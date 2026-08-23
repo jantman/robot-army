@@ -454,6 +454,13 @@ A working spike implementation lives at `docs/initial-planning/spike/ra-session-
 
 ## 12. Storage
 
+> **Superseded during specification (2026-08-23): storage is SQLite, not MariaDB.** MariaDB
+> conflicts with constitution Principle II ("Core function MUST NOT require a hosted database") and
+> the Operating Constraints storage rule ("Persistent data MUST use plain text, structured line
+> formats, or SQLite"). Raised before work began per the Governance section and resolved in favour
+> of the constitution — which also disposes of both tradeoffs listed below. See
+> [`docs/roadmap.md`](../roadmap.md). The rest of this section is retained as the original reasoning.
+
 - **MariaDB** — already running, already backed up. Reasonable call.
 - Tradeoffs to be aware of: external service dependency (startup ordering, DB outage takes down the daemon), and the daemon is no longer portable to a laptop without a DB.
 - Keep the persistence layer thin enough that SQLite remains a drop-in option if that ever matters.

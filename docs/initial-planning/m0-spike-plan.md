@@ -106,7 +106,7 @@ These exist because the spike tests things that can kill the terminal we're work
    kitty session with `KITTY_LISTEN_ON`, `DISPLAY`/`WAYLAND_DISPLAY`, a controlling TTY, and a
    full shell environment. A systemd user service has *none* of that guaranteed. Every
    experiment that the daemon will eventually perform is run through
-   `spike/as-daemon.sh` (a real transient systemd user unit), never straight from this shell.
+   `docs/initial-planning/spike/as-daemon.sh` (a real transient systemd user unit), never straight from this shell.
    A test that passes from this prompt but fails from systemd is a test that lied to us.
 3. **Benign prompts in kill tests.** Sessions we intend to SIGKILL get a prompt that does
    nothing destructive, in a throwaway worktree.
@@ -118,9 +118,9 @@ These exist because the spike tests things that can kill the terminal we're work
 ### Scratch layout
 
 ```
-~/GIT/robot-army/spike/          # throwaway scripts; committed — they seed the real wrapper
-~/GIT-worktrees/<repo>/<slug>/   # worktrees under test
-~/.local/state/robot-army-spike/ # dtach sockets, wrapper logs, exit-code reports
+~/GIT/robot-army/docs/initial-planning/spike/  # throwaway scripts; committed — they seed the real wrapper
+~/GIT-worktrees/<repo>/<slug>/                 # worktrees under test
+~/.local/state/robot-army-spike/               # dtach sockets, wrapper logs, exit-code reports
 ```
 
 `~/.local/state/...` rather than `/tmp` deliberately — see E4.3, we need to know what survives
@@ -265,7 +265,7 @@ environment, the scrubbed run is no longer "what the daemon will have". Reinterp
 dependency probe: what does the launch chain *minimally* require? Useful for F3 (predicting the
 no-graphical-session case), but the un-scrubbed run is now the realistic baseline.
 
-### P0.5 — Build `spike/as-daemon.sh`
+### P0.5 — Build `docs/initial-planning/spike/as-daemon.sh`
 A wrapper that runs a command the way the eventual systemd unit will:
 
 ```sh
@@ -278,7 +278,7 @@ honest reproduction. Add a `--scrub` mode that additionally uses `env -i` to str
 inherited environment down to `HOME`/`PATH`/`XDG_RUNTIME_DIR`, so we can tell the difference
 between "works" and "works only because it inherited something".
 
-> **RESULT:** ✅ Done — `spike/as-daemon.sh`. Verified against a real transient unit:
+> **RESULT:** ✅ Done — `docs/initial-planning/spike/as-daemon.sh`. Verified against a real transient unit:
 >
 > | Probe | Result |
 > |---|---|
@@ -294,7 +294,7 @@ between "works" and "works only because it inherited something".
 > and `/usr/bin`. What `--scrub` actually removes is the *display* environment, which is the
 > useful part: it models the F3 no-graphical-session case.
 
-### P0.6 — Build `spike/ra-session-wrapper.sh`
+### P0.6 — Build `docs/initial-planning/spike/ra-session-wrapper.sh`
 The §9 session wrapper, spike edition. Takes an item ID and a command; runs the command,
 captures `$?`, and instead of POSTing to a daemon API (which doesn't exist yet) appends a JSON
 line to `~/.local/state/robot-army-spike/reports/exits.jsonl`:
@@ -306,7 +306,7 @@ line to `~/.local/state/robot-army-spike/reports/exits.jsonl`:
 Also records: the PID of claude, the cwd, and any session ID it can find. This is the artifact
 that makes E3.1–E3.4 measurable, and it becomes the real wrapper in M1.
 
-> **RESULT:** ✅ Done — `spike/ra-session-wrapper.sh`. Emits `start` and `exit` records to
+> **RESULT:** ✅ Done — `docs/initial-planning/spike/ra-session-wrapper.sh`. Emits `start` and `exit` records to
 > `~/.local/state/robot-army-spike/reports/exits.jsonl`, plus a per-item log. Verified:
 >
 > | Smoke test | Result |
@@ -345,7 +345,7 @@ the highest-priority thing in the whole spike alongside Phase 2. Do E1.5 first.
 
 ### E1.1 — Does `claude --remote-control` require a TTY?
 
-**Method.** Three runs, each via `spike/as-daemon.sh`, in a throwaway worktree:
+**Method.** Three runs, each via `docs/initial-planning/spike/as-daemon.sh`, in a throwaway worktree:
 
 | Run | stdin | Expectation to test |
 |---|---|---|
@@ -383,7 +383,7 @@ allows. The question is narrow: is this a usable fallback when no kitty is avail
 
 **Method.**
 1. `claude --bg --remote-control "ra-bg-1" --session-id <uuid> --permission-mode auto "<prompt>"`
-   in a worktree, launched via `spike/as-daemon.sh`. Does it return immediately? What's the exit
+   in a worktree, launched via `docs/initial-planning/spike/as-daemon.sh`. Does it return immediately? What's the exit
    code of the launching command, and what's left running?
 2. `claude agents` — what does it report? Is there a stable ID, a status, an exit state?
 3. **The decisive question: is a background agent drivable from the phone via Remote Control?**
@@ -595,7 +595,7 @@ No control socket, no `allow_remote_control`, and the §9 security tradeoff ("an
 kitty control socket lets anything that can reach it run arbitrary commands in my terminal",
 which §16 flags as needing a deliberate answer) simply doesn't arise.
 
-**Method (only if we ever need the degraded path).** From `spike/as-daemon.sh`, spawn the above
+**Method (only if we ever need the degraded path).** From `docs/initial-planning/spike/as-daemon.sh`, spawn the above
 and confirm a window appears — P0.4 showed the imported environment includes `WAYLAND_DISPLAY`
 and `DISPLAY`, so this should work while a graphical session exists.
 
@@ -652,8 +652,8 @@ means the daemon needs a "no kitty available" degraded mode — worth knowing no
 
 **Method.**
 ```
-spike/as-daemon.sh          kitty @ --to unix:/tmp/ra-spike-<pid> ls
-spike/as-daemon.sh --scrub  kitty @ --to unix:/tmp/ra-spike-<pid> ls
+docs/initial-planning/spike/as-daemon.sh          kitty @ --to unix:/tmp/ra-spike-<pid> ls
+docs/initial-planning/spike/as-daemon.sh --scrub  kitty @ --to unix:/tmp/ra-spike-<pid> ls
 ```
 The `--scrub` run is the one that matters — it proves reachability doesn't depend on inherited
 graphical-session environment.
@@ -676,10 +676,10 @@ to be on the service's `PATH`.
 
 ### E2.3 — Full launch chain, driven as the daemon
 ```
-spike/as-daemon.sh kitty @ --to <sock> launch \
+docs/initial-planning/spike/as-daemon.sh kitty @ --to <sock> launch \
     --type=tab --cwd <worktree> --title "ra-spike-1" --var ra_item=spike-1 -- \
     dtach -A ~/.local/state/robot-army-spike/sockets/spike-1.sock -- \
-    ~/GIT/robot-army/spike/ra-session-wrapper.sh spike-1 \
+    ~/GIT/robot-army/docs/initial-planning/spike/ra-session-wrapper.sh spike-1 \
     claude --remote-control "ra-spike-1" --permission-mode auto "<benign prompt>"
 ```
 
@@ -1527,5 +1527,5 @@ When the result blocks are filled:
    §3/§8/§9.
 2. **Decide the four judgment calls** M0 informs but doesn't answer (§16): non-zero exit
    classification, kitty socket security posture, attach button, worktree cleanup policy.
-3. **Keep `spike/ra-session-wrapper.sh`** — it's the M1 wrapper's first draft, now with
+3. **Keep `docs/initial-planning/spike/ra-session-wrapper.sh`** — it's the M1 wrapper's first draft, now with
    evidence behind every line.

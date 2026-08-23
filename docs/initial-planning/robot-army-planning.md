@@ -4,7 +4,7 @@ A local daemon for delegating work to Claude Code, sourced from GitHub issues an
 
 **Status:** Consolidated planning doc. Supersedes `github-claude-orchestrator-spec-skeleton.md` and the initial `README.md` brainstorm.
 
-**M0 spike is complete** and its results are folded into §§3–10 below. Full method, raw output, and 19 numbered findings live in [`m0-spike-plan.md`](m0-spike-plan.md); the spike scripts are in [`spike/`](../../spike/). Claims that were *measured* are marked as such — everything else is still design intent awaiting contact with reality.
+**M0 spike is complete** and its results are folded into §§3–10 below. Full method, raw output, and 19 numbered findings live in [`m0-spike-plan.md`](m0-spike-plan.md); the spike scripts are in [`docs/initial-planning/spike/`](spike/). Claims that were *measured* are marked as such — everything else is still design intent awaiting contact with reality.
 
 ---
 
@@ -410,7 +410,7 @@ Mitigations:
 ### The session wrapper
 A small wrapper script sits between the host and claude. It exists because claude is not the daemon's child, so the daemon can't `waitpid()` on it.
 
-A working spike implementation lives at `spike/ra-session-wrapper.sh`; M1's wrapper should start from it.
+A working spike implementation lives at `docs/initial-planning/spike/ra-session-wrapper.sh`; M1's wrapper should start from it.
 
 - Runs claude, captures `$?`, and **POSTs the exit code back to the daemon's API** — exit detection becomes a push, not a poll. Verified to propagate `0`, `1`, `42`, `126`, `127`, `137`, and `143` faithfully through both dtach and kitty.
 - Decodes signal deaths as `128+N` and records the signal number separately, so §7 can tell "crashed" from "a human killed it".
@@ -485,7 +485,7 @@ A working spike implementation lives at `spike/ra-session-wrapper.sh`; M1's wrap
 
 ## 15. Milestones
 
-- **M0 — Spike (no daemon, no DB, no UI).** ✅ **COMPLETE.** Full method, raw results, and 19 numbered findings are in **[`m0-spike-plan.md`](m0-spike-plan.md)**; the spike scripts (`as-daemon.sh`, `ra-session-wrapper.sh`) are in [`spike/`](../../spike/) and seed M1's wrapper. The findings are folded into §§3–10 above. Checklist as originally written, with outcomes:
+- **M0 — Spike (no daemon, no DB, no UI).** ✅ **COMPLETE.** Full method, raw results, and 19 numbered findings are in **[`m0-spike-plan.md`](m0-spike-plan.md)**; the spike scripts (`as-daemon.sh`, `ra-session-wrapper.sh`) are in [`docs/initial-planning/spike/`](spike/) and seed M1's wrapper. The findings are folded into §§3–10 above. Checklist as originally written, with outcomes:
 
   **Process model & TTY**
   - ⏭️ **Does `claude --remote-control` require a TTY?** *Not tested, deliberately.* This was billed as highest-leverage on the premise that a "no" collapses the host/display stack — but the §2 settled decision makes a kitty session the product, so it wouldn't. Reduced to "is a headless fallback possible", which blocks nothing.

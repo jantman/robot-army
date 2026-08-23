@@ -23,9 +23,54 @@ A local daemon for delegating work to Claude Code, sourced from GitHub issues an
 - **Boring and inspectable.** I should be able to query the DB and read the logs at 2am and understand what happened.
 - **Thin abstractions.** Generic enough to add a second source or worker later; not so generic that it costs anything now.
 
+### Dry-run mode (requirement)
+
+The daemon must have a **dry-run mode**: it reports what it *would* do without updating GitHub issues, updating Trello cards, or launching Claude sessions.
+
+**Implement it at the abstraction boundary, not at call sites.** The scattered-`if dry_run:` approach drifts (new code forgets the check), can't be tested, and lies — the simulated path diverges from the real one. §3 already defines exactly the interfaces that touch the outside world: Work Item Source (`update`, `create`), AI Worker (`dispatch`, `terminate`), and Session Host (`spawn`, `terminate`). Dry-run is a decorator over those, which logs the intended call and returns a plausible fake handle. Any new side-effecting operation *must* go through an interface, so it is structurally impossible to forget.
+
+Note this implies **git operations need an interface too** (worktree add, fetch, branch create). Today they'd be inline calls; dry-run is the reason to give them a seam.
+
+**Effects are not one boolean.** These are independently useful and a single flag can't express them:
+
+| Level | Polls & evaluates | Git worktree + hooks | Session launch | GitHub/Trello writes |
+|---|---|---|---|---|
+| `plan` | ✅ real | ❌ simulated | ❌ | ❌ |
+| `local` | ✅ real | ✅ real | ❌ | ❌ |
+| `no-remote` | ✅ real | ✅ real | ✅ real | ❌ |
+| `live` | ✅ | ✅ | ✅ | ✅ |
+
+`local` is how you debug per-repo post-create hooks (§6) without burning subscription usage. `no-remote` is how you test dispatch end-to-end without commenting on real issues. Expose `--dry-run` as an alias for `plan` for ergonomics, but model the levels underneath.
+
+**Polling always stays real.** A dry-run that fakes its reads tells you nothing about eligibility, which is the main thing you want to check.
+
+**Persistence: real writes, with `dry_run` on the row.** Work items and sessions are written to the live database with `dry_run = true`, so the state machine can be observed advancing through `dispatching → active → interrupted` for real. One database, one code path.
+
+**The `dry_run` flag governs reporting and remote writes — never resource accounting.** This is the subtle part, and getting it backwards causes real bugs. At the `no-remote` level a dry-run item has a *real* worktree and a *real* Claude session burning *real* subscription quota. So:
+
+| Concern | Treatment of `dry_run` rows |
+|---|---|
+| GitHub/Trello writes | **Skipped** — this is the point of the mode |
+| Global concurrency cap (§10) | **Counted.** A real session consumes real quota regardless of the flag |
+| Per-repo cap (§10) | **Counted.** Otherwise a live dispatch collides with the dry-run's worktree |
+| Reconciliation of sessions (§8) | **Performed.** A real session that dies still needs its state fixed |
+| Reconciliation "is the issue closed?" | **Skipped** — there is no real source item to check |
+| Web UI | **Shown, visually distinct.** Never silently filtered out |
+
+The rule: *anything that consumed a real resource is accounted for; only the outward-facing effects are suppressed.*
+
+**Risk of this approach, and the mitigation.** The failure mode is a query that forgets `WHERE dry_run = false` and quietly treats simulated work as live. Don't rely on remembering — make it structural: put the filter in the persistence layer's default scope (or a `live_work_items` view) so *including* dry-run rows is the explicit act, not excluding them.
+
+**Dry-run rows accumulate.** Needs a purge command, and a decision on whether they're purged on startup or retained for inspection.
+
+**Mode must be loudly visible.** Log it at startup, show it persistently in the web UI, and include it in the health signal (§14). Both failure directions are bad: believing you're in dry-run when you're live produces surprise GitHub comments; believing you're live when you're in dry-run is exactly the silent no-op §2 warns about.
+
+**Known limitation:** dry-run doesn't write the mapping table, so repeated dry-runs will keep reporting "would create issue X" for the same card. That's correct behavior, but it means **dry-run cannot validate the §11 loop-prevention invariant** — that needs a real run against a test board, or unit tests.
+
 ### Settled decisions (not open for reconsideration)
 - **Subscription auth only.** Sessions run under my Claude subscription. No API key, no pay-per-request. Consequence: orchestrator usage shares limits with my interactive sessions, which is why the concurrency cap in §10 matters.
 - **Local execution only.** No GitHub Actions, no hosted runners, no cloud dispatch. Work happens in clones on my machine.
+- **A normal interactive Claude Code session in a kitty window is the default experience.** Remote Control is the away-from-desk case, not the primary one. The host/display stack does not exist merely to solve PTY ownership — it exists because the session must be a real terminal session I can sit down at. Headless or background-agent modes do not satisfy this, however well they work. Sessions appear in the *already-running* kitty instance, which puts `kitty @ launch` on the critical path.
 
 ## 3. Core Abstractions
 

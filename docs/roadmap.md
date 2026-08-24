@@ -86,3 +86,21 @@ favour of the constitution: SQLite at a documented local path. This also removes
 dependency and the DB-outage failure mode that §12 itself flags, and keeps the daemon portable to a
 laptop. §12's instruction to keep the persistence layer thin still applies, now in the other
 direction.
+
+**Repository CI is not the "no GitHub Actions" settled decision.** Planning §2 lists "Local
+execution only. No GitHub Actions, no hosted runners, no cloud dispatch" as settled and not open
+for reconsideration, and the pre-M0 question "GitHub Actions as a complement?" was closed with the
+same answer. Both are about **where dispatched work runs** — whether the daemon could farm sessions
+out to hosted runners instead of a real terminal on this machine. Neither is about testing this
+repository's own code, and the settled decision stands untouched: no work item will ever be
+dispatched to a runner.
+
+A test-and-lint workflow (`.github/workflows/tests.yml`) is therefore in scope, and was added after
+milestone 001. It is not a release pipeline — nothing is packaged or published, which Principle V
+would forbid without a demonstrated need. It enforces a rule the constitution already states, that
+implementation is not complete until the suite passes, mechanically rather than by discipline.
+
+Its limit is worth stating alongside it, because a green check is easy to over-read: CI cannot run
+anything needing a live session registry, a running kitty, or real credentials. One test skips there
+for precisely that reason, and it is the one that caught the worst bug in milestone 001. CI raises
+the floor. It does not replace the human verification round.

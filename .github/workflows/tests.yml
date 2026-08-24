@@ -1,0 +1,64 @@
+# Runs the test suite and the linter. Nothing else.
+#
+# This is deliberately *not* a release pipeline, which Principle V forbids building unless
+# the author personally needs one. It exists to enforce a rule the constitution already
+# states — "Implementation is not complete until the unit test suite passes" (Governance) —
+# mechanically rather than by discipline.
+#
+# It does not contradict the planning document's "Local execution only. No GitHub Actions"
+# settled decision: that decision is about where *dispatched work* runs, not about testing
+# this repository. See docs/roadmap.md.
+#
+# What this cannot catch: any test that needs a live `~/.claude` session registry, a running
+# kitty, or real credentials. One test skips here for exactly that reason — the version
+# guard against this machine's real registry, which caught the worst bug in milestone 001.
+# CI raises the floor; it is not a substitute for the human verification tracked in #1.
+
+name: tests
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+# Read-only: this workflow never needs to write to the repository, and a public repo should
+# not hand more than that to anything it runs.
+permissions:
+  contents: read
+
+# A new push supersedes the run it interrupted. Without this, pushing three times in a
+# minute queues three full runs and the first two are already meaningless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The suite takes ~20s. This bound exists because the code under test spawns
+    # subprocesses, signals process groups, and has sleep-based tests — a hung test is a
+    # realistic failure here, and it is the same failure mode the daemon itself guards
+    # against with per-step timeouts. Six hours of a stuck runner is not a useful signal.
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          # Pinned rather than inferred: the daemon targets 3.14 specifically, and
+          # `requires-python = ">=3.14"` would happily resolve to something newer.
+          python-version: "3.14"
+
+      # --locked, not plain sync: this fails if uv.lock has drifted from pyproject.toml,
+      # which catches the "edited the dependencies and forgot to relock" mistake at the
+      # only moment it is cheap to fix.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # Lint first — it is a second and gives the fastest useful feedback.
+      - name: Lint
+        run: uv run ruff check src/ tests/
+
+      - name: Test
+        run: uv run pytest -q -rs

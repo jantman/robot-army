@@ -113,13 +113,13 @@ was started. Then label it by hand and confirm exactly one work item appears by 
 - [ ] T031 [P] [US1] Add `tests/unit/test_repo_resolution.py` with adversarial card text: a pasted log containing `src/robot_army` and `docs/roadmap.md` must resolve to **nothing**, a URL plus the same repository's local path must resolve to one, two different configured repositories must be ambiguous, and an unconfigured `owner/name` must resolve to nothing with a reason naming it
 - [ ] T032 [US1] Implement issue composition in `src/robot_army/intake.py`: the card's title becomes the issue title, the card's description is carried as **quoted** content and never interpreted as configuration, command, or directive (FR-013), and the body always contains the card's URL, which R6's recovery depends on
 - [ ] T033 [US1] Define the marker comment format in `src/robot_army/intake.py` as a fixed prefix followed by the issue URL, matched by prefix rather than parsed, with the prefix as a module constant so the writer and the recovery reader cannot drift
-- [ ] T034 [US1] Implement the four-step creation in `src/robot_army/intake.py` per R6 — commit the `creating` intent row with `repo_key` and `intent_at`; call `create_issue`; write the mapping and transition to `linked`; comment on the card and record `comment_posted_at` — each step in its own transaction so every seam is separately resumable (depends on T009, T015, T030, T032, T033)
-- [ ] T035 [US1] Implement the normal-operation duplicate check in `src/robot_army/intake.py`: consult the `cards` mapping row first and do nothing if one exists, without reading the board's comments at all — §11's "don't parse comments as the authoritative source in normal operation" as a call-site rule (depends on T034)
+- [ ] T034 [US1] Implement the normal-operation duplicate check in `src/robot_army/intake.py`: consult the `cards` mapping row first and do nothing if one exists, without reading the board's comments at all — §11's "don't parse comments as the authoritative source in normal operation" as a call-site rule. This lands **before** the create path, so no revision of the tree ever polls a linked card into a second issue (depends on T007, T009)
+- [ ] T035 [US1] Implement the four-step creation in `src/robot_army/intake.py` per R6, entered only after the T034 guard returns clear — commit the `creating` intent row with `repo_key` and `intent_at`; call `create_issue`; write the mapping and transition to `linked`; comment on the card and record `comment_posted_at` — each step in its own transaction so every seam is separately resumable (depends on T009, T015, T030, T032, T033, T034)
 - [ ] T036 [P] [US1] Add `tests/unit/test_card_dedup.py` asserting that with a mapping row present no issue is created and `card_comments` is **never called**, and that repeated evaluation of a linked card is a no-op
-- [ ] T037 [US1] Handle creation failure in `src/robot_army/intake.py` so the row stays in `creating` with `reason` set and `create_failures` incremented, retried on a later pass, raising an anomaly at a threshold, and **never** leaving a comment on the card claiming an issue exists (FR-019) (depends on T034)
-- [ ] T038 [US1] Emit the audit records `trello.evaluated`, `trello.issue.create`, and `trello.card.comment` from `src/robot_army/intake.py` as intent/outcome pairs written before each call, naming the card and, where one exists, the repository and issue (depends on T034)
+- [ ] T037 [US1] Handle creation failure in `src/robot_army/intake.py` so the row stays in `creating` with `reason` set and `create_failures` incremented, retried on a later pass, raising an anomaly at a threshold, and **never** leaving a comment on the card claiming an issue exists (FR-019) (depends on T035)
+- [ ] T038 [US1] Emit the audit records `trello.evaluated`, `trello.issue.create`, and `trello.card.comment` from `src/robot_army/intake.py` as intent/outcome pairs written before each call, naming the card and, where one exists, the repository and issue (depends on T035)
 - [ ] T039 [P] [US1] Add `tests/integration/test_card_to_issue.py` driving the happy path against fake boundaries: one tagged resolvable card produces one issue, one marker comment, and a `linked` row
-- [ ] T040 [P] [US1] Add to `tests/integration/test_card_to_issue.py` the two gate assertions: the created issue **never** carries the dispatch label whatever the card says, and board ingestion creates **no** `work_items` row — the human gate is structural, not conventional (depends on T039)
+- [ ] T040 [P] [US1] Add to `tests/integration/test_card_to_issue.py` the two gate assertions: the created issue **never** carries the dispatch label whatever the card says, and board ingestion creates **no** `work_items` row — the human gate is structural, not conventional. Then label the issue and poll GitHub, asserting exactly **one** `work_items` row appears by the ordinary path (FR-018), so both halves of the gate are tested rather than only the refusal (depends on T039)
 - [ ] T041 [P] [US1] Add to `tests/integration/test_card_to_issue.py` the effect-level case: at `no-remote` the card is read and evaluated for real, nothing is created, nothing is written to the board, the log carries every would-be write with full arguments, and the row is `dry_run` (FR-039, SC-009)
 
 **Checkpoint**: cards become issues, issues stay unlabelled, and a labelled issue dispatches by the
@@ -150,8 +150,10 @@ within one poll interval with no further human action.
 - [ ] T053 [US2] Add `GET /cards` to `ROUTES` and a `view_cards` handler in `src/robot_army/web/server.py`, with the `.json` suffix and the standard view chrome — effect level, heartbeat age, pause state, anomaly count (depends on T048)
 - [ ] T054 [US2] Add the cards view renderer to `src/robot_army/web/pages.py`, excluding simulated rows by default and marking them visibly when included (depends on T053)
 - [ ] T055 [US2] Add `POST /card/{id}/rescan` to `src/robot_army/web/server.py` with the confirm-then-post pattern every other mutating route uses (depends on T050, T053)
-- [ ] T056 [P] [US2] Extend `tests/unit/test_web_routing.py` and `tests/unit/test_web_render.py` with the cards view and the rescan route, including escaping of card text and the simulated-row marking
-- [ ] T057 [P] [US2] Add `tests/integration/test_card_needs_info.py`: an unresolvable card creates nothing anywhere and is listed with its reason; five further polls add no second comment; an edit naming the repository resolves it with no human action; an ambiguous card naming two configured repositories is held rather than resolved to either
+- [ ] T056 [US2] Join `cards` to work items on `(repo_key, issue_number)` against `work_items.source_id` in `src/robot_army/operations.py`, exposing the card URL on the work-item payload without adding a column to `work_items` (R16), and render it beside the issue URL in `robot-army show` in `src/robot_army/cli.py` (FR-017, FR-048)
+- [ ] T057 [P] [US2] Render the card link beside the issue link in the work-item detail and listing views in `src/robot_army/web/pages.py`, so a work item whose issue came from a card is identifiable as such wherever work items are shown (FR-017, FR-048) (depends on T056)
+- [ ] T058 [P] [US2] Extend `tests/unit/test_web_routing.py` and `tests/unit/test_web_render.py` with the cards view and the rescan route, including escaping of card text and the simulated-row marking
+- [ ] T059 [P] [US2] Add `tests/integration/test_card_needs_info.py`: an unresolvable card creates nothing anywhere and is listed with its reason; five further polls add no second comment; an edit naming the repository resolves it with no human action; an ambiguous card naming two configured repositories is held rather than resolved to either
 
 **Checkpoint**: unresolvable cards are safely parked, self-heal on edit, and are visible from the
 terminal and the phone.
@@ -168,15 +170,15 @@ made by hand.
 list at each stage; take a second to abandonment and confirm it returns to its original list with a
 comment; move a third by hand and confirm the system refuses to move it and comments instead.
 
-- [ ] T058 [US3] Implement `on_session_active(...)` in `src/robot_army/intake.py` moving the card to the configured in-progress list and recording `origin_list_id` and `placed_list_id`, called from the point in `src/robot_army/dispatch.py` where a session is **confirmed** running rather than where it is launched (FR-027)
-- [ ] T059 [US3] Implement `on_issue_closed(...)` in `src/robot_army/intake.py` moving the card to the configured done list with an outcome comment, called from wherever the issue-closed observation already lands in `src/robot_army/reconcile.py` (FR-028)
-- [ ] T060 [US3] Implement `on_work_abandoned(...)` in `src/robot_army/intake.py` returning the card to `origin_list_id` with a comment naming the reason, so a card never sits in the in-progress list claiming to be busy when nothing is (FR-029)
-- [ ] T061 [US3] Implement the manual-move refusal in `src/robot_army/intake.py`: read the card's current `idList` before any move and, if it differs from `placed_list_id`, do **not** move — comment with what would have been done instead (FR-030, R12) (depends on T058)
-- [ ] T062 [US3] Write `pending_move_to` before every move attempt and clear it after, in `src/robot_army/intake.py`, so an interrupted move is identified as ours rather than mistaken for the author's on the next pass (depends on T061)
-- [ ] T063 [US3] Emit `trello.card.move` and `trello.card.move_refused` audit records from `src/robot_army/intake.py` before the call and again with the outcome, naming the card, both lists, and the result (depends on T061)
-- [ ] T064 [P] [US3] Add `tests/unit/test_card_lifecycle_guard.py` covering the manual-move refusal, and the `pending_move_to` case where the card is already in the target list — which must be recognised as our own interrupted move, not as a move by the author
-- [ ] T065 [P] [US3] Add `tests/integration/test_card_lifecycle.py` driving a card through active → closed and confirming its list at each stage, a second card through abandonment confirming it returns to its origin list with a reason, and a manually moved card confirming refusal plus comment
-- [ ] T066 [P] [US3] Add a case to `tests/integration/test_card_lifecycle.py` asserting that a missing configured list is caught by the startup precondition rather than discovered mid-lifecycle after the issue already exists (depends on T024)
+- [ ] T060 [US3] Implement `on_session_active(...)` in `src/robot_army/intake.py` moving the card to the configured in-progress list and recording `origin_list_id` and `placed_list_id`, called from the point in `src/robot_army/dispatch.py` where a session is **confirmed** running rather than where it is launched (FR-027)
+- [ ] T061 [US3] Implement `on_issue_closed(...)` in `src/robot_army/intake.py` moving the card to the configured done list with an outcome comment, called from wherever the issue-closed observation already lands in `src/robot_army/reconcile.py` (FR-028)
+- [ ] T062 [US3] Implement `on_work_abandoned(...)` in `src/robot_army/intake.py` returning the card to `origin_list_id` with a comment naming the reason, so a card never sits in the in-progress list claiming to be busy when nothing is (FR-029)
+- [ ] T063 [US3] Implement the manual-move refusal in `src/robot_army/intake.py`: read the card's current `idList` before any move and, if it differs from `placed_list_id`, do **not** move — comment with what would have been done instead (FR-030, R12) (depends on T060)
+- [ ] T064 [US3] Write `pending_move_to` before every move attempt and clear it after, in `src/robot_army/intake.py`, so an interrupted move is identified as ours rather than mistaken for the author's on the next pass (depends on T063)
+- [ ] T065 [US3] Emit `trello.card.move` and `trello.card.move_refused` audit records from `src/robot_army/intake.py` before the call and again with the outcome, naming the card, both lists, and the result (depends on T063)
+- [ ] T066 [P] [US3] Add `tests/unit/test_card_lifecycle_guard.py` covering the manual-move refusal, and the `pending_move_to` case where the card is already in the target list — which must be recognised as our own interrupted move, not as a move by the author
+- [ ] T067 [P] [US3] Add `tests/integration/test_card_lifecycle.py` driving a card through active → closed and confirming its list at each stage, a second card through abandonment confirming it returns to its origin list with a reason, and a manually moved card confirming refusal plus comment
+- [ ] T068 [P] [US3] Add a case to `tests/integration/test_card_lifecycle.py` asserting that a missing configured list is caught by the startup precondition rather than discovered mid-lifecycle after the issue already exists (depends on T024)
 
 **Checkpoint**: the board is an honest status surface, and it never fights the author.
 
@@ -191,17 +193,18 @@ sequence, and under total loss of the database.
 daemon between each pair of creation steps in turn and confirm no duplicates; delete the database and
 confirm the marker comment restores the mapping without creating a second issue.
 
-- [ ] T067 [US4] Implement `creating`-row recovery in `src/robot_army/intake.py` per R6: list issues in the target repository created since `intent_at`, authored by us, and adopt one whose body contains this card's URL — using the **listing** endpoint, never search, because the search index lags by minutes and would miss exactly the issue a crash orphaned
-- [ ] T068 [US4] Add the repository-issue listing call needed by T067 to `GitHubReader` in `src/robot_army/boundaries/github.py`, bounded by a `since` parameter, with the same timeout and backoff policy as its neighbours (depends on T067)
-- [ ] T069 [US4] Implement marker-comment restoration in `src/robot_army/intake.py`: when no mapping row exists, read the card's comments for the marker prefix and restore the mapping from it before creating anything — the recovery half of R7's ordering, reached only when the mapping is absent (depends on T033, T035)
-- [ ] T070 [US4] Implement the deferred-comment retry in `src/robot_army/intake.py` for a `linked` row with `comment_posted_at` NULL, checking for an existing marker comment first so a retry cannot double-post (depends on T034)
-- [ ] T071 [US4] Run the recovery sweep — unfinished `creating` rows and missing marker comments — at daemon startup and at the head of each board poll in `src/robot_army/intake.py`, so an interruption is resolved on the next pass rather than at the next restart (depends on T067, T070)
-- [ ] T072 [US4] Emit `trello.recovered` audit records from `src/robot_army/intake.py` naming which recovery path fired and what it found, so a recovery is visible in the log rather than silent (depends on T071)
-- [ ] T073 [P] [US4] Add `tests/integration/test_card_interruption.py` killing the sequence at each of its three seams in turn and asserting no duplicate: after the intent with no issue (retry creates one), after the issue with no mapping (listing adopts it), after the mapping with no comment (comment posted once)
-- [ ] T074 [P] [US4] Add to `tests/integration/test_card_interruption.py` the database-loss case: with the mapping rows discarded, re-polling a previously processed card restores the mapping from its marker comment and creates **no** second issue (FR-034)
-- [ ] T075 [P] [US4] Add to `tests/integration/test_card_interruption.py` the repetition case: one hundred consecutive polls of one unchanged card, across a simulated restart, yield exactly one issue and one marker comment (SC-002)
-- [ ] T076 [P] [US4] Add `tests/unit/test_card_invariant.py` asserting the reverse-direction guard required by FR-036 — an attempt to create a card for an issue that already has one is refused by the mapping check, so the card → issue → card loop is structurally impossible even though nothing builds that direction
-- [ ] T077 [P] [US4] Add to `tests/unit/test_card_invariant.py` a case asserting that a simulated row does not occupy the live row's identity, so a `no-remote` run followed by a `live` run of the same card performs the real creation (FR-041)
+- [ ] T069 [US4] Add a bounded repository-issue listing call to `GitHubReader` in `src/robot_army/boundaries/github.py`, taking a `since` parameter and an author filter, with the same explicit timeout and backoff policy as its neighbours — the immediately consistent endpoint R6 requires, never search
+- [ ] T070 [US4] Implement `creating`-row recovery in `src/robot_army/intake.py` per R6: list issues in the target repository created since `intent_at`, authored by us, and adopt one whose body contains this card's URL — using the **listing** endpoint, never search, because the search index lags by minutes and would miss exactly the issue a crash orphaned (depends on T069)
+- [ ] T071 [US4] Implement marker-comment restoration in `src/robot_army/intake.py`: when no mapping row exists, read the card's comments for the marker prefix and restore the mapping from it before creating anything — the recovery half of R7's ordering, reached only when the mapping is absent (depends on T033, T034)
+- [ ] T072 [US4] Implement the deferred-comment retry in `src/robot_army/intake.py` for a `linked` row with `comment_posted_at` NULL, checking for an existing marker comment first so a retry cannot double-post (depends on T035)
+- [ ] T073 [US4] Run the recovery sweep — unfinished `creating` rows and missing marker comments — at daemon startup and at the head of each board poll in `src/robot_army/intake.py`, so an interruption is resolved on the next pass rather than at the next restart (depends on T070, T072)
+- [ ] T074 [US4] Detect, during the same recovery sweep, a `linked` row whose issue no longer resolves — deleted, transferred, or otherwise gone — in `src/robot_army/intake.py`, and raise an anomaly through `db.raise_anomaly` naming the card and the missing issue while **keeping the mapping intact**, so the card never triggers a fresh creation (FR-037) (depends on T073)
+- [ ] T075 [US4] Emit `trello.recovered` audit records from `src/robot_army/intake.py` naming which recovery path fired and what it found, so a recovery is visible in the log rather than silent (depends on T073)
+- [ ] T076 [P] [US4] Add `tests/integration/test_card_interruption.py` killing the sequence at each of its three seams in turn and asserting no duplicate: after the intent with no issue (retry creates one), after the issue with no mapping (listing adopts it), after the mapping with no comment (comment posted once)
+- [ ] T077 [P] [US4] Add to `tests/integration/test_card_interruption.py` the database-loss case: with the mapping rows discarded, re-polling a previously processed card restores the mapping from its marker comment and creates **no** second issue (FR-034)
+- [ ] T078 [P] [US4] Add to `tests/integration/test_card_interruption.py` the repetition case: one hundred consecutive polls of one unchanged card, across a simulated restart, yield exactly one issue and one marker comment (SC-002)
+- [ ] T079 [P] [US4] Add `tests/unit/test_card_invariant.py` asserting the reverse-direction guard required by FR-036 — an attempt to create a card for an issue that already has one is refused by the mapping check, so the card → issue → card loop is structurally impossible even though nothing builds that direction
+- [ ] T080 [P] [US4] Add to `tests/unit/test_card_invariant.py` a case asserting that a simulated row does not occupy the live row's identity, so a `no-remote` run followed by a `live` run of the same card performs the real creation (FR-041), and a case asserting that a `linked` row whose issue has vanished raises an anomaly and creates nothing (FR-037)
 
 **Checkpoint**: the invariant the milestone exists to protect is proven under the failures that
 threaten it.
@@ -210,14 +213,14 @@ threaten it.
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T078 [P] Document the `cards` table, its state machine, and the synthetic `trello:board:<id>` poll-state key in `docs/state.md`
-- [ ] T079 [P] Document the ten new `trello.*` actions and the enumerated Principle III exception — individual board reads within a cycle are not separately audited — in `docs/logging.md`
-- [ ] T080 [P] Document configuring the board, the private-board requirement, and the credential env vars in `README.md`
-- [ ] T081 Record the residual double-failure gap from R6 — crash between issue creation and mapping *combined with* database loss — in `docs/state.md` beside the recovery description, so a future reader meets the limit where the mechanism is explained rather than only in the plan
-- [ ] T082 Mark the disposable-board test in `tests/integration/test_card_to_issue.py` as skipped without real credentials, for the reason `docs/roadmap.md` already records about CI's ceiling, and make the skip message say what it would have verified
-- [ ] T083 Run `ruff` and the type checker clean across `src/robot_army/intake.py`, `src/robot_army/cardstates.py`, `src/robot_army/boundaries/trello.py`, and every file this milestone touched
-- [ ] T084 Run the full suite under `tests/` and confirm it passes, which the constitution makes the completion gate
-- [ ] T085 Work through all nine scenarios in [quickstart.md](quickstart.md) against a disposable board, including scenario 5's kill matrix and scenario 7's shared-board refusal, and record what was actually observed — the roadmap is explicit that CI raises the floor and does not replace this round
+- [ ] T081 [P] Document the `cards` table, its state machine, and the synthetic `trello:board:<id>` poll-state key in `docs/state.md`
+- [ ] T082 [P] Document the ten new `trello.*` actions and the enumerated Principle III exception — individual board reads within a cycle are not separately audited — in `docs/logging.md`
+- [ ] T083 [P] Document configuring the board, the private-board requirement, and the credential env vars in `README.md`
+- [ ] T084 Record the residual double-failure gap from R6 — crash between issue creation and mapping *combined with* database loss — in `docs/state.md` beside the recovery description, so a future reader meets the limit where the mechanism is explained rather than only in the plan
+- [ ] T085 Mark the disposable-board test in `tests/integration/test_card_to_issue.py` as skipped without real credentials, for the reason `docs/roadmap.md` already records about CI's ceiling, and make the skip message say what it would have verified
+- [ ] T086 Run `ruff` and the type checker clean across `src/robot_army/intake.py`, `src/robot_army/cardstates.py`, `src/robot_army/boundaries/trello.py`, and every file this milestone touched
+- [ ] T087 Run the full suite under `tests/` and confirm it passes, which the constitution makes the completion gate, explicitly including every test milestones 001 and 002 already had — an unchanged GitHub path is FR-045, and the only way to know is that their tests still pass untouched
+- [ ] T088 Work through all nine scenarios in [quickstart.md](quickstart.md) against a disposable board, including scenario 5's kill matrix and scenario 7's shared-board refusal, and record what was actually observed — the roadmap is explicit that CI raises the floor and does not replace this round
 
 ---
 
@@ -244,10 +247,10 @@ threaten it.
 - **Phase 1**: T004 alongside T002/T003
 - **Phase 2**: T006 and T008 alongside T005; T017, T018, T020, T024, T028, T029 are each in their own file
 - **Phase 3**: T031, T036, T039–T041 are separate test files from the implementation they cover
-- **Phase 4**: T045, T056, T057 alongside the implementation tasks
-- **Phase 5**: T064–T066 alongside T058–T063
-- **Phase 6**: T073–T077 alongside T067–T072
-- **Phase 7**: T078, T079, T080 are three different documents
+- **Phase 4**: T045, T057, T058, T059 alongside the implementation tasks
+- **Phase 5**: T066–T068 alongside T060–T065
+- **Phase 6**: T076–T080 alongside T069–T075
+- **Phase 7**: T081, T082, T083 are three different documents
 
 The honest caveat: with one maintainer these markers identify work that will not collide in the same
 file, not work that will happen simultaneously.
@@ -260,7 +263,8 @@ file, not work that will happen simultaneously.
 # The implementation, in order — each depends on the last
 Task: "T030 repository resolution in src/robot_army/intake.py"
 Task: "T032 issue composition in src/robot_army/intake.py"
-Task: "T034 the four-step creation in src/robot_army/intake.py"
+Task: "T034 the duplicate guard in src/robot_army/intake.py"
+Task: "T035 the four-step creation in src/robot_army/intake.py"
 
 # The tests, in three separate files, safe to interleave with the above
 Task: "T031 tests/unit/test_repo_resolution.py"
@@ -292,7 +296,7 @@ being honest when things go wrong.
 5. US4 → the invariant is proven under crash and database loss
 
 US4 is last by priority but it is not optional: FR-042 makes it the gate on believing any of the
-above. A dry run cannot demonstrate it, which is why T085 exists and why one test is allowed to skip
+above. A dry run cannot demonstrate it, which is why T088 exists and why one test is allowed to skip
 in CI.
 
 ---

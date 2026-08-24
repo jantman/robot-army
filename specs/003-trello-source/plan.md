@@ -191,14 +191,17 @@ src/robot_army/
 ├── db.py                    # + cards accessors
 ├── migrations.py            # + _migration_003 (cards table and its two unique indexes)
 ├── models.py                # + Card row dataclass
-├── daemon.py                # + the board job; + board preconditions at startup
+├── daemon.py                # + the board job; + board preconditions at startup; + drain rescan
+├── dispatch.py              # + the call site that moves a card once a session is confirmed
+├── reconcile.py             # + the call site that moves a card once its issue is observed closed
+├── control.py               # + the rescan job name; the marker mechanism itself is unchanged
 ├── health.py                # + board reachability on the heartbeat
-├── operations.py            # + cards, rescan; + card link on show
+├── operations.py            # + cards, rescan; + card link on show and on work-item payloads
 ├── config.py                # + [trello] section and its validation
 ├── cli.py                   # + cards, rescan
 └── web/
     ├── server.py            # + GET /cards, POST /card/{id}/rescan
-    └── pages.py             # + the cards view
+    └── pages.py             # + the cards view; + the card link on work-item views
 
 tests/
 ├── unit/
@@ -208,10 +211,14 @@ tests/
 │   ├── test_card_activity.py     # R9: our own comment must not trigger a rescan
 │   ├── test_board_preconditions.py  # privacy, membership, label, lists
 │   ├── test_trello_secrets.py    # no key or token in any record, including failures
-│   └── test_simulated_writers.py # structural validity of create_issue and card writes
+│   ├── test_simulated_writers.py # structural validity of create_issue and card writes
+│   ├── test_intake_poll.py       # unconfigured makes no request; failure is not an empty board
+│   ├── test_card_lifecycle_guard.py # the manual-move refusal and the interrupted-move case
+│   └── test_card_invariant.py    # the reverse-direction guard; simulated rows do not block live
 └── integration/
     ├── test_card_to_issue.py     # the happy path end to end against fakes
     ├── test_card_interruption.py # killed at each of the three seams; no duplicates
+    ├── test_card_needs_info.py   # held, commented once, self-healed on edit
     └── test_card_lifecycle.py    # In Progress / Done / returned; the manual-move refusal
 
 docs/

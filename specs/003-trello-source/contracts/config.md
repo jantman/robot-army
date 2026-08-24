@@ -6,7 +6,7 @@ all, and behaves exactly as it did in milestone 002 (FR-001).
 ```toml
 [trello]
 board_id      = "5f3a..."          # required when the section is present
-label         = "AI-task"          # the tag that marks a card as work
+label         = "AI-task"          # spec.md calls this the "tag" — see the note below
 in_progress_list = "In Progress"   # list the card is moved to while a session runs
 done_list        = "Done"          # list the card is moved to when the issue closes
 poll_seconds  = 300                # R13: no conditional-request economy, so slower than GitHub
@@ -20,6 +20,12 @@ token_env     = "TRELLO_API_TOKEN"
 # key_file    = "~/.config/robot-army/trello-key"
 # token_file  = "~/.config/robot-army/trello-token"
 ```
+
+**On the word "tag".** The spec says *tag* throughout, deliberately: this project already has a
+`label`, the GitHub one that is the human gate, and calling both by the same word in a document about
+a system that must never confuse them would be careless. The configuration key stays `label` because
+that is what Trello's own API calls it, and every task and module follows the API. The two words name
+the same thing; the spec's usage protects the reader, and this key's usage protects the implementer.
 
 ## Validation, at load
 

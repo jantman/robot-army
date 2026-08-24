@@ -279,10 +279,11 @@ steps in the creation sequence in turn, restart, and confirm no step produces a 
   state of which is `needs_info`: tagged, but not resolvable, and awaiting human clarification. That
   lifecycle MUST be governed by the same single, enumerable set of legal transitions every other state
   machine in the system uses.
-- **FR-020a**: A card MUST NOT become a work item before an issue exists for it. A work item is
-  dispatchable work; a card awaiting clarification is not, has no repository and no issue, and MUST
-  NOT be representable as one. This deliberately places `needs_info` on the card rather than on the
-  work item, which is where the planning document's §7 put it — see the Assumptions section.
+- **FR-020a**: A card MUST NOT become a work item before an issue exists for it. A card awaiting
+  clarification names no repository and no issue, and MUST NOT be representable as one. This
+  deliberately places `needs_info` on the card rather than on the work item, which is where the
+  planning document's §7 put it — see the Assumptions section. FR-021 states the consequence for
+  dispatch; this requirement is about what may exist, not about what may run.
 - **FR-021**: An item in `needs_info` MUST never be eligible for dispatch and MUST never cause an
   issue to be created.
 - **FR-022**: On first entering `needs_info`, the system MUST add exactly one comment to the card
@@ -352,10 +353,13 @@ steps in the creation sequence in turn, restart, and confirm no step produces a 
 ### Boundary Integrity
 
 - **FR-043**: The board MUST be reached through the same kind of seam the existing source uses, with
-  reads and writes separated so that the effect-level rules of FR-038 and FR-039 are structural.
-- **FR-044**: Where the existing source seam cannot express what the board needs, the seam MUST be
-  changed rather than bypassed. No shared path may branch on which external system it is talking to; a
-  reviewer MUST be able to find every source-specific behaviour behind the seam and nowhere else.
+  reads and writes separated so that the effect-level rules of FR-038 and FR-039 are structural. This
+  is a requirement about *shape*: where the board is spoken to.
+- **FR-044**: No shared path may branch on which external system it is talking to, and where the
+  existing seam cannot express what the board needs, the seam MUST be changed rather than bypassed.
+  This is a requirement about *containment*: a reviewer MUST be able to find every source-specific
+  behaviour behind a seam and nowhere else. FR-043 can hold while this one fails, which is why they
+  are separate.
 - **FR-045**: Adding this source MUST NOT change the observable behaviour of the GitHub path for
   issues the author wrote themselves.
 

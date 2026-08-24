@@ -419,7 +419,10 @@ becomes trustworthy — before it, an unnoticed kitty crash silently strands wor
 ## Not run: scenarios requiring the maintainer's live environment
 
 Six validation tasks are left unchecked because they cannot be performed by anyone but the
-maintainer, on their machine, with their credentials. Each would create real effects — real
+maintainer, on their machine, with their credentials. They are tracked in
+**[issue #1](https://github.com/jantman/robot-army/issues/1)**, which batches them with any
+later milestone's deferred verification into a single session rather than interrupting each
+milestone. Each would create real effects — real
 sessions consuming real subscription quota, real comments on real issues, or changes to the
 user's systemd configuration. They are listed here rather than quietly marked done.
 

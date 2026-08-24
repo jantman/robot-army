@@ -32,7 +32,7 @@ session accounting, and automatic worktree cleanup.
 
 ## 002 — Web UI & HTTP API (`specs/002-web-ui/`)
 
-**Status:** not yet specified
+**Status:** specified
 
 Planning doc M2. Active-sessions, queue, and interrupted views; resume / abandon / restart / attach
 controls with the resume-decision signals from §8; the audit log with clickable issue, card, and PR
@@ -41,6 +41,16 @@ ergonomic point of it.
 
 Depends on 001 for the state model, the audit record, and the session-control operations — the UI
 is a second front-end onto commands 001 already exposes, not a new set of capabilities.
+
+Two decisions were taken during specification. The interface **serves on the local network with no
+in-application access control**, with the author's existing VPN providing remote reach — the reading
+that honours Principle II's "authentication and authorization MUST NOT be built" literally, at the
+cost that anything able to reach the port has full control. And it **runs as its own command rather
+than inside the daemon**, so the audit log and the interrupted-item list stay readable during
+exactly the incident that makes them worth reading.
+
+Pausing dispatch is the one genuinely new capability here rather than a second door onto an existing
+one; per the constitution's terminal-reachability rule it gains a terminal command at the same time.
 
 ## 003 — Trello Source (`specs/003-trello-source/`)
 

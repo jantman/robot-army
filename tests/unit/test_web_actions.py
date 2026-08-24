@@ -162,13 +162,128 @@ def test_the_redirect_returns_to_the_referring_view(web, conn):
     assert response.headers["Location"].startswith("/interrupted")
 
 
-def test_a_foreign_referer_is_ignored_rather_than_followed(web, conn):
-    """An open redirect on an interface where reaching it is reaching everything."""
+def test_a_foreign_referer_is_not_used_as_a_redirect_target(web, conn):
+    """An open redirect on an interface where reaching it is reaching everything.
+
+    This is about the *redirect target* only. Whether such a request is performed at all is
+    a separate question, answered by the same-origin check below — a bare ``Referer`` with
+    no ``Origin`` and no ``Sec-Fetch-Site`` is not something a browser produces for a
+    cross-site POST, so it is not the signal to refuse on.
+    """
     item_id = seed_item(conn, state="interrupted")
     response = web.post(
         f"/item/{item_id}/abandon", headers={"Referer": "https://evil.example/steal"}
     )
     assert response.headers["Location"].startswith(f"/item/{item_id}")
+
+
+# -- cross-site request forgery ---------------------------------------------
+#
+# The gap the spec's exposure model does not cover. FR-003 reasons about *network*
+# reachability to the port and accepts full control for anything that has it. A forged
+# request needs no network path to a loopback-bound port at all — only the author's own
+# browser, already inside the trust boundary, with some unrelated page open.
+
+
+CROSS_SITE = {
+    "origin": "https://evil.example",
+    "referer": "https://evil.example/page",
+    "sec-fetch-site": "cross-site",
+}
+
+
+@pytest.mark.parametrize(
+    ("path", "state"),
+    [
+        ("/item/{id}/abandon", "interrupted"),
+        ("/item/{id}/restart", "interrupted"),
+        ("/item/{id}/cancel", "active"),
+        ("/item/{id}/retry", "failed"),
+        ("/item/{id}/attach", "active"),
+    ],
+)
+def test_a_cross_site_item_action_is_refused_and_changes_nothing(web, conn, path, state):
+    item_id = seed_item(conn, state=state)
+    seed_session(conn, item_id, state="running" if state == "active" else "lost")
+    before = state_of(conn, item_id)
+
+    response = web.post_json(path.format(id=item_id), headers=CROSS_SITE)
+    assert response.status == 403
+    assert response.json()["code"] == 3
+    assert state_of(conn, item_id) == before
+
+
+@pytest.mark.parametrize("path", ["/dispatch/pause", "/dispatch/unpause", "/poll", "/reconcile"])
+def test_a_cross_site_system_action_is_refused(web, conn, path):
+    """Pausing dispatch from someone else's page is not less serious for being reversible."""
+    assert web.post_json(path, headers=CROSS_SITE).status == 403
+    assert db.get_dispatch_control(conn).paused is False
+
+
+def test_the_sec_fetch_site_header_alone_is_enough_to_refuse(web, conn):
+    """Browsers send it on every request, including ones carrying no Origin."""
+    item_id = seed_item(conn, state="interrupted")
+    response = web.post_json(
+        f"/item/{item_id}/abandon", headers={"sec-fetch-site": "cross-site"}
+    )
+    assert response.status == 403
+    assert state_of(conn, item_id) == WorkItemState.INTERRUPTED
+
+
+def test_an_origin_that_does_not_match_the_host_is_refused(web, conn):
+    item_id = seed_item(conn, state="interrupted")
+    response = web.post_json(
+        f"/item/{item_id}/abandon", headers={"origin": "http://192.168.1.99:8420"}
+    )
+    assert response.status == 403
+    assert "192.168.1.99" in response.json()["reason"]
+
+
+@pytest.mark.parametrize("site", ["same-origin", "none"])
+def test_the_interfaces_own_forms_are_allowed(web, conn, site):
+    """``same-origin`` is a form on a page we served; ``none`` is a typed URL or a bookmark."""
+    item_id = seed_item(conn, state="interrupted")
+    response = web.post_json(
+        f"/item/{item_id}/abandon",
+        headers={
+            "origin": "http://localhost:8420",
+            "sec-fetch-site": site,
+            "referer": f"http://localhost:8420/item/{item_id}/confirm/abandon",
+        },
+    )
+    assert response.status == 303
+    assert state_of(conn, item_id) == WorkItemState.ABANDONED
+
+
+def test_a_client_that_sends_neither_header_is_allowed_through(web, conn):
+    """``curl`` sends neither, and the quickstart drives every control with it.
+
+    Refusing those would break the documented terminal path to protect against a client
+    that has no need of forgery — it can reach the port directly, which is the model the
+    spec already accepts.
+    """
+    item_id = seed_item(conn, state="interrupted")
+    assert web.post_json(f"/item/{item_id}/abandon").status == 303
+    assert state_of(conn, item_id) == WorkItemState.ABANDONED
+
+
+def test_a_refused_cross_site_request_still_leaves_a_record(web, conn, layout):
+    """It is the only way one would ever be noticed."""
+    item_id = seed_item(conn, state="interrupted")
+    web.post_json(f"/item/{item_id}/abandon", headers=CROSS_SITE)
+
+    records = web_records(layout, action="web.abandon")
+    assert [r["kind"] for r in records] == ["intent", "outcome"]
+    assert records[0]["detail"]["origin"] == "https://evil.example"
+    assert records[0]["detail"]["sec_fetch_site"] == "cross-site"
+    assert records[-1]["outcome"] == "error"
+
+
+def test_read_views_are_not_origin_checked(web, conn):
+    """A GET changes nothing, and refusing one would break linking to the interface."""
+    seed_item(conn, state="ready")
+    for path in ("/active", "/queue", "/log"):
+        assert web.get(path, headers=CROSS_SITE).status == 200, path
 
 
 # -- FR-038 / FR-039 / FR-040: the audit invariant --------------------------
@@ -328,3 +443,62 @@ def test_a_transaction_rolled_back_mid_action_leaves_no_partial_state(web, conn,
         web.post_json(f"/item/{item_id}/abandon")
 
     assert state_of(conn, item_id) == WorkItemState.INTERRUPTED
+
+
+def test_a_confirmed_action_never_redirects_back_to_its_own_confirm_page(web, conn):
+    """The primary success path: tap → confirm → act → land somewhere that makes sense.
+
+    A browser sends the confirm page's own URL as the ``Referer`` of the POST it submits.
+    Returning that as the redirect target sent the author back to a page whose whole job is
+    to re-validate the action they had just completed — which found it no longer legal and
+    rendered a 409. The action succeeded and the page said it failed, which is the worst
+    thing this interface could do.
+    """
+    item_id = seed_item(conn, state="interrupted")
+    confirm = f"/item/{item_id}/confirm/abandon"
+
+    response = web.post(
+        f"/item/{item_id}/abandon",
+        headers={"Referer": f"http://localhost:8420{confirm}"},
+    )
+    assert response.status == 303
+    location = response.headers["Location"]
+    assert "/confirm/" not in location
+    assert location.startswith(f"/item/{item_id}")
+
+    # And the page the browser actually lands on reports the success.
+    landed = web.get(location)
+    assert landed.status == 200
+    assert "abandoned" in landed.text
+
+
+@pytest.mark.parametrize("action", ["abandon", "cancel", "retry"])
+def test_every_confirmed_action_lands_on_a_200(web, conn, monkeypatch, action):
+    """The bug hit every confirmed action, so every confirmed action is checked."""
+    monkeypatch.setattr(
+        operations.dispatch, "is_trusted", lambda path, trust_file=None: (True, "trusted in test")
+    )
+    state = {"abandon": "interrupted", "cancel": "active", "retry": "failed"}[action]
+    item_id = seed_item(conn, state=state)
+    seed_session(conn, item_id, state="running" if state == "active" else "lost")
+
+    response = web.post(
+        f"/item/{item_id}/{action}",
+        headers={"Referer": f"http://localhost:8420/item/{item_id}/confirm/{action}"},
+    )
+    assert response.status == 303, action
+    assert web.get(response.headers["Location"]).status == 200, action
+
+
+def test_a_referer_naming_something_that_is_not_a_view_is_ignored(web, conn):
+    """An asset, an unknown path, or the root redirect are not places to land."""
+    item_id = seed_item(conn, state="interrupted")
+    for referer in (
+        "http://localhost:8420/static/app.css",
+        "http://localhost:8420/nope",
+        "http://localhost:8420/",
+    ):
+        row = seed_item(conn, issue_number=900 + len(referer), state="interrupted")
+        response = web.post(f"/item/{row}/abandon", headers={"Referer": referer})
+        assert response.headers["Location"].startswith(f"/item/{row}"), referer
+    assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED

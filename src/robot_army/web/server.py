@@ -441,8 +441,13 @@ def _perform(
             "route": request.path,
             "form": {k: v for k, v in request.form.items() if k != "include_simulated"},
             "include_simulated": request.include_simulated,
+            "origin": request.headers.get("origin"),
+            "sec_fetch_site": request.headers.get("sec-fetch-site"),
         },
     ) as outcome:
+        # Inside the audit pair, so a forged request that is refused still leaves the
+        # record that says one arrived — which is the only way it would ever be noticed.
+        check_same_origin(request)
         data = body(outcome)
         outcome.update({k: v for k, v in data.items() if k not in outcome})
     target = location + html_query(request, msg=message)
@@ -456,13 +461,62 @@ def html_query(request: Request, **extra: Any) -> str:
     return ("?" + "&".join(parts)) if parts else ""
 
 
+def check_same_origin(request: Request) -> None:
+    """Refuse a state-changing request that a **browser** says came from another site.
+
+    This closes a path the spec's exposure model does not actually cover. FR-003 reasons
+    about *network* reachability — "anything that can reach the port has full control" — and
+    accepts that. A cross-site request forgery needs no network path to a loopback-bound
+    port at all: it needs only the author's own browser, already inside the trust boundary,
+    to have some unrelated page open while the interface happens to be running. A zero-field
+    form POST to ``/item/1/restart`` from any such page would otherwise just work.
+
+    It is **not** authentication, which Principle II forbids building. It identifies nobody
+    and authorises nobody; it asks one question — did a browser originate this from a page
+    this server served? — and it holds no state, which is what R7 rules out.
+
+    **Headers that are absent are allowed through, deliberately.** ``curl`` sends neither,
+    and the quickstart drives every control with it; refusing those would break the
+    documented terminal path to protect against a client that has no need of forgery — it
+    can reach the port directly, which is the accepted model. Browsers always send
+    ``Sec-Fetch-Site``, and always send ``Origin`` on a cross-origin POST, so the check
+    covers exactly the gap and nothing else.
+    """
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site not in ("same-origin", "none"):
+        raise Refusal(
+            f"refusing a state-changing request the browser reports as {site!r}. This "
+            "interface has no authentication by design, so a request forged by another "
+            "page you have open is the one attack its exposure model does not already "
+            "accept",
+            status=403,
+            code=EXIT_PRECONDITION,
+        )
+    origin = request.headers.get("origin")
+    if origin:
+        host = request.headers.get("host", "")
+        if urlparse(origin).netloc != host:
+            raise Refusal(
+                f"refusing a state-changing request from origin {origin!r}, which is not "
+                f"{host!r}",
+                status=403,
+                code=EXIT_PRECONDITION,
+            )
+
+
 def _referring_view(request: Request, fallback: str) -> str:
     """Where a successful action returns to.
 
-    The ``Referer`` is used only for its **path**, and only when its host matches the one
-    the request came to. Trusting it whole would be an open redirect, and this interface
-    has exactly one thing worth protecting — the fact that reaching it is reaching
-    everything.
+    The ``Referer`` is used only for its **path**, and only when that path matches a route
+    this server actually serves as a view. Trusting it whole would be an open redirect, and
+    this interface has exactly one thing worth protecting — the fact that reaching it is
+    reaching everything.
+
+    **A confirmation page is never a destination.** Its whole purpose is to precede the
+    action, and a browser sends it as the ``Referer`` of the very POST it submits — so
+    returning it would send the author back to a page that re-validates an action they just
+    completed, finds it no longer legal, and renders a ``409``. The action succeeded and the
+    page said it failed, which is the worst thing this interface could do.
     """
     referer = request.referer
     if not referer:
@@ -472,6 +526,11 @@ def _referring_view(request: Request, fallback: str) -> str:
     if parsed.netloc and host and parsed.netloc != host:
         return fallback
     if not parsed.path.startswith("/"):
+        return fallback
+    # Match against the route table rather than pattern-matching the string: a referer
+    # naming an asset, an unknown path, or a confirm page is not somewhere to land.
+    route, _params, _allowed = match("GET", parsed.path.removesuffix(".json"))
+    if route is None or route.handler in (view_confirm, view_root):
         return fallback
     return parsed.path
 
@@ -488,7 +547,13 @@ def view_active(app: WebApp, ctx: Context, request: Request, params: dict[str, A
 
 
 def view_queue(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
-    return pages.queue_view(ctx, include_simulated=request.include_simulated)
+    # The chrome is handed in so the dispatch controls render from the same snapshot the
+    # rest of the page does, rather than re-reading the pause a second time.
+    return pages.queue_view(
+        ctx,
+        include_simulated=request.include_simulated,
+        chrome_payload=params.get("chrome"),
+    )
 
 
 def view_interrupted(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
@@ -900,7 +965,7 @@ def handle(app: WebApp, request: Request) -> Response:
     try:
         chrome = pages.chrome(ctx, include_simulated=request.include_simulated)
         try:
-            outcome = route.handler(app, ctx, request, params)
+            outcome = route.handler(app, ctx, request, {**params, "chrome": chrome})
         except Refusal as refusal:
             view = pages.refusal_view(
                 reason=refusal.reason,
@@ -996,14 +1061,20 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 length = 0
             if length > MAX_BODY_BYTES:
+                # The body is never read, so its bytes are still queued on the socket.
+                # Under HTTP/1.1 keep-alive the next read would parse them as the start of
+                # the following request line, corrupting whatever the client sent next.
+                # Closing is the honest end: the alternative is draining an arbitrary
+                # number of bytes we already decided not to accept.
                 self._respond(
                     Response(
                         status=413,
                         body=b'{"ok": false, "reason": "request body too large"}',
                         content_type="application/json; charset=utf-8",
-                        headers=dict(NO_STORE),
+                        headers={**NO_STORE, "Connection": "close"},
                     )
                 )
+                self.close_connection = True
                 return
             body = self.rfile.read(length) if length > 0 else b""
         request = parse_request(method, self.path, headers, body)
@@ -1032,8 +1103,28 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def build_server(app: WebApp, *, bind: str, port: int) -> ThreadingHTTPServer:
+    """Bind the server, in the address family the address actually belongs to.
+
+    ``TCPServer`` defaults to ``AF_INET``, so without this an IPv6 literal passed every
+    precondition — ``validate_bind`` calls ``::1`` loopback and the probe socket already
+    branches on the family — and then failed at the real bind with a ``gaierror``. Being
+    told an address is fine and then refused it is worse than being refused it up front.
+    """
     handler = type("BoundHandler", (Handler,), {"app": app})
-    return ThreadingHTTPServer((bind, port), handler)
+    server_class: type[ThreadingHTTPServer] = ThreadingHTTPServer
+    if ":" in bind:
+        server_class = type(
+            "ThreadingHTTPServerV6",
+            (ThreadingHTTPServer,),
+            {"address_family": socket.AF_INET6},
+        )
+    return server_class((bind, port), handler)
+
+
+def _display_address(address: str, port: int) -> str:
+    """``http://[::1]:8420`` — an IPv6 literal in a URL needs its brackets to be clickable."""
+    host = f"[{address}]" if ":" in address else address
+    return f"http://{host}:{port}"
 
 
 def serve(
@@ -1093,7 +1184,10 @@ def serve(
     finally:
         ctx.close()
 
-    print(f"robot-army: web interface on http://{address}:{actual_port}", file=sys.stderr)
+    print(
+        f"robot-army: web interface on {_display_address(str(address), actual_port)}",
+        file=sys.stderr,
+    )
     print(f"robot-army: effect level {app.effect_level}", file=sys.stderr)
     if not ipaddress.ip_address(str(address)).is_loopback:
         print(

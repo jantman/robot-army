@@ -55,11 +55,20 @@ def live_server(config, conn, monkeypatch):
         thread.join(timeout=5)
 
 
-def fetch(url: str, *, data: dict | None = None, accept: str = "text/html", follow=False):
+def fetch(
+    url: str,
+    *,
+    data: dict | None = None,
+    accept: str = "text/html",
+    follow=False,
+    headers: dict[str, str] | None = None,
+):
     """A request that does **not** follow redirects, so a ``303`` is observable."""
     body = urllib.parse.urlencode(data).encode("utf-8") if data is not None else None
     # S310 does not apply: the URL is this test's own ephemeral loopback server.
-    request = urllib.request.Request(url, data=body, headers={"Accept": accept})  # noqa: S310
+    request = urllib.request.Request(  # noqa: S310
+        url, data=body, headers={"Accept": accept, **(headers or {})}
+    )
 
     opener = urllib.request.build_opener(
         urllib.request.HTTPRedirectHandler if follow else _NoRedirect
@@ -230,4 +239,99 @@ def test_an_oversized_body_is_refused_rather_than_read(live_server, conn):
     except urllib.error.HTTPError as exc:
         status = exc.code
     assert status == 413
+    assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED
+
+
+def test_an_oversized_body_does_not_desync_the_keep_alive_connection(live_server, conn):
+    """The refusal must not corrupt whatever the client sends next on the same connection.
+
+    The body is never read, so its bytes stay queued on the socket. Under HTTP/1.1
+    keep-alive the next read parses them as the start of the following request line: a
+    perfectly good ``GET`` came back as a garbage 414. ``urllib`` opens a fresh connection
+    per request, which is exactly why the existing test could not see this — so this one
+    speaks the protocol directly.
+    """
+    import socket as socketlib
+
+    from robot_army.web.server import MAX_BODY_BYTES
+
+    item_id = seed_item(conn, state="interrupted")
+    host, port = urllib.parse.urlsplit(live_server).hostname, urllib.parse.urlsplit(
+        live_server
+    ).port
+
+    connection = socketlib.create_connection((host, port), timeout=10)
+    try:
+        payload = b"x" * (MAX_BODY_BYTES + 512)
+        connection.sendall(
+            b"POST /item/%d/abandon HTTP/1.1\r\nHost: %s\r\n"
+            b"Content-Type: application/x-www-form-urlencoded\r\n"
+            b"Content-Length: %d\r\n\r\n"
+            % (item_id, host.encode(), len(payload))
+            + payload
+        )
+        received = b""
+        while b"\r\n\r\n" not in received:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            received += chunk
+
+        head = received.split(b"\r\n\r\n")[0].decode("latin-1")
+        assert head.split("\r\n")[0].startswith("HTTP/1.1 413")
+        assert "Connection: close" in head, (
+            "without this the client reuses a connection with unread body bytes on it"
+        )
+    finally:
+        connection.close()
+
+    # The action did not happen, and the server is still healthy for the next client.
+    assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED
+    status, _headers, _body = fetch(f"{live_server}/active")
+    assert status == 200
+
+
+def test_a_browser_shaped_confirm_then_post_lands_on_a_page_that_says_it_worked(
+    live_server, conn
+):
+    """What a phone actually sends, including the ``Referer`` the test client omitted.
+
+    The pure-function tests cover the redirect target; this one exercises it over the wire
+    with the header a browser really attaches, because that header is what turned the
+    success path into a 409.
+    """
+    item_id = seed_item(conn, state="interrupted")
+    confirm = f"{live_server}/item/{item_id}/confirm/abandon"
+
+    status, _headers, page = fetch(confirm)
+    assert status == 200
+    assert f'action="/item/{item_id}/abandon"' in page
+
+    status, response_headers, _body = fetch(
+        f"{live_server}/item/{item_id}/abandon",
+        data={},
+        headers={
+            "Referer": confirm,
+            "Origin": live_server,
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert status == 303
+    location = response_headers["Location"]
+
+    assert "/confirm/" not in location
+    status, _headers, landed = fetch(f"{live_server}{location}")
+    assert status == 200
+    assert "worktree was left in place" in landed
+
+
+def test_a_cross_site_post_over_the_wire_is_refused(live_server, conn):
+    item_id = seed_item(conn, state="interrupted")
+    status, _headers, _body = fetch(
+        f"{live_server}/item/{item_id}/abandon",
+        data={},
+        accept="application/json",
+        headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+    )
+    assert status == 403
     assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED

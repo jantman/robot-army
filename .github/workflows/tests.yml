@@ -44,7 +44,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      # Pinned to an exact release, not a floating major tag: astral-sh/setup-uv stopped
+      # publishing those after v7, so `@v10` does not resolve at all. Exact pins want
+      # occasional manual bumping, which is the correct trade for a repo with no
+      # dependency bot and one maintainer.
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           # Pinned rather than inferred: the daemon targets 3.14 specifically, and
           # `requires-python = ">=3.14"` would happily resolve to something newer.

@@ -263,3 +263,32 @@ gap and nothing else.
 The refusal is a `403` carrying exit code `3`, and it is raised **inside** the audit pair, so
 a forged request that never happened still leaves the record saying one arrived — which is
 the only way it would ever be noticed.
+
+**And a second round found that it was not enough.** Comparing `Origin` to `Host` compares
+two headers an attacker controls together. Under DNS rebinding — point a name at `127.0.0.1`,
+get the browser to load it — `Host`, `Origin` and `Sec-Fetch-Site: same-origin` all agree
+with each other while the request really reaches this server, restoring the whole attack and
+adding *reading* every response to it.
+
+So the `Host` is checked for its **form**: an IP literal, or `localhost`. Rebinding needs a
+name, because a name whose resolution changes is the entire mechanism. This requires nothing
+plumbed through from the bind configuration, and it matches how the interface is already
+reached: `[web] bind` must itself be an address rather than a hostname, for the same reason —
+what the interface became reachable from must be unambiguous. It applies to **every** request
+rather than only the mutating ones, because a rebound page reads what it fetches.
+
+## Corrected after implementation: the effect-level guard failed open
+
+R4's guard treated a *stale* heartbeat exactly like an absent one and waved the action
+through. That is right when no daemon holds the lock — there is nothing to disagree with —
+but wrong when one does: a daemon's effect level is fixed when it starts and cannot change
+while it runs, and a starting daemon writes its heartbeat before its first tick, so a stale
+heartbeat from the process currently holding the lock still names that process's level
+correctly. Staleness means a tick is running long, which is when a large clone is in progress
+and when launching more work at the wrong level would matter most.
+
+The guard now reads the lock as well as the heartbeat, and distinguishes three states rather
+than two: no daemon (fall back), a daemon with a heartbeat fresh or stale (compare, and say
+when the evidence is old), and a daemon with no readable heartbeat at all (refuse — the level
+is genuinely unknown). The test that asserted the old behaviour asserted the fail-open, and
+has been rewritten.

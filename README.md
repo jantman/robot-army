@@ -99,6 +99,12 @@ That is the accepted model, so the mitigations are the ones that matter:
   authentication; it identifies nobody, holds no state, and asks one question. Clients that
   send neither `Origin` nor `Sec-Fetch-Site`, `curl` included, are allowed through: they can
   reach the port directly anyway, which is the model above.
+- **Reach it by address, not by name.** Any request whose `Host` is a hostname other than
+  `localhost` is refused with `403`. Comparing `Origin` to `Host` is not enough on its own,
+  because DNS rebinding lets an attacker control both: point `evil.test` at `127.0.0.1`, get
+  my browser to load `http://evil.test:8420`, and every header agrees with every other while
+  the request really lands here. Rebinding needs a *name*, so requiring an address closes it
+  — and `[web] bind` already has to be an address for the same reason.
 
 From outside the house I connect my existing VPN and use the same LAN address. Nothing is
 published, no tunnel is configured, and no port is forwarded.

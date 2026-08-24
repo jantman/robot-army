@@ -49,6 +49,8 @@ refusal reads identically whichever front end produced it.
 | The daemon's heartbeat reports a different effect level | `409`, `reason` naming both levels | R4 |
 | The item is no longer in a state where the action is legal | `409`, `reason` from `IllegalTransition` | FR-027 |
 | A browser reports the request as coming from another site | `403`, `reason` naming the origin | see plan.md, "Added after implementation" |
+| The `Host` names a hostname other than `localhost` (any method) | `403`, `reason` naming DNS rebinding | see plan.md, "Added after implementation" |
+| A daemon is running but no heartbeat can be read | `409`, `reason` naming the level as unknown | R4 |
 
 The `403` was added after implementation and is the one refusal with no requirement behind
 it. A forged request reaches the port through the author's own browser rather than over the

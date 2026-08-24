@@ -168,7 +168,10 @@ class FakeIssueReader:
         self.closed: dict[tuple[str, int], bool] = {}
         self.open_prs: dict[tuple[str, int], Any] = {}
         self.poll_calls: list[tuple[str, str | None]] = []
+        self.closed_calls: list[tuple[str, int]] = []
+        self.pr_calls: list[tuple[str, str]] = []
         self.raise_on_poll: Exception | None = None
+        self.raise_on_remote: Exception | None = None
 
     def poll(self, repo_key: str, etag: str | None) -> PollResult:
         self.poll_calls.append((repo_key, etag))
@@ -185,10 +188,16 @@ class FakeIssueReader:
         return None
 
     def is_closed(self, repo_key: str, number: int) -> bool:
+        self.closed_calls.append((repo_key, number))
+        if self.raise_on_remote is not None:
+            raise self.raise_on_remote
         return self.closed.get((repo_key, number), False)
 
     def open_pr_for_branch(self, repo_key: str, branch: str) -> Any:
-        return None
+        # Keyed by branch, because that is what the caller asks about: milestone 002's
+        # resume signals want "is there an open PR for *this* branch", not for the issue.
+        self.pr_calls.append((repo_key, branch))
+        return self.open_prs.get((repo_key, branch))
 
     def list_owned_repos(self) -> list[Any]:
         return []
@@ -464,3 +473,158 @@ def make_issue(number: int = 42, **overrides: Any) -> Issue:
     }
     defaults.update(overrides)
     return Issue(**defaults)
+
+
+# -- the web harness (milestone 002) ----------------------------------------
+#
+# Every web test drives ``server.handle`` directly rather than through a socket (R15).
+# Routing, negotiation, rendering and every refusal are pure functions of a Request, which
+# is what makes the failure cases — bad method, unknown item, illegal transition,
+# effect-level mismatch, daemon down — cheap enough to write exhaustively. Exactly one
+# integration test binds a real port, for the parts this cannot reach.
+
+
+class WebHarness:
+    """A ``WebApp`` with its boundaries stubbed and a request helper.
+
+    The stubbed boundaries are shared instances rather than fresh ones per request, so a
+    test can assert on what the display was asked to open or what the reader was asked
+    about — which is the whole point of having them.
+    """
+
+    def __init__(self, app: Any, *, reader: Any, display: Any, host: Any, vcs: Any) -> None:
+        self.app = app
+        self.reader = reader
+        self.display = display
+        self.host = host
+        self.vcs = vcs
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        form: dict[str, str] | None = None,
+        accept: str = "text/html",
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        from urllib.parse import urlencode
+
+        from robot_army.web.server import handle, parse_request
+
+        head = {"accept": accept, "host": "localhost:8420"}
+        head.update({k.lower(): v for k, v in (headers or {}).items()})
+        body = urlencode(form or {}).encode("utf-8") if form is not None else b""
+        return handle(self.app, parse_request(method, path, head, body))
+
+    def get(self, path: str, **kwargs: Any) -> Any:
+        return self.request("GET", path, **kwargs)
+
+    def get_json(self, path: str, **kwargs: Any) -> Any:
+        return self.request("GET", path, accept="application/json", **kwargs)
+
+    def post(self, path: str, **kwargs: Any) -> Any:
+        kwargs.setdefault("form", {})
+        return self.request("POST", path, **kwargs)
+
+    def post_json(self, path: str, **kwargs: Any) -> Any:
+        kwargs.setdefault("form", {})
+        return self.request("POST", path, accept="application/json", **kwargs)
+
+
+@pytest.fixture
+def web(config: Config, conn: Any, layout: Layout, monkeypatch: Any) -> WebHarness:
+    """A web app whose per-request contexts get stubbed boundaries.
+
+    ``operations.wire`` is the seam: the web builds one ``Context`` per request and would
+    otherwise construct a real ``GitHubReader``, so a resume-signal render in a test would
+    make a network call. Patching the wiring rather than adding a hook to ``WebApp`` keeps
+    the test seam out of the product.
+    """
+    from robot_army import operations
+    from robot_army.web.server import WebApp
+
+    reader = FakeIssueReader()
+    display = StubDisplay()
+    host = StubSessionHost()
+    shared: dict[str, Any] = {}
+
+    def fake_wire(level: Any, cfg: Any, audit_log: Any) -> Any:
+        from robot_army.boundaries.git import GitVersionControl
+
+        if "vcs" not in shared:
+            shared["vcs"] = GitVersionControl(audit_log)
+        return make_boundaries(
+            audit_log,
+            level=level,
+            reader=reader,
+            display=display,
+            host=host,
+            vcs=shared["vcs"],
+        )
+
+    monkeypatch.setattr(operations, "wire", fake_wire)
+    operations.clear_resume_signal_cache()
+    app = WebApp(config)
+    harness = WebHarness(app, reader=reader, display=display, host=host, vcs=None)
+    yield harness
+    operations.clear_resume_signal_cache()
+
+
+@pytest.fixture
+def running_daemon(layout: Layout) -> Any:
+    """Hold the daemon lock, so ``daemon.is_locked`` reports a daemon is running.
+
+    ``flock`` is associated with the open file description, not the process, so a second
+    descriptor on the same file conflicts even from here — which is what makes this a real
+    test of the guard rather than a mock of it.
+    """
+    from robot_army.daemon import SingleInstanceLock
+
+    lock = SingleInstanceLock(layout.lock_path)
+    lock.acquire()
+    yield lock
+    lock.release()
+
+
+def beat(layout: Layout, *, effect_level: str = "live", **overrides: Any) -> None:
+    """Write a heartbeat, so the chrome and the effect guard have something to read."""
+    from robot_army import health
+
+    health.write_heartbeat(
+        layout.heartbeat_path,
+        effect_level=effect_level,
+        activity=overrides.pop("activity", "idle"),
+        cycles=overrides.pop("cycles", 1),
+        **overrides,
+    )
+
+
+def seed_session(
+    conn: Any,
+    item_id: int,
+    *,
+    state: str = "running",
+    session_id: str | None = None,
+    dry_run: bool = False,
+    host_socket: str = "/tmp/ra-test.sock",
+    pid: int | None = 4321,
+    exit_code: int | None = None,
+    signal: int | None = None,
+) -> int:
+    """Insert a session row directly, bypassing the state machine's launch path."""
+    attempt = db.next_attempt(conn, item_id)
+    with db.transaction(conn):
+        row_id = db.insert_session(
+            conn,
+            work_item_id=item_id,
+            session_id=session_id or f"sess-{item_id}-{attempt}",
+            attempt=attempt,
+            dry_run=dry_run,
+            host_socket=host_socket,
+        )
+        conn.execute(
+            "UPDATE sessions SET state = ?, pid = ?, exit_code = ?, signal = ? WHERE id = ?",
+            (state, pid, exit_code, signal, row_id),
+        )
+    return row_id

@@ -143,6 +143,20 @@ class HooksConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WebConfig:
+    """``robot-army serve``'s three settings (research.md R13).
+
+    The default is loopback deliberately: under FR-003 the bind address *is* the access
+    policy, so an unconfigured install must not be reachable from the network. Widening it
+    is an explicit edit, and the server announces the effective address at startup.
+    """
+
+    bind: str = "127.0.0.1"
+    port: int = 8420
+    refresh_seconds: int = 10
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     path: Path
     daemon: DaemonConfig
@@ -151,6 +165,7 @@ class Config:
     terminal: TerminalConfig
     health: HealthConfig
     hooks: HooksConfig
+    web: WebConfig
     repos: dict[str, RepoConfig]
     worktree_root: Path
     layout: Layout
@@ -191,6 +206,7 @@ _TOP_LEVEL_SECTIONS = {
     "terminal",
     "health",
     "hooks",
+    "web",
     "repos",
 }
 
@@ -220,6 +236,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "terminal": {"socket_glob", "probe_timeout_seconds", "binary"},
     "health": {"max_age_seconds", "webhook_url"},
     "hooks": {"default_timeout_seconds"},
+    "web": {"bind", "port", "refresh_seconds"},
 }
 
 _REPO_KEYS = {"path", "base_branch", "post_create", "env", "permission_mode", "model"}
@@ -394,6 +411,18 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         default_timeout_seconds=_int("hooks", "default_timeout_seconds", 300, minimum=1)
     )
 
+    # -- [web] -------------------------------------------------------------
+    # The bind address is only *parsed* here; whether it is permitted is decided at
+    # startup by web.server.validate_bind, because refusing a globally routable address
+    # is a serving decision and `robot-army status` must not fail over it.
+    web = WebConfig(
+        bind=_str("web", "bind", "127.0.0.1"),
+        port=_int("web", "port", 8420, minimum=1),
+        refresh_seconds=_int("web", "refresh_seconds", 10, minimum=1),
+    )
+    if web.port > 65535:
+        problems.append(f"[web] port must be <= 65535, got {web.port}")
+
     # -- [paths] -----------------------------------------------------------
     paths_raw = raw.get("paths", {})
     worktree_root = Path(str(paths_raw.get("worktree_root", "~/worktrees"))).expanduser()
@@ -478,6 +507,7 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         terminal=terminal,
         health=health,
         hooks=hooks,
+        web=web,
         repos=repos,
         worktree_root=worktree_root,
         layout=layout,

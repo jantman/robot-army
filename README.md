@@ -92,6 +92,13 @@ That is the accepted model, so the mitigations are the ones that matter:
 - The effective address is printed at startup and written to the audit log as `web.start`, on
   every start, with a loud warning when it is not loopback. That is the one fact about this
   design that is never allowed to be silent.
+- A state-changing request that a **browser** reports as coming from another site is refused
+  with `403`. This is the one attack the model above does not already accept: a forged
+  request needs no network path to the port at all, only my own browser — already inside the
+  trust boundary — having some unrelated page open while the interface is running. It is not
+  authentication; it identifies nobody, holds no state, and asks one question. Clients that
+  send neither `Origin` nor `Sec-Fetch-Site`, `curl` included, are allowed through: they can
+  reach the port directly anyway, which is the model above.
 
 From outside the house I connect my existing VPN and use the same LAN address. Nothing is
 published, no tunnel is configured, and no port is forwarded.

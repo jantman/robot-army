@@ -48,6 +48,12 @@ refusal reads identically whichever front end produced it.
 | No daemon holds the lock, and the action needs one | `503`, `reason` naming that the daemon is not running | FR-005 |
 | The daemon's heartbeat reports a different effect level | `409`, `reason` naming both levels | R4 |
 | The item is no longer in a state where the action is legal | `409`, `reason` from `IllegalTransition` | FR-027 |
+| A browser reports the request as coming from another site | `403`, `reason` naming the origin | see plan.md, "Added after implementation" |
+
+The `403` was added after implementation and is the one refusal with no requirement behind
+it. A forged request reaches the port through the author's own browser rather than over the
+network, so FR-003's model does not cover it. Clients sending neither `Origin` nor
+`Sec-Fetch-Site` — `curl`, and every script in quickstart.md — are unaffected.
 
 ---
 

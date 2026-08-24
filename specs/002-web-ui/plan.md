@@ -234,3 +234,32 @@ Re-run after the Phase 1 artifacts were written.
 
 **Re-check result: PASS.** No violation requires redesign; the three tracked items above stand as
 written.
+
+## Added after implementation: a same-origin check on mutating requests
+
+Found in review, and recorded here rather than folded in silently, because it adds something
+the specification did not ask for.
+
+**The gap.** FR-003's exposure model reasons about *network* reachability — "anything that
+can reach the port has full control" — and accepts it. A cross-site request forgery needs no
+network path to a loopback-bound port at all. It needs only the author's own browser, already
+inside the trust boundary, to have some unrelated page open while the interface is running; a
+zero-field form POST to `/item/1/restart` would otherwise succeed. The model does not cover
+this case, so accepting it was never a decision anyone made.
+
+**Why it is not the authentication Principle II forbids.** It identifies nobody and
+authorises nobody. It asks one question — did a browser originate this from a page this
+server served? — from headers the browser already sends. There is no account, no role, no
+credential, and no server-side state, which is also what keeps it inside R7's constraint
+against nonces and signed cookies.
+
+**Why absent headers are allowed.** `curl` sends neither `Origin` nor `Sec-Fetch-Site`, and
+quickstart.md drives every control with it. Refusing those would break the documented
+terminal path in order to defend against a client that has no need of forgery — it can reach
+the port directly, which is the model FR-003 already accepts. Browsers always send
+`Sec-Fetch-Site`, and always send `Origin` on a cross-origin POST, so the check covers the
+gap and nothing else.
+
+The refusal is a `403` carrying exit code `3`, and it is raised **inside** the audit pair, so
+a forged request that never happened still leaves the record saying one arrived — which is
+the only way it would ever be noticed.

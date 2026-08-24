@@ -138,3 +138,53 @@ def test_the_bind_warning_is_returned_so_the_caller_can_announce_it(
     # Binding a foreign address fails on this machine; the *warning* is what matters here.
     assert any("FULL CONTROL" in w for w in warnings)
     assert not any("globally routable" in p for p in problems)
+
+
+# -- IPv6 --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("address", ["::1", "::"])
+def test_an_ipv6_address_that_validates_can_actually_be_bound(
+    repo_clone, layout, tmp_path, conn, address
+):
+    """Validation and binding must agree about what is possible.
+
+    ``TCPServer`` defaults to ``AF_INET``. Without an explicit family an IPv6 literal
+    passed every precondition — ``validate_bind`` calls ``::1`` loopback and the probe
+    socket already branched on the family — and then failed at the real bind with a
+    ``gaierror``, reported as a precondition failure for an address just declared fine.
+    """
+    from robot_army.web.server import WebApp, build_server
+
+    problem, _warning = validate_bind(address)
+    assert problem is None
+
+    config = build(repo_clone, layout, tmp_path)
+    problems, _warnings = check_preconditions(config, bind=address, port=0)
+    assert problems == [], problems
+
+    server = build_server(WebApp(config), bind=address, port=0)
+    try:
+        assert server.address_family is socket.AF_INET6
+        assert server.server_address[0] in (address, "::1", "::")
+    finally:
+        server.server_close()
+
+
+def test_an_ipv4_address_still_binds_in_the_ipv4_family(repo_clone, layout, tmp_path, conn):
+    from robot_army.web.server import WebApp, build_server
+
+    config = build(repo_clone, layout, tmp_path)
+    server = build_server(WebApp(config), bind="127.0.0.1", port=0)
+    try:
+        assert server.address_family is socket.AF_INET
+    finally:
+        server.server_close()
+
+
+def test_an_ipv6_address_is_bracketed_when_it_is_printed(repo_clone, layout, tmp_path):
+    """A URL with a bare IPv6 literal in it is not clickable and not pasteable."""
+    from robot_army.web.server import _display_address
+
+    assert _display_address("::1", 8420) == "http://[::1]:8420"
+    assert _display_address("127.0.0.1", 8420) == "http://127.0.0.1:8420"

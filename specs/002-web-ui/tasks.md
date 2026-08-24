@@ -242,32 +242,68 @@ CI cannot perform.
 - [ ] T077 Walk [quickstart.md](quickstart.md) Scenarios 1 through 13 against a real daemon, a real kitty, and a real repository
 - [ ] T078 Do the human round: a real phone, on the couch, with the daemon running — see what is active, resume something interrupted, pause dispatch, and read back in the audit log exactly what you just did
 
-### On T077 and T078
+---
 
-**These two are the author's to do and are deliberately left open.** They need a real kitty
-with a control socket, a real GitHub token against real repositories, real sessions to
-interrupt, and a physical phone — none of which an implementation pass can substitute for
-without pretending. Ticking them from a test harness would be exactly the dishonesty the
-constitution's "review is self-review" clause depends on not happening.
+## Not run: scenarios requiring the maintainer's live environment
 
-What *was* verified mechanically, so the human round starts from a working system rather
-than a debugging session:
+Two validation tasks are left unchecked because they cannot be performed by anyone but the
+maintainer, on their machine, with their credentials and their phone. They are tracked in
+**[issue #1](https://github.com/jantman/robot-army/issues/1)** alongside milestone 001's six,
+so a single verification session covers both rather than each milestone interrupting for one.
 
-| Quickstart scenario | Covered by |
+This milestone adds a class of real effect 001 did not have: **reaching the interface from
+the phone means binding a non-loopback address, and anything that can then reach that port
+has full control of robot-army.** There is no authentication, by design (FR-003). That is the
+accepted model, but it is a real change to what the machine exposes on the network, and it is
+the second reason these cannot be run by an agent or in CI.
+
+| Task | Scenario | What it needs |
+|---|---|---|
+| T077 | 3 — decide an interrupted item | A real session to interrupt, and worktree preparation taking real time |
+| T077 | 7 — cancel exactly one session | **Two** live sessions, to confirm the survivor's process tree is untouched |
+| T077 | 9 — attach at the desk | A live kitty with a control socket, and a running session to attach twice |
+| T077 | 10 — effect-level disagreement | Two genuinely disagreeing processes; this guard is new in 002 and has no 001 equivalent |
+| T078 | the human round | A real phone, on the couch, with the daemon running |
+
+Scenarios 1, 2, 4, 5, 6, 8, 11, 12 and 13 also belong to T077 and are worth walking once the
+environment exists, but each has automated coverage; the four above do not and cannot.
+
+**What was verified in their place**, so the gap is bounded rather than open-ended:
+
+| Scenario | Covered by |
 |---|---|
-| 1 — the couch view | `test_web_views.py`, plus a real 390px viewport measured in a browser: no horizontal page scroll on any view, smallest text 13px, smallest touch target 44px |
+| 1 — the couch view | `tests/unit/test_web_views.py`, plus a **real 390px viewport measured in a browser**: no horizontal page scroll on any view, tables scrolling inside their own containers, smallest text 13px, smallest touch target 44px |
 | 2 — the daemon is down | `test_web_views.py`, `test_web_actions.py`, and a live `serve` refusing a resume with `503` |
 | 4 — the view is stale when you tap | `test_web_actions.py` |
-| 5 — double tap | `test_web_actions.py`, three concurrent resumes producing one session |
-| 6 — pause dispatch | `test_pause.py`, including durability across a simulated restart |
-| 8 — force a poll | `test_job_requests.py`, marker written and drained exactly once |
-| 11 — reconstruct what happened | `test_web_log.py`, including a truncated final line |
-| 12 — no secrets, no outside world | `test_web_secrets.py`, `test_web_render.py` |
-| 13 — a public bind address is refused | `test_web_bind.py`, and `serve --bind 8.8.8.8` exiting `3` |
+| 5 — double tap | `test_web_actions.py` — three concurrent resumes producing exactly one session row |
+| 6 — pause dispatch | `tests/unit/test_pause.py`, including durability across a simulated daemon restart and the heartbeat carrying it |
+| 8 — force a poll | `tests/unit/test_job_requests.py` — marker written, drained exactly once, re-request while pending a no-op |
+| 11 — reconstruct what happened | `tests/unit/test_web_log.py`, including a truncated final line and paging across a file boundary |
+| 12 — no secrets, no outside world | `tests/unit/test_web_secrets.py`, `tests/unit/test_web_render.py` |
+| 13 — a public bind address refused | `tests/unit/test_web_bind.py`, and `serve --bind 8.8.8.8` exiting `3` for real |
 
-Scenarios 3, 7, 9 and 10 — interrupting a real session, cancelling one of two running
-sessions, attaching a kitty tab, and a real effect-level disagreement between two running
-processes — have unit coverage of their logic but need real sessions to exercise end to end.
+Also done for real, so the session need not re-check it:
+
+- `robot-army serve` was run end to end from the CLI against a live config: it bound,
+  announced the effective address on stderr and as a `web.start` audit record, served both
+  HTML and JSON, accepted a `POST /dispatch/pause` that `robot-army status` then reported,
+  reported every startup precondition at once rather than the first, and exited `0` on
+  `SIGTERM`. `serve --bind 0.0.0.0` printed the full-control warning before serving anything.
+- One integration test binds a real ephemeral port and drives the confirm-then-post round
+  trip, the `303`, and a `413` with `urllib`.
+
+**One bug here was found by looking rather than by testing**, which is the argument for doing
+these two at all: a four-pane screenshot at 390px showed three views saying `DAEMON NOT
+RUNNING` and one saying `daemon running`, on the same machine at the same moment, with no
+daemon running. `daemon.is_locked` probed with an *exclusive* lock, so concurrent requests
+each saw the other's transient hold — 1,558 false positives in 2,400 probes. Milestone 001
+only ever probed from a single-threaded CLI, so nothing before this could have surfaced it.
+Fixed, with a regression test, but a green suite had it wrong first.
+
+What the automated tests **cannot** establish is whether the interface is trustworthy in the
+specific sense this milestone exists for: that a decision made from a phone, against a page
+that may be a minute old, does what it says and leaves a record that reads back. Everything
+above is a stand-in for that, not a substitute.
 
 ---
 

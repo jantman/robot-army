@@ -30,6 +30,11 @@ class Heartbeat:
     cycles: int
     dispatched: int = 0
     errors: int = 0
+    #: FR-036. A first-class field rather than a member of ``extra`` because
+    #: ``docs/state.md`` documents this file's shape for a human reading it at 2am, and a
+    #: named field is what that reader will look for. It defaults to ``False``, so a
+    #: heartbeat written by an older build still parses.
+    dispatch_paused: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
@@ -44,6 +49,7 @@ def write_heartbeat(
     cycles: int,
     dispatched: int = 0,
     errors: int = 0,
+    dispatch_paused: bool = False,
     extra: dict[str, Any] | None = None,
 ) -> Heartbeat:
     """Write the heartbeat atomically.
@@ -60,6 +66,7 @@ def write_heartbeat(
         cycles=cycles,
         dispatched=dispatched,
         errors=errors,
+        dispatch_paused=dispatch_paused,
         extra=extra or {},
     )
     atomic_write(Path(path), beat.to_json(), mode=0o644)

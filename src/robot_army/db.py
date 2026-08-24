@@ -24,7 +24,15 @@ from pathlib import Path
 from typing import Any
 
 from robot_army.migrations import migrate
-from robot_army.models import Anomaly, PollState, Repo, Session, WorkItem, from_row
+from robot_army.models import (
+    Anomaly,
+    DispatchControl,
+    PollState,
+    Repo,
+    Session,
+    WorkItem,
+    from_row,
+)
 from robot_army.states import SessionState, WorkItemState, utcnow
 
 
@@ -431,6 +439,53 @@ def save_poll_state(conn: sqlite3.Connection, state: PollState) -> None:
             state.backoff_until,
         ),
     )
+
+
+# -- dispatch control (milestone 002) ---------------------------------------
+
+
+def get_dispatch_control(conn: sqlite3.Connection) -> DispatchControl:
+    """Read the pause state. Never raises on a missing row.
+
+    Migration 002 inserts the row, so its absence would mean a hand-edited database. A
+    default-constructed ``DispatchControl`` — not paused — is the honest reading of that:
+    refusing to answer would stop the daemon dispatching, which is the failure mode with
+    teeth. The daemon's schema-version precondition is what actually catches the
+    hand-edited case.
+    """
+    row = conn.execute(
+        "SELECT paused, paused_at, paused_by FROM dispatch_control WHERE id = 1"
+    ).fetchone()
+    return from_row(DispatchControl, row) if row else DispatchControl()
+
+
+def set_dispatch_paused(
+    conn: sqlite3.Connection, *, paused: bool, by: str
+) -> DispatchControl:
+    """Suspend or resume dispatch. Called inside ``db.transaction`` by its callers.
+
+    Setting a state that already holds is a **no-op that returns the existing row**, not
+    an error: pausing twice is not a mistake, and reporting the pause that is already in
+    force — with its original timestamp — is more useful than reporting a fresh one. The
+    audit record its caller writes still names the attempt.
+    """
+    current = get_dispatch_control(conn)
+    if current.paused == paused:
+        return current
+    stamp = utcnow() if paused else None
+    actor = by if paused else None
+    conn.execute(
+        """
+        INSERT INTO dispatch_control (id, paused, paused_at, paused_by)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            paused    = excluded.paused,
+            paused_at = excluded.paused_at,
+            paused_by = excluded.paused_by
+        """,
+        (int(paused), stamp, actor),
+    )
+    return DispatchControl(paused=paused, paused_at=stamp, paused_by=actor)
 
 
 # -- simulated-row purge (FR-058) -------------------------------------------

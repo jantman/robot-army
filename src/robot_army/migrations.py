@@ -134,13 +134,43 @@ def _statements(script: str) -> list[str]:
     return statements
 
 
+SCHEMA_002_SQL = """
+-- Whether dispatch is currently suspended (milestone 002, FR-033 through FR-036).
+--
+-- One row, and the CHECK is what makes a second row impossible rather than merely
+-- unlikely: this is a single-valued fact about the whole system, and "which of the two
+-- pause rows is authoritative" is a question that must never be askable.
+--
+-- A table rather than a file or a config key because durability across restart and reboot
+-- is the whole point (FR-035), and the database provides it atomically alongside the data
+-- it governs — see research.md R6. `paused_by` records which front end set it, so "who
+-- stopped dispatch" is answerable from state as well as from the log.
+CREATE TABLE dispatch_control (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    paused      INTEGER NOT NULL DEFAULT 0,
+    paused_at   TEXT,
+    paused_by   TEXT
+);
+
+INSERT INTO dispatch_control (id, paused) VALUES (1, 0);
+"""
+
+
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
         conn.execute(statement)
 
 
+def _migration_002(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_002_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
-MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_migration_001,)
+MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
+    _migration_001,
+    _migration_002,
+)
 
 SCHEMA_VERSION = len(MIGRATIONS)
 

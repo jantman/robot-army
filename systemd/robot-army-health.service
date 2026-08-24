@@ -1,0 +1,12 @@
+[Unit]
+Description=robot-army liveness check
+Documentation=file:%h/GIT/robot-army/docs/state.md
+
+[Service]
+Type=oneshot
+# The timer, not the daemon, is the dead-man's switch: a dead daemon cannot report its
+# own death, so the checker has to be a separate process (research.md R15).
+ExecStart=%h/GIT/robot-army/.venv/bin/robot-army health --notify
+# A failing check is the whole point of running this; it must not mark the unit failed
+# in a way that stops the timer.
+SuccessExitStatus=0 4

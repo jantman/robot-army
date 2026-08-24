@@ -1,0 +1,61 @@
+[project]
+name = "robot-army"
+version = "0.1.0"
+description = "A single-user daemon that turns labelled GitHub issues into real interactive Claude Code sessions"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "Jason Antman", email = "jason@jasonantman.com" }]
+dependencies = [
+    # The sole runtime dependency. Chosen over stdlib urllib because FR-008 makes
+    # explicit per-call timeouts and bounded retries a requirement, and over PyGithub
+    # because ETag/rate-limit headers must stay visible (research.md R4).
+    "httpx>=0.28",
+]
+
+[project.scripts]
+robot-army = "robot_army.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/robot_army"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-ra --strict-markers"
+markers = [
+    "requires_git: test shells out to a real git binary",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "S", "N", "C90", "BLE"]
+ignore = [
+    "SIM108",  # ternaries are not always clearer than if/else
+    "B008",    # we do not use a framework with call-in-default semantics
+    "N818",    # DispatchBlocked / IllegalTransition read better than ...Error
+    "RUF002",  # the prose in this project uses en dashes deliberately
+]
+
+[tool.ruff.lint.mccabe]
+# Orchestration functions here are long because each step carries its reasoning in a
+# comment. Splitting them to satisfy a counter would hide the sequence, not clarify it.
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+# Asserts, subprocess calls and /tmp literals are the point in tests, not a smell.
+"tests/*" = ["E501", "S101", "S603", "S607", "S108", "BLE001", "RUF015"]

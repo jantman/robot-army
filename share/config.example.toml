@@ -80,10 +80,14 @@ refresh_seconds = 10
 # in the loader: a config written for a later milestone still loads. It starts
 # being read when task T002 lands.
 #
-# The board must be PRIVATE with you as its only member. That is the entire
-# authorization model for this path: there is no per-card author check, so
-# board access IS authorization, and startup refuses to ingest if either
-# condition stops holding.
+# The board must be PRIVATE. That is the authorization model for this path:
+# there is no per-card author check, so board access IS authorization, and
+# startup refuses to ingest a board the public can read.
+#
+# Who else is on your private board is your decision, not the daemon's. The
+# member list is recorded in the audit log and never gated on. A second member
+# can cause an issue to be filed; only you labelling that issue causes anything
+# to run.
 #
 # Find the board id with:
 #   curl -s "https://api.trello.com/1/members/me/boards?fields=id,name,prefs" \

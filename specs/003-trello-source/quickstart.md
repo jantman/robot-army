@@ -135,14 +135,18 @@ simulated row did not consume the card's identity (FR-041).
 
 ## 7 — A shared board stops ingestion (FR-004)
 
-Add any second member to the board, restart the daemon.
+Set the board to public rather than private, restart the daemon.
 
-**Expected**: ingestion refuses with an anomaly naming the extra member; **dispatch of ordinary
-labelled issues keeps working**; `robot-army doctor` exits `4` and says which check failed. Remove the
-member and restart to confirm it recovers.
+**Expected**: ingestion refuses with an anomaly naming the actual permission level; **dispatch of
+ordinary labelled issues keeps working**; `robot-army doctor` exits `4` and says which check failed.
+Set it back to private and restart to confirm it recovers.
 
-Repeat with the board set to public rather than private, and with the `AI-task` label renamed — a
-renamed label must fail loudly rather than look like an empty board (FR-005).
+Repeat with the `AI-task` label renamed — a renamed label must fail loudly rather than look like an
+empty board (FR-005).
+
+Then the case that must **not** fail: add a second member to the private board and restart.
+**Expected**: ingestion continues normally, and the member list appears in the audit log. Who else is
+on the author's own board is the author's decision, and the system does not get a vote (FR-004a).
 
 ---
 

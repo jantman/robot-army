@@ -82,10 +82,10 @@ the checkpoint: at the end of this phase the system can see the board and has cr
 
 ### Board preconditions
 
-- [ ] T021 Implement `check_board(...)` in `src/robot_army/intake.py` performing R10 and R11's five checks — reachable and authenticated, `permission_level == "private"`, members exactly the authenticated member, configured label present, both lifecycle lists present — returning a structured per-check result rather than a bare boolean
+- [ ] T021 Implement `check_board(...)` in `src/robot_army/intake.py` performing R10 and R11's four checks — reachable and authenticated, `permission_level == "private"`, configured label present, both lifecycle lists present — returning a structured per-check result rather than a bare boolean, and **recording** the board's member list without gating on it (FR-004a)
 - [ ] T022 Call `check_board` at daemon startup in `src/robot_army/daemon.py`, and on failure disable **ingestion only** with an anomaly naming the failed check, leaving polling and dispatch of issues the author wrote themselves entirely unaffected (depends on T021)
-- [ ] T023 Extend `doctor` in `src/robot_army/operations.py` to report all five board checks individually, exiting `4` if any fails, so the board can be verified without starting the daemon (depends on T021)
-- [ ] T024 [P] Add `tests/unit/test_board_preconditions.py` covering each of the five checks failing individually, that a failure disables ingestion without disabling dispatch, and that the anomaly names which check failed
+- [ ] T023 Extend `doctor` in `src/robot_army/operations.py` to report all four board checks individually plus the member list as information, exiting `4` if any check fails, so the board can be verified without starting the daemon (depends on T021)
+- [ ] T024 [P] Add `tests/unit/test_board_preconditions.py` covering each of the four checks failing individually, that a failure disables ingestion without disabling dispatch, that the anomaly names which check failed, and — the case the author corrected this design into — that a private board with **extra members ingests normally** while the member list is recorded (FR-004a)
 
 ### The read-only poll cycle
 

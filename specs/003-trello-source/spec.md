@@ -185,9 +185,12 @@ steps in the creation sequence in turn, restart, and confirm no step produces a 
 - **The card description contains text pasted from a log, an email, or a web page.** It is carried
   into the issue as quoted content and nothing in it is interpreted as an instruction to the system.
   The human gate is what protects the session prompt, and it is not bypassed for any card.
-- **The board turns out not to be private, or has gained a member.** Board access *is* the
-  authorisation model for this path. Ingestion must stop and say so rather than continue on an
-  assumption that has quietly become false.
+- **The board turns out not to be private.** Board access *is* the authorisation model for this path.
+  Ingestion must stop and say so rather than continue on an assumption that has quietly become false.
+- **The board has more members than the author.** This is a decision the author is entitled to make,
+  and ingestion continues. What it changes is who can put a card on the board — and therefore who can
+  cause an issue to be filed. It does not change who can cause a session to run, because that still
+  requires the author to label the issue by hand.
 - **The board cannot be reached.** "No cards matched" and "I could not ask" are different facts and
   must never be conflated; repeated failure must become visible rather than looking like an idle board.
 - **The card is edited while its issue is being created.** The outcome must be one issue reflecting
@@ -223,10 +226,14 @@ steps in the creation sequence in turn, restart, and confirm no step produces a 
   configuration file the rest of the system uses.
 - **FR-003**: Board credentials MUST be read from an environment variable or a git-ignored local file,
   MUST NOT be committed, and MUST NOT appear in any log record, terminal output, or served response.
-- **FR-004**: The system MUST verify at startup that the configured board is private and that it has
-  no members other than the author, and MUST refuse to ingest cards and raise an anomaly if either is
-  false. Board access is the authorisation model for this path; there is no per-card author check,
-  and a board that has been shared has silently changed the trust boundary.
+- **FR-004**: The system MUST verify at startup that the configured board is private, and MUST refuse
+  to ingest cards and raise an anomaly if it is not. Board access is the authorisation model for this
+  path; there is no per-card author check, so a board the public can read is a board the public can
+  queue work from.
+- **FR-004a**: The system MUST record the board's member list at startup in the audit log, and MUST
+  NOT refuse to ingest because of it. Who may see a private board is the author's decision, not the
+  system's. What the record buys is that if a card ever arrives from someone unexpected, the log
+  already says who could have written it.
 - **FR-005**: The system MUST verify at startup that the configured board, tag, and lifecycle lists
   exist on the board, and MUST fail loudly rather than treating a renamed tag as an empty board.
 - **FR-006**: Creating issues from cards is an outward-facing action that mutates a remote system.
@@ -424,10 +431,18 @@ steps in the creation sequence in turn, restart, and confirm no step produces a 
 
 ## Assumptions
 
-- **The board is private and the author is its only member.** The planning document states this as the
-  security boundary for the Trello path: there is no per-card author check, so board access *is*
-  authorisation. FR-004 turns the assumption into a checked precondition rather than leaving it as a
-  comment, so that sharing the board stops ingestion instead of silently widening who can queue work.
+- **The board is private; who else is on it is the author's business.** The planning document states
+  the security boundary for this path: there is no per-card author check, so board access *is*
+  authorisation. FR-004 turns the *private* half into a checked precondition rather than leaving it as
+  a comment. It deliberately stops there. Sharing a private board with a person the author chose is a
+  decision the author is entitled to make, and a system that refused to run because of it would be
+  substituting its judgement for theirs.
+
+  What makes that safe to leave alone is the human gate. A second member can cause an issue to be
+  filed; only the author labelling that issue causes anything to run. The blast radius of an added
+  member is unwanted issues in the author's repositories — annoying, visible, and reversible — not
+  code execution on the author's machine. FR-004a records the member list so the question "who could
+  have written this card?" is answerable from the log without making it a gate.
 - **One board.** Multiple boards, and per-board configuration, are not needed and are not built.
 - **The tag and the lifecycle list names are configuration, not constants**, with the planning
   document's `AI-task`, in-progress and done conventions as defaults.

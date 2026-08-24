@@ -49,7 +49,7 @@ themselves is unaffected:
 |---|---|
 | Board is reachable and the credentials work | Refuse ingestion, anomaly, loud log line |
 | `prefs.permissionLevel == "private"` | Refuse ingestion, anomaly naming the actual level |
-| Board members are exactly the authenticated member | Refuse ingestion, anomaly naming the extra members |
+| Board members are recorded | **Never** a failure. Who else is on a private board is the author's decision; the list is logged so an unexpected card can be traced, not gated on |
 | The configured label exists on the board | Refuse ingestion — a renamed label is otherwise indistinguishable from an empty board |
 | Both lifecycle lists exist on the board | Refuse ingestion — a missing list is otherwise discovered mid-lifecycle, after the issue exists |
 

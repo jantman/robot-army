@@ -221,10 +221,9 @@ one of our own writes triggers no re-evaluation.
 
 ## R10 — The board's privacy is checked, not assumed
 
-**Decision**: at startup, `GET /1/members/me`, `GET /1/boards/{id}?fields=name,prefs`, and
-`GET /1/boards/{id}/members`. Require `prefs.permissionLevel == "private"` and a member list
-containing exactly the authenticated member. Otherwise refuse to ingest, raise an anomaly, and leave
-the rest of the daemon running.
+**Decision**: at startup, `GET /1/boards/{id}?fields=name,prefs` and `GET /1/boards/{id}/members`.
+Require `prefs.permissionLevel == "private"`; otherwise refuse to ingest, raise an anomaly, and leave
+the rest of the daemon running. **Record** the member list; do not gate on it.
 
 **Rationale**: the planning document states the assumption plainly — "the board is private and nobody
 else can access it... there is no author check, so board access *is* authorization" — and adds
@@ -235,10 +234,20 @@ failure instead of a silent widening of who can queue work onto the author's mac
 Refusing *ingestion only*, rather than refusing to start, is deliberate: an unrelated board
 misconfiguration must not take down dispatch for issues the author wrote themselves.
 
-**Alternatives considered**: checking on every poll (rejected — three extra calls a minute to detect
-a change that happens approximately never; startup plus a documented restart is the right frequency);
-a per-card author check (rejected — Trello's `idMemberCreator` is available, but on a single-member
-private board it is a check with no possible failing case, and Principle I says do not build it).
+**Requiring sole membership was considered and rejected — by the author, correcting this document.**
+An earlier draft of R10 required the member list to contain only the authenticated member and refused
+to ingest otherwise. That is not what the planning document asks for, and it substitutes the system's
+judgement for the author's about who may see their own board. It is also disproportionate to what a
+second member can actually do: put a card on the board, which becomes an *unlabelled* issue. The
+human gate means only the author can turn that into a running session, so the exposure a second
+member adds is unwanted issues — visible and reversible — not code execution. The private check
+stays because a public board is a different thing entirely: it is not a person the author chose.
+
+**Alternatives considered**: checking on every poll (rejected — extra calls a minute to detect a
+change that happens approximately never; startup plus a documented restart is the right frequency); a
+per-card author check (rejected for now — Trello's `idMemberCreator` is available and would be the
+right tool if a shared board ever turns out to need one, but building it before that is speculative
+generality, and the human gate already bounds the damage).
 
 ---
 

@@ -89,15 +89,21 @@ and dtach, from a different direction.
 
 | Check | Result |
 |---|---|
-| No authentication, authorization, accounts, or roles built | **Pass** — and the board's own privacy is *checked* rather than assumed (R10), which strengthens the existing boundary instead of adding a new one |
+| No authentication, authorization, accounts, or roles built | **Pass** — the board's own privacy is *checked* rather than assumed (R10). Who else may see a private board is recorded, never gated on: deciding that is the author's, and a system that refused to run over it would be building exactly the access policy Principle II forbids |
 | State on the local filesystem, no hosted service required | **Pass** — same database; the board is a source, and the daemon runs and dispatches without it |
 | Secrets from environment or git-ignored files, never in logs | **Pass, with a specific hazard closed** — Trello's documented auth is a query string, which would put both secrets into every logged URL and past the field-name redaction in `audit.py`. The header form is used instead (R3) |
 | No public IP, reverse proxy, or deployment infrastructure assumed | **Pass** — outbound HTTPS only |
 
 The trust boundary for this path is board access, as the planning document states. Principle II's
 prohibition is on *building* authentication, and none is built; what R10 adds is a precondition check
-that the assumption still holds, which is the "revisit if the board is ever shared" the planning
-document asked for and could not perform on its own.
+that the board is still private.
+
+An earlier draft went further and refused to ingest unless the author was the board's only member.
+That was removed at the author's direction, and the correction is worth keeping visible: it was the
+system overriding the author's decision about their own board, which is nearer to the access policy
+Principle II forbids than to the assumption check it was meant to be. The human gate is what bounds
+the risk — a second member can cause an issue to be filed, and only the author can cause one to
+run.
 
 ### III. Total Accountability
 
@@ -209,7 +215,7 @@ tests/
 │   ├── test_card_states.py       # legal and illegal transitions, enumerated
 │   ├── test_card_dedup.py        # mapping-first ordering; comments read only when it is absent
 │   ├── test_card_activity.py     # R9: our own comment must not trigger a rescan
-│   ├── test_board_preconditions.py  # privacy, membership, label, lists
+│   ├── test_board_preconditions.py  # privacy, label, lists — and that membership never gates
 │   ├── test_trello_secrets.py    # no key or token in any record, including failures
 │   ├── test_simulated_writers.py # structural validity of create_issue and card writes
 │   ├── test_intake_poll.py       # unconfigured makes no request; failure is not an empty board

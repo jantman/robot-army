@@ -48,8 +48,10 @@ CardSourceReader:
 
 **Contract notes**
 
-- `board_info` is what R10 and R11 check at startup: privacy, membership, and the existence of the
-  configured label and lifecycle lists. It is one call plus a members call, made once per process.
+- `board_info` is what R10 and R11 check at startup: privacy and the existence of the configured
+  label and lifecycle lists. It is one call plus a members call, made once per process. `member_ids`
+  is carried to be **logged**, not to be tested — sole membership is deliberately not a precondition
+  (R10).
 - `poll` returns **all** currently tagged, unarchived cards, not a delta. There is no usable
   conditional-request economy here (R13), so the interval is 300 seconds by default rather than
   GitHub's 60.

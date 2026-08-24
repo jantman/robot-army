@@ -13,6 +13,7 @@ import json
 import pytest
 from tests.conftest import seed_item
 
+from robot_army import db
 from robot_army.cli import build_parser
 from robot_army.web import server
 from robot_army.web.server import ROUTES, match, parse_request
@@ -200,3 +201,99 @@ def test_include_simulated_is_read_from_query_and_form():
     assert parse_request(
         "POST", "/poll", {}, b"include_simulated=yes"
     ).include_simulated
+
+
+# -- DNS rebinding -----------------------------------------------------------
+
+
+REBOUND = {
+    "host": "evil.test:8420",
+    "origin": "http://evil.test:8420",
+    "sec-fetch-site": "same-origin",
+}
+
+
+def test_a_request_addressed_to_a_name_is_refused(web):
+    """DNS rebinding walks straight through a check that only compares Origin to Host.
+
+    The attacker points ``evil.test`` at ``127.0.0.1``; the browser then sends a
+    self-consistent ``Host``, ``Origin`` and ``Sec-Fetch-Site: same-origin`` while the
+    request really reaches this server. Rebinding needs a *name*, so the rule is the form
+    of the Host — an address, or ``localhost``.
+    """
+    response = web.get("/active", headers=REBOUND)
+    assert response.status == 403
+    assert "DNS rebinding" in response.text
+
+
+def test_the_rebinding_check_covers_reads_as_well_as_writes(web, conn):
+    """The attacker's page reads what it fetches. The audit log is not theirs to read."""
+    seed_item(conn, state="active")
+    for path in ("/active", "/queue", "/log", "/anomalies", "/item/1"):
+        assert web.get(path, headers=REBOUND).status == 403, path
+        assert web.get_json(path, headers=REBOUND).status == 403, path
+
+
+def test_a_rebound_post_changes_nothing(web, conn):
+    from robot_army.states import WorkItemState
+
+    item_id = seed_item(conn, state="interrupted")
+    assert web.post_json(f"/item/{item_id}/abandon", headers=REBOUND).status == 403
+    assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["127.0.0.1:8420", "192.168.1.20:8420", "10.0.0.5:8420", "[::1]:8420", "localhost:8420",
+     "127.0.0.1", "localhost"],
+)
+def test_every_legitimate_way_of_reaching_it_still_works(web, host):
+    """An address, with or without a port, v4 or v6 — plus ``localhost``.
+
+    ``[web] bind`` must itself be an address rather than a hostname, for the same reason:
+    what the interface became reachable from must be unambiguous. Requiring the same of
+    the Host is consistent with that, not a new imposition.
+    """
+    assert web.get("/active", headers={"host": host}).status == 200, host
+
+
+def test_a_client_sending_no_host_is_allowed(web):
+    """HTTP/1.1 requires it and every browser sends it, so its absence means a
+    hand-written client — which could reach the port directly anyway."""
+    from robot_army.web.server import handle, parse_request
+
+    response = handle(web.app, parse_request("GET", "/active", {"accept": "text/html"}))
+    assert response.status == 200
+
+
+def test_the_rebinding_refusal_renders_without_touching_the_database(web, layout):
+    """It is checked before routing, before the database, before anything reads the
+    request — so it still answers when nothing else would."""
+    layout.db_path.unlink()
+    assert web.get("/active", headers=REBOUND).status == 403
+
+
+# -- dead-end pages do not poll ----------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/nope", "/dispatch/pause"])
+def test_a_dead_end_page_does_not_refresh_itself(web, path):
+    """``_bare`` sets ``refresh_seconds`` to 0 for exactly this reason, and ``or`` ate it.
+
+    A page reporting a broken database re-fetching the broken endpoint every ten seconds
+    forever is the opposite of what a dead end is for. These are the pages rendered
+    *without* a database behind them — an unknown path, a wrong method, a schema mismatch,
+    an unhandled error.
+    """
+    body = web.get(path).text
+    assert 'data-refresh="0"' in body, path
+
+
+def test_a_working_page_still_refreshes(web):
+    assert 'data-refresh="10"' in web.get("/active").text
+
+
+def test_a_missing_item_page_is_a_normal_view_and_does_refresh(web):
+    """Not a dead end: it is rendered with a live database behind it, like any view, and
+    re-reading it costs one query. The zero is for the pages that have no database."""
+    assert 'data-refresh="10"' in web.get("/item/9999").text

@@ -461,6 +461,50 @@ def html_query(request: Request, **extra: Any) -> str:
     return ("?" + "&".join(parts)) if parts else ""
 
 
+def check_host(request: Request) -> None:
+    """Refuse a request whose ``Host`` is a **name** rather than an address.
+
+    This closes DNS rebinding, which otherwise walks straight through
+    :func:`check_same_origin`. That check compares ``Origin`` against ``Host`` — and under
+    rebinding an attacker controls both. They point ``evil.test`` at ``127.0.0.1``, the
+    author's browser loads ``http://evil.test:8420``, and the browser then sends
+    ``Host: evil.test:8420``, ``Origin: http://evil.test:8420`` and
+    ``Sec-Fetch-Site: same-origin`` — all self-consistent, all satisfying a check that only
+    compares the two to each other, while the request really reaches this server. That
+    restores the whole attack, and adds reading every response to it.
+
+    **Rebinding needs a name**, because the trick is a name whose resolution changes. So the
+    rule is the form of the ``Host``, not an allowlist of addresses: an IP literal, or
+    ``localhost``. That needs nothing plumbed through from the bind configuration, and it
+    already matches how this interface is reached — ``[web] bind`` must itself be an address
+    rather than a hostname, for the same reason: what the interface became reachable from
+    must be unambiguous.
+
+    Applied to **every** request, not only the mutating ones. Rebinding lets the attacker's
+    page read what it fetches, and the audit log and issue titles are not theirs to read.
+
+    An absent ``Host`` is allowed: HTTP/1.1 requires it and every browser sends it, so its
+    absence means a hand-written client that could reach the port directly anyway.
+    """
+    host = request.headers.get("host")
+    if not host:
+        return
+    hostname = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]")[0][1:]
+    if hostname == "localhost":
+        return
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        raise Refusal(
+            f"refusing a request addressed to {hostname!r}. This interface answers on an "
+            "address, not a name: a name that resolves here is how a page on another site "
+            "makes your browser treat itself as same-origin (DNS rebinding). Reach it by "
+            "its IP address, or by localhost",
+            status=403,
+            code=EXIT_PRECONDITION,
+        ) from None
+
+
 def check_same_origin(request: Request) -> None:
     """Refuse a state-changing request that a **browser** says came from another site.
 
@@ -901,7 +945,11 @@ def _render(view: View, chrome: dict[str, Any], request: Request) -> Response:
         body=view.body,
         path=request.path,
         message=request.first("msg"),
-        refresh_seconds=int(chrome.get("refresh_seconds") or 10),
+        # `.get(key, default)`, not `or`: zero is a *meaningful* value here. `_bare` sets it
+        # to 0 for dead-end pages — 404, 405, a schema mismatch — precisely so they do not
+        # poll. Treating it as falsy made a page reporting a broken database re-fetch the
+        # broken endpoint every ten seconds, forever.
+        refresh_seconds=int(chrome.get("refresh_seconds", 10)),
     )
     return Response(status=view.status, body=document.encode("utf-8"), headers=dict(NO_STORE))
 
@@ -930,6 +978,18 @@ def _render_redirect(redirect: Redirect, request: Request) -> Response:
 
 def handle(app: WebApp, request: Request) -> Response:
     """One request in, one response out. No socket involved (R15)."""
+    try:
+        # Before routing, before the database, before anything reads the request: a
+        # rebound Host means this request is not addressed to us in the sense the browser
+        # believes, and its response is not the attacker's to read.
+        check_host(request)
+    except Refusal as refusal:
+        return _bare(
+            pages.refusal_view(
+                reason=refusal.reason, status=refusal.status, code=refusal.code
+            ),
+            request,
+        )
     if request.path in STATIC and request.method in GET:
         content_type, text = STATIC[request.path]
         return Response(

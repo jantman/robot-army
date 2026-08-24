@@ -260,3 +260,74 @@ def test_pausing_works_with_no_daemon_running(ctx, conn, layout):
     operations.pause_dispatch(ctx, by="cli")
     assert db.get_dispatch_control(conn).paused is True
     assert control.pending(layout) == [], "pausing is state, not a request"
+
+
+# -- the controls themselves (T046, T051) -----------------------------------
+
+
+def test_the_queue_view_renders_a_pause_control(web, conn):
+    """Registering the route is only half of T046. Without a form there is no way to
+    pause from a phone, which is the entire point of the milestone."""
+    body = web.get("/queue").text
+    assert '<form action="/dispatch/pause" method="post">' in body
+    assert "pause dispatch" in body
+
+
+def test_the_control_becomes_unpause_once_paused(web, conn):
+    web.post_json("/dispatch/pause")
+    body = web.get("/queue").text
+    assert '<form action="/dispatch/unpause" method="post">' in body
+    assert "resume dispatch" in body
+    assert '<form action="/dispatch/pause" method="post">' not in body, (
+        "offering a control that is already in force is FR-029's complaint in miniature"
+    )
+
+
+def test_the_queue_view_renders_poll_and_reconcile_controls(web, conn):
+    body = web.get("/queue").text
+    assert '<form action="/poll" method="post">' in body
+    assert '<form action="/reconcile" method="post">' in body
+
+
+def test_the_paused_pill_links_to_where_the_control_lives(web, conn):
+    """The pause is visible from every view, so the control that lifts it has to be
+    reachable from every view."""
+    web.post_json("/dispatch/pause")
+    for path in ("/active", "/interrupted", "/anomalies", "/log"):
+        body = web.get(path).text
+        assert 'href="/queue" class="pill warn">DISPATCH PAUSED' in body, path
+
+
+def test_a_pending_job_request_is_reported_on_the_control(web, layout):
+    from robot_army.daemon import SingleInstanceLock
+
+    lock = SingleInstanceLock(layout.lock_path)
+    lock.acquire()
+    try:
+        web.post_json("/poll")
+        body = web.get("/queue").text
+        assert "the daemon runs it within one tick" in body
+    finally:
+        lock.release()
+
+
+def test_the_controls_say_what_happens_with_no_daemon_running(web, conn):
+    body = web.get("/queue").text
+    assert "performed directly rather than" in body
+
+
+def test_every_rendered_form_targets_a_registered_route(web, conn):
+    """The gap this closes ran the other way — routes with no form. This asserts both
+    directions, so neither half can land without the other."""
+    import re
+
+    from robot_army.web.server import match
+
+    seed_item(conn, state="failed")
+    seen: set[str] = set()
+    for path in ("/queue", "/active", "/interrupted", "/anomalies", "/log"):
+        for action in re.findall(r'<form action="([^"?]+)"[^>]*method="post"', web.get(path).text):
+            seen.add(action)
+            route, _params, _allowed = match("POST", action)
+            assert route is not None, f"{path} renders a form to unrouted {action}"
+    assert {"/dispatch/pause", "/poll", "/reconcile"} <= seen

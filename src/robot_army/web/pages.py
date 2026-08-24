@@ -365,6 +365,66 @@ def action_bar(
     )
 
 
+# -- dispatch controls (FR-023, FR-035, T046, T051) -------------------------
+
+
+def dispatch_controls(chrome: dict[str, Any], *, include_simulated: bool = False) -> Markup:
+    """Pause, unpause, force a poll, force a reconciliation.
+
+    These are the four controls that act on the *system* rather than on one work item, so
+    they live on the queue view — the page whose subject is what dispatch is doing. None of
+    them needs a confirmation: none stops, starts, or discards work. Pausing is reversible
+    and its whole purpose is caution.
+    """
+    paused = bool(chrome.get("dispatch_paused"))
+    pending = chrome.get("pending_job_requests") or []
+
+    def control(action: str, label: str, note: str, **attributes: Any) -> Markup:
+        return form(
+            action,
+            html.hidden("include_simulated", "1") if include_simulated else None,
+            button(label, **attributes),
+            span(note, class_="meta"),
+        )
+
+    return div(
+        h(2, "dispatch"),
+        div(
+            control(
+                "/dispatch/unpause" if paused else "/dispatch/pause",
+                "resume dispatch" if paused else "pause dispatch",
+                "held items dispatch on the next tick"
+                if paused
+                else "polling, reconciliation and the heartbeat keep running",
+                class_="primary" if paused else None,
+            ),
+            control(
+                "/poll",
+                "poll now",
+                "requested; the daemon runs it within one tick"
+                if "poll" in pending
+                else "ask GitHub for new work now",
+            ),
+            control(
+                "/reconcile",
+                "reconcile now",
+                "requested; the daemon runs it within one tick"
+                if "reconcile" in pending
+                else "make the picture match reality now",
+            ),
+            class_="actions",
+        ),
+        p(
+            "With no daemon running, poll and reconcile are performed directly rather than "
+            "requested — the controls work either way.",
+            class_="meta",
+        )
+        if not (chrome.get("daemon") or {}).get("running")
+        else Markup(""),
+        class_="card",
+    )
+
+
 # -- shared row assembly ----------------------------------------------------
 
 
@@ -441,7 +501,12 @@ def active_view(ctx: operations.Context, *, include_simulated: bool = False) -> 
 # -- /queue (FR-012, FR-013) ------------------------------------------------
 
 
-def queue_view(ctx: operations.Context, *, include_simulated: bool = False) -> View:
+def queue_view(
+    ctx: operations.Context,
+    *,
+    include_simulated: bool = False,
+    chrome_payload: dict[str, Any] | None = None,
+) -> View:
     """Ready in dispatch order, dispatching with its age, and blocked with the reason.
 
     Dispatch order is ``ORDER BY id`` because that is the order ``select_and_dispatch``
@@ -477,8 +542,13 @@ def queue_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
                 }
             )
 
+    # The chrome is already assembled once per request; reuse it rather than re-reading
+    # the same three facts to decide which control to render.
+    current = chrome_payload if chrome_payload is not None else chrome(
+        ctx, include_simulated=include_simulated
+    )
     pause_note: list[Any] = []
-    if db.get_dispatch_control(ctx.conn).paused:
+    if current.get("dispatch_paused"):
         pause_note.append(
             div(
                 "Dispatch is paused. Eligible items accumulate here and dispatch when it "
@@ -491,6 +561,7 @@ def queue_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
         [
             h(1, "queue"),
             *pause_note,
+            dispatch_controls(current, include_simulated=include_simulated),
             h(2, f"ready ({len(ready)}) — in dispatch order"),
             _empty("Nothing is ready.")
             if not ready

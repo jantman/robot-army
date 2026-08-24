@@ -229,7 +229,11 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     if chrome.get("dispatch_paused"):
         since = chrome.get("dispatch_paused_at") or "unknown time"
         by = chrome.get("dispatch_paused_by") or "?"
-        pills.append(span(f"DISPATCH PAUSED since {since} (by {by})", class_="pill warn"))
+        # A link, not a label: the pause is visible from every view, so the control that
+        # lifts it has to be reachable from every view too.
+        pills.append(
+            a("/queue", f"DISPATCH PAUSED since {since} (by {by})", class_="pill warn")
+        )
     if chrome.get("include_simulated"):
         pills.append(span("simulated rows included", class_="pill quiet"))
 

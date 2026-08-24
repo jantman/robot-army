@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from tests.conftest import make_boundaries, seed_item
+from tests.conftest import beat, make_boundaries, seed_item
 
 from robot_army import control, db, health, operations
 from robot_army import daemon as daemon_mod
@@ -303,6 +303,7 @@ def test_a_pending_job_request_is_reported_on_the_control(web, layout):
 
     lock = SingleInstanceLock(layout.lock_path)
     lock.acquire()
+    beat(layout)  # a daemon that holds the lock has always written one
     try:
         web.post_json("/poll")
         body = web.get("/queue").text

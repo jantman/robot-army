@@ -181,7 +181,7 @@ def chrome(ctx: operations.Context, *, include_simulated: bool = False) -> dict[
             "reason": report.reason,
             "effect_level": beat.get("effect_level"),
         },
-        "effect_mismatch": effect_mismatch(ctx, report),
+        "effect_mismatch": effect_mismatch(ctx, report, running=running),
         "dispatch_paused": pause.paused,
         "dispatch_paused_at": pause.paused_at,
         "dispatch_paused_by": pause.paused_by,
@@ -193,7 +193,9 @@ def chrome(ctx: operations.Context, *, include_simulated: bool = False) -> dict[
     }
 
 
-def effect_mismatch(ctx: operations.Context, report: Any = None) -> str | None:
+def effect_mismatch(
+    ctx: operations.Context, report: Any = None, *, running: bool | None = None
+) -> str | None:
     """Does the daemon's live effect level disagree with ours? (research.md R4)
 
     The daemon can be started with ``--effect-level plan`` while the configuration file
@@ -202,22 +204,60 @@ def effect_mismatch(ctx: operations.Context, report: Any = None) -> str | None:
     that — without this guard the interface would launch real sessions for a daemon the
     author believes is only planning.
 
-    A stale or absent heartbeat is **not** a mismatch: there is nothing to disagree with,
-    and the configured level applies.
+    Three states, not two, and the middle one is the reason this reads the lock as well as
+    the heartbeat:
+
+    * **No daemon holds the lock.** There is nothing to disagree with and the configured
+      level applies. Refusing on the strength of a heartbeat left by a dead process would
+      be the same class of surprise in the other direction.
+    * **A daemon holds the lock and a heartbeat exists** — fresh *or* stale. The levels are
+      compared. Staleness is not ignorance here: a daemon's effect level is fixed when it
+      starts and cannot change while it runs, and a starting daemon writes its heartbeat
+      before its first tick. So a stale heartbeat from the process currently holding the
+      lock still names that process's level correctly; what staleness means is that a tick
+      is running long, which is exactly when a big clone is in progress and exactly when
+      launching more work at the wrong level would matter most.
+    * **A daemon holds the lock and no heartbeat can be read at all.** The level is
+      genuinely unknown, and this fails closed rather than open.
+
+    Treating stale as "no disagreement" made the guard fail open in the one state it exists
+    for: a daemon alive at ``plan``, an interface configured for ``live``, a tick running
+    longer than the staleness threshold, and every mutation waved through.
     """
     if report is None:
         report = health.check(
             ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
         )
-    if not report.healthy or not report.heartbeat:
+    if running is None:
+        running = daemon_mod.is_locked(ctx.layout.lock_path)
+    if not running:
         return None
+
+    if not report.heartbeat:
+        return (
+            "EFFECT LEVEL UNKNOWN: a daemon is running, but no heartbeat can be read, so "
+            "there is no way to tell which effect level it is at. Actions that touch work "
+            f"are refused rather than performed at this interface's {str(ctx.effect_level)!r} "
+            f"on the chance it disagrees — {report.reason}"
+        )
+
     theirs = report.heartbeat.get("effect_level")
     if not theirs or str(theirs) == str(ctx.effect_level):
         return None
+
+    staleness = (
+        ""
+        if report.healthy
+        else (
+            f" Its heartbeat is {int(report.age_seconds or 0)}s old, which means a tick is "
+            "running long — not that the level changed, because it cannot while the daemon "
+            "runs."
+        )
+    )
     return (
         f"EFFECT LEVEL MISMATCH: the daemon is running at {theirs!r} but this interface is "
         f"configured for {str(ctx.effect_level)!r}. Actions that touch work are refused "
-        "until they agree — restart one of them at the level you meant."
+        f"until they agree — restart one of them at the level you meant.{staleness}"
     )
 
 

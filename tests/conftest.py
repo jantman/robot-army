@@ -573,16 +573,23 @@ def web(config: Config, conn: Any, layout: Layout, monkeypatch: Any) -> WebHarne
 
 @pytest.fixture
 def running_daemon(layout: Layout) -> Any:
-    """Hold the daemon lock, so ``daemon.is_locked`` reports a daemon is running.
+    """A running daemon: it holds the lock **and** it has written a heartbeat.
 
     ``flock`` is associated with the open file description, not the process, so a second
     descriptor on the same file conflicts even from here — which is what makes this a real
     test of the guard rather than a mock of it.
+
+    The heartbeat is part of the fixture because a daemon that holds the lock has always
+    written one: it writes it before its first tick. A lock with no heartbeat is a distinct
+    and much rarer state — a daemon caught mid-startup — and the effect-level guard now
+    treats it differently, so representing it by accident would be misleading. Tests that
+    want that state remove the file explicitly.
     """
     from robot_army.daemon import SingleInstanceLock
 
     lock = SingleInstanceLock(layout.lock_path)
     lock.acquire()
+    beat(layout)
     yield lock
     lock.release()
 

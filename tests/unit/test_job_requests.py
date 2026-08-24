@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from tests.conftest import make_boundaries
+from tests.conftest import beat, make_boundaries
 
 from robot_army import control, operations
 from robot_army.control import UnknownJob, pending, request_job, take_requests
@@ -133,6 +133,7 @@ def test_a_marker_written_while_the_daemon_is_down_survives(layout, audit):
 def test_poll_now_writes_a_marker_when_a_daemon_holds_the_lock(ctx, layout):
     lock = SingleInstanceLock(layout.lock_path)
     lock.acquire()
+    beat(layout)  # a daemon that holds the lock has always written one
     try:
         result = operations.poll_now(ctx)
         assert result.code == 0
@@ -151,6 +152,7 @@ def test_poll_now_writes_a_marker_when_a_daemon_holds_the_lock(ctx, layout):
 def test_a_second_request_while_one_is_pending_is_reported_honestly(ctx, layout):
     lock = SingleInstanceLock(layout.lock_path)
     lock.acquire()
+    beat(layout)  # a daemon that holds the lock has always written one
     try:
         operations.poll_now(ctx)
         second = operations.poll_now(ctx)
@@ -163,6 +165,7 @@ def test_a_second_request_while_one_is_pending_is_reported_honestly(ctx, layout)
 def test_reconcile_now_delegates_the_same_way(ctx, layout):
     lock = SingleInstanceLock(layout.lock_path)
     lock.acquire()
+    beat(layout)  # a daemon that holds the lock has always written one
     try:
         result = operations.reconcile_now(ctx)
         assert result.data["requested"] == "reconcile"
@@ -181,6 +184,7 @@ def test_with_no_daemon_running_the_work_is_done_directly(ctx, layout):
 def test_the_web_control_forces_a_real_poll(web, layout):
     lock = SingleInstanceLock(layout.lock_path)
     lock.acquire()
+    beat(layout)  # a daemon that holds the lock has always written one
     try:
         response = web.post_json("/poll")
         assert response.status == 303
@@ -195,6 +199,7 @@ def test_the_pending_request_is_visible_in_the_chrome(web, layout):
     never made."""
     lock = SingleInstanceLock(layout.lock_path)
     lock.acquire()
+    beat(layout)  # a daemon that holds the lock has always written one
     try:
         web.post_json("/reconcile")
         assert web.get_json("/queue").json()["pending_job_requests"] == ["reconcile"]

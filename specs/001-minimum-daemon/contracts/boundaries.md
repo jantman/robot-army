@@ -65,7 +65,7 @@ to import rather than quietly returning fixtures.
 VersionControl:
     fetch(clone_path, remote, ref)
     add_worktree(clone_path, worktree_path, branch, base_ref) -> WorktreeHandle
-    remove_worktree(worktree_path, force=False) -> RemovalResult
+    remove_worktree(worktree_path, force=False, clone_path=None) -> RemovalResult
     delete_branch(clone_path, branch)
     list_worktrees(clone_path) -> [WorktreeInfo]     # includes `prunable`
     prune_worktrees(clone_path)
@@ -80,6 +80,9 @@ Planning §2 identified this boundary specifically: git operations would otherwi
 and dry-run is the reason to give them a seam.
 
 **Contract notes**
+- `remove_worktree` takes the clone path because `git worktree remove` resolves the
+  repository from its working directory; run from anywhere else it reports "is not a
+  working tree" and removes nothing. Found during implementation, not during design.
 - `remove_worktree` **never passes `--force` on its own**. Git refuses to remove a dirty worktree —
   including one with merely untracked files — and that refusal is the free guard FR-016 relies on
   (M0 E6.5).

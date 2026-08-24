@@ -20,7 +20,7 @@ confirm_timeout_seconds     = 45    # FR-025 dispatch confirmation window
 max_concurrent_sessions     = 2     # FR-028
 
 [paths]
-worktree_root = "~/GIT-worktrees"
+worktree_root = "~/worktrees"
 # state_dir and socket_dir default per R16; override only if you have a reason
 
 [github]

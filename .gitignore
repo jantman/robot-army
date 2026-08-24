@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local state that must never be committed (Principle V: this repo is public)
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+.env
+.env.*
+github-token
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

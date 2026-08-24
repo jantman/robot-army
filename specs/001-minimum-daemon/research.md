@@ -379,7 +379,7 @@ daemon only — rejected, it cannot detect its own death, which is the entire re
 | `~/.local/state/robot-army/heartbeat.json` | liveness evidence |
 | `~/.local/state/robot-army/daemon.lock` | single-instance lock |
 | `/run/user/1000/robot-army/<item>.sock` | session host sockets |
-| `~/GIT-worktrees/<repo>/<slug>/` | isolated checkouts |
+| `~/worktrees/<repo>/<slug>/` | isolated checkouts |
 
 XDG variables are honoured when set, with these as the defaults.
 
@@ -387,9 +387,12 @@ XDG variables are honoured when set, with these as the defaults.
 because it is tmpfs and cleared on reboot — a dead socket from a previous boot is noise
 reconciliation would otherwise have to reason about, and letting the kernel delete them is free.
 Everything that must survive a reboot goes under `~/.local/state`, which M0 chose for the same
-reason. Worktrees stay at the planning document's `~/GIT-worktrees/` so they sit beside `~/GIT/`
-where the maintainer will look for them, and stay out of any backup set aimed at `~/.local`, which
-matters given M0's measurement of 499 MB per prepared worktree.
+reason. Worktrees live at `~/worktrees/` — a departure from the planning document's
+`~/GIT-worktrees/`, made during implementation. The substance of the original reason is unchanged:
+they belong at a short, obvious top-level path the maintainer will find without looking it up, and
+outside any backup set aimed at `~/.local`, which matters given M0's measurement of 499 MB per
+prepared worktree. What is dropped is the adjacency-to-`~/GIT/` argument, which was never load-
+bearing — these are not clones and sorting next to them buys nothing.
 
 ## R17 — Single instance
 
@@ -403,7 +406,7 @@ the lock; commands that mutate state the daemon owns take it or fail.
 ## R18 — Branch and worktree naming
 
 **Decision**: Branch `robot-army/issue-<number>-<slug>`, worktree
-`~/GIT-worktrees/<repo>/issue-<number>/`. The slug is derived from the issue title: lowercased,
+`~/worktrees/<repo>/issue-<number>/`. The slug is derived from the issue title: lowercased,
 non-alphanumerics collapsed to single hyphens, truncated to 40 characters at a hyphen boundary, and
 omitted entirely if it reduces to empty.
 

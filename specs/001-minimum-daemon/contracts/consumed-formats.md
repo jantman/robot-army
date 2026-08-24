@@ -25,11 +25,17 @@ database↔process join from best-effort into exact.
 | `procStart` | **PID-reuse guard** (kernel start-time ticks). Never trust `pid` alone |
 | `cwd` | Classifies orchestrator-owned vs the maintainer's own session |
 | `status` | `busy` / `idle` / `shell` — displayed, never used for control decisions |
-| `version` | **The guard.** Parsing is gated on a known-compatible set |
+| `version` | **The guard.** The *worker's own version string*, e.g. `"2.1.239"` — measured during implementation, where the design had assumed a schema integer. Gated on `(major, minor)`, so a patch bump does not trip it |
 
 **Guard and degraded path**: on an unrecognised `version`, raise a `registry_version_unknown`
 anomaly **once** and fall back to enumerating `/proc/*/exe` for the worker binary, classifying by
 `/proc/<pid>/cwd`. Never crash — a worker upgrade must not take the daemon down.
+
+**Getting the guard wrong is expensive in a specific direction**, learned by getting it wrong: an
+over-strict guard rejects every live entry, degrades permanently to `/proc`, and silently destroys
+the exact `sessionId` join that dispatch confirmation depends on — so nothing ever reaches `active`
+and the failure looks like a launch problem rather than a parsing one. A test asserts the guard
+accepts the registry actually present on this machine.
 
 **Absolute prohibition**: `<pid>.<hash>.key` files sit alongside these, mode 0600, and appear to be
 session credentials. The daemon **must never open, read, copy, or log them.** This is worth a test

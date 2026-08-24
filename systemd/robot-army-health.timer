@@ -1,0 +1,12 @@
+[Unit]
+Description=Check robot-army liveness every five minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+# Catch up after a suspend rather than silently skipping the missed runs.
+Persistent=true
+Unit=robot-army-health.service
+
+[Install]
+WantedBy=timers.target

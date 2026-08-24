@@ -37,7 +37,7 @@ Written immediately before the worker is executed.
   "ts": "2026-08-23T14:07:11Z",
   "pid": 1996056,
   "ppid": 1996044,
-  "cwd": "/home/jantman/GIT-worktrees/privatepuppet/issue-142",
+  "cwd": "/home/jantman/worktrees/privatepuppet/issue-142",
   "argv": ["claude", "--session-id", "3f2a...", "--permission-mode", "auto", "..."]
 }
 ```

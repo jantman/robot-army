@@ -87,8 +87,10 @@ automatic cleanup a deliberate non-goal here.
 
 ### III. Total Accountability
 
-**Pass, with four enumerated and justified gaps.** The constitution requires every permitted gap to
-be named in the plan; an undocumented gap is a violation.
+**Pass, with six enumerated and justified gaps.** The constitution requires every permitted gap to
+be named in the plan; an undocumented gap is a violation. Two of the six were added during
+implementation, when code that had not existed at design time turned out to make a read the
+design had not anticipated.
 
 **What is logged** (JSONL, append-only, one record per line, secrets redacted, UTC timestamps —
 R14):
@@ -111,10 +113,11 @@ R14):
 
 | Gap | Justification |
 |---|---|
-| Individual **successful, read-only** GitHub GETs are logged as one aggregate record per repository per poll cycle (status, ETag hit, rate-limit remaining, item counts) rather than one record per HTTP call | Cost disproportionate to risk. These change no state outside the process; at a 60 s poll the individual records would be pure volume. Every failure and every retry **is** logged individually, so the reconstruction standard still holds for anything that went wrong |
+| Individual **successful, read-only** GitHub GETs. The issue-listing poll is logged as one aggregate record per repository per cycle (status, ETag hit, rate-limit remaining, item counts); the incidental reads — `is_closed` during a reconciliation pass, `open_pr_for_branch` when computing resume signals — are covered by that pass's own aggregate record rather than logged individually | Cost disproportionate to risk. These change no state outside the process; at a 60 s poll the individual records would be pure volume. Every failure and every retry **is** logged individually, so the reconstruction standard still holds for anything that went wrong |
 | Individual SQLite statements are not logged; the **state transition** they effect is | The transition is the meaningful unit for reconstruction, and the database is directly inspectable at any time. Logging each INSERT would flood the log without adding reconstruction power |
 | Heartbeat file writes (every 5 s) are not logged | ~17,000 records per day of pure noise. The heartbeat file **is** the record, it is inspectable, and its staleness is the signal |
 | Reads of `/proc` and the session registry during reconciliation are logged as an aggregate result per pass, not per file | Same disproportion argument. The *conclusions* — sessions found, orphans detected, states changed — are logged individually |
+| **Probes** — the terminal control-socket discovery sweep and the dtach socket liveness check — are logged as one record carrying every candidate tried and its result, not one record per candidate | A probe changes nothing and answers in milliseconds; what matters for reconstruction is which socket answered, and that is in the aggregate. A failed discovery logs the whole candidate list, so a probe that found nothing is fully diagnosable |
 | **Actions taken by the Claude session itself** inside the worktree are not logged by this system | They occur outside this process entirely. This system records the dispatch, the session identity, and the transcript's location; the worker's own transcript is the record of what it did. Claiming otherwise would be dishonest about what our log covers |
 
 **Silent failure**: forbidden throughout. Specifically encoded: a GitHub transport failure raises
@@ -169,6 +172,23 @@ how to run it, where the logs are, and what they mean.
 | Unit tests for all new behaviour | **Pass** — R20 |
 | Failure/interruption tests for persistence, state machines, external-input parsing | **Pass** — R20 names all three categories with specific cases |
 | No coverage targets, test-first not required | **Pass** — none adopted |
+
+### Implementation findings that corrected the design
+
+Recorded here rather than silently absorbed, because both contradict something this plan or
+its contracts asserted:
+
+1. **The session registry's `version` field is the worker's own version string** (`"2.1.239"`),
+   not a schema integer. The guard was written against the assumption and consequently rejected
+   every live entry, degrading permanently to `/proc` — which destroys the exact `sessionId` join
+   that FR-025's confirmation depends on, so nothing would ever have reached `active`. The guard
+   now gates on `(major, minor)` and a test asserts it accepts the registry present on this
+   machine.
+2. **`git worktree remove` resolves the repository from its working directory.** Run from
+   anywhere else it reports "is not a working tree" and removes nothing, silently. The boundary
+   method now takes the clone path; `contracts/boundaries.md` was updated to match.
+
+Neither changes a requirement or a principle; both change a fact the design took for granted.
 
 ### Post-Design Re-Evaluation
 

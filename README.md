@@ -49,6 +49,95 @@ Two things are easy to overlook:
 carrying `CLAUDE_CODE_CHILD_SESSION` in its environment silently disables transcript
 saving, producing sessions that look perfect, exit 0, and can never be resumed.
 
+## The web interface
+
+A second front end onto the same operations, so I can see what is running and decide an
+interrupted item from my phone without opening a terminal.
+
+```bash
+uv run robot-army serve        # http://127.0.0.1:8420, the shipped default
+```
+
+**Two processes, started by hand after graphical login, in either order.** The interface is
+deliberately separate from the daemon: it starts, stops, and survives on its own, so the
+audit log and the interrupted list stay readable during exactly the incident that makes them
+worth reading.
+
+```bash
+uv run robot-army run &        # the daemon
+uv run robot-army serve        # the interface
+```
+
+To reach it from the phone, name the machine's LAN address:
+
+```toml
+[web]
+bind = "127.0.0.1"      # the LAN address, or 0.0.0.0 for every interface
+port = 8420
+refresh_seconds = 10    # how often an open page re-fetches itself
+```
+
+### Read this part
+
+**There is no authentication, and that is deliberate.** The operating-system user stops being
+the trust boundary the moment this binds to anything but loopback — the network becomes the
+boundary instead. **Anything that can reach that port has full control of robot-army**: it can
+resume sessions, cancel them, abandon work, and pause dispatch.
+
+That is the accepted model, so the mitigations are the ones that matter:
+
+- The default is loopback. Widening it is an explicit edit to the config.
+- A **globally routable** bind address is refused outright, exit `3`. The interface will not
+  start somewhere the internet can reach it.
+- The effective address is printed at startup and written to the audit log as `web.start`, on
+  every start, with a loud warning when it is not loopback. That is the one fact about this
+  design that is never allowed to be silent.
+
+From outside the house I connect my existing VPN and use the same LAN address. Nothing is
+published, no tunnel is configured, and no port is forwarded.
+
+### What it can do
+
+Six views — active, queue, interrupted, one item, anomalies, and the audit log — and the
+controls for the decisions I actually make away from the desk: resume, restart, abandon,
+cancel, retry, attach a terminal, acknowledge an anomaly, pause and resume dispatch, and force
+a poll or a reconciliation. Every one of them has a terminal equivalent, verified by a test
+rather than by intention.
+
+Deliberately **not** there: repository onboarding and permission re-approval, removing a
+checkout or its branch, purging simulated rows, changing the concurrency limit, and anything
+that starts or stops the daemon. Each stays a terminal command.
+
+Add `.json` to any path, or send `Accept: application/json`, for the same facts as a payload:
+
+```bash
+curl -s localhost:8420/active.json  | jq '.items[] | {id, repo_key, state, title}'
+curl -s localhost:8420/queue.json   | jq '.counts'
+curl -s 'localhost:8420/log.json?item=42&outcome=error' | jq '.records'
+```
+
+It is not a stable API. It is versioned by the commit that produced it.
+
+Nothing is fetched from a third-party host — no web font, no CDN, no icon set — so every view
+works with the machine offline. Every page renders on a phone in a single column, and works
+with scripting disabled, merely static until reloaded.
+
+## Pausing dispatch
+
+```bash
+uv run robot-army pause        # or the control on the queue view
+uv run robot-army unpause
+```
+
+While paused the daemon still polls, evaluates eligibility, reconciles, and heartbeats. It
+starts **no new session**, and eligible items accumulate in `ready` — nothing is rejected and
+nothing is lost.
+
+The pause is durable: it survives a daemon restart and a reboot, and is cleared only by
+`unpause` or the web control. Never by time. It appears in `status`, in `heartbeat.json`, and
+on every web view, because a system that is healthy and deliberately doing nothing must not
+read as one that is healthy and doing nothing for no reason.
+
 ## Trying it without consequences
 
 Four graduated effect levels, enforced at the boundaries rather than at call sites:
@@ -84,6 +173,7 @@ marked when shown.
 | `~/.local/state/robot-army/spool/exits/` | exit records awaiting the daemon |
 | `~/.local/state/robot-army/heartbeat.json` | liveness evidence |
 | `~/.local/state/robot-army/daemon.lock` | single-instance lock |
+| `~/.local/state/robot-army/requests/` | markers asking the daemon to poll or reconcile now |
 | `/run/user/<uid>/robot-army/<item>.sock` | session host sockets |
 | `~/worktrees/<repo>/issue-<n>/` | isolated checkouts |
 
@@ -101,6 +191,9 @@ Every outward-facing action appears **twice**: an `intent` record before it and 
 `outcome` record after, sharing an `action_id`. An intent with no outcome is the signature
 of a process killed mid-action. Format and conventions in
 [docs/logging.md](docs/logging.md).
+
+Records carry which interface produced them — `daemon`, `cli`, or `web` — and the same log is
+readable from the browser at `/log`, filtered, newest first, with GitHub links already made.
 
 ## When something looks wrong
 

@@ -52,6 +52,12 @@ webhook_url     = ""                # empty disables; any service accepting a JS
 # M0 measured this as the dominant case: 39 of 294 repos, all virtualenv setup.
 default_timeout_seconds = 300
 
+# Added by milestone 002. All three are optional with the defaults shown.
+[web]
+bind            = "127.0.0.1"       # the LAN address, or 0.0.0.0, to reach it from a phone
+port            = 8420
+refresh_seconds = 10                # how often an open page re-fetches itself
+
 # --- Repositories -----------------------------------------------------------
 # A section here declares a repo. It still requires `robot-army onboard` before
 # anything is dispatched (FR-001) — declaring is not approving.
@@ -103,6 +109,23 @@ permission_mode = "acceptEdits"     # per-repo override of [worker]
 - `token_file` must be mode 0600 or startup fails.
 - `extra_repos` are repositories the maintainer does not own. They still require onboarding, and the
   committed-permission fingerprint check (FR-004) matters most for exactly these.
+
+**`[web]`** *(milestone 002)*
+- `bind` is the interface's **access policy**, because it has no authentication by design
+  ([002 FR-003](../../002-web-ui/spec.md)). Anything that can reach the port has full control.
+  - A **globally routable** address is refused and `robot-army serve` exits `3`. This is the one
+    validation in this file that is a safety property rather than a convenience.
+  - `0.0.0.0` is permitted with a warning: it cannot be classified — it means every interface,
+    including any the machine gains later — and refusing it would push toward pinning an address a
+    DHCP lease can change.
+  - Anything other than loopback prints a one-line warning naming the consequence. The effective
+    address is also written to the audit log as `web.start`, on every start.
+  - It must be an **address, not a hostname**, so what the interface became reachable from is
+    unambiguous.
+- `port` must be ≥ 1 and ≤ 65535. 8420 is arbitrary, above 1024 so no privilege is needed.
+- `refresh_seconds` bounds how often an open page re-fetches itself. Must be ≥ 1.
+- Validation of `bind` beyond its type happens at `serve` time rather than at load time, so that
+  `robot-army status` never fails over a setting only the interface uses.
 
 **`[terminal]`**
 - `socket_glob` is a **pattern, not a path** — kitty appends its PID to `listen_on`, so no fixed

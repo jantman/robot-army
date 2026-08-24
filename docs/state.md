@@ -14,6 +14,7 @@ XDG variables are honoured when set; these are the defaults.
 | `~/.local/state/robot-army/spool/exits/rejected/` | Quarantined malformed records | yes |
 | `~/.local/state/robot-army/heartbeat.json` | Liveness evidence | yes (and immediately stale) |
 | `~/.local/state/robot-army/daemon.lock` | Single-instance lock | file yes, **lock no** |
+| `~/.local/state/robot-army/requests/{poll,reconcile}` | Empty markers asking the daemon to run a job now | yes — harmlessly |
 | `/run/user/<uid>/robot-army/<item>.sock` | Session host sockets | **no — deliberately** |
 | `~/worktrees/<repo>/issue-<n>/` | Isolated checkouts | yes |
 
@@ -35,6 +36,23 @@ document; the reasoning is [research.md R5](../specs/001-minimum-daemon/research
 the holding process dies by any means, including `SIGKILL`. A stale `daemon.lock` file
 containing an old PID is normal and harmless.
 
+**Job request markers survive on purpose, and cost at most one redundant job.** They are
+empty files whose whole lifetime is one tick, written by `robot-army poll` / `reconcile` and
+by the web controls when a daemon holds the lock, and unlinked by the daemon at the top of
+its next tick. A marker left over from before a reboot causes one extra poll on the next
+start — and a startup already polls and reconciles, so the cost is nil. Only `poll` and
+`reconcile` are valid names; anything else in that directory is **left in place and reported
+once**, because deleting something the system does not understand is worse than leaving it.
+
+```bash
+ls ~/.local/state/robot-army/requests/     # empty almost always; a marker lives ~5s
+```
+
+Why a file and not a signal: the daemon may be mid-tick, and a marker waits without needing
+a handler in a loop whose entire design is "one thread, no interleaving". Signalling would
+also mean reading a PID out of the lock file and trusting it, which is the
+identify-the-process-by-weaker-evidence pattern this project has already been bitten by.
+
 ## The configuration / state split
 
 `config.toml` holds what I **declare**. The database holds what the system **observed**.
@@ -49,7 +67,7 @@ database free of values I would expect to change by editing a file.
 
 ## The database
 
-SQLite, WAL mode, `foreign_keys=ON`, `synchronous=FULL`. Five tables. Directly inspectable:
+SQLite, WAL mode, `foreign_keys=ON`, `synchronous=FULL`. Six tables. Directly inspectable:
 
 ```bash
 sqlite3 ~/.local/state/robot-army/state.db '.tables'
@@ -71,6 +89,33 @@ sqlite3 ~/.local/state/robot-army/state.db 'PRAGMA user_version'
 
 There are no downgrades. The rollback plan is restoring the file from backup.
 
+### `dispatch_control` — is dispatch paused?
+
+Added by migration 002. **One row, and the `CHECK (id = 1)` makes a second one impossible
+rather than merely unlikely** — "which of the two pause rows is authoritative" is a question
+that must never be askable.
+
+| Column | Meaning |
+|---|---|
+| `paused` | `0` or `1`. Read by the daemon before **every** dispatch decision |
+| `paused_at` | When it was set. `NULL` when not paused |
+| `paused_by` | `web` or `cli` — so "who stopped dispatch" is answerable from state as well as from the log |
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db 'SELECT * FROM dispatch_control'
+robot-army pause      # and `unpause`
+robot-army status     # reports it, as does heartbeat.json and every web view
+```
+
+While paused the daemon still polls, evaluates eligibility, reconciles, and heartbeats. It
+starts no new session, and eligible items **accumulate in `ready`** — nothing is rejected and
+nothing is lost, so lifting the pause needs no unwinding.
+
+It is in the database rather than in a config key or a marker file because durability across
+restart and reboot is the entire point: a pause that lapses when the daemon restarts is worse
+than no pause, because I would believe work was held when it was not. It is also an
+*operational act* rather than something I declare, which is the line the section above draws.
+
 ## What a reboot does
 
 Every session is gone; every `active` row still says `active`. On the next start:
@@ -85,6 +130,10 @@ Every session is gone; every `active` row still says `active`. On the next start
 None of this raises an error-level record. A reboot legitimately produces one `interrupted`
 item per session that was running, and treating that as an error would train me to ignore
 errors.
+
+**A pause survives all of this.** If dispatch was paused before the reboot it is still paused
+after it, and only `robot-army unpause` or the web control clears it — never time, never a
+restart. That is the whole reason it lives in the database.
 
 Nothing resumes automatically. `robot-army status` lists what is waiting; `robot-army show
 <id>` reports whether the worktree has uncommitted changes, whether the branch has commits,
@@ -107,6 +156,11 @@ summary:
 | After applying a spool record, before unlinking it | Reapplied; application is idempotent |
 | Mid-migration | The migration re-runs; `user_version` never advanced |
 | Mid-audit-write | A partial final line is skipped and counted by readers |
+| Mid-`set_dispatch_paused` | Rolled back; dispatch continues as before. The pause is never half-applied |
+| After writing a request marker, before the daemon read it | The marker persists and is consumed on the next tick or the next start |
+| After the daemon unlinked a marker, before running the job | The forced flag is lost and the job runs on its ordinary interval. Accepted: the cost is one interval, and unlinking *after* would risk running it twice |
+| Web process killed mid-request, before the transaction committed | Rolled back. The browser sees a dropped connection and the item page tells the truth on reload |
+| Web process killed while a worker thread was dispatching | The item is left mid-dispatch and reconciliation resolves it — the same path any interrupted dispatch takes. This is not a new way to produce that condition |
 
 ## Disk
 

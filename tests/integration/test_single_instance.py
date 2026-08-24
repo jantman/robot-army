@@ -139,3 +139,48 @@ def _src_dir():
     from pathlib import Path
 
     return Path(__file__).resolve().parents[2] / "src"
+
+
+def test_concurrent_probes_do_not_see_each_other_as_a_running_daemon(layout):
+    """``is_locked`` probes with a **shared** lock, and that is the whole point.
+
+    A shared lock still conflicts with the daemon's ``LOCK_EX``, so a running daemon is
+    detected exactly as before — but two concurrent probes no longer conflict with *each
+    other*. With the exclusive probe this function used to take, each saw the other's
+    transient hold and reported "a daemon is running": measured at 1,558 false positives
+    in 2,400 probes across six threads, with no daemon running at all.
+
+    Milestone 001 only ever probed from a single-threaded CLI, so the race had no way to
+    occur. Milestone 002's web interface serves concurrent requests, and the very first
+    page load with several in flight produced a page claiming the daemon was alive while
+    it was dead — which is exactly what that milestone's SC-010 forbids.
+    """
+    import threading
+
+    assert not is_locked(layout.lock_path)
+    claims: list[bool] = []
+    guard = threading.Lock()
+
+    def probe() -> None:
+        for _ in range(300):
+            answer = is_locked(layout.lock_path)
+            with guard:
+                claims.append(answer)
+
+    threads = [threading.Thread(target=probe) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(claims) == 1800
+    assert not any(claims), (
+        f"{sum(claims)}/{len(claims)} concurrent probes invented a running daemon"
+    )
+
+
+def test_the_shared_probe_still_detects_a_real_holder(layout):
+    """The fix must not have traded a false positive for a false negative."""
+    with SingleInstanceLock(layout.lock_path):
+        assert is_locked(layout.lock_path) is True
+    assert is_locked(layout.lock_path) is False

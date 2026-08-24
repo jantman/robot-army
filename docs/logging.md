@@ -57,7 +57,7 @@ against what target, with what result.
 | Field | Meaning |
 |---|---|
 | `ts` | UTC ISO 8601, `Z` suffix. Always. |
-| `component` | `daemon` or `cli` — which process wrote it |
+| `component` | `daemon`, `cli`, or `web` — which process wrote it |
 | `kind` | `event`, `intent`, or `outcome` |
 | `action` | Dotted name: `github.poll`, `git.fetch`, `hook.step`, `state.session`, … |
 | `outcome` | `ok`, `error`, or `pending` (only on an `intent`) |
@@ -66,6 +66,34 @@ against what target, with what result.
 | `action_id` | Present on `intent`/`outcome` pairs, shared between them |
 | `dry_run` / `simulated` | Present and `true` only when the record concerns simulated work |
 | `detail` | Everything else, action-specific |
+
+## The `web` component
+
+Milestone 002 added a third writer. Records from the web interface carry
+`"component": "web"`, which is what makes "which interface did this?" answerable from the
+record alone rather than by inference from the timestamp.
+
+```bash
+jq -c 'select(.component == "web")' ~/.local/state/robot-army/logs/audit-*.jsonl
+robot-army log --item 42          # both interfaces' records, interleaved in causal order
+```
+
+Every state-changing request produces an `intent`/`outcome` pair named for its route —
+`web.resume`, `web.abandon`, `web.cancel`, `web.dispatch.pause`, `web.poll` — written
+**before** the action runs, including before the checks that might refuse it. That ordering
+is deliberate: it means a refused request, a crashed request, and a successful one all leave
+a record, so **an error response with no corresponding record is impossible by construction**
+rather than by discipline.
+
+The operations underneath write their own records too, so a resume from the web reads as
+`web.resume` (intent) → `state.work_item` → `worktree.prepare` → … → `web.resume` (outcome).
+The two long actions, resume and restart, run on a worker thread and answer HTTP immediately;
+what the operation actually returned lands later as `web.resume.result`.
+
+`web.start` records the address and port the interface is actually listening on, on every
+start. Under the exposure model in
+[002's spec](../specs/002-web-ui/spec.md) the bind address *is* the access policy, so it is
+the one fact that is never allowed to be silent.
 
 ## Intent and outcome
 
@@ -114,6 +142,7 @@ the log knows what its silence means:
 | Heartbeat writes, every 5 seconds | ~17,000 records a day of noise. The heartbeat file *is* the record, and its staleness is the signal |
 | Individual `/proc` and registry reads during reconciliation — one aggregate per pass | Same disproportion. The *conclusions* — sessions found, orphans detected, states changed — are each logged individually |
 | **Actions the session itself takes** inside the worktree | They happen outside this process entirely. This log records the dispatch, the session identity, and where the transcript lives; the worker's own transcript is the record of what it did. Claiming otherwise would be dishonest about what this log covers |
+| **Read-only web requests** — every `GET` the interface serves | They change no state outside the process, so Principle III's own scope does not reach them. The exception is written down because the *volume* makes the omission visible: a page auto-refreshing every 10 seconds issues a `GET` every 10 seconds, and logging those would bury the record this project exists to keep readable. Nothing a `GET` does is unreconstructable — the data it read is in the database and in this log. **Every `POST` is logged**, without exception |
 
 ## Silent failure is forbidden
 
@@ -127,6 +156,19 @@ Every swallowed error, retry, and fallback leaves a record. Specifically:
 - A degraded terminate path (process group rather than systemd scope) logs that it was taken.
 - A GitHub comment that fails does not change the work item's state, but the failure is
   recorded.
+
+## Reading it from the phone
+
+`GET /log` renders the same records with the same filters — `?item=`, `?since=`, `?outcome=`
+— newest first, a bounded page at a time, with GitHub repositories, issues, and pull requests
+turned into followable links. Only URLs that are already `https://github.com/…`, or targets
+shaped like `owner/repo#123`, become links; anything else in a record stays as text, because
+a record can carry an issue body and an arbitrary URL out of one must not become a link on a
+page I trust.
+
+Paging reads daily files newest-first and stops the moment the page is full, so it stays
+bounded in time and memory against a log of any size rather than proportional to total
+history.
 
 ## Reconstructing an item's history
 

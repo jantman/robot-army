@@ -121,6 +121,20 @@ class PollState:
     backoff_until: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DispatchControl:
+    """Whether dispatch is suspended, since when, and by which front end (FR-033).
+
+    Single-valued for the whole system — the table it comes from is constrained to one
+    row. Orthogonal to both state machines: it gates whether the dispatcher runs at all
+    and changes no item's state, so items simply accumulate in ``ready`` (FR-034).
+    """
+
+    paused: bool = False
+    paused_at: str | None = None
+    paused_by: str | None = None
+
+
 #: Every anomaly kind the system can raise. Named here so ``status`` and ``anomalies``
 #: can surface all of them (FR-065, T135) rather than only the ones seen so far.
 ANOMALY_KINDS: tuple[str, ...] = (

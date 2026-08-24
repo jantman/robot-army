@@ -358,3 +358,94 @@ def test_doctor_probes_the_real_terminal_socket_not_the_wired_one(
     run_cli(["doctor"], config_file)
     combined = capsys.readouterr()
     assert "simulated-kitty" not in combined.out + combined.err
+
+
+# -- milestone 002 verbs ----------------------------------------------------
+
+
+def test_pause_and_unpause_report_the_resulting_state(config_file, capsys):
+    """Both work whether or not the daemon is running: they write to the database, which
+    the daemon reads before each dispatch decision."""
+    assert main(["--config", str(config_file), "pause"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "dispatch paused at" in out
+    assert "survives a daemon restart" in out
+
+    assert main(["--config", str(config_file), "unpause"]) == EXIT_OK
+    assert "dispatch resumed" in capsys.readouterr().out
+
+
+def test_pausing_twice_is_not_an_error(config_file, capsys):
+    """FR-033: a redundant pause is a reported no-op. The existing pause is the answer."""
+    main(["--config", str(config_file), "pause"])
+    capsys.readouterr()
+    assert main(["--config", str(config_file), "pause"]) == EXIT_OK
+    assert "already paused" in capsys.readouterr().out
+
+
+def test_status_shows_the_pause_after_the_verb_set_it(config_file, capsys):
+    main(["--config", str(config_file), "pause"])
+    capsys.readouterr()
+    main(["--config", str(config_file), "status"])
+    assert "PAUSED since" in capsys.readouterr().out
+
+
+def test_attach_with_no_running_session_exits_three(config_file, layout, capsys):
+    """contracts/cli-additions.md: exit 3 when the item has no session in ``running``."""
+    from robot_army import db
+
+    conn, _ = db.open_database(layout.db_path)
+    item_id = seed_item(conn, state="interrupted")
+    conn.close()
+
+    assert main(["--config", str(config_file), "attach", str(item_id)]) == EXIT_PRECONDITION
+    assert "no running session" in capsys.readouterr().err
+
+
+def test_attach_on_a_missing_item_exits_one(config_file, capsys):
+    assert main(["--config", str(config_file), "attach", "4242"]) == EXIT_FAILED
+    assert "no work item with id 4242" in capsys.readouterr().err
+
+
+def test_serve_refuses_a_globally_routable_bind_address(config_file, capsys):
+    """FR-004, from the terminal: exit 3, and nothing listening."""
+    assert (
+        main(["--config", str(config_file), "serve", "--bind", "8.8.8.8"]) == EXIT_PRECONDITION
+    )
+    err = capsys.readouterr().err
+    assert "globally routable" in err
+    assert "no authentication by design" in err
+
+
+def test_serve_reports_every_precondition_at_once(config_file, layout, capsys):
+    """Fixing one per restart is a poor experience at 2am, which is the audience named."""
+    from robot_army import db
+
+    conn = db.connect(layout.db_path)
+    conn.execute("PRAGMA user_version = 1")
+    conn.close()
+
+    assert main(["--config", str(config_file), "serve", "--bind", "8.8.8.8"]) == EXIT_PRECONDITION
+    err = capsys.readouterr().err
+    assert "schema" in err
+    assert "globally routable" in err
+
+
+def test_serve_accepts_bind_and_port_overrides():
+    args = build_parser().parse_args(["serve", "--bind", "192.168.1.20", "--port", "9001"])
+    assert args.bind == "192.168.1.20"
+    assert args.port == 9001
+
+
+def test_pause_unpause_and_attach_accept_json():
+    for command in (["pause"], ["unpause"], ["attach", "1"]):
+        assert build_parser().parse_args([*command, "--json"]).json is True
+
+
+def test_every_web_control_has_a_terminal_verb_here(config_file):
+    """SC-011 from the other side: the CLI half of the enumeration in test_web_routing."""
+    parser = build_parser()
+    verbs = set(parser._subparsers._group_actions[0].choices)
+    for verb in ("serve", "pause", "unpause", "attach", "resume", "restart", "abandon",
+                 "cancel", "retry", "anomalies", "poll", "reconcile"):
+        assert verb in verbs, verb

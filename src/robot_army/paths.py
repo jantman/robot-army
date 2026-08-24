@@ -89,6 +89,16 @@ class Layout:
     def lock_path(self) -> Path:
         return self.state_dir / "daemon.lock"
 
+    @property
+    def requests_dir(self) -> Path:
+        """Cross-process job requests (milestone 002, research.md R5).
+
+        Under ``state_dir`` rather than the runtime directory because a marker written
+        while the daemon is down must still be there when it starts — including across a
+        reboot, where the cost of a leftover marker is one redundant job.
+        """
+        return self.state_dir / "requests"
+
     def socket_for(self, item_id: int | str) -> Path:
         return self.socket_dir / f"{item_id}.sock"
 
@@ -100,6 +110,7 @@ class Layout:
             self.session_log_dir,
             self.spool_dir,
             self.spool_rejected_dir,
+            self.requests_dir,
             self.socket_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)

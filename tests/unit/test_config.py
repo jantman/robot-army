@@ -232,3 +232,49 @@ def test_an_empty_token_env_is_an_error_at_read_time(repo_clone, layout, tmp_pat
     monkeypatch.setenv("ROBOT_ARMY_TEST_TOKEN", "")
     with pytest.raises(ConfigError):
         config.github.read_token()
+
+
+# -- [web] (milestone 002) --------------------------------------------------
+
+
+def test_web_section_defaults_to_loopback(repo_clone, layout, tmp_path):
+    """The shipped default must not be reachable from the network.
+
+    Under FR-003 the bind address *is* the access policy, so an unconfigured install
+    being loopback-only is a requirement rather than a convenience.
+    """
+    config = build(repo_clone, layout, tmp_path)
+    assert config.web.bind == "127.0.0.1"
+    assert config.web.port == 8420
+    assert config.web.refresh_seconds == 10
+
+
+def test_web_section_overrides_are_honoured(repo_clone, layout, tmp_path):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        web={"bind": "192.168.1.20", "port": 9001, "refresh_seconds": 30},
+    )
+    assert config.web.bind == "192.168.1.20"
+    assert config.web.port == 9001
+    assert config.web.refresh_seconds == 30
+
+
+def test_a_non_integer_web_port_is_rejected(repo_clone, layout, tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, web={"port": "8420"})
+    assert any("[web] port must be an integer" in p for p in caught.value.problems)
+
+
+def test_an_out_of_range_web_port_is_rejected(repo_clone, layout, tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, web={"port": 70000})
+    assert any("65535" in p for p in caught.value.problems)
+
+
+def test_an_unknown_web_key_is_a_warning_not_an_error(repo_clone, layout, tmp_path):
+    """Top-level sections warn rather than fail, so a config written for a later
+    milestone still starts."""
+    config = build(repo_clone, layout, tmp_path, web={"tls": True})
+    assert any("[web].tls" in w for w in config.warnings)

@@ -147,9 +147,43 @@ def build_parser() -> argparse.ArgumentParser:
     purge = sub.add_parser("purge-simulated", help="remove dry-run rows (FR-058)")
     purge.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
 
+    # -- milestone 002 -----------------------------------------------------
+    serve = sub.add_parser(
+        "serve", help="run the web interface in the foreground, independently of the daemon"
+    )
+    serve.add_argument(
+        "--bind", default=None, metavar="ADDR", help="listening address (default: [web] bind)"
+    )
+    serve.add_argument(
+        "--port", type=int, default=None, metavar="N", help="listening port (default: [web] port)"
+    )
+    serve.add_argument(
+        "--effect-level",
+        choices=[level.value for level in EffectLevel],
+        default=None,
+        help="override the configured effect level",
+    )
+
+    sub.add_parser(
+        "pause",
+        help="suspend dispatch durably; polling, reconciliation and the heartbeat continue",
+    )
+    sub.add_parser("unpause", help="resume dispatch")
+
+    attach = sub.add_parser("attach", help="open a terminal window on a running session")
+    attach.add_argument("item_id", type=int)
+
     # -- universal flags ---------------------------------------------------
     for name, action in sub.choices.items():
-        if name in READ_COMMANDS or name in ("poll", "reconcile", "drain", "purge-simulated"):
+        if name in READ_COMMANDS or name in (
+            "poll",
+            "reconcile",
+            "drain",
+            "purge-simulated",
+            "pause",
+            "unpause",
+            "attach",
+        ):
             action.add_argument(
                 "--json", action="store_true", help="machine-readable output on stdout"
             )
@@ -176,6 +210,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         return _run(args)
+    if args.command == "serve":
+        # Handled here rather than in the table below because `serve` must never open the
+        # database the way every other command does: the web process verifies the schema
+        # version and refuses on a mismatch instead of migrating (research.md R11).
+        return _serve(args)
 
     try:
         config = load_config(args.config)
@@ -241,6 +280,23 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_PRECONDITION
 
 
+def _serve(args: argparse.Namespace) -> int:
+    from robot_army.web.server import serve
+
+    try:
+        config = load_config(args.config)
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        for warning in exc.warnings:
+            print(f"  (warning) {warning}", file=sys.stderr)
+        return EXIT_PRECONDITION
+    level = EffectLevel(args.effect_level) if args.effect_level else None
+    try:
+        return serve(config, bind=args.bind, port=args.port, effect_level=level)
+    except KeyboardInterrupt:  # pragma: no cover - the signal handler normally wins
+        return EXIT_OK
+
+
 def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
     """Route one parsed command to its operation.
 
@@ -282,6 +338,9 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
             ctx, args.repo_key, reapprove=args.reapprove, assume_yes=args.yes
         ),
         "purge-simulated": lambda: operations.purge_simulated(ctx, assume_yes=args.yes),
+        "pause": lambda: operations.pause_dispatch(ctx, by="cli"),
+        "unpause": lambda: operations.unpause_dispatch(ctx, by="cli"),
+        "attach": lambda: operations.attach(ctx, args.item_id),
     }
 
     handler = table.get(args.command)

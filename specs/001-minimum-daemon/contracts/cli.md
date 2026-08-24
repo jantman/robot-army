@@ -59,12 +59,22 @@ uncommitted changes, commits on branch, issue open or closed, open pull request.
 
 ## `robot-army poll [--repo KEY]` **[lock-aware]**
 
-Forces an immediate poll rather than waiting for the interval. If the daemon is running, signals it
-to poll on its next tick; if not, polls directly. Reports what it found and what it rejected.
+Forces an immediate poll rather than waiting for the interval. With no daemon running it polls
+directly and reports what it found and what it rejected. With a daemon running it writes a durable
+request marker, which the daemon consumes at the top of its next tick — so the response is
+*"requested, and it will run within one tick"* rather than a result. What the poll found is reported
+to the audit log, which `robot-army log` and the web audit view then show.
+
+> **Corrected in milestone 002.** This section previously promised that the command "signals it to
+> poll on its next tick". It did not: `operations.poll_now` only printed how often the daemon polls,
+> because `Daemon.request()` had no caller outside the process. Milestone 002's FR-023 needed a real
+> force, so the mechanism now exists — an empty marker file under `state_dir/requests/`, chosen over
+> a signal for the reasons in [002's research.md R5](../../002-web-ui/research.md) — and the verb
+> stops over-promising.
 
 ## `robot-army reconcile` **[lock-aware]**
 
-Forces a reconciliation pass. Same delegation behaviour as `poll`.
+Forces a reconciliation pass. Same delegation behaviour as `poll`, including the request marker.
 
 ## `robot-army cancel <item-id>`
 

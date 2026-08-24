@@ -11,20 +11,21 @@ machine-readable payload. The CLI chooses which to print; it makes no decisions 
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import sqlite3
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+import threading
+import time
+from collections.abc import Callable, Iterator
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from robot_army import audit as audit_mod
 from robot_army import (
-    daemon as daemon_mod,
-)
-from robot_army import (
+    control,
     db,
     dispatch,
     health,
@@ -34,6 +35,9 @@ from robot_army import (
     sessions,
     spool,
     worktree,
+)
+from robot_army import (
+    daemon as daemon_mod,
 )
 from robot_army.audit import AuditLog
 from robot_army.boundaries import BoundaryError, HostHandle, TransportError
@@ -86,14 +90,54 @@ class Context:
         self.audit.close()
 
 
+class SchemaMismatch(Exception):
+    """The database is not at the version this code expects, and we must not migrate.
+
+    Raised only by contexts built with ``migrate=False`` — the web process (R11). Two
+    processes racing to run the same migration is a failure mode worth removing rather
+    than surviving: the daemon owns the schema and the interface follows it.
+    """
+
+    def __init__(self, found: int, expected: int, path: Path) -> None:
+        super().__init__(
+            f"database at {path} is schema version {found}, but this code expects "
+            f"{expected}. The daemon owns the schema — start or restart "
+            "`robot-army run` to migrate, then start the interface again"
+        )
+        self.found = found
+        self.expected = expected
+
+
 def build_context(
-    config: Config, *, effect_level: EffectLevel | None = None, component: str = "cli"
+    config: Config,
+    *,
+    effect_level: EffectLevel | None = None,
+    component: str = "cli",
+    migrate: bool = True,
 ) -> Context:
+    """Assemble everything an operation needs.
+
+    ``migrate=False`` is the web process's mode (R11): it opens the database read-write,
+    verifies ``PRAGMA user_version``, and refuses rather than upgrading. Everything else
+    migrates on open, as milestone 001 established.
+    """
     layout = config.layout
     layout.ensure()
     level = effect_level or config.daemon.effect_level
     audit = AuditLog(layout.log_dir, component=component)
-    conn, _ = db.open_database(layout.db_path)
+    if migrate:
+        conn, _ = db.open_database(layout.db_path)
+    else:
+        conn = db.connect(layout.db_path)
+        try:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        except sqlite3.Error:
+            conn.close()
+            raise
+        if version != SCHEMA_VERSION:
+            conn.close()
+            audit.close()
+            raise SchemaMismatch(version, SCHEMA_VERSION, layout.db_path)
     return Context(
         config=config,
         conn=conn,
@@ -140,6 +184,7 @@ def status(
         ctx.conn, include_simulated=include_simulated, states=states, repo_key=repo
     )
     anomalies = db.list_anomalies(ctx.conn)
+    control_state = db.get_dispatch_control(ctx.conn)
 
     result.data = {
         "effect_level": str(ctx.effect_level),
@@ -148,10 +193,23 @@ def status(
         "items": [_item_dict(i) for i in items],
         "anomalies": [_anomaly_dict(a) for a in anomalies],
         "include_simulated": include_simulated,
+        "dispatch_paused": control_state.paused,
+        "dispatch_paused_at": control_state.paused_at,
+        "dispatch_paused_by": control_state.paused_by,
     }
 
     result.say(f"effect level : {ctx.effect_level}")
     result.say(f"health       : {'ok' if report.healthy else 'STALE'} — {report.reason}")
+    # FR-036: a system that is healthy and deliberately doing nothing must not read as a
+    # system that is healthy and doing nothing for no reason.
+    result.say(
+        "dispatch     : "
+        + (
+            f"PAUSED since {control_state.paused_at} (by {control_state.paused_by})"
+            if control_state.paused
+            else "running"
+        )
+    )
     result.say(f"database     : {ctx.layout.db_path} (schema {SCHEMA_VERSION})")
     result.say()
     if counts:
@@ -237,7 +295,12 @@ def _anomaly_dict(anomaly: Any) -> dict[str, Any]:
         "kind": anomaly.kind,
         "entity_type": anomaly.entity_type,
         "entity_id": anomaly.entity_id,
-        "detail": anomaly.detail_obj,
+        # An anomaly's detail is an open-ended dict written by whatever raised it, and it
+        # is *stored* rather than only logged — so the audit log's redaction choke point
+        # never saw it. Both front ends render this dict (the CLI to stdout, the web to a
+        # page and a JSON payload), so it passes through the same choke point here, once,
+        # rather than being filtered separately in each (FR-020).
+        "detail": audit_mod.redact(anomaly.detail_obj),
         "detected_at": anomaly.detected_at,
         "acknowledged_at": anomaly.acknowledged_at,
     }
@@ -321,23 +384,48 @@ def _history(item: Any) -> list[tuple[str, str]]:
     return [(when, what) for when, what in stamps if when]
 
 
-def resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
-    """Whether resuming is worthwhile (FR-048). Every value computed on demand.
+#: How long a GitHub-derived resume signal may be served from memory (research.md R9).
+#: An interrupted view with five items auto-refreshing every 10 seconds would otherwise
+#: make 1,800 GitHub calls an hour asking a question that cannot change as a result of
+#: anything happening on this machine — competing directly with the polling budget FR-008
+#: exists to protect.
+REMOTE_SIGNAL_TTL_SECONDS = 60.0
 
-    A stored copy would be wrong the instant the maintainer touched the directory, which
-    is precisely why data-model.md keeps none of these.
+#: (item id, branch) -> (computed_at monotonic, signals). Per-process, non-authoritative,
+#: bounded by time and by the number of interrupted items, and lost on restart. Nothing is
+#: persisted, so FR-013's prohibition on a *stored* copy is honoured as written.
+_REMOTE_SIGNAL_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+_REMOTE_SIGNAL_LOCK = threading.Lock()
+
+
+def _monotonic() -> float:
+    """Indirection so a test can move the clock without sleeping for a minute."""
+    return time.monotonic()
+
+
+def clear_resume_signal_cache() -> None:
+    """Drop every cached remote signal. For tests, and for a front end that wants a
+    guaranteed-fresh read after acting on an item."""
+    with _REMOTE_SIGNAL_LOCK:
+        _REMOTE_SIGNAL_CACHE.clear()
+
+
+def local_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
+    """The two signals that come from local git. **Recomputed on every call.**
+
+    Volatile precisely because the maintainer may be in the worktree with an editor open —
+    ``docs/state.md`` says these are computed on demand and never stored "because a stored
+    copy would be wrong the moment I touched the directory", and that reasoning applies to
+    these two and not to the remote pair.
     """
     signals: dict[str, Any] = {
         "worktree_present": False,
         "uncommitted_changes": None,
         "commits_on_branch": None,
-        "issue_closed": None,
-        "open_pull_request": None,
     }
     repo = ctx.config.repos.get(item.repo_key)
     if repo is None or not item.worktree_path or not item.branch:
         return signals
-
     base_ref = ctx.config.base_branch_for(item.repo_key)
     try:
         condition = worktree.condition(
@@ -352,21 +440,59 @@ def resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
         signals["commits_on_branch"] = condition.commits_ahead
     except BoundaryError as exc:
         signals["worktree_error"] = str(exc)
+    return signals
 
+
+def remote_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
+    """The two signals that reach GitHub, cached in-process for a minute (R9).
+
+    Every returned value carries ``signals_age_seconds``, so a cached answer is *visible*
+    as stale rather than implied to be current. ``0`` means it was computed just now.
+    """
+    empty: dict[str, Any] = {
+        "issue_closed": None,
+        "open_pull_request": None,
+        "signals_age_seconds": 0,
+    }
+    repo = ctx.config.repos.get(item.repo_key)
+    if repo is None or not item.branch:
+        return empty
     if item.dry_run:
         # FR-055: a simulated row must not cause outward-facing effects, and asking
         # GitHub about it would be exactly that.
-        return signals
+        return empty
 
+    key = (int(item.id), str(item.branch))
+    now = _monotonic()
+    with _REMOTE_SIGNAL_LOCK:
+        cached = _REMOTE_SIGNAL_CACHE.get(key)
+        if cached is not None and now - cached[0] < REMOTE_SIGNAL_TTL_SECONDS:
+            return {**cached[1], "signals_age_seconds": int(now - cached[0])}
+
+    fresh: dict[str, Any] = {"issue_closed": None, "open_pull_request": None}
     try:
-        signals["issue_closed"] = ctx.boundaries.issue_reader.is_closed(
+        fresh["issue_closed"] = ctx.boundaries.issue_reader.is_closed(
             item.repo_key, item.issue_number
         )
         pr = ctx.boundaries.issue_reader.open_pr_for_branch(item.repo_key, item.branch)
-        signals["open_pull_request"] = pr.url if pr else None
+        fresh["open_pull_request"] = pr.url if pr else None
     except TransportError as exc:
-        signals["github_error"] = str(exc)
-    return signals
+        # Not cached: "I could not ask" is not an answer, and caching it would suppress
+        # the next attempt for a minute — the silent failure Principle III forbids.
+        return {**fresh, "github_error": str(exc), "signals_age_seconds": 0}
+
+    with _REMOTE_SIGNAL_LOCK:
+        _REMOTE_SIGNAL_CACHE[key] = (now, fresh)
+    return {**fresh, "signals_age_seconds": 0}
+
+
+def resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
+    """All four signals (FR-048, FR-013). Split by cost; see R9 and the two halves above.
+
+    Nothing here is persisted. The local pair is always fresh; the remote pair carries its
+    own age so a stale value is visible rather than implied.
+    """
+    return {**local_resume_signals(ctx, item), **remote_resume_signals(ctx, item)}
 
 
 # -- onboard ----------------------------------------------------------------
@@ -892,24 +1018,200 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
     return Result(lines=[f"item {item_id} is ready again"], data={"item_id": item_id})
 
 
+# -- dispatch pause (milestone 002) -----------------------------------------
+
+
+def _set_pause(ctx: Context, *, paused: bool, by: str) -> Result:
+    """The body both verbs share. One transaction, one audit pair, no branching outside."""
+    before = db.get_dispatch_control(ctx.conn)
+    action = "dispatch.pause" if paused else "dispatch.unpause"
+    with (
+        ctx.audit.action(
+            action,
+            entity_type="dispatch_control",
+            entity_id=1,
+            detail={"by": by, "was_paused": before.paused},
+        ) as outcome,
+        db.transaction(ctx.conn),
+    ):
+        after = db.set_dispatch_paused(ctx.conn, paused=paused, by=by)
+        outcome["paused"] = after.paused
+        outcome["paused_at"] = after.paused_at
+        outcome["paused_by"] = after.paused_by
+        outcome["redundant"] = before.paused == paused
+
+    result = Result(
+        data={
+            "paused": after.paused,
+            "paused_at": after.paused_at,
+            "paused_by": after.paused_by,
+            "redundant": before.paused == paused,
+        }
+    )
+    if before.paused == paused:
+        # A redundant pause is a reported no-op, not an error (FR-033). Pausing twice is
+        # not a mistake, and the *existing* pause with its original timestamp is the
+        # useful answer.
+        result.say(
+            f"dispatch was already {'paused' if paused else 'running'}"
+            + (
+                f" — paused at {after.paused_at} by {after.paused_by}"
+                if after.paused
+                else ""
+            )
+        )
+        return result
+    if paused:
+        result.say(f"dispatch paused at {after.paused_at} by {by}")
+        result.say(
+            "The daemon keeps polling, evaluating eligibility, reconciling, and "
+            "heartbeating. It starts no new session; eligible items accumulate in ready."
+        )
+        result.say("This survives a daemon restart and a reboot. `robot-army unpause` clears it.")
+    else:
+        result.say("dispatch resumed; held items dispatch on the next tick")
+    return result
+
+
+def pause_dispatch(ctx: Context, *, by: str = "cli") -> Result:
+    """Suspend dispatch durably (FR-033, FR-035).
+
+    Works whether or not the daemon is running: it writes to the database, which the
+    daemon reads before each dispatch decision. Pausing a stopped daemon is meaningful —
+    it takes effect when it starts.
+    """
+    return _set_pause(ctx, paused=True, by=by)
+
+
+def unpause_dispatch(ctx: Context, *, by: str = "cli") -> Result:
+    return _set_pause(ctx, paused=False, by=by)
+
+
+# -- attach (milestone 002) -------------------------------------------------
+
+
+def attach(ctx: Context, item_id: int) -> Result:
+    """Open a terminal window onto that item's running session (R10, FR-025).
+
+    Changes **no** state and consumes no session: M0 measured that reattachment repaints
+    fully and that more than one viewer is allowed, so there is deliberately no
+    "is something already attached" check — FR-025's tolerance requirement is satisfied by
+    the host's measured capability rather than by logic here.
+    """
+    item = db.get_work_item(ctx.conn, item_id)
+    if item is None:
+        return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
+    session = db.latest_session_for_item(ctx.conn, item_id)
+    if session is None or session.state is not SessionState.RUNNING:
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=[
+                f"work item {item_id} has no running session to attach to"
+                + (f" (latest session is {session.state})" if session else "")
+            ],
+            data={"item_id": item_id, "attached": False},
+        )
+    if not session.host_socket:
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=[f"session {session.session_id} has no host socket recorded"],
+            data={"item_id": item_id, "attached": False},
+        )
+
+    handle = HostHandle(socket_path=session.host_socket, argv=(), pid=session.pid)
+    argv = ctx.boundaries.session_host.attach_command(handle)
+    title = f"robot-army #{item.issue_number} {item.repo_key} (item {item_id})"
+    try:
+        with ctx.audit.action(
+            "web.attach" if ctx.audit.component == "web" else "session.attach",
+            entity_type="work_item",
+            entity_id=item_id,
+            target=session.session_id,
+            detail={"argv": argv, "socket": session.host_socket},
+            dry_run=item.dry_run,
+        ) as outcome:
+            display = ctx.boundaries.display.open(
+                item.worktree_path or str(ctx.config.worktree_root),
+                argv,
+                title,
+                {"robot_army_item": str(item_id), "robot_army_session": session.session_id},
+                {},
+            )
+            outcome["window_id"] = display.window_id
+    except BoundaryError as exc:
+        # A missing terminal socket is a visible refusal naming what is missing, not a
+        # traceback: the maintainer's next action is "start kitty", and the message has to
+        # say so.
+        return Result(
+            code=EXIT_FAILED,
+            lines=[
+                f"could not open a terminal window: {exc}",
+                f"  no terminal control socket answered "
+                f"{ctx.config.terminal.socket_glob!r}. Nothing about the session changed.",
+            ],
+            data={"item_id": item_id, "attached": False, "error": str(exc)},
+        )
+    return Result(
+        lines=[
+            f"opened a terminal window (id {display.window_id}) attached to session "
+            f"{session.session_id}; the session is untouched and still running"
+        ],
+        data={
+            "item_id": item_id,
+            "attached": True,
+            "session_id": session.session_id,
+            "window_id": display.window_id,
+        },
+    )
+
+
 # -- lock-aware verbs -------------------------------------------------------
+
+
+def _request_job(ctx: Context, name: str, *, detail: dict[str, Any] | None = None) -> Result:
+    """Ask the running daemon to run ``name`` on its next tick (research.md R5).
+
+    The response is necessarily *"requested"* rather than *"here is what it found"*: the
+    daemon reports the result into the audit log, which ``robot-army log`` and the web
+    audit view then show. Saying so is the honest version of what 001's contract
+    previously over-promised.
+    """
+    holder = daemon_mod.read_lock_holder(ctx.layout.lock_path)
+    with ctx.audit.action(
+        f"{name}.request",
+        detail={"delegated_to_pid": holder, **(detail or {})},
+    ) as outcome:
+        created = control.request_job(ctx.layout, name)
+        outcome["marker_created"] = created
+    tick = ctx.config.daemon.tick_seconds
+    lines = [
+        f"requested a {name} from the running daemon (pid {holder}); it will run within "
+        f"one tick ({tick}s)."
+    ]
+    if not created:
+        lines.append(f"A {name} was already requested and is still pending — this changed nothing.")
+    lines.append("What it finds is reported to the audit log: `robot-army log --since 1m`")
+    return Result(
+        lines=lines,
+        data={
+            "delegated": True,
+            "daemon_pid": holder,
+            "requested": name,
+            "marker_created": created,
+            "within_seconds": tick,
+        },
+    )
 
 
 def poll_now(ctx: Context, *, repo: str | None = None) -> Result:
     """Force a poll. Delegates to a running daemon, or acts directly when none holds
     the lock — so the command works the same whether or not the daemon is up."""
     if daemon_mod.is_locked(ctx.layout.lock_path):
-        holder = daemon_mod.read_lock_holder(ctx.layout.lock_path)
-        ctx.audit.record(
-            "cli.poll_request", outcome="ok", detail={"delegated_to_pid": holder, "repo": repo}
-        )
-        return Result(
-            lines=[
-                f"a daemon is running (pid {holder}); it polls every "
-                f"{ctx.config.daemon.poll_seconds}s and will pick this up on its next cycle"
-            ],
-            data={"delegated": True, "daemon_pid": holder},
-        )
+        # `repo` is deliberately not carried into the marker: the daemon's poll job polls
+        # every configured repository, and inventing a per-repo marker would need a second
+        # file format for a filter the daemon has no way to honour. It is recorded in the
+        # audit detail so the request is still reconstructable.
+        return _request_job(ctx, "poll", detail={"repo": repo})
 
     outcomes = poll.poll_all(
         ctx.conn,
@@ -919,7 +1221,10 @@ def poll_now(ctx: Context, *, repo: str | None = None) -> Result:
         dry_run=ctx.effect_level.is_simulated,
         only_repo=repo,
     )
-    result = Result(data={"delegated": False, "outcomes": [vars(o) for o in outcomes]})
+    # asdict(), not vars(): these outcomes are slotted dataclasses and have no __dict__.
+    # The web serves this payload directly, so a TypeError here would be a 500 on a
+    # control FR-023 requires to work.
+    result = Result(data={"delegated": False, "outcomes": [asdict(o) for o in outcomes]})
     for outcome in outcomes:
         if outcome.error:
             result.code = EXIT_FAILED
@@ -937,14 +1242,7 @@ def poll_now(ctx: Context, *, repo: str | None = None) -> Result:
 
 def reconcile_now(ctx: Context, *, registry_dir: Path | None = None) -> Result:
     if daemon_mod.is_locked(ctx.layout.lock_path):
-        holder = daemon_mod.read_lock_holder(ctx.layout.lock_path)
-        return Result(
-            lines=[
-                f"a daemon is running (pid {holder}); it reconciles every "
-                f"{ctx.config.daemon.reconcile_seconds}s"
-            ],
-            data={"delegated": True, "daemon_pid": holder},
-        )
+        return _request_job(ctx, "reconcile")
     outcome = reconcile.reconcile(
         ctx.conn,
         boundaries=ctx.boundaries,
@@ -967,7 +1265,7 @@ def drain_spool(ctx: Context) -> Result:
             f"applied={outcome.applied} duplicates={outcome.duplicates} "
             f"quarantined={outcome.quarantined} orphaned={outcome.orphaned}"
         ],
-        data=vars(outcome),
+        data=asdict(outcome),
     )
 
 
@@ -1066,12 +1364,47 @@ def parse_duration(text: str) -> timedelta:
     return timedelta(seconds=int(amount) * _DURATION_UNITS[unit])
 
 
+#: A record either matches the active filters, fails them, or cannot be judged. The third
+#: case is not the second: an unparseable timestamp means the record is *skipped and
+#: counted*, which is what FR-044 requires readers to report rather than silently drop.
+_MATCH = "match"
+_REJECT = "reject"
+_UNREADABLE = "unreadable"
+
+
+def _judge_record(
+    record: dict[str, Any],
+    *,
+    cutoff: datetime | None,
+    item_id: int | None,
+    outcome: str | None,
+) -> str:
+    """Apply the log filters to one record. One implementation, two readers.
+
+    ``read_log`` scans forwards and ``read_log_page`` scans backwards; sharing this keeps
+    "what does ``--item 42`` mean" from having two answers.
+    """
+    if cutoff is not None:
+        try:
+            stamp = datetime.strptime(record["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        except (KeyError, ValueError):
+            return _UNREADABLE
+        if stamp < cutoff:
+            return _REJECT
+    if item_id is not None and str(record.get("entity_id")) != str(item_id):
+        return _REJECT
+    if outcome is not None and str(record.get("outcome")) != outcome:
+        return _REJECT
+    return _MATCH
+
+
 def read_log(
     ctx: Context,
     *,
     since: str | None = None,
     item_id: int | None = None,
     limit: int | None = None,
+    outcome: str | None = None,
 ) -> Result:
     """The FR-062 reconstruction path: what happened, when, to what, with what result.
 
@@ -1092,22 +1425,164 @@ def read_log(
         if record is None:
             skipped += 1
             continue
-        if cutoff is not None:
-            try:
-                stamp = datetime.strptime(record["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-            except (KeyError, ValueError):
-                skipped += 1
-                continue
-            if stamp < cutoff:
-                continue
-        if item_id is not None and str(record.get("entity_id")) != str(item_id):
-            continue
-        records.append(record)
+        verdict = _judge_record(record, cutoff=cutoff, item_id=item_id, outcome=outcome)
+        if verdict is _UNREADABLE:
+            skipped += 1
+        elif verdict is _MATCH:
+            records.append(record)
 
     if limit:
         records = records[-limit:]
 
     result = Result(data={"records": records, "unparseable_lines": skipped})
+    for record in records:
+        result.say(_format_record(record))
+    if skipped:
+        result.say()
+        result.say(f"({skipped} unparseable line(s) skipped)")
+    return result
+
+
+#: Default page size for the paged reader. Bounded by construction, per SC-014.
+LOG_PAGE_SIZE = 100
+
+
+def _encode_cursor(file_name: str, consumed: int) -> str:
+    """An opaque cursor. Opaque because its shape is ours to change, not a caller's to
+    depend on — FR-009 says there is no stable API here."""
+    raw = json.dumps({"f": file_name, "n": consumed}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[str, int] | None:
+    """``None`` for anything unreadable: a hand-edited cursor restarts from the newest
+    page rather than erroring, because the page it names may legitimately no longer exist."""
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        return str(payload["f"]), int(payload["n"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def _scan_file_backwards(
+    path: Path,
+    *,
+    judge: Callable[[dict[str, Any]], str],
+    skip: int,
+    want: int,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Read one daily file newest-record-first, returning ``(records, matched, skipped)``.
+
+    ``matched`` counts every record that passed the filters **including** the ``skip``
+    already consumed by an earlier page, because that count is exactly what the next
+    cursor has to carry for pages to stay disjoint across a file boundary.
+    """
+    found: list[dict[str, Any]] = []
+    matched = 0
+    skipped = 0
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        # A file that vanished between the glob and the read is not a reason to fail the
+        # page; it is counted so the silence is not silent.
+        return found, matched, 1
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            skipped += 1
+            continue
+        verdict = judge(record)
+        if verdict is _UNREADABLE:
+            skipped += 1
+            continue
+        if verdict is _REJECT:
+            continue
+        matched += 1
+        if matched <= skip:
+            continue
+        found.append(record)
+        if len(found) >= want:
+            break
+    return found, matched, skipped
+
+
+def read_log_page(
+    ctx: Context,
+    *,
+    since: str | None = None,
+    item_id: int | None = None,
+    outcome: str | None = None,
+    cursor: str | None = None,
+    limit: int = LOG_PAGE_SIZE,
+) -> Result:
+    """One bounded page of the audit log, newest first (research.md R14, FR-044).
+
+    Daily files are read newest-first and each is scanned backwards, stopping the moment
+    the page is full. SC-014 wants a bounded page against 100,000 records in under two
+    seconds; reading one or two daily files satisfies any first page, and reading the whole
+    history to show a hundred lines would grow without bound by construction.
+
+    The cursor names ``(file, records already consumed from it)``, so paging across a file
+    boundary produces disjoint pages rather than a repeated or a skipped record.
+    """
+    cutoff: datetime | None = None
+    if since:
+        try:
+            cutoff = datetime.now(UTC) - parse_duration(since)
+        except ValueError as exc:
+            return Result(code=EXIT_USAGE, lines=[str(exc)])
+    if outcome is not None and outcome not in ("ok", "error", "pending"):
+        return Result(
+            code=EXIT_USAGE,
+            lines=[f"unknown outcome {outcome!r}; use ok, error, or pending"],
+        )
+    limit = max(1, min(int(limit), 1000))
+
+    files = sorted(Path(ctx.layout.log_dir).glob("audit-*.jsonl"), reverse=True)
+    start_index = 0
+    skip_in_file = 0
+    if cursor:
+        decoded = _decode_cursor(cursor)
+        if decoded is not None:
+            name, consumed = decoded
+            for index, path in enumerate(files):
+                if path.name == name:
+                    start_index, skip_in_file = index, consumed
+                    break
+
+    records: list[dict[str, Any]] = []
+    skipped = 0
+    next_cursor: str | None = None
+    judge = lambda record: _judge_record(  # noqa: E731 - one binding, read once, below
+        record, cutoff=cutoff, item_id=item_id, outcome=outcome
+    )
+    for path in files[start_index:]:
+        found, matched, file_skipped = _scan_file_backwards(
+            path, judge=judge, skip=skip_in_file, want=limit - len(records)
+        )
+        records.extend(found)
+        skipped += file_skipped
+        if len(records) >= limit:
+            next_cursor = _encode_cursor(path.name, matched)
+            break
+        skip_in_file = 0
+
+    filters = {"item": item_id, "since": since, "outcome": outcome}
+    result = Result(
+        data={
+            "records": records,
+            "filters": filters,
+            "skipped_lines": skipped,
+            "unparseable_lines": skipped,
+            "has_more": next_cursor is not None,
+            "next_cursor": next_cursor,
+            "page_size": limit,
+        }
+    )
     for record in records:
         result.say(_format_record(record))
     if skipped:

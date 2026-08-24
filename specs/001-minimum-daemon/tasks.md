@@ -422,7 +422,8 @@ Six validation tasks are left unchecked because they cannot be performed by anyo
 maintainer, on their machine, with their credentials. They are tracked in
 **[issue #1](https://github.com/jantman/robot-army/issues/1)**, which batches them with any
 later milestone's deferred verification into a single session rather than interrupting each
-milestone. Each would create real effects — real
+milestone. Milestone 002 has since added its two to the same issue, and its section is
+cheapest to run immediately after scenarios 3 and 5 here, while live sessions still exist. Each would create real effects — real
 sessions consuming real subscription quota, real comments on real issues, or changes to the
 user's systemd configuration. They are listed here rather than quietly marked done.
 

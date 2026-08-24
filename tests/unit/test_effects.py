@@ -260,11 +260,26 @@ def test_the_simulated_host_reports_the_same_capabilities_as_the_real_one():
 
 def test_only_effects_py_knows_the_effect_level_exists(config, audit):
     """T147, asserted mechanically. If ``EffectLevel`` were consulted downstream, a new
-    code path could forget the check — which is the drift FR-053 exists to prevent."""
-    allowed = {"effects.py", "config.py", "cli.py", "daemon.py", "operations.py"}
+    code path could forget the check — which is the drift FR-053 exists to prevent.
+
+    The exempt set is exactly the modules that **resolve** a level at startup and pass the
+    wired boundaries down: the config that parses it, the two process entry points, and the
+    operations layer both front ends call. ``web/server.py`` joined them in milestone 002
+    for the same reason ``daemon.py`` is there — it is where the web process's level is
+    decided, once, before any request. Matching on the path rather than the bare filename
+    keeps the exemption precise: a future ``web/foo/config.py`` is not exempt by accident.
+    """
+    allowed = {
+        "effects.py",
+        "config.py",
+        "cli.py",
+        "daemon.py",
+        "operations.py",
+        "web/server.py",
+    }
     offenders: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        if path.name in allowed:
+        if str(path.relative_to(SRC)) in allowed:
             continue
         text = path.read_text(encoding="utf-8")
         if re.search(r"\bEffectLevel\b", text):

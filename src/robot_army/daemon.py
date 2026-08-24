@@ -34,7 +34,7 @@ from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
-from robot_army import db, dispatch, health, poll, reconcile, spool
+from robot_army import control, db, dispatch, health, poll, reconcile, spool
 from robot_army.audit import AuditLog
 from robot_army.effects import Boundaries, EffectLevel
 from robot_army.migrations import SCHEMA_VERSION
@@ -117,17 +117,34 @@ def read_lock_holder(path: Path) -> str | None:
 
 
 def is_locked(path: Path) -> bool:
-    """Non-destructive check: can we take the lock right now?
+    """Non-destructive check: is a daemon holding the lock right now?
 
     Used by lock-aware commands to decide between delegating to a running daemon and
-    acting directly. Takes and immediately releases, so it never blocks the daemon.
+    acting directly, and by the web interface's chrome on every page.
+
+    **The probe takes a SHARED lock, not an exclusive one, and that is load-bearing.**
+    A shared lock still conflicts with the daemon's ``LOCK_EX``, so a running daemon is
+    detected exactly as before — but two concurrent probes no longer conflict with *each
+    other*. With ``LOCK_EX`` they did, and each reported the other's transient hold as "a
+    daemon is running": measured at 1,558 false positives in 2,400 probes across six
+    threads, with no daemon running at all.
+
+    Milestone 001 only ever probed from a single-threaded CLI, so the race had no way to
+    occur. Milestone 002 serves concurrent requests, and the first page load with two
+    requests in flight produced a page claiming the daemon was alive while it was dead —
+    which is precisely what SC-010 forbids.
+
+    The remaining window is the reverse and is negligible: a daemon starting in the
+    microseconds a probe holds its shared lock would fail to acquire and say so loudly.
+    That is a deliberate human action, immediately retryable, with a message naming the
+    lock — as against a misleading page on every concurrent load.
     """
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     except OSError:
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except OSError:
         return True
     else:
@@ -323,6 +340,21 @@ class Daemon:
         }
 
     def job_dispatch(self) -> dict[str, Any]:
+        # FR-033: the pause is read **first**, before any selection, and gates only this
+        # job. Polling, eligibility evaluation, reconciliation and the heartbeat all keep
+        # running — a paused system must stay observably alive, not go quiet.
+        #
+        # Items simply remain `ready` (FR-034). Nothing is rejected, nothing is lost, and
+        # nothing needs unwinding when the pause is lifted.
+        paused = db.get_dispatch_control(self.conn)
+        if paused.paused:
+            self.activity = "dispatch paused"
+            return {
+                "dispatched": 0,
+                "paused": True,
+                "paused_at": paused.paused_at,
+                "paused_by": paused.paused_by,
+            }
         self.activity = "dispatching"
         count = dispatch.select_and_dispatch(
             self.conn,
@@ -394,6 +426,17 @@ class Daemon:
 
     def tick(self) -> dict[str, Any]:
         """One pass over the due jobs. Returns what ran, for ``--once`` and for tests."""
+        # Drain cross-process job requests first (R5), so a marker written a moment ago is
+        # honoured by *this* tick rather than the next one. Unlinking before running means
+        # an interruption costs one ordinary interval; unlinking after would risk running
+        # the job twice, and a duplicate poll spends rate limit the daemon needs.
+        for name in control.take_requests(self.layout, self.audit):
+            if self.request(name):
+                self.audit.record(
+                    "control.request_taken",
+                    outcome="ok",
+                    detail={"job": name, "note": "forced for this tick"},
+                )
         now = time.monotonic()
         ran: dict[str, Any] = {}
         for job in self._jobs:
@@ -413,6 +456,15 @@ class Daemon:
         return ran
 
     def _heartbeat(self) -> None:
+        # FR-036: the pause travels with the liveness signal, so a check that "the daemon
+        # is healthy" cannot be true while it is silently doing nothing.
+        try:
+            paused = db.get_dispatch_control(self.conn).paused
+        except sqlite3.Error:
+            # The heartbeat is the last thing that should fail. An unreadable pause is
+            # reported rather than swallowed, and the beat still gets written.
+            self.audit.error("daemon.heartbeat_pause_read", error="could not read dispatch_control")
+            paused = False
         health.write_heartbeat(
             self.layout.heartbeat_path,
             effect_level=str(self.effect_level),
@@ -420,6 +472,7 @@ class Daemon:
             cycles=self.cycles,
             dispatched=self.dispatched,
             errors=self.errors,
+            dispatch_paused=paused,
             extra={"config": str(self.config.path)},
         )
 

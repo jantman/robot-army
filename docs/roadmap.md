@@ -54,7 +54,7 @@ one; per the constitution's terminal-reachability rule it gains a terminal comma
 
 ## 003 — Trello Source (`specs/003-trello-source/`)
 
-**Status:** not yet specified
+**Status:** specified
 
 Planning doc M3. Card → issue creation, the `needs_info` state with `dateLastActivity` auto-rescan,
 In Progress / Done card lifecycle, and the §11 loop-prevention invariant (one work item ⇒ at most

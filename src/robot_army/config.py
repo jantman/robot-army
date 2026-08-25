@@ -26,11 +26,31 @@ from typing import Any
 from robot_army.effects import EffectLevel
 from robot_army.paths import Layout, default_config_path
 
-#: Things that look like a credential rather than a variable name. GitHub's own token
-#: prefixes plus a generic long-opaque-string check.
+#: Things that look like a credential rather than a variable name.
+#:
+#: The point of this list is that a `*_env` key holds the **name** of an environment
+#: variable, never the value — the repository is public (Principle V), and a config that
+#: "works" with a secret in it is a config that will eventually be pasted somewhere.
+#:
+#: Milestone 003 added the Trello shapes, and the gap they close is worth naming: until
+#: they were added, this guard could not catch a real Trello credential at all. Only the
+#: GitHub prefixes were listed, so a genuine 32-hex API key pasted into `[trello] key_env`
+#: passed validation in silence. The test that was supposed to cover it pasted a
+#: *GitHub*-shaped token into a Trello field, so it exercised the mechanism and proved
+#: nothing about the property.
+#:
+#: The bare-hex entries are safe against the values this config legitimately carries: a
+#: Trello board id is 24 hex characters and a short board link is 8, neither of which is
+#: 32 or 64, and no other string these two sections hold is bare hex of any length.
 _TOKEN_PATTERNS = (
     re.compile(r"^gh[pousr]_[A-Za-z0-9]{20,}$"),
     re.compile(r"^github_pat_[A-Za-z0-9_]{20,}$"),
+    # Trello's API key.
+    re.compile(r"^[0-9a-fA-F]{32}$"),
+    # Trello's classic API token.
+    re.compile(r"^[0-9a-fA-F]{64}$"),
+    # Trello's newer prefixed token.
+    re.compile(r"^ATTA[A-Za-z0-9_-]{20,}$"),
 )
 
 VALID_PERMISSION_MODES = (

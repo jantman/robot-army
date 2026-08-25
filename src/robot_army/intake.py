@@ -973,7 +973,13 @@ def _post_marker_comment(
 
     with db.transaction(conn):
         _record_write(conn, card.id, result, comment_posted_at=utcnow())
-    return Verdict(card.card_id, "created", card.repo_key, card.issue_number)
+    # "comment_posted", **not** "created". This function is reachable twice over: once as
+    # step 4 of a creation, where the caller reports the creation itself, and once on its
+    # own as the retry for a card whose comment was deferred. Reusing "created" for both
+    # made that retry increment `issues_created` in the cycle report, so a pass that filed
+    # no issue at all could claim to have filed one — a report that overstates an outward
+    # action is worse than one that omits it.
+    return Verdict(card.card_id, "comment_posted", card.repo_key, card.issue_number)
 
 
 def _record_write(conn: sqlite3.Connection, card_row_id: int, result: Any, **columns: Any) -> None:
@@ -1280,6 +1286,8 @@ _VERDICT_COUNTER: dict[str, str] = {
     "created": "issues_created",
     "adopted": "recovered",
     "restored": "recovered",
+    # Both of these are a deferred step 4 being finished, not an issue being filed.
+    "comment_posted": "recovered",
     "comment_already_present": "recovered",
     "held": "held",
     "held_and_commented": "held",
@@ -1335,7 +1343,7 @@ def run_cycle(
     evaluated = 0
 
     present = {card.card_id: card for card in outcome.cards}
-    _reconcile_board_contents(
+    dropped = _reconcile_board_contents(
         conn, audit=audit, config=config, present=present, dry_run=dry_run
     )
 
@@ -1379,7 +1387,11 @@ def run_cycle(
         evaluated=evaluated,
         issues_created=counts.get("issues_created", 0),
         held=counts.get("held", 0),
-        dropped=counts.get("dropped", 0),
+        # Counted where cards are actually dropped, which is the reconcile pass above.
+        # ``evaluate_card`` reports a "dropped" verdict too, but the loop below skips rows
+        # already in that state before reaching it — so reading the count from `counts`
+        # alone reported 0 however many cards had just left the board.
+        dropped=dropped + counts.get("dropped", 0),
         recovered=counts.get("recovered", 0) + sum(recovered.values()),
         failed=counts.get("failed", 0),
     )
@@ -1392,8 +1404,11 @@ def _reconcile_board_contents(
     config: Config,
     present: dict[str, Any],
     dry_run: bool,
-) -> None:
+) -> int:
     """Notice cards that have left the board, and refresh the ones still on it.
+
+    Returns the number of cards **transitioned to** ``dropped`` — not counting a linked
+    card that was merely archived, which keeps its mapping and is a different event.
 
     ``poll`` returns only tagged, unarchived cards, so a card that has lost its tag, been
     archived, or been deleted is simply *absent* from the listing — which is the signal
@@ -1403,22 +1418,29 @@ def _reconcile_board_contents(
     """
     trello = config.trello
     if trello is None:  # pragma: no cover - guarded by the caller
-        return
+        return 0
 
+    dropped = 0
     for row in db.list_cards(conn, include_simulated=True, board_id=trello.board_id):
         if row.dry_run != dry_run:
             continue
         card = present.get(row.card_id)
         if card is None:
-            _leave_board(conn, audit, row=row, dry_run=dry_run)
+            dropped += _leave_board(conn, audit, row=row, dry_run=dry_run)
             continue
         _refresh_tracked_card(conn, row=row, card=card)
+    return dropped
 
 
 def _leave_board(
     conn: sqlite3.Connection, audit: AuditLog, *, row: Any, dry_run: bool
-) -> None:
-    """A tracked card that is no longer tagged, or is archived or deleted (FR-025)."""
+) -> int:
+    """A tracked card that is no longer tagged, or is archived or deleted (FR-025).
+
+    Returns ``1`` when the card was actually dropped this pass, so the cycle can report it.
+    A linked card that was archived returns ``0``: it keeps its mapping and is a different
+    event, and counting it as dropped would say the mapping had gone when it had not.
+    """
     if row.state is CardState.LINKED:
         if row.archived_at is None:
             with db.transaction(conn):
@@ -1438,11 +1460,11 @@ def _leave_board(
                 },
                 dry_run=dry_run,
             )
-        return
+        return 0
     if row.state in (CardState.DROPPED, CardState.CREATING):
         # `creating` has no exit to `dropped` by design: an issue may already exist for it,
         # and R6's recovery must still run against the intent.
-        return
+        return 0
     with db.transaction(conn):
         transition_card(
             conn,
@@ -1461,6 +1483,7 @@ def _leave_board(
         detail={"state": str(row.state)},
         dry_run=dry_run,
     )
+    return 1
 
 
 def _refresh_tracked_card(conn: sqlite3.Connection, *, row: Any, card: Any) -> None:

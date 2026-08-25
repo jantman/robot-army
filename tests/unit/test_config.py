@@ -358,9 +358,63 @@ def test_exactly_one_credential_source_is_required(repo_clone, layout, tmp_path,
     assert any(f"exactly one of {what}_env or {what}_file" in p for p in caught.value.problems)
 
 
-def test_a_literal_credential_in_key_env_is_refused(repo_clone, layout, tmp_path):
-    """The env *name* goes in the config, never the secret — the same rule, and the same
-    message, as the [github] equivalents. The repository is public (Principle V)."""
+#: What a **real** Trello credential looks like. Written out per shape rather than as one
+#: example, because the bug this guards against was precisely that the guard had never seen
+#: a Trello-shaped secret: it listed only GitHub's prefixes, so a genuine 32-hex API key
+#: pasted into `key_env` passed validation in silence.
+#:
+#: The test below used to paste a *GitHub*-shaped token into a Trello field, which
+#: exercised the mechanism and proved nothing about the property. That is the more useful
+#: half of the lesson, and the reason these are parametrised by shape.
+REAL_TRELLO_CREDENTIALS = {
+    "api key (32 hex)": "0123456789abcdef0123456789abcdef",
+    "classic token (64 hex)": "f" * 64,
+    "uppercase hex token": "A1B2C3D4" * 8,
+    "ATTA-prefixed token": "ATTA" + "b" * 40,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(REAL_TRELLO_CREDENTIALS))
+def test_a_real_trello_credential_pasted_into_the_config_is_refused(
+    repo_clone, layout, tmp_path, shape
+):
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            trello=trello_section(key_env=REAL_TRELLO_CREDENTIALS[shape]),
+        )
+    assert any("literal credential" in p and "[trello]" in p for p in caught.value.problems)
+
+
+@pytest.mark.parametrize("shape", sorted(REAL_TRELLO_CREDENTIALS))
+def test_a_real_trello_credential_is_refused_in_the_token_field_too(
+    repo_clone, layout, tmp_path, shape
+):
+    """Every string value in the section is checked, not only the four credential keys —
+    so pasting a secret into the wrong key is caught as well as into the right one."""
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            trello=trello_section(token_env=REAL_TRELLO_CREDENTIALS[shape]),
+        )
+    assert any("literal credential" in p for p in caught.value.problems)
+
+
+def test_a_board_id_is_not_mistaken_for_a_credential(repo_clone, layout, tmp_path):
+    """Guards the guard against the other failure: a rule so broad it refuses valid
+    config. A Trello board id is 24 hex characters and a short board link is 8, so neither
+    collides with the 32- and 64-character patterns."""
+    for board_id in ("5f3a0000000000000000000a", "abc12345", "A1B2C3D4E5F6A7B8C9D0E1F2"):
+        config = build(repo_clone, layout, tmp_path, trello=trello_section(board_id=board_id))
+        assert config.trello.board_id == board_id
+
+
+def test_a_github_shaped_token_in_a_trello_field_is_still_refused(repo_clone, layout, tmp_path):
+    """The original case. Kept, because widening the patterns must not narrow them."""
     with pytest.raises(ConfigError) as caught:
         build(
             repo_clone,

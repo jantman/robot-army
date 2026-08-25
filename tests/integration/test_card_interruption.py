@@ -344,3 +344,100 @@ def test_a_linked_card_whose_issue_vanished_raises_an_anomaly_and_keeps_the_mapp
     # And the next ordinary pass still creates nothing.
     cycle(conn, board_config, audit, boundaries)
     assert len(issues_for(boundaries)) == 1
+
+
+# -- the cycle report must not overstate what it did ------------------------
+
+
+def test_a_deferred_comment_retry_is_not_counted_as_an_issue_creation(
+    conn, board_config, audit
+):
+    """`_post_marker_comment` is reachable twice over: as step 4 of a creation, and on its
+    own as the retry for a card whose comment was deferred. Reporting both as ``created``
+    meant a pass that filed no issue at all could claim to have filed one.
+
+    A report that overstates an outward action is worse than one that omits it — the
+    whole value of the cycle summary is that it can be believed.
+    """
+    from robot_army.boundaries import TransportError
+
+    boundaries = make_board_boundaries(audit, cards=[card()])
+    boundaries.card_writer.raise_on_comment = TransportError("board down")
+    first = cycle(conn, board_config, audit, boundaries)
+    assert first.issues_created == 1, "the issue itself was filed and should be counted"
+
+    row = db.list_cards(conn)[0]
+    assert row.state == CardState.LINKED and row.comment_posted_at is None
+
+    # The narrow window the miscount lived in: the recovery sweep's attempt defers, and
+    # the evaluate-loop retry later in the *same* cycle succeeds.
+    writer = boundaries.card_writer
+    real_comment = writer.comment
+    attempts = {"n": 0}
+
+    def flaky(card_id: str, body: str):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise TransportError("still flapping")
+        return real_comment(card_id, body)
+
+    writer.comment = flaky
+    writer.raise_on_comment = None
+    creations_before = len(issues_for(boundaries))
+
+    second = cycle(conn, board_config, audit, boundaries)
+
+    assert attempts["n"] >= 2, "the scenario did not exercise the deferred retry"
+    assert len(issues_for(boundaries)) == creations_before, "no issue should have been filed"
+    assert second.issues_created == 0, "a comment retry was reported as an issue creation"
+    assert second.recovered >= 1, "finishing a deferred step 4 is a recovery, and is reported"
+    assert len(markers(boundaries)) == 1, "and the comment landed exactly once"
+
+
+def test_dropped_cards_are_counted_in_the_cycle_report(conn, board_config, audit):
+    """``PollOutcome.dropped`` reported 0 however many cards had just left the board: the
+    only producer of a ``dropped`` verdict is ``evaluate_card``, and the cycle skips rows
+    already in that state before reaching it. The cards are actually dropped earlier, in
+    the reconcile pass, which counted nothing."""
+    import dataclasses
+
+    boundaries = make_board_boundaries(
+        audit,
+        cards=[
+            make_card("card-1", body="no repository named here"),
+            make_card("card-2", body="nor here"),
+        ],
+    )
+    cycle(conn, board_config, audit, boundaries)
+    assert all(row.state == CardState.NEEDS_INFO for row in db.list_cards(conn))
+
+    # Both lose their tag, which is how a card leaves: `poll` simply stops returning it.
+    for index in (0, 1):
+        boundaries.card_reader.cards[index] = dataclasses.replace(
+            boundaries.card_reader.cards[index], label_ids=()
+        )
+    outcome = cycle(conn, board_config, audit, boundaries)
+
+    assert [row.state for row in db.list_cards(conn)] == [CardState.DROPPED] * 2
+    assert outcome.dropped == 2
+
+    # And a later pass does not re-count cards that were already dropped.
+    assert cycle(conn, board_config, audit, boundaries).dropped == 0
+
+
+def test_an_archived_linked_card_is_not_counted_as_dropped(conn, board_config, audit):
+    """It keeps its mapping, so it is a different event. Counting it as dropped would say
+    the mapping had gone when it had not."""
+    import dataclasses
+
+    boundaries = make_board_boundaries(audit, cards=[card()])
+    cycle(conn, board_config, audit, boundaries)
+
+    boundaries.card_reader.cards[0] = dataclasses.replace(
+        boundaries.card_reader.cards[0], closed=True
+    )
+    outcome = cycle(conn, board_config, audit, boundaries)
+
+    row = db.list_cards(conn)[0]
+    assert row.state == CardState.LINKED and row.archived_at is not None
+    assert outcome.dropped == 0

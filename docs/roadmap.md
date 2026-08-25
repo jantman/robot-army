@@ -16,7 +16,7 @@ planning document already draw the seams; this roadmap follows them.
 
 ## 001 — Minimum Daemon (`specs/001-minimum-daemon/`)
 
-**Status:** specified
+**Status:** implemented (#2)
 
 Planning doc M1. The end-to-end loop with no Trello and no web UI: watch GitHub for labelled
 issues, prepare an isolated worktree, launch a real Claude Code session in the running kitty
@@ -32,7 +32,7 @@ session accounting, and automatic worktree cleanup.
 
 ## 002 — Web UI & HTTP API (`specs/002-web-ui/`)
 
-**Status:** specified
+**Status:** implemented (#4)
 
 Planning doc M2. Active-sessions, queue, and interrupted views; resume / abandon / restart / attach
 controls with the resume-decision signals from §8; the audit log with clickable issue, card, and PR
@@ -54,7 +54,7 @@ one; per the constitution's terminal-reachability rule it gains a terminal comma
 
 ## 003 — Trello Source (`specs/003-trello-source/`)
 
-**Status:** specified
+**Status:** implemented (#6)
 
 Planning doc M3. Card → issue creation, the `needs_info` state with `dateLastActivity` auto-rescan,
 In Progress / Done card lifecycle, and the §11 loop-prevention invariant (one work item ⇒ at most
@@ -70,7 +70,7 @@ throwaway board.
 
 ## 004 — Concurrency & Polish (`specs/004-concurrency-polish/`)
 
-**Status:** implemented
+**Status:** implemented (#7)
 
 Planning doc M4. The full concurrency model — global and per-repo caps, counting the author's own
 out-of-band sessions against the global cap, queue position — plus per-repo configuration
@@ -120,7 +120,9 @@ the fallback.**
 
 ## 005 — Whatever survives contact with reality
 
-Planning doc M5. Not planned. Parked items from §16 that are still genuinely open — kitty control
+**Status:** not specified
+
+Planning doc M5. Parked items from §16 that are still genuinely open — kitty control
 socket hardening, multi-machine dispatch, scheduled/proactive work — land here or get dropped.
 
 ---

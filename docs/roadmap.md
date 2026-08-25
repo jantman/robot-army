@@ -70,7 +70,7 @@ throwaway board.
 
 ## 004 — Concurrency & Polish (`specs/004-concurrency-polish/`)
 
-**Status:** not yet specified
+**Status:** specified
 
 Planning doc M4. The full concurrency model — global and per-repo caps, counting the author's own
 out-of-band sessions against the global cap, queue position — plus per-repo configuration
@@ -78,6 +78,20 @@ overrides, priority and ordering modes, worktree cleanup policy, and event notif
 
 Depends on 001's session registry scan, which already does most of the observation work this
 milestone needs; 004 is largely policy layered on top of it.
+
+Four decisions the planning document leaves open in §16 were taken during specification, each
+recorded with its reasoning in the spec's Assumptions. **Worktree cleanup triggers on issue close
+and is opt-in** — issue close is the trigger §6's 499 MB measurement argues for, and the
+constitution's rule that irreversible actions must not be reachable by default settles the opt-in
+half. **The per-repo cap defaults to one**, per §10. **Aging is not built**, per §5's own deferral,
+so starvation under repository-priority ordering is accepted and documented rather than mitigated.
+And **notifications reuse the health channel** rather than introducing a second delivery mechanism.
+
+The global concurrency cap's *value* is deliberately not decided here. §16 lists it as open; the
+spec treats it as configuration with a documented default, because only running the system answers
+it. A branch guard is added beyond what §6 describes: git refuses to remove a dirty worktree for
+free, but nothing stops a branch deletion from destroying unpushed commits, so that check has to be
+made explicitly.
 
 ## 005 — Whatever survives contact with reality
 

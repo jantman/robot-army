@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 
 from robot_army.boundaries import (
+    CardSourceReader,
+    CardSourceWriter,
     Display,
     HookRunner,
     IssueSourceReader,
@@ -30,6 +32,8 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "robot_army"
 EXPECTED = {
     EffectLevel.PLAN: {
         "issue_reader": "real",
+        "card_reader": "real",
+        "card_writer": "simulated",
         "issue_writer": "simulated",
         "version_control": "simulated",
         "hook_runner": "simulated",
@@ -38,6 +42,8 @@ EXPECTED = {
     },
     EffectLevel.LOCAL: {
         "issue_reader": "real",
+        "card_reader": "real",
+        "card_writer": "simulated",
         "issue_writer": "simulated",
         "version_control": "real",
         "hook_runner": "real",
@@ -46,6 +52,8 @@ EXPECTED = {
     },
     EffectLevel.NO_REMOTE: {
         "issue_reader": "real",
+        "card_reader": "real",
+        "card_writer": "simulated",
         "issue_writer": "simulated",
         "version_control": "real",
         "hook_runner": "real",
@@ -54,6 +62,8 @@ EXPECTED = {
     },
     EffectLevel.LIVE: {
         "issue_reader": "real",
+        "card_reader": "real",
+        "card_writer": "real",
         "issue_writer": "real",
         "version_control": "real",
         "hook_runner": "real",
@@ -65,6 +75,8 @@ EXPECTED = {
 REAL_CLASSES = {
     "issue_reader": "GitHubReader",
     "issue_writer": "GitHubWriter",
+    "card_reader": "TrelloCardReader",
+    "card_writer": "TrelloCardWriter",
     "version_control": "GitVersionControl",
     "hook_runner": "SubprocessHookRunner",
     "session_host": "DtachHost",
@@ -72,6 +84,7 @@ REAL_CLASSES = {
 }
 SIMULATED_CLASSES = {
     "issue_writer": "SimulatedIssueWriter",
+    "card_writer": "SimulatedCardWriter",
     "version_control": "SimulatedVersionControl",
     "hook_runner": "SimulatedHookRunner",
     "session_host": "SimulatedSessionHost",
@@ -80,8 +93,8 @@ SIMULATED_CLASSES = {
 
 
 @pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
-def test_every_cell_of_the_table(level, config, audit):
-    wired = wire(level, config, audit)
+def test_every_cell_of_the_table(level, board_config, audit):
+    wired = wire(level, board_config, audit)
     for boundary, expected in EXPECTED[level].items():
         actual = type(getattr(wired, boundary)).__name__
         want = REAL_CLASSES[boundary] if expected == "real" else SIMULATED_CLASSES[boundary]
@@ -106,7 +119,7 @@ def test_there_is_no_simulated_issue_reader_anywhere():
     assert not hasattr(github, "SimulatedIssueReader")
 
 
-def test_the_table_covers_exactly_the_six_boundaries():
+def test_the_table_covers_exactly_the_eight_boundaries():
     assert set(REAL_AT) == set(REAL_CLASSES)
     assert set(REAL_AT) == set(EXPECTED[EffectLevel.LIVE])
 
@@ -124,9 +137,16 @@ def test_live_is_the_only_level_that_is_not_simulated():
         assert level.is_simulated is True
 
 
-def test_plan_performs_no_writes_of_any_kind(config, audit):
-    wired = wire(EffectLevel.PLAN, config, audit)
-    for boundary in ("issue_writer", "version_control", "hook_runner", "session_host", "display"):
+def test_plan_performs_no_writes_of_any_kind(board_config, audit):
+    wired = wire(EffectLevel.PLAN, board_config, audit)
+    for boundary in (
+        "issue_writer",
+        "card_writer",
+        "version_control",
+        "hook_runner",
+        "session_host",
+        "display",
+    ):
         assert type(getattr(wired, boundary)).__name__.startswith("Simulated")
 
 
@@ -142,22 +162,24 @@ def test_the_wired_set_describes_itself_for_the_startup_log(config, audit):
 
 
 @pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
-def test_every_wired_implementation_satisfies_its_protocol(level, config, audit):
-    wired = wire(level, config, audit)
+def test_every_wired_implementation_satisfies_its_protocol(level, board_config, audit):
+    wired = wire(level, board_config, audit)
     assert isinstance(wired.issue_reader, IssueSourceReader)
     assert isinstance(wired.issue_writer, IssueSourceWriter)
+    assert isinstance(wired.card_reader, CardSourceReader)
+    assert isinstance(wired.card_writer, CardSourceWriter)
     assert isinstance(wired.version_control, VersionControl)
     assert isinstance(wired.hook_runner, HookRunner)
     assert isinstance(wired.session_host, SessionHost)
     assert isinstance(wired.display, Display)
 
 
-def test_real_and_simulated_pairs_have_the_same_method_surface(config, audit):
+def test_real_and_simulated_pairs_have_the_same_method_surface(board_config, audit):
     """The simulated path must not be able to diverge from the real one by *omission* —
     a missing method would surface as an AttributeError only on the code path that
     happens to call it."""
-    live = wire(EffectLevel.LIVE, config, audit)
-    plan = wire(EffectLevel.PLAN, config, audit)
+    live = wire(EffectLevel.LIVE, board_config, audit)
+    plan = wire(EffectLevel.PLAN, board_config, audit)
 
     def surface(obj: object) -> set[str]:
         return {
@@ -166,7 +188,14 @@ def test_real_and_simulated_pairs_have_the_same_method_surface(config, audit):
             if not name.startswith("_") and callable(getattr(obj, name, None))
         }
 
-    for boundary in ("issue_writer", "version_control", "hook_runner", "session_host", "display"):
+    for boundary in (
+        "issue_writer",
+        "card_writer",
+        "version_control",
+        "hook_runner",
+        "session_host",
+        "display",
+    ):
         real = surface(getattr(live, boundary))
         simulated = surface(getattr(plan, boundary))
         missing = real - simulated
@@ -174,11 +203,19 @@ def test_real_and_simulated_pairs_have_the_same_method_surface(config, audit):
 
 
 @pytest.mark.parametrize(
-    "boundary", ["issue_writer", "version_control", "hook_runner", "session_host", "display"]
+    "boundary",
+    [
+        "issue_writer",
+        "card_writer",
+        "version_control",
+        "hook_runner",
+        "session_host",
+        "display",
+    ],
 )
-def test_matching_methods_accept_the_same_arguments(boundary, config, audit):
-    live = getattr(wire(EffectLevel.LIVE, config, audit), boundary)
-    plan = getattr(wire(EffectLevel.PLAN, config, audit), boundary)
+def test_matching_methods_accept_the_same_arguments(boundary, board_config, audit):
+    live = getattr(wire(EffectLevel.LIVE, board_config, audit), boundary)
+    plan = getattr(wire(EffectLevel.PLAN, board_config, audit), boundary)
     for name in dir(live):
         if name.startswith("_"):
             continue
@@ -347,3 +384,43 @@ def test_the_boundaries_dataclass_is_frozen():
     assert dataclasses.fields(Boundaries)
     params = Boundaries.__dataclass_params__
     assert params.frozen is True
+
+
+# -- the board pair (milestone 003) -----------------------------------------
+
+
+@pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
+def test_board_reads_are_real_at_every_level(level, board_config, audit):
+    """FR-038, and the same reasoning as FR-052: a dry run that faked its board reads
+    would tell you nothing about which cards would be acted on."""
+    assert is_real("card_reader", level)
+    assert type(wire(level, board_config, audit).card_reader).__name__ == "TrelloCardReader"
+
+
+@pytest.mark.parametrize("level", [EffectLevel.PLAN, EffectLevel.LOCAL, EffectLevel.NO_REMOTE])
+def test_no_board_write_happens_below_live(level, board_config, audit):
+    """FR-039. ``no-remote`` is the interesting one: sessions are real there, and the
+    board must still be untouched."""
+    assert not is_real("card_writer", level)
+    assert type(wire(level, board_config, audit).card_writer).__name__ == "SimulatedCardWriter"
+
+
+@pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
+def test_an_unconfigured_installation_wires_no_board_at_all(level, config, audit):
+    """FR-001, structurally. Not a disabled client that call sites must remember to skip:
+    no client exists, so no board request can be constructed by accident."""
+    wired = wire(level, config, audit)
+    assert wired.card_reader is None
+    assert wired.card_writer is None
+    described = wired.describe()
+    assert described["card_reader"] == "NoneType"
+    assert described["card_writer"] == "NoneType"
+
+
+def test_there_is_no_simulated_card_reader_anywhere():
+    """Its absence means a bug that tries to fake board reads fails to *import*."""
+    from robot_army.boundaries import trello
+
+    names = sorted(name for name in dir(trello) if "Simulated" in name)
+    assert names == ["SimulatedCardWriter"], names
+    assert not hasattr(trello, "SimulatedCardReader")

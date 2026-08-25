@@ -28,6 +28,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import queue
+import re
 import signal
 import socket
 import sys
@@ -604,6 +605,18 @@ def view_interrupted(app: WebApp, ctx: Context, request: Request, params: dict[s
     return pages.interrupted_view(ctx, include_simulated=request.include_simulated)
 
 
+def view_cards(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
+    return pages.cards_view(ctx, include_simulated=request.include_simulated)
+
+
+def view_card_confirm(
+    app: WebApp, ctx: Context, request: Request, params: dict[str, Any]
+) -> View:
+    return pages.card_confirm_view(
+        ctx, params["card_id"], include_simulated=request.include_simulated
+    )
+
+
 def view_anomalies(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
     return pages.anomalies_view(ctx, include_simulated=request.include_simulated)
 
@@ -792,6 +805,33 @@ def _job_action(name: str) -> Callable[..., Redirect]:
     return handler
 
 
+def action_rescan(
+    app: WebApp, ctx: Context, request: Request, params: dict[str, Any]
+) -> Redirect:
+    """Force a re-evaluation of held cards (FR-024).
+
+    Goes through ``operations.rescan`` rather than reimplementing the marker write, which
+    is FR-047's rule and the reason the button and the verb cannot answer differently —
+    including in their refusals, which this route does not re-derive.
+    """
+    card_id = params["card_id"]
+
+    def body(outcome: dict[str, Any]) -> dict[str, Any]:
+        require_effect_agreement(ctx, "rescan")
+        return _report(operations.rescan(ctx, card_id), extra={"card_id": card_id})
+
+    return _perform(
+        ctx,
+        request,
+        action="rescan",
+        entity_type="card",
+        entity_id=card_id,
+        location=_referring_view(request, "/cards"),
+        message="rescanned",
+        body=body,
+    )
+
+
 # -- the route table --------------------------------------------------------
 
 
@@ -806,6 +846,11 @@ class Route:
     terminal: str | None = None
 
 
+#: What a Trello card id looks like. Deliberately strict: a route parameter that reaches a
+#: page is one an attacker would like to control, and the board only ever issues these.
+_CARD_ID = re.compile(r"[A-Za-z0-9]{8,32}")
+
+
 def _seg(path: str) -> tuple[str, ...]:
     return tuple(part for part in path.strip("/").split("/") if part)
 
@@ -818,6 +863,9 @@ ROUTES: tuple[Route, ...] = (
     Route(GET, _seg("/active"), view_active, terminal="status"),
     Route(GET, _seg("/queue"), view_queue, terminal="status"),
     Route(GET, _seg("/interrupted"), view_interrupted, terminal="status"),
+    Route(GET, _seg("/cards"), view_cards, terminal="cards"),
+    Route(GET, ("card", "<card_id>", "confirm", "rescan"), view_card_confirm, terminal="cards"),
+    Route(POST, ("card", "<card_id>", "rescan"), action_rescan, terminal="rescan"),
     Route(GET, _seg("/anomalies"), view_anomalies, terminal="anomalies"),
     Route(GET, _seg("/log"), view_log, terminal="log"),
     Route(GET, ("item", "<id>"), view_item, terminal="show"),
@@ -912,6 +960,13 @@ def _bind(pattern: tuple[str, ...], segments: tuple[str, ...]) -> dict[str, Any]
                 params["id"] = int(actual)
             except ValueError:
                 return None
+        elif expected == "<card_id>":
+            # A card id is an opaque board identifier, not a number of ours. Constrained to
+            # what the board actually issues — 24 hex characters — so a path segment can
+            # never carry a slash, a traversal, or markup into a page.
+            if not _CARD_ID.fullmatch(actual):
+                return None
+            params["card_id"] = actual
         elif expected == "<action>":
             if actual not in ITEM_ACTIONS:
                 return None

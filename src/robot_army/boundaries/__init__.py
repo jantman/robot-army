@@ -1,4 +1,4 @@
-"""The five seams that touch the outside world (contracts/boundaries.md).
+"""The six seams that touch the outside world (contracts/boundaries.md, card-source.md).
 
 FR-053 requires effect levels to be enforced *here* rather than at call sites, and gives
 the reason: scattered ``if dry_run:`` checks drift as new code forgets them, cannot be
@@ -12,7 +12,15 @@ Principle I forbids; see the plan's Complexity Tracking table.
 Note the asymmetry in ``IssueSource``: it is split into a reader and a writer so the
 effect table can treat them differently. There is deliberately **no**
 ``SimulatedIssueReader`` — its absence means a bug that tries to fake reads fails to
-import rather than quietly returning fixtures.
+import rather than quietly returning fixtures. ``CardSource`` is split the same way, for
+the same reason, and has no simulated reader either.
+
+**``CardSource`` is a sixth seam, not a second ``IssueSource``** (research.md R1). A
+common ``poll() -> [SourceItem]`` could be written — both sides have an id, a title, a
+body and labels — but no caller ever holds one where it could just as well hold the other:
+GitHub is where *dispatchable work* is read from, Trello is where *intake* is read from,
+and its output is a GitHub issue. Two implementations that are never used polymorphically
+are the strategy interface with one caller that Principle I forbids.
 """
 
 from __future__ import annotations
@@ -32,6 +40,66 @@ class Issue:
     labels: tuple[str, ...]
     author: str
     state: str  # "open" | "closed"
+
+
+@dataclass(frozen=True, slots=True)
+class Card:
+    """One card as the board reports it (contracts/card-source.md).
+
+    ``last_activity`` is carried as the **string the API returned**, not a parsed
+    datetime. It is used only for equality against the stored baseline (R9), and parsing
+    it would invite a timezone bug into a comparison that does not need one.
+
+    ``closed`` is Trello's word for archived, kept rather than renamed so that anyone
+    comparing this against an API response is reading the same word.
+    """
+
+    card_id: str
+    board_id: str
+    url: str
+    title: str
+    body: str
+    label_ids: tuple[str, ...] = ()
+    list_id: str = ""
+    last_activity: str = ""
+    closed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BoardInfo:
+    """What the startup preconditions are checked against (R10, R11).
+
+    ``member_ids`` is carried to be **logged, not tested**. Sole membership is deliberately
+    not a precondition: who else may see the author's own private board is the author's
+    decision, and a system that refused to run over it would be building the access policy
+    Principle II forbids. The list is recorded so an unexpected card can be traced.
+
+    ``labels`` and ``lists`` map name to id, because resolving the configured names once at
+    startup makes the per-card filter an id comparison — cheaper, and immune to a label
+    being renamed mid-run.
+    """
+
+    board_id: str
+    name: str
+    permission_level: str
+    member_ids: tuple[str, ...] = ()
+    labels: dict[str, str] = field(default_factory=dict)
+    lists: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CardWriteResult:
+    """What a board write returns: its own result, and the card's refreshed activity.
+
+    Both halves travel together because R9's loop closes only if they do. Commenting on a
+    card changes its ``dateLastActivity``, which is the rescan trigger — a writer that
+    performed the write and left the caller to re-read would reopen the very loop this
+    rule exists to close. The caller stores ``last_activity`` in the same transaction that
+    records the write.
+    """
+
+    url: str | None
+    last_activity: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,14 +224,89 @@ class IssueSourceReader(Protocol):
 
     def open_pr_for_branch(self, repo_key: str, branch: str) -> PullRequest | None: ...
 
+    def list_issues_since(
+        self, repo_key: str, since: str, *, author: str | None = None, limit: int = 100
+    ) -> list[Issue]:
+        """Issues created since a timestamp — the immediately consistent recovery read.
+
+        Listing rather than search, deliberately (R6): the search index lags by minutes,
+        so an issue created seconds before a crash would be invisible to it, producing
+        exactly the duplicate the recovery exists to prevent.
+        """
+        ...
+
     def list_owned_repos(self) -> list[RepoRef]: ...
 
 
 @runtime_checkable
 class IssueSourceWriter(Protocol):
-    """``comment`` is the only write in this milestone."""
+    """Writes to the issue source. Selected only at ``live``."""
 
     def comment(self, repo_key: str, number: int, body: str) -> str: ...
+
+    def create_issue(self, repo_key: str, title: str, body: str) -> Issue:
+        """Create one issue and return it **as the source reported it**.
+
+        The mapping is written from this response, not from a request that was assumed to
+        have worked, which is what makes the number and URL in the ``cards`` row facts
+        rather than predictions.
+
+        There is deliberately **no parameter that could carry a label** (FR-015). The
+        dispatch label is the human gate, and the gate is absent from the interface rather
+        than defended by a rule someone has to remember not to break — a caller that wants
+        to label the issue it just filed cannot express the wish.
+        """
+        ...
+
+
+@runtime_checkable
+class CardSourceReader(Protocol):
+    """Reads from the intake board. Real at **every** effect level (FR-038).
+
+    A dry run that fakes its reads tells you nothing about which cards would be acted on,
+    which is the main thing you want to check. As with ``IssueSourceReader`` there is no
+    simulated counterpart, so a bug that tries to fake board reads fails to import.
+    """
+
+    def board_info(self) -> BoardInfo:
+        """The board's name, privacy, members, labels and lists — one startup call."""
+        ...
+
+    def poll(self, board_id: str, label_id: str) -> list[Card]:
+        """**All** currently tagged, unarchived cards. Not a delta.
+
+        There is no usable conditional-request economy on this endpoint (R13), which
+        argues for a longer interval rather than a cleverer mechanism — hence a 300-second
+        default against GitHub's 60.
+        """
+        ...
+
+    def get_card(self, card_id: str) -> Card | None:
+        """One card as it is *now*. The freshness re-read a move check depends on."""
+        ...
+
+    def card_comments(self, card_id: str) -> list[str]:
+        """Comment bodies, newest first. Exists only for R7's recovery path.
+
+        **Not called when a mapping row exists.** That is §11's "don't parse comments as
+        the authoritative source in normal operation" expressed as a call-site rule, with
+        a test behind it.
+        """
+        ...
+
+
+@runtime_checkable
+class CardSourceWriter(Protocol):
+    """Writes to the intake board. Selected only at ``live`` (FR-039).
+
+    Neither call decides whether it is *allowed*. The check against ``placed_list_id``
+    (R12) belongs to the caller, because it is policy about the author's intent rather
+    than a property of the transport.
+    """
+
+    def comment(self, card_id: str, body: str) -> CardWriteResult: ...
+
+    def move(self, card_id: str, list_id: str) -> CardWriteResult: ...
 
 
 @runtime_checkable
@@ -271,7 +414,12 @@ class Display(Protocol):
 
 
 __all__ = [
+    "BoardInfo",
     "BoundaryError",
+    "Card",
+    "CardSourceReader",
+    "CardSourceWriter",
+    "CardWriteResult",
     "Display",
     "DisplayHandle",
     "HookResult",

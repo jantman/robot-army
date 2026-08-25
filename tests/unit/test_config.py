@@ -278,3 +278,149 @@ def test_an_unknown_web_key_is_a_warning_not_an_error(repo_clone, layout, tmp_pa
     milestone still starts."""
     config = build(repo_clone, layout, tmp_path, web={"tls": True})
     assert any("[web].tls" in w for w in config.warnings)
+
+
+# -- [trello] (milestone 003) -----------------------------------------------
+
+
+def trello_section(**overrides):
+    """A minimally valid ``[trello]`` table, so each test overrides only what it tests."""
+    base = {
+        "board_id": "5f3a0000000000000000000a",
+        "key_env": "TRELLO_TEST_KEY",
+        "token_env": "TRELLO_TEST_TOKEN",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_no_trello_section_leaves_the_source_inert(repo_clone, layout, tmp_path):
+    """FR-001. ``None`` rather than a disabled-but-present config: an unconfigured
+    installation has no section to read, so no board request can be constructed."""
+    config = build(repo_clone, layout, tmp_path)
+    assert config.trello is None
+
+
+def test_trello_defaults_match_the_contract(repo_clone, layout, tmp_path):
+    config = build(repo_clone, layout, tmp_path, trello=trello_section())
+    assert config.trello is not None
+    assert config.trello.board_id == "5f3a0000000000000000000a"
+    assert config.trello.label == "AI-task"
+    assert config.trello.in_progress_list == "In Progress"
+    assert config.trello.done_list == "Done"
+    # 300, not GitHub's 60: there is no conditional-request economy here (R13).
+    assert config.trello.poll_seconds == 300
+    assert config.trello.timeout_seconds == 20
+    assert config.trello.max_retries == 4
+    assert config.trello.api_base == "https://api.trello.com/1"
+
+
+def test_trello_overrides_are_honoured(repo_clone, layout, tmp_path):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        trello=trello_section(
+            label="triage",
+            in_progress_list="Doing",
+            done_list="Shipped",
+            poll_seconds=60,
+            api_base="https://api.trello.example/1/",
+        ),
+    )
+    assert config.trello.label == "triage"
+    assert config.trello.in_progress_list == "Doing"
+    assert config.trello.done_list == "Shipped"
+    assert config.trello.poll_seconds == 60
+    # The trailing slash is stripped, as it is for [github] api_base.
+    assert config.trello.api_base == "https://api.trello.example/1"
+
+
+def test_a_trello_section_without_a_board_id_is_rejected(repo_clone, layout, tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, trello=trello_section(board_id=""))
+    assert any("board_id is required" in p for p in caught.value.problems)
+
+
+@pytest.mark.parametrize("what", ["key", "token"])
+def test_exactly_one_credential_source_is_required(repo_clone, layout, tmp_path, what):
+    """Neither is a board that cannot authenticate; both is an ambiguity about which
+    one is in force, and silently preferring one would make the other a lie."""
+    section = trello_section()
+    section.pop(f"{what}_env")
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, trello=section)
+    assert any(f"exactly one of {what}_env or {what}_file" in p for p in caught.value.problems)
+
+    both = trello_section(**{f"{what}_file": str(tmp_path / "secret")})
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, trello=both)
+    assert any(f"exactly one of {what}_env or {what}_file" in p for p in caught.value.problems)
+
+
+def test_a_literal_credential_in_key_env_is_refused(repo_clone, layout, tmp_path):
+    """The env *name* goes in the config, never the secret — the same rule, and the same
+    message, as the [github] equivalents. The repository is public (Principle V)."""
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            trello=trello_section(key_env="ghp_" + "a" * 36),
+        )
+    assert any("literal credential" in p and "[trello]" in p for p in caught.value.problems)
+
+
+def test_a_credential_file_must_exist(repo_clone, layout, tmp_path):
+    section = trello_section(token_file=str(tmp_path / "absent"))
+    section.pop("token_env")
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, trello=section)
+    assert any("token_file does not exist" in p for p in caught.value.problems)
+
+
+def test_a_credential_file_must_be_mode_0600(repo_clone, layout, tmp_path):
+    secret = tmp_path / "trello-token"
+    secret.write_text("s3cret\n", encoding="utf-8")
+    secret.chmod(0o644)
+    section = trello_section(token_file=str(secret))
+    section.pop("token_env")
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, trello=section)
+    assert any("must be mode 0600" in p for p in caught.value.problems)
+
+
+def test_a_mode_0600_credential_file_is_accepted_and_read_lazily(repo_clone, layout, tmp_path):
+    secret = tmp_path / "trello-token"
+    secret.write_text("s3cret\n", encoding="utf-8")
+    secret.chmod(0o600)
+    section = trello_section(token_file=str(secret))
+    section.pop("token_env")
+    config = build(repo_clone, layout, tmp_path, trello=section)
+    assert config.trello.token_file == secret
+    # Resolved when needed, never stored in the config object itself.
+    assert config.trello.read_token() == "s3cret"
+
+
+def test_an_unknown_trello_key_is_an_error_not_a_warning(repo_clone, layout, tmp_path):
+    """Unlike the top level. A typo in a board section that exists silently polls the
+    wrong thing and looks healthy while doing it — the [repos.*] rule, for the same
+    reason."""
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, trello=trello_section(labl="AI-task"))
+    assert any("unknown key 'labl'" in p for p in caught.value.problems)
+
+
+def test_a_non_integer_trello_poll_interval_is_rejected(repo_clone, layout, tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, trello=trello_section(poll_seconds="300"))
+    assert any("[trello] poll_seconds must be an integer" in p for p in caught.value.problems)
+
+
+def test_reading_a_credential_from_an_empty_variable_is_an_error(repo_clone, layout, tmp_path):
+    import os
+
+    os.environ.pop("TRELLO_TEST_KEY", None)
+    config = build(repo_clone, layout, tmp_path, trello=trello_section())
+    with pytest.raises(ConfigError):
+        config.trello.read_key()

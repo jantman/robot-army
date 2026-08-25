@@ -16,6 +16,8 @@ Boundary             plan        local       no-remote    live
 ===================  ==========  ==========  ===========  ========
 IssueSource reads    real        real        real         real
 IssueSource writes   simulated   simulated   simulated    real
+CardSource reads     real        real        real         real
+CardSource writes    simulated   simulated   simulated    real
 VersionControl       simulated   real        real         real
 HookRunner           simulated   real        real         real
 SessionHost          simulated   simulated   real         real
@@ -33,6 +35,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from robot_army.boundaries import (
+    CardSourceReader,
+    CardSourceWriter,
     Display,
     HookRunner,
     IssueSourceReader,
@@ -65,6 +69,8 @@ class EffectLevel(StrEnum):
 REAL_AT: dict[str, frozenset[EffectLevel]] = {
     "issue_reader": frozenset(EffectLevel),  # FR-052: always real, at every level
     "issue_writer": frozenset({EffectLevel.LIVE}),
+    "card_reader": frozenset(EffectLevel),  # FR-038: always real, at every level
+    "card_writer": frozenset({EffectLevel.LIVE}),  # FR-039: no board write below live
     "version_control": frozenset({EffectLevel.LOCAL, EffectLevel.NO_REMOTE, EffectLevel.LIVE}),
     "hook_runner": frozenset({EffectLevel.LOCAL, EffectLevel.NO_REMOTE, EffectLevel.LIVE}),
     "session_host": frozenset({EffectLevel.NO_REMOTE, EffectLevel.LIVE}),
@@ -86,6 +92,8 @@ class Boundaries:
     level: EffectLevel
     issue_reader: IssueSourceReader
     issue_writer: IssueSourceWriter
+    card_reader: CardSourceReader | None
+    card_writer: CardSourceWriter | None
     version_control: VersionControl
     hook_runner: HookRunner
     session_host: SessionHost
@@ -94,10 +102,15 @@ class Boundaries:
     def describe(self) -> dict[str, str]:
         """Which implementation each boundary got, for the startup log (FR-057)."""
         return {
+            # ``NoneType`` for the board pair on an installation with no ``[trello]``
+            # section, which is exactly what FR-001 means by inert and is worth seeing in
+            # the startup record rather than omitting.
             name: type(getattr(self, name)).__name__
             for name in (
                 "issue_reader",
                 "issue_writer",
+                "card_reader",
+                "card_writer",
                 "version_control",
                 "hook_runner",
                 "session_host",
@@ -121,10 +134,31 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
     )
     from robot_army.boundaries.hooks import SimulatedHookRunner, SubprocessHookRunner
     from robot_army.boundaries.kitty import KittyDisplay, SimulatedDisplay
+    from robot_army.boundaries.trello import (
+        SimulatedCardWriter,
+        TrelloCardReader,
+        TrelloCardWriter,
+    )
 
     # There is no SimulatedIssueReader, deliberately: no level ever selects one, and its
     # absence means a bug that tries to fake reads fails to import.
     reader = GitHubReader(config, audit)
+
+    # The board pair is ``None`` when no board is configured. This is the one boundary that
+    # can be absent, and the absence is the requirement (FR-001): there is nothing to wire,
+    # so nothing downstream can construct a request by accident.
+    #
+    # There is no SimulatedCardReader, for the same reason there is no SimulatedIssueReader:
+    # no level selects one, so a bug that tries to fake board reads fails to import.
+    card_reader: CardSourceReader | None = None
+    card_writer: CardSourceWriter | None = None
+    if config.trello is not None:
+        card_reader = TrelloCardReader(config, audit)
+        card_writer = (
+            TrelloCardWriter(config, audit)
+            if is_real("card_writer", level)
+            else SimulatedCardWriter(audit)
+        )
 
     writer: IssueSourceWriter = (
         GitHubWriter(config, audit)
@@ -156,6 +190,8 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
         level=level,
         issue_reader=reader,
         issue_writer=writer,
+        card_reader=card_reader,
+        card_writer=card_writer,
         version_control=vcs,
         hook_runner=hooks,
         session_host=host,

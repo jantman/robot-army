@@ -116,6 +116,55 @@ class GitHubConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TrelloConfig:
+    """The board, absent by default (FR-001, contracts/config.md).
+
+    ``config.trello is None`` is what makes an unconfigured installation *inert*: not
+    "configured with empty values and skipped at the call site", but with no section to
+    read, so no board request is ever constructed.
+
+    ``label`` is Trello's own word for what spec.md calls the *tag*. The spec keeps the
+    two apart to protect the reader — this project already has a `label`, the GitHub one
+    that is the human gate — and this key follows the API to protect the implementer.
+
+    ``poll_seconds`` defaults to 300 rather than GitHub's 60 because there is no
+    conditional-request economy on the endpoint we need (R13): every board poll costs a
+    real request, and a card the author just wrote is not urgent — nothing dispatches from
+    it until a human labels the issue it becomes.
+    """
+
+    board_id: str = ""
+    label: str = "AI-task"
+    in_progress_list: str = "In Progress"
+    done_list: str = "Done"
+    poll_seconds: int = 300
+    timeout_seconds: int = 20
+    max_retries: int = 4
+    api_base: str = "https://api.trello.com/1"
+    key_env: str | None = None
+    key_file: Path | None = None
+    token_env: str | None = None
+    token_file: Path | None = None
+
+    def read_key(self) -> str:
+        """Resolve the API key at the moment it is needed, never storing it in the config."""
+        return self._read("key", self.key_env, self.key_file)
+
+    def read_token(self) -> str:
+        return self._read("token", self.token_env, self.token_file)
+
+    def _read(self, what: str, env: str | None, file: Path | None) -> str:
+        if env:
+            value = os.environ.get(env, "")
+            if not value:
+                raise ConfigError([f"[trello] {what}_env {env!r} is set but empty"])
+            return value
+        if file:
+            return file.read_text(encoding="utf-8").strip()
+        raise ConfigError([f"[trello] neither {what}_env nor {what}_file is configured"])
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerConfig:
     permission_mode: str = "auto"
     model: str = ""
@@ -169,6 +218,9 @@ class Config:
     repos: dict[str, RepoConfig]
     worktree_root: Path
     layout: Layout
+    #: ``None`` when no ``[trello]`` section exists, which is the default and means the
+    #: board source is inert — not merely disabled at a call site (FR-001).
+    trello: TrelloConfig | None = None
     warnings: tuple[str, ...] = ()
 
     def repo(self, key: str) -> RepoConfig:
@@ -207,6 +259,7 @@ _TOP_LEVEL_SECTIONS = {
     "health",
     "hooks",
     "web",
+    "trello",
     "repos",
 }
 
@@ -237,6 +290,23 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "health": {"max_age_seconds", "webhook_url"},
     "hooks": {"default_timeout_seconds"},
     "web": {"bind", "port", "refresh_seconds"},
+    # Unknown keys here are an **error**, not the top level's warning, and are handled
+    # separately below: a typo in a board section that exists is a board that quietly
+    # polls the wrong thing, which is the same class of failure as a typo in [repos.*].
+    "trello": {
+        "board_id",
+        "label",
+        "in_progress_list",
+        "done_list",
+        "poll_seconds",
+        "timeout_seconds",
+        "max_retries",
+        "api_base",
+        "key_env",
+        "key_file",
+        "token_env",
+        "token_file",
+    },
 }
 
 _REPO_KEYS = {"path", "base_branch", "post_create", "env", "permission_mode", "model"}
@@ -263,6 +333,8 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         if section not in _TOP_LEVEL_SECTIONS:
             warnings.append(f"unknown top-level section [{section}] — ignored")
     for section, known in _KNOWN_KEYS.items():
+        if section == "trello":
+            continue  # an error rather than a warning; see the [trello] block below
         for key in raw.get(section, {}):
             if key not in known:
                 warnings.append(f"unknown key [{section}].{key} — ignored")
@@ -423,6 +495,14 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
     if web.port > 65535:
         problems.append(f"[web] port must be <= 65535, got {web.port}")
 
+    # -- [trello] ----------------------------------------------------------
+    # Absent by default. ``None`` here is what FR-001 means by inert: there is no section
+    # to read, so no board request is ever constructed — as against a configured-but-empty
+    # section that every call site would have to remember to skip.
+    trello: TrelloConfig | None = None
+    if "trello" in raw:
+        trello = _parse_trello(raw["trello"], problems)
+
     # -- [paths] -----------------------------------------------------------
     paths_raw = raw.get("paths", {})
     worktree_root = Path(str(paths_raw.get("worktree_root", "~/worktrees"))).expanduser()
@@ -511,7 +591,103 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         repos=repos,
         worktree_root=worktree_root,
         layout=layout,
+        trello=trello,
         warnings=tuple(warnings),
+    )
+
+
+def _trello_credential(section: dict[str, Any], what: str, problems: list[str]) -> Path | None:
+    """Validate one ``key``/``token`` pair and return its file path if one was given.
+
+    Split out of :func:`_parse_trello` because it is the same three checks twice — exactly
+    one source, the file exists, the file is not readable by anyone else — and inlining
+    both copies made the enclosing function's shape unreadable.
+    """
+    env_key, file_key = f"{what}_env", f"{what}_file"
+    raw_file = section.get(file_key)
+    if bool(section.get(env_key)) == bool(raw_file):
+        problems.append(f"[trello] exactly one of {env_key} or {file_key} must be set")
+    if not raw_file:
+        return None
+    path = Path(str(raw_file)).expanduser()
+    if not path.exists():
+        problems.append(f"[trello] {file_key} does not exist: {path}")
+        return path
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        problems.append(f"[trello] {file_key} must be mode 0600, found {mode:04o}: {path}")
+    return path
+
+
+def _parse_trello(section: Any, problems: list[str]) -> TrelloConfig | None:
+    """Parse and validate ``[trello]``, appending every problem it finds.
+
+    Unknown keys are an **error** here rather than the top level's warning, for the same
+    reason they are inside ``[repos.*]``: a typo in a section that exists silently changes
+    what the system does — polls the wrong board, looks for a tag nobody applies — and
+    looks healthy while doing it.
+
+    Returns ``None`` when the section could not be understood at all, so a caller holding
+    a ``Config`` never sees a half-built board.
+    """
+    if not isinstance(section, dict):
+        problems.append("[trello] must be a table")
+        return None
+
+    for unknown in sorted(set(section) - _KNOWN_KEYS["trello"]):
+        problems.append(f"[trello] unknown key {unknown!r}")
+
+    def _text(key: str, default: str) -> str:
+        value = section.get(key, default)
+        if not isinstance(value, str):
+            problems.append(f"[trello] {key} must be a string, got {value!r}")
+            return default
+        return value
+
+    def _number(key: str, default: int, *, minimum: int) -> int:
+        value = section.get(key, default)
+        if not isinstance(value, int) or isinstance(value, bool):
+            problems.append(f"[trello] {key} must be an integer, got {value!r}")
+            return default
+        if value < minimum:
+            problems.append(f"[trello] {key} must be >= {minimum}, got {value}")
+            return default
+        return value
+
+    board_id = _text("board_id", "")
+    if not board_id.strip():
+        problems.append(
+            "[trello] board_id is required when the section is present — there is no "
+            "default board, and guessing one would poll somebody else's"
+        )
+
+    # The same shape [github] uses: the *name* of the variable goes in the file, never
+    # the value. The repository is public (Principle V).
+    for key, value in section.items():
+        if isinstance(value, str) and _looks_like_token(value):
+            problems.append(
+                f"[trello] {key} appears to contain a literal credential. Credentials must "
+                "come from key_env/token_env or a mode-0600 key_file/token_file, never this "
+                "file — the repository is public"
+            )
+
+    files = {
+        f"{what}_file": _trello_credential(section, what, problems) for what in ("key", "token")
+    }
+
+    return TrelloConfig(
+        board_id=board_id,
+        label=_text("label", "AI-task"),
+        in_progress_list=_text("in_progress_list", "In Progress"),
+        done_list=_text("done_list", "Done"),
+        poll_seconds=_number("poll_seconds", 300, minimum=1),
+        timeout_seconds=_number("timeout_seconds", 20, minimum=1),
+        max_retries=_number("max_retries", 4, minimum=0),
+        api_base=_text("api_base", "https://api.trello.com/1").rstrip("/"),
+        key_env=str(section["key_env"]) if section.get("key_env") else None,
+        key_file=files["key_file"],
+        token_env=str(section["token_env"]) if section.get("token_env") else None,
+        token_file=files["token_file"],
     )
 
 

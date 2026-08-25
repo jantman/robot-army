@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import db, procinfo, prompt, sessions, worktree
+from robot_army import db, intake, procinfo, prompt, sessions, worktree
 from robot_army.boundaries import BoundaryError, DisplayHandle, Issue
 from robot_army.paths import claude_trust_file
 from robot_army.states import (
@@ -555,6 +555,33 @@ def dispatch_item(
             target=WorkItemState.ACTIVE,
             reason="session confirmed present",
             extra_columns={"failure_reason": None},
+        )
+
+    # The board follows reality, and reality is a *confirmed* session (FR-027). Placed
+    # here rather than at the launch call because M0 F16 measured that call's success as
+    # meaningless on its own — a card reading "in progress" for a session that never
+    # started is the lie milestone 003 exists to remove.
+    #
+    # A board failure must never fail a dispatch that already succeeded, so this is
+    # deliberately best-effort and says so in the log when it does not work.
+    try:
+        intake.on_session_active(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            repo_key=item.repo_key,
+            issue_number=item.issue_number,
+            dry_run=dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001 - the session is running; the board is cosmetic
+        audit.error(
+            "trello.card.move",
+            error=exc,
+            entity_type="work_item",
+            entity_id=item_id,
+            detail={"stage": "moving the card to the in-progress list after confirmation"},
+            dry_run=dry_run,
         )
 
     audit.record(

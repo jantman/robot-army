@@ -73,12 +73,19 @@ refresh_seconds = 10
 # socket_dir    = "/run/user/1000/robot-army"
 
 # ---------------------------------------------------------------------------
-# Milestone 003 — the Trello card source. NOT YET IMPLEMENTED.
+# Milestone 003 — the Trello card source. OPTIONAL, and absent by default.
 #
-# Leaving this section here today produces one warning per load — "unknown
-# top-level section [trello] — ignored" — and nothing else. That is deliberate
-# in the loader: a config written for a later milestone still loads. It starts
-# being read when task T002 lands.
+# Delete this whole section and the daemon makes no board request at all: the
+# source is inert, not merely disabled, so an installation that does not want it
+# behaves exactly as it did in milestone 002.
+#
+# Unlike the sections above, an unknown key in HERE is an ERROR rather than a
+# warning — for the same reason it is inside [repos.*]. A typo in a board
+# section that exists means polling the wrong thing while looking healthy.
+#
+# A tagged card becomes an UNLABELLED GitHub issue. Labelling it is still yours
+# to do, and the writer has no parameter that could carry a label — the human
+# gate is absent from the interface rather than defended by a rule.
 #
 # The board must be PRIVATE. That is the authorization model for this path:
 # there is no per-card author check, so board access IS authorization, and
@@ -109,6 +116,10 @@ key_env          = "TRELLO_API_KEY"     # variable NAMES, not the values
 token_env        = "TRELLO_API_TOKEN"
 # key_file       = "~/.config/robot-army/trello-key"      # or 0600 files; exactly one of each
 # token_file     = "~/.config/robot-army/trello-token"
+#
+# Verify it without starting the daemon:
+#   robot-army doctor      # six board checks, each reported individually
+#   robot-army cards       # what is on the board and what became of it
 
 # ---------------------------------------------------------------------------
 # Repositories. One section per repo, and a repo is only worked on after

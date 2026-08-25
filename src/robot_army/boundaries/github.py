@@ -35,6 +35,10 @@ if TYPE_CHECKING:
 #: Statuses worth retrying. 403 and 429 are the rate-limit shapes; 5xx is transient.
 _RETRY_STATUSES = frozenset({403, 429, 500, 502, 503, 504})
 
+#: Where simulated issue numbers start. High enough that one can never be mistaken for a
+#: real issue in a log line, which is the only thing the value has to achieve.
+SIMULATED_ISSUE_BASE = 900_000
+
 #: Cap on a single backoff sleep, so honouring a far-future X-RateLimit-Reset cannot
 #: wedge the daemon's whole tick loop for an hour.
 _MAX_BACKOFF_SECONDS = 120.0
@@ -281,6 +285,44 @@ class GitHubReader:
             state=str(payload["state"]),
         )
 
+    def list_issues_since(
+        self, repo_key: str, since: str, *, author: str | None = None, limit: int = 100
+    ) -> list[Issue]:
+        """Issues in one repository created since ``since``, optionally by one author.
+
+        This exists for milestone 003's crash recovery (R6), and the choice of endpoint is
+        the whole point of it. GitHub's **search** index is eventually consistent — by
+        minutes in the worst case — so an issue created two seconds before a crash may be
+        invisible to it, which would produce precisely the duplicate the recovery exists to
+        prevent. ``GET /repos/{owner}/{repo}/issues`` is immediately consistent, and
+        bounding it by the intent timestamp keeps it cheap.
+
+        ``since`` filters on *updated* time server-side, which is a superset of what we
+        want; the created-time filter is applied here so the caller gets what it asked for.
+        """
+        response = self._request(
+            "GET",
+            f"/repos/{self._repo_path(repo_key)}/issues",
+            params={
+                "state": "all",
+                "since": since,
+                "per_page": min(limit, 100),
+                "sort": "created",
+                "direction": "desc",
+            },
+        )
+        issues = []
+        for payload in response.json():
+            if "pull_request" in payload:
+                continue
+            issue = _issue_from_json(payload)
+            if author is not None and issue.author != author:
+                continue
+            if str(payload.get("created_at") or "") < since:
+                continue
+            issues.append(issue)
+        return issues
+
     def list_owned_repos(self) -> list[RepoRef]:
         refs: list[RepoRef] = []
         page = 1
@@ -307,7 +349,7 @@ class GitHubReader:
 
 
 class GitHubWriter:
-    """Writes. Selected only at ``live``. ``comment`` is the only write in this milestone."""
+    """Writes. Selected only at ``live``."""
 
     def __init__(self, config: Config, audit: AuditLog, *, reader: GitHubReader | None = None):
         self._audit = audit
@@ -330,6 +372,36 @@ class GitHubWriter:
             url = str(response.json().get("html_url", ""))
             outcome["comment_url"] = url
             return url
+
+
+    def create_issue(self, repo_key: str, title: str, body: str) -> Issue:
+        """File one issue and return it as GitHub reported it.
+
+        **No label parameter, deliberately** (FR-015). The dispatch label is the human
+        gate, and it is absent from the signature rather than defended by a rule: a caller
+        that wanted to label the issue it just filed cannot express the wish.
+        """
+        with self._audit.action(
+            "github.issue.create",
+            entity_type="repo",
+            entity_id=repo_key,
+            target=repo_key,
+            detail={"title": title, "body_chars": len(body)},
+        ) as outcome:
+            response = self._reader._request(
+                "POST",
+                f"/repos/{self._reader._repo_path(repo_key)}/issues",
+                json_body={"title": title, "body": body},
+            )
+            issue = _issue_from_json(response.json())
+            outcome["number"] = issue.number
+            outcome["url"] = issue.url
+            # Loud rather than silent: an issue arriving pre-labelled means something on
+            # the far side applied it — a repository automation, say — and the human gate
+            # has been bypassed by something this code cannot see.
+            if issue.labels:
+                outcome["unexpected_labels"] = list(issue.labels)
+            return issue
 
 
 class SimulatedIssueWriter:
@@ -357,6 +429,41 @@ class SimulatedIssueWriter:
             detail={"body": body, "would_return": url},
         )
         return url
+
+
+    def create_issue(self, repo_key: str, title: str, body: str) -> Issue:
+        """A structurally valid ``Issue`` with a recognisable fake number.
+
+        Returning ``None`` or raising would let the simulated path diverge from the real
+        one at exactly the point FR-015 exists to protect — the caller would take a
+        different branch, and the dry run would stop rehearsing the thing being checked.
+
+        The number is drawn from a fixed high offset so it is unmistakable in a log, and
+        the row it produces is ``dry_run``, which is what keeps it out of listings and out
+        of the live mapping.
+        """
+        self._counter += 1
+        number = SIMULATED_ISSUE_BASE + self._counter
+        url = f"https://github.com/{repo_key}/issues/{number}"
+        self._audit.record(
+            "github.issue.create",
+            outcome="ok",
+            entity_type="repo",
+            entity_id=repo_key,
+            target=repo_key,
+            simulated=True,
+            detail={"title": title, "body": body, "would_return": {"number": number, "url": url}},
+        )
+        return Issue(
+            number=number,
+            title=title,
+            body=body,
+            url=url,
+            # Empty, like the real one: FR-015 is what the simulated path must rehearse.
+            labels=(),
+            author="robot-army-simulated",
+            state="open",
+        )
 
 
 def _int_header(response: httpx.Response, name: str) -> int | None:

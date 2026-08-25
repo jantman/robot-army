@@ -160,6 +160,7 @@ NAV: tuple[tuple[str, str], ...] = (
     ("/active", "active"),
     ("/queue", "queue"),
     ("/interrupted", "interrupted"),
+    ("/cards", "cards"),
     ("/anomalies", "anomalies"),
     ("/log", "log"),
 )
@@ -179,6 +180,11 @@ BANNERS: dict[str, tuple[str, str]] = {
     "unpaused": ("ok", "Dispatch resumed."),
     "polled": ("ok", "Poll requested. The result appears in the audit log."),
     "reconciled": ("ok", "Reconciliation requested. The result appears in the audit log."),
+    "rescanned": (
+        "ok",
+        "Re-evaluation requested. Every card awaiting clarification is re-read on the "
+        "daemon's next tick, and the result appears in the audit log.",
+    ),
     "refused": ("error", "That action was refused. See the reason below."),
     "failed": ("error", "That action failed. See the audit log for what happened."),
 }

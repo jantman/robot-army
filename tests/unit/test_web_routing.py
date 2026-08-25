@@ -297,3 +297,100 @@ def test_a_missing_item_page_is_a_normal_view_and_does_refresh(web):
     """Not a dead end: it is rendered with a live database behind it, like any view, and
     re-reading it costs one query. The zero is for the pages that have no database."""
     assert 'data-refresh="10"' in web.get("/item/9999").text
+
+
+# -- /cards and the rescan control (milestone 003) --------------------------
+
+
+def test_the_cards_view_renders_and_serves_json(board_web, conn):
+    from robot_army import db
+
+    with db.transaction(conn):
+        db.insert_card(
+            conn,
+            board_id="board-1",
+            card_id="abc123def456abc123def456",
+            card_url="https://trello.com/c/abc123def456abc123def456",
+            title="Fix the widget",
+            body="",
+            dry_run=False,
+        )
+    page = board_web.get("/cards")
+    assert page.status == 200
+    assert "Fix the widget" in page.text
+
+    payload = board_web.get_json("/cards").json()
+    assert payload["configured"] is True
+    assert [c["card_id"] for c in payload["cards"]] == ["abc123def456abc123def456"]
+
+
+def test_the_cards_view_says_so_when_no_board_is_configured(web):
+    """An empty table would misrepresent "not configured" as "nothing to do"."""
+    page = web.get("/cards")
+    assert page.status == 200
+    assert "No intake board is configured" in page.text
+    assert web.get_json("/cards").json()["configured"] is False
+
+
+def test_a_card_id_that_is_not_a_card_id_does_not_reach_a_page(board_web):
+    """A route parameter that reaches a page is one an attacker would like to control, so
+    the pattern is what the board actually issues and nothing else."""
+    for hostile in ("../../etc/passwd", "<script>", "a b", ""):
+        from urllib.parse import quote
+
+        response = board_web.get(f"/card/{quote(hostile, safe='')}/confirm/rescan")
+        assert response.status in (404, 400), hostile
+
+
+def test_the_rescan_route_confirms_before_it_posts(board_web, conn, running_daemon):
+    from robot_army import db
+    from robot_army.cardstates import CardState
+
+    with db.transaction(conn):
+        row = db.insert_card(
+            conn,
+            board_id="board-1",
+            card_id="abc123def456abc123def456",
+            card_url="https://trello.com/c/abc123def456abc123def456",
+            title="Vague",
+            body="",
+            dry_run=False,
+        )
+        conn.execute(
+            "UPDATE cards SET state = ?, reason = ? WHERE id = ?",
+            (str(CardState.NEEDS_INFO), "no repository named", row),
+        )
+
+    confirm = board_web.get("/card/abc123def456abc123def456/confirm/rescan")
+    assert confirm.status == 200
+    assert "rescan" in confirm.text
+
+    posted = board_web.post("/card/abc123def456abc123def456/rescan")
+    assert posted.status == 303
+    assert "msg=rescanned" in posted.headers["Location"]
+
+
+def test_rescanning_a_linked_card_is_refused_by_the_same_rule_as_the_verb(
+    board_web, conn, running_daemon
+):
+    """FR-047's rule doing its job: the button and the verb cannot answer differently,
+    because the button *is* the verb."""
+    from robot_army import db
+    from robot_army.cardstates import CardState
+
+    with db.transaction(conn):
+        row = db.insert_card(
+            conn,
+            board_id="board-1",
+            card_id="abc123def456abc123def456",
+            card_url="https://trello.com/c/abc123def456abc123def456",
+            title="Done already",
+            body="",
+            dry_run=False,
+        )
+        conn.execute(
+            "UPDATE cards SET state = ?, repo_key = ?, issue_number = 5 WHERE id = ?",
+            (str(CardState.LINKED), "jantman/demo", row),
+        )
+    response = board_web.post_json("/card/abc123def456abc123def456/rescan")
+    assert response.json()["code"] == 2

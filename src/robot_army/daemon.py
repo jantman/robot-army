@@ -34,7 +34,7 @@ from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
-from robot_army import control, db, dispatch, health, poll, reconcile, spool
+from robot_army import control, db, dispatch, health, intake, poll, reconcile, spool
 from robot_army.audit import AuditLog
 from robot_army.effects import Boundaries, EffectLevel
 from robot_army.migrations import SCHEMA_VERSION
@@ -152,6 +152,12 @@ def is_locked(path: Path) -> bool:
         return False
     finally:
         os.close(fd)
+
+
+#: An interval no uptime reaches, for jobs that only ever run when explicitly forced.
+#: Ten years in seconds — a number, rather than a special case in the scheduler, because
+#: the scheduler having one shape is worth more than the tidiness of an ``Optional``.
+_FORCED_ONLY = 315_360_000.0
 
 
 # -- the multi-rate scheduler ----------------------------------------------
@@ -273,6 +279,10 @@ class Daemon:
         self.errors = 0
         self.activity = "idle"
         self._jobs: list[Job] = []
+        #: The board preconditions, checked once at startup (R10, R11). ``None`` until
+        #: ``startup()`` runs, and on an installation with no ``[trello]`` section it stays
+        #: ``None`` — there is nothing to check and nothing to ingest.
+        self.board: intake.BoardStatus | None = None
 
     # -- signals ---------------------------------------------------------
 
@@ -310,12 +320,27 @@ class Daemon:
         # (dispatch). Dispatching before polling would leave an issue discovered this
         # tick waiting for the next one — a whole tick of latency for no reason — and
         # dispatching before reconciling would act on a picture we already know is stale.
-        return [
+        jobs = [
             Job("spool", tick, self.job_drain_spool),
             Job("reconcile", float(daemon_cfg.reconcile_seconds), self.job_reconcile),
             Job("poll", float(daemon_cfg.poll_seconds), self.job_poll),
-            Job("dispatch", tick, self.job_dispatch),
         ]
+        # The board job, on its own slower interval (R13, R14), between poll and dispatch.
+        # The ordering is a nicety rather than a correctness requirement: an issue this job
+        # creates is picked up by the *next* GitHub poll regardless, and it cannot dispatch
+        # until the author labels it, which will be later than either.
+        #
+        # **Skipped entirely when no board is configured** (FR-001). Not a job that checks
+        # and returns — no job at all, so an unconfigured installation's tick is the one
+        # milestone 002 shipped.
+        if self.config.trello is not None:
+            jobs.append(Job("board", float(self.config.trello.poll_seconds), self.job_board))
+            # Forced-only: a rescan never runs on a schedule of its own, because there is
+            # nothing periodic about it. `_FORCED_ONLY` is far beyond any uptime, so the
+            # job is due exactly when a marker says so and never otherwise.
+            jobs.append(Job("rescan", _FORCED_ONLY, self.job_rescan, next_due=_FORCED_ONLY))
+        jobs.append(Job("dispatch", tick, self.job_dispatch))
+        return jobs
 
     def job_drain_spool(self) -> dict[str, Any]:
         self.activity = "draining exit spool"
@@ -337,6 +362,73 @@ class Daemon:
             "created": sum(o.created for o in outcomes),
             "rejected": sum(o.rejected for o in outcomes),
             "errors": sum(1 for o in outcomes if o.error),
+        }
+
+    def job_rescan(self) -> dict[str, Any]:
+        """Re-evaluate every held card now, whether or not the author has touched it.
+
+        A separate job rather than a flag on ``job_board`` so the marker mechanism needs no
+        change at all: ``control.take_requests`` returns a job name, ``request()`` finds a
+        job with that name, and this is that job. Its interval is effectively infinite —
+        it only ever runs when forced.
+        """
+        if not self.ingesting:
+            return {"skipped": True, "reason": "board ingestion is disabled"}
+        assert self.board is not None  # noqa: S101 - narrowed by self.ingesting
+        self.activity = "rescanning held cards"
+        outcome = intake.run_cycle(
+            self.conn,
+            boundaries=self.boundaries,
+            audit=self.audit,
+            config=self.config,
+            status=self.board,
+            dry_run=self.effect_level.is_simulated,
+            forced=True,
+        )
+        return {
+            "evaluated": outcome.evaluated,
+            "issues_created": outcome.issues_created,
+            "held": outcome.held,
+            "error": outcome.error,
+        }
+
+    def job_board(self) -> dict[str, Any]:
+        """One board cycle: recover what an interruption left, then poll and evaluate.
+
+        Gated on the startup preconditions rather than re-checking them: R10 fixes the
+        frequency at once per process plus a documented restart, because the thing being
+        checked changes approximately never and the alternative is extra calls a minute.
+        """
+        if not self.ingesting:
+            self.activity = "board ingestion disabled"
+            return {
+                "skipped": True,
+                "reason": "board preconditions failed at startup",
+                "failed_checks": [c.name for c in self.board.failures] if self.board else [],
+            }
+        assert self.board is not None  # noqa: S101 - narrowed by self.ingesting
+        self.activity = "polling the board"
+        outcome = intake.run_cycle(
+            self.conn,
+            boundaries=self.boundaries,
+            audit=self.audit,
+            config=self.config,
+            status=self.board,
+            dry_run=self.effect_level.is_simulated,
+        )
+        if outcome.error:
+            self.errors += 1
+        return {
+            "found": outcome.found,
+            "created": outcome.created,
+            "evaluated": outcome.evaluated,
+            "issues_created": outcome.issues_created,
+            "held": outcome.held,
+            "dropped": outcome.dropped,
+            "recovered": outcome.recovered,
+            "failed": outcome.failed,
+            "error": outcome.error,
+            "skipped_reason": outcome.skipped_reason,
         }
 
     def job_dispatch(self) -> dict[str, Any]:
@@ -413,6 +505,32 @@ class Daemon:
             )
         warn_about_environment(self.audit, self.config)
 
+        # The board preconditions, before any board work and after the effect level has
+        # been announced. Their failure disables **ingestion only**: the rest of this
+        # startup sequence, and every job below, runs exactly as it did in milestone 002.
+        # An unrelated board misconfiguration must not take down dispatch of issues the
+        # author wrote themselves.
+        self._check_board()
+
+        # Whatever the last process was killed in the middle of. Run here as well as at
+        # the head of every cycle, because a restart is the one moment we *know* an
+        # interruption may have happened, and the board interval is 300 seconds.
+        if self.ingesting:
+            assert self.board is not None  # noqa: S101 - narrowed by self.ingesting
+            recovered = intake.recovery_sweep(
+                self.conn,
+                boundaries=self.boundaries,
+                audit=self.audit,
+                config=self.config,
+                dry_run=self.effect_level.is_simulated,
+            )
+            if any(recovered.values()):
+                self.audit.record(
+                    "trello.recovered",
+                    outcome="ok",
+                    detail={"at": "startup", **recovered},
+                )
+
         # A record that arrived while we were down is applied before anything reasons
         # about state — otherwise reconciliation would see a session with no exit and
         # correctly-but-wrongly call it interrupted.
@@ -423,6 +541,29 @@ class Daemon:
         # path and the startup pass cannot drift from the periodic one.
         summary = self.job_reconcile()
         reconcile.sweep_startup_note(self.audit, summary)
+
+    def _check_board(self) -> None:
+        """Run the board preconditions and record the verdict on the daemon.
+
+        Deliberately not part of ``check_preconditions``: that function's failures stop
+        the daemon starting, and a board problem must not. The distinction is the whole
+        point of R10's "refuse ingestion, not startup".
+        """
+        if self.config.trello is None:
+            return
+        status = intake.check_board(
+            boundaries=self.boundaries, audit=self.audit, config=self.config
+        )
+        self.board = status
+        if not status.ok:
+            intake.board_disabled_anomaly(
+                self.conn, self.audit, config=self.config, status=status
+            )
+
+    @property
+    def ingesting(self) -> bool:
+        """Whether the board job may run. False when unconfigured or precondition-failed."""
+        return self.board is not None and self.board.ok
 
     def tick(self) -> dict[str, Any]:
         """One pass over the due jobs. Returns what ran, for ``--once`` and for tests."""
@@ -473,6 +614,12 @@ class Daemon:
             dispatched=self.dispatched,
             errors=self.errors,
             dispatch_paused=paused,
+            board=health.board_signal(
+                self.conn,
+                config=self.config,
+                ingesting=self.ingesting,
+                failures=[c.name for c in self.board.failures] if self.board else [],
+            ),
             extra={"config": str(self.config.path)},
         )
 

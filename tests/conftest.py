@@ -28,6 +28,9 @@ import pytest
 from robot_army import db
 from robot_army.audit import AuditLog
 from robot_army.boundaries import (
+    BoardInfo,
+    Card,
+    CardWriteResult,
     HookResult,
     HostCapabilities,
     HostHandle,
@@ -150,8 +153,41 @@ def config(repo_clone: Path, layout: Layout, tmp_path: Path) -> Config:
     )
 
 
+#: A minimally valid ``[trello]`` table. Milestone 003's default config has **no** board
+#: (FR-001), so every board test opts in explicitly — which is also what keeps the
+#: unconfigured case honestly tested by everything else in the suite.
+TRELLO_SECTION: dict[str, Any] = {
+    "board_id": "board-1",
+    "label": "AI-task",
+    "in_progress_list": "In Progress",
+    "done_list": "Done",
+    "key_env": "ROBOT_ARMY_TEST_TRELLO_KEY",
+    "token_env": "ROBOT_ARMY_TEST_TRELLO_TOKEN",
+}
+
+
+@pytest.fixture
+def board_config(repo_clone: Path, layout: Layout, tmp_path: Path) -> Config:
+    """A config with a board configured, for the milestone 003 paths.
+
+    Its repository is keyed ``jantman/demo`` rather than the bare ``demo`` the other
+    fixtures use, because milestone 003 *reads* repository keys out of card text: a card
+    names ``owner/name``, which is what ``[repos."you/example-repo"]`` looks like in the
+    shipped example and what ``GitHubReader._repo_path`` requires. A short key here would
+    make every resolution test resolve nothing.
+    """
+    monkey_token()
+    raw = config_dict(repo_clone, layout, tmp_path / "worktrees", trello=dict(TRELLO_SECTION))
+    raw["repos"] = {"jantman/demo": {"path": str(repo_clone), "base_branch": "main"}}
+    return parse(raw, tmp_path / "config.toml")
+
+
 def monkey_token() -> None:
     os.environ.setdefault("ROBOT_ARMY_TEST_TOKEN", "not-a-real-token")
+    # Distinctive values: test_trello_secrets.py greps every record for these, and a
+    # placeholder that also appears in ordinary prose would make that test vacuous.
+    os.environ.setdefault("ROBOT_ARMY_TEST_TRELLO_KEY", "trellokey-abcdef0123456789")
+    os.environ.setdefault("ROBOT_ARMY_TEST_TRELLO_TOKEN", "trellotoken-fedcba9876543210")
 
 
 # -- fake boundaries --------------------------------------------------------
@@ -172,6 +208,8 @@ class FakeIssueReader:
         self.pr_calls: list[tuple[str, str]] = []
         self.raise_on_poll: Exception | None = None
         self.raise_on_remote: Exception | None = None
+        self.listing_calls: list[tuple[str, str, str | None]] = []
+        self.created: dict[int, str] = {}
 
     def poll(self, repo_key: str, etag: str | None) -> PollResult:
         self.poll_calls.append((repo_key, etag))
@@ -199,17 +237,174 @@ class FakeIssueReader:
         self.pr_calls.append((repo_key, branch))
         return self.open_prs.get((repo_key, branch))
 
+    def list_issues_since(
+        self, repo_key: str, since: str, *, author: str | None = None, limit: int = 100
+    ) -> list[Issue]:
+        """Milestone 003's recovery read. ``created`` maps issue number → created-at, so a
+        test can place an issue before or after the intent timestamp precisely."""
+        self.listing_calls.append((repo_key, since, author))
+        found = []
+        for issue in self.issues:
+            if author is not None and issue.author != author:
+                continue
+            if self.created.get(issue.number, since) < since:
+                continue
+            found.append(issue)
+        return found[:limit]
+
     def list_owned_repos(self) -> list[Any]:
         return []
 
 
 class RecordingWriter:
-    def __init__(self) -> None:
+    def __init__(self, *, next_number: int = 101) -> None:
         self.comments: list[tuple[str, int, str]] = []
+        self.created: list[tuple[str, str, str]] = []
+        self.next_number = next_number
+        #: Set to raise from ``create_issue``, for the failure branch of the four-step
+        #: creation sequence — the seam where an intent row exists and no issue does.
+        self.raise_on_create: Exception | None = None
 
     def comment(self, repo_key: str, number: int, body: str) -> str:
         self.comments.append((repo_key, number, body))
         return f"https://example.invalid/{repo_key}/{number}#c{len(self.comments)}"
+
+    def create_issue(self, repo_key: str, title: str, body: str) -> Issue:
+        if self.raise_on_create is not None:
+            raise self.raise_on_create
+        self.created.append((repo_key, title, body))
+        number = self.next_number
+        self.next_number += 1
+        return Issue(
+            number=number,
+            title=title,
+            body=body,
+            url=f"https://github.com/{repo_key}/issues/{number}",
+            # Empty, always: FR-015 has no parameter that could carry a label, and a fake
+            # that invented one would let a test pass that the product would fail.
+            labels=(),
+            author="jantman",
+            state="open",
+        )
+
+
+class FakeCardReader:
+    """A board whose answers the test controls.
+
+    There is no *simulated* card reader in the product — board reads are real at every
+    effect level — so tests supply their own fake, exactly as they do for issues.
+
+    ``comment_calls`` exists for one specific assertion: with a mapping row present,
+    ``card_comments`` must **never** be reached (R7, §11). Counting the calls is how that
+    ordering rule is tested rather than assumed.
+    """
+
+    def __init__(
+        self,
+        cards: list[Card] | None = None,
+        *,
+        board: BoardInfo | None = None,
+        comments: dict[str, list[str]] | None = None,
+    ) -> None:
+        self.cards = cards or []
+        self.board = board or BoardInfo(
+            board_id="board-1",
+            name="Intake",
+            permission_level="private",
+            member_ids=("member-1",),
+            labels={"AI-task": "label-ai"},
+            lists={"In Progress": "list-doing", "Done": "list-done", "Inbox": "list-inbox"},
+        )
+        self.comments = comments or {}
+        self.poll_calls: list[tuple[str, str]] = []
+        self.comment_calls: list[str] = []
+        self.board_calls = 0
+        self.raise_on_poll: Exception | None = None
+        self.raise_on_board: Exception | None = None
+
+    def board_info(self) -> BoardInfo:
+        self.board_calls += 1
+        if self.raise_on_board is not None:
+            raise self.raise_on_board
+        return self.board
+
+    def poll(self, board_id: str, label_id: str) -> list[Card]:
+        self.poll_calls.append((board_id, label_id))
+        if self.raise_on_poll is not None:
+            raise self.raise_on_poll
+        return [c for c in self.cards if label_id in c.label_ids and not c.closed]
+
+    def get_card(self, card_id: str) -> Card | None:
+        for card in self.cards:
+            if card.card_id == card_id:
+                return card
+        return None
+
+    def card_comments(self, card_id: str) -> list[str]:
+        self.comment_calls.append(card_id)
+        return list(self.comments.get(card_id, []))
+
+
+class RecordingCardWriter:
+    """Records every board write and refreshes the card's activity stamp like the real one.
+
+    The refresh is not decoration: R9's loop closes only because a writer hands the caller
+    the post-write timestamp, and a fake that returned ``None`` would let a test pass while
+    the product looped.
+    """
+
+    def __init__(self, reader: Any = None) -> None:
+        self.reader = reader
+        self.comments: list[tuple[str, str]] = []
+        self.moves: list[tuple[str, str]] = []
+        self.raise_on_comment: Exception | None = None
+        self.raise_on_move: Exception | None = None
+
+    def comment(self, card_id: str, body: str) -> CardWriteResult:
+        if self.raise_on_comment is not None:
+            raise self.raise_on_comment
+        self.comments.append((card_id, body))
+        return CardWriteResult(
+            url=f"https://trello.com/c/{card_id}#c{len(self.comments)}",
+            last_activity=self._touch(card_id),
+        )
+
+    def move(self, card_id: str, list_id: str) -> CardWriteResult:
+        if self.raise_on_move is not None:
+            raise self.raise_on_move
+        self.moves.append((card_id, list_id))
+        return CardWriteResult(url=None, last_activity=self._touch(card_id, list_id=list_id))
+
+    def _touch(self, card_id: str, *, list_id: str | None = None) -> str:
+        """Advance the fake board's clock for this card, as a real write would."""
+        stamp = f"2026-08-24T00:00:{len(self.comments) + len(self.moves):02d}Z"
+        if self.reader is None:
+            return stamp
+        import dataclasses
+
+        for index, card in enumerate(self.reader.cards):
+            if card.card_id == card_id:
+                changes: dict[str, Any] = {"last_activity": stamp}
+                if list_id is not None:
+                    changes["list_id"] = list_id
+                self.reader.cards[index] = dataclasses.replace(card, **changes)
+        return stamp
+
+
+def make_card(card_id: str = "card-1", **overrides: Any) -> Card:
+    defaults: dict[str, Any] = {
+        "card_id": card_id,
+        "board_id": "board-1",
+        "url": f"https://trello.com/c/{card_id}",
+        "title": "Fix the thing",
+        "body": "in https://github.com/x/demo",
+        "label_ids": ("label-ai",),
+        "list_id": "list-inbox",
+        "last_activity": "2026-08-24T00:00:00Z",
+        "closed": False,
+    }
+    defaults.update(overrides)
+    return Card(**defaults)
 
 
 class StubHookRunner:
@@ -307,6 +502,8 @@ def make_boundaries(
     level: EffectLevel = EffectLevel.LIVE,
     reader: Any = None,
     writer: Any = None,
+    card_reader: Any = None,
+    card_writer: Any = None,
     vcs: Any = None,
     hooks: Any = None,
     host: Any = None,
@@ -318,10 +515,34 @@ def make_boundaries(
         level=level,
         issue_reader=reader or FakeIssueReader(),
         issue_writer=writer or RecordingWriter(),
+        # ``None`` by default, mirroring an installation with no ``[trello]`` section: a
+        # test that wants a board says so, and every other test proves the unconfigured
+        # path stays inert.
+        card_reader=card_reader,
+        card_writer=card_writer,
         version_control=vcs or GitVersionControl(audit),
         hook_runner=hooks or StubHookRunner(),
         session_host=host or StubSessionHost(),
         display=display or StubDisplay(),
+    )
+
+
+def make_board_boundaries(
+    audit: AuditLog,
+    *,
+    level: EffectLevel = EffectLevel.LIVE,
+    cards: list[Card] | None = None,
+    board: BoardInfo | None = None,
+    comments: dict[str, list[str]] | None = None,
+    **overrides: Any,
+) -> Boundaries:
+    """A wired set with a fake board attached, for the milestone 003 paths."""
+    card_reader = overrides.pop("card_reader", None) or FakeCardReader(
+        cards, board=board, comments=comments
+    )
+    card_writer = overrides.pop("card_writer", None) or RecordingCardWriter(card_reader)
+    return make_boundaries(
+        audit, level=level, card_reader=card_reader, card_writer=card_writer, **overrides
     )
 
 
@@ -567,6 +788,49 @@ def web(config: Config, conn: Any, layout: Layout, monkeypatch: Any) -> WebHarne
     operations.clear_resume_signal_cache()
     app = WebApp(config)
     harness = WebHarness(app, reader=reader, display=display, host=host, vcs=None)
+    yield harness
+    operations.clear_resume_signal_cache()
+
+
+@pytest.fixture
+def board_web(board_config: Config, conn: Any, layout: Layout, monkeypatch: Any) -> WebHarness:
+    """A web app whose config has a board, for milestone 003's views.
+
+    Separate from ``web`` rather than a parameter on it, so every milestone 002 test keeps
+    exercising the **unconfigured** path — which is the one most installations run and the
+    one FR-001 is about.
+    """
+    from robot_army import operations
+    from robot_army.web.server import WebApp
+
+    reader = FakeIssueReader()
+    display = StubDisplay()
+    host = StubSessionHost()
+    card_reader = FakeCardReader()
+    card_writer = RecordingCardWriter(card_reader)
+    shared: dict[str, Any] = {}
+
+    def fake_wire(level: Any, cfg: Any, audit_log: Any) -> Any:
+        from robot_army.boundaries.git import GitVersionControl
+
+        if "vcs" not in shared:
+            shared["vcs"] = GitVersionControl(audit_log)
+        return make_boundaries(
+            audit_log,
+            level=level,
+            reader=reader,
+            display=display,
+            host=host,
+            vcs=shared["vcs"],
+            card_reader=card_reader,
+            card_writer=card_writer,
+        )
+
+    monkeypatch.setattr(operations, "wire", fake_wire)
+    operations.clear_resume_signal_cache()
+    harness = WebHarness(WebApp(board_config), reader=reader, display=display, host=host, vcs=None)
+    harness.card_reader = card_reader
+    harness.card_writer = card_writer
     yield harness
     operations.clear_resume_signal_cache()
 

@@ -93,16 +93,31 @@ def test_ended_sessions_do_not_occupy_a_slot(conn):
 
 
 def test_purge_removes_only_simulated_rows(conn):
+    """FR-058, and it covers ``cards`` too since milestone 003: a simulated card row is a
+    dry-run row like any other, and leaving it behind would make ``purge-simulated`` a
+    verb that only mostly does what its name says."""
     live, simulated = _seed_both(conn)
     with db.transaction(conn):
         db.insert_session(conn, work_item_id=live, session_id="s-live", attempt=1, dry_run=False)
         db.insert_session(conn, work_item_id=simulated, session_id="s-sim", attempt=1, dry_run=True)
+        for dry_run in (False, True):
+            db.insert_card(
+                conn,
+                board_id="b1",
+                card_id="c1",
+                card_url="https://trello.com/c/c1",
+                title="a card",
+                body="",
+                dry_run=dry_run,
+            )
 
     with db.transaction(conn):
         purged = db.purge_simulated(conn)
-    assert purged == {"work_items": 1, "sessions": 1}
+    assert purged == {"work_items": 1, "sessions": 1, "cards": 1}
     assert [i.id for i in db.list_work_items(conn, include_simulated=True)] == [live]
     assert [s.session_id for s in db.list_sessions(conn, include_simulated=True)] == ["s-live"]
+    remaining = db.list_cards(conn, include_simulated=True)
+    assert [c.dry_run for c in remaining] == [False]
 
 
 def test_state_filtering_composes_with_the_scope(conn):

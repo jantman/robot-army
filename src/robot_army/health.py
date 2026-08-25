@@ -35,6 +35,12 @@ class Heartbeat:
     #: named field is what that reader will look for. It defaults to ``False``, so a
     #: heartbeat written by an older build still parses.
     dispatch_paused: bool = False
+    #: Board health, or ``None`` on an installation with no ``[trello]`` section — which
+    #: is not a degraded board but the absence of one, and the two must not read alike.
+    #: A first-class field for the same reason ``dispatch_paused`` is: ``docs/state.md``
+    #: documents this file's shape for a human reading it at 2am, and a named field is
+    #: what that reader will look for. Defaults to ``None``, so an older heartbeat parses.
+    board: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
@@ -50,6 +56,7 @@ def write_heartbeat(
     dispatched: int = 0,
     errors: int = 0,
     dispatch_paused: bool = False,
+    board: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> Heartbeat:
     """Write the heartbeat atomically.
@@ -67,6 +74,7 @@ def write_heartbeat(
         dispatched=dispatched,
         errors=errors,
         dispatch_paused=dispatch_paused,
+        board=board,
         extra=extra or {},
     )
     atomic_write(Path(path), beat.to_json(), mode=0o644)
@@ -166,3 +174,60 @@ def notify(webhook_url: str, report: HealthReport, *, timeout: float = 10.0) -> 
     if response.status_code >= 400:
         return False, f"webhook returned HTTP {response.status_code}"
     return True, f"notified {webhook_url} (HTTP {response.status_code})"
+
+
+def board_signal(
+    conn: Any,
+    *,
+    config: Any,
+    ingesting: bool,
+    failures: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """The board's health, for the heartbeat and everything that renders it (FR-009).
+
+    ``None`` when no board is configured. That is *not* a degraded board — it is the
+    absence of one — and reporting the two alike would either invent a problem on every
+    milestone-002 installation or hide a real one behind "not applicable".
+
+    ``last_polled_at`` and ``consecutive_failures`` come from ``poll_state`` under the
+    synthetic key R13 assigns, so a board that has stopped answering is visible as an age
+    and a count rather than as silence. Silence is what FR-009 exists to forbid: "I could
+    not ask" must never look like "nothing found".
+    """
+    from robot_army import db
+
+    trello = getattr(config, "trello", None)
+    if trello is None:
+        return None
+    state = db.get_poll_state(conn, board_poll_key(trello.board_id))
+    return {
+        "board_id": trello.board_id,
+        "ingesting": ingesting,
+        "failed_checks": list(failures or []),
+        "last_polled_at": state.last_polled_at,
+        "last_polled_age_seconds": _age(state.last_polled_at),
+        "consecutive_failures": state.consecutive_failures,
+        "backoff_until": state.backoff_until,
+        "healthy": ingesting and state.consecutive_failures == 0,
+    }
+
+
+def board_poll_key(board_id: str) -> str:
+    """The synthetic ``poll_state`` key for a board (R13).
+
+    ``poll_state`` has no foreign key and no consumer that renders its rows as
+    repositories, so a non-repository key is safe and a second identically shaped table is
+    not needed. Defined here, next to the only other code that reads it, so the two
+    spellings cannot drift.
+    """
+    return f"trello:board:{board_id}"
+
+
+def _age(stamp: str | None) -> int | None:
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    return int((datetime.now(UTC) - parsed).total_seconds())

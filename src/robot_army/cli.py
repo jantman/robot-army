@@ -31,7 +31,7 @@ from robot_army.operations import (
 )
 
 READ_COMMANDS = frozenset(
-    {"status", "show", "repos", "worktree", "log", "anomalies", "health", "doctor"}
+    {"status", "show", "repos", "worktree", "log", "anomalies", "health", "doctor", "cards"}
 )
 
 
@@ -173,11 +173,35 @@ def build_parser() -> argparse.ArgumentParser:
     attach = sub.add_parser("attach", help="open a terminal window on a running session")
     attach.add_argument("item_id", type=int)
 
+    # -- milestone 003 -----------------------------------------------------
+    cards = sub.add_parser("cards", help="tracked intake cards, their state and their reason")
+    cards.add_argument(
+        "--state",
+        default=None,
+        help="filter to one card state (discovered, needs_info, creating, linked, dropped)",
+    )
+
+    rescan = sub.add_parser(
+        "rescan", help="force re-evaluation of cards awaiting clarification (FR-024)"
+    )
+    rescan.add_argument(
+        "card_id",
+        nargs="?",
+        default=None,
+        help="the card to re-evaluate; omit with --all-needs-info",
+    )
+    rescan.add_argument(
+        "--all-needs-info",
+        action="store_true",
+        help="re-evaluate every card awaiting clarification",
+    )
+
     # -- universal flags ---------------------------------------------------
     for name, action in sub.choices.items():
         if name in READ_COMMANDS or name in (
             "poll",
             "reconcile",
+            "rescan",
             "drain",
             "purge-simulated",
             "pause",
@@ -187,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
             action.add_argument(
                 "--json", action="store_true", help="machine-readable output on stdout"
             )
-        if name in ("status", "worktree", "log", "anomalies", "repos"):
+        if name in ("status", "worktree", "log", "anomalies", "repos", "cards"):
             action.add_argument(
                 "--include-simulated",
                 action="store_true",
@@ -341,12 +365,38 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "pause": lambda: operations.pause_dispatch(ctx, by="cli"),
         "unpause": lambda: operations.unpause_dispatch(ctx, by="cli"),
         "attach": lambda: operations.attach(ctx, args.item_id),
+        "cards": lambda: operations.cards(
+            ctx, state=args.state, include_simulated=include_simulated
+        ),
+        "rescan": lambda: _rescan(args, ctx),
     }
 
     handler = table.get(args.command)
     if handler is None:
         return Result(code=EXIT_USAGE, lines=[f"unknown command {args.command!r}"])
     return handler()
+
+
+def _rescan(args: argparse.Namespace, ctx: Context) -> Result:
+    """``rescan`` takes either a card id or ``--all-needs-info``, and needs exactly one.
+
+    Checked here rather than by argparse because "neither" and "both" are different usage
+    mistakes and deserve different messages — argparse's mutually-exclusive group would
+    report one of them as the other.
+    """
+    if bool(args.card_id) == bool(args.all_needs_info):
+        return Result(
+            code=EXIT_USAGE,
+            lines=[
+                "usage: robot-army rescan <card-id> | robot-army rescan --all-needs-info"
+                + (
+                    "  (a card id and --all-needs-info together are ambiguous)"
+                    if args.card_id
+                    else "  (name a card, or ask for all of them)"
+                )
+            ],
+        )
+    return operations.rescan(ctx, args.card_id or "", all_needs_info=args.all_needs_info)
 
 
 def _worktree(args: argparse.Namespace, ctx: Context) -> Result:

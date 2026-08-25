@@ -24,6 +24,7 @@ from typing import Any
 
 from robot_army import control, db, health, operations
 from robot_army import daemon as daemon_mod
+from robot_army.cardstates import CardState
 from robot_army.states import SessionState, WorkItemState, is_legal_work_item_transition
 from robot_army.web import html
 from robot_army.web.html import (
@@ -136,6 +137,31 @@ def issue_link(item: dict[str, Any]) -> Markup:
     if url is None:
         return span(label)
     return a(url, label, rel="noreferrer noopener")
+
+
+#: The intake board's own host. The **only** other external origin this interface emits,
+#: added by milestone 003 for the same reason ``github.com`` was allowed in 002: the link
+#: is constructed from data already stored, with no additional source-system call, and
+#: :func:`card_link` is the single place that decides an href may point at it.
+TRELLO = "https://trello.com/"
+
+
+def card_link(card: dict[str, Any] | None, *, label: str | None = None) -> Markup:
+    """The card an item came from, rendered beside its issue (FR-017, FR-048).
+
+    ``None`` renders as an em dash rather than nothing, so "this item did not come from a
+    card" is visibly answered rather than looking like a missing field.
+    """
+    if not card:
+        return span("—")
+    url = card.get("card_url") or ""
+    text = label or f"card {card.get('card_id')}"
+    if not isinstance(url, str) or not url.startswith(TRELLO):
+        # A card URL that is not a Trello URL is not a link. Everything this system
+        # renders here it wrote itself, so this should be unreachable — which is exactly
+        # when a fallback earns its place.
+        return span(text)
+    return a(url, text, rel="noreferrer noopener")
 
 
 def item_link(item: dict[str, Any]) -> Markup:
@@ -898,6 +924,153 @@ def anomalies_view(ctx: operations.Context, *, include_simulated: bool = False) 
     )
 
 
+# -- /cards (milestone 003, FR-026, FR-049) ---------------------------------
+
+#: How a card's state reads to someone who did not write the state machine. The web is the
+#: phone-shaped surface, and ``needs_info`` alone does not say what to do about it.
+CARD_STATE_HELP: dict[str, str] = {
+    "discovered": "seen, not yet evaluated",
+    "needs_info": "held — the card does not say which repository",
+    "creating": "filing an issue for it",
+    "linked": "an issue exists for it",
+    "dropped": "no longer tagged, archived, or deleted",
+}
+
+
+def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> View:
+    """The card listing, mirroring ``robot-army cards`` (FR-026).
+
+    Assembled from ``operations.cards`` rather than from ``db`` directly, which is
+    milestone 002's FR-047 rule and the reason the two front ends cannot drift.
+    """
+    result = operations.cards(ctx, include_simulated=include_simulated)
+    payload = result.data
+    if not payload.get("configured"):
+        return View(
+            title="cards",
+            data=payload,
+            body=join(
+                [
+                    h(1, "cards"),
+                    _empty(
+                        "No intake board is configured, so no cards are being read. "
+                        "Add a [trello] section to enable the card source."
+                    ),
+                ]
+            ),
+        )
+
+    rows = payload["cards"]
+    held = [row for row in rows if row["state"] == str(CardState.NEEDS_INFO)]
+    body = join(
+        [
+            h(1, f"cards ({len(rows)})"),
+            p(
+                "Cards on the intake board and what became of them. A card in "
+                "needs_info is waiting for you to say which repository it is for — edit "
+                "the card and it is picked up automatically, or rescan to force a look now.",
+                class_="meta",
+            ),
+            _empty("Nothing on the board yet.")
+            if not rows
+            else join(
+                [
+                    h(2, f"awaiting clarification ({len(held)})") if held else Markup(""),
+                    _cards_table(held, include_simulated=include_simulated, rescannable=True)
+                    if held
+                    else Markup(""),
+                    h(2, "every tracked card"),
+                    _cards_table(rows, include_simulated=include_simulated, rescannable=False),
+                ]
+            ),
+        ]
+    )
+    return View(title="cards", data={**payload, "needs_info": len(held)}, body=body)
+
+
+def _cards_table(
+    rows: list[dict[str, Any]], *, include_simulated: bool, rescannable: bool
+) -> Markup:
+    return table(
+        ["card", "title", "state", "repository", "issue", "reason", "in state", ""],
+        [
+            [
+                card_link(row, label=row["card_id"]),
+                join([row["title"], " ", mark_simulated(row["simulated"])]),
+                span(
+                    row["state"],
+                    title=CARD_STATE_HELP.get(row["state"], ""),
+                    class_="mono",
+                ),
+                row["repo_key"] or "—",
+                _card_issue_cell(row),
+                row["reason"] or "—",
+                human_age(row["age_seconds"]),
+                rescan_control(row["card_id"], include_simulated=include_simulated)
+                if rescannable
+                else Markup(""),
+            ]
+            for row in rows
+        ],
+    )
+
+
+def _card_issue_cell(row: dict[str, Any]) -> Markup:
+    """The issue a card produced, and the work item it became, where each exists."""
+    if row["issue_number"] is None:
+        return span("—")
+    url = github_link(row.get("issue_url")) or github_link(row.get("source_id"))
+    issue = (
+        a(url, f"#{row['issue_number']}", rel="noreferrer noopener")
+        if url
+        else span(f"#{row['issue_number']}")
+    )
+    if not row.get("work_item_id"):
+        return issue
+    return join([issue, " · ", a(f"/item/{row['work_item_id']}", f"item {row['work_item_id']}")])
+
+
+def rescan_control(card_id: str, *, include_simulated: bool = False) -> Markup:
+    """The one mutating control on this view. Confirm-then-post, like every other one."""
+    return a(
+        f"/card/{card_id}/confirm/rescan{_query(include_simulated)}",
+        "rescan",
+        class_="button",
+    )
+
+
+def card_confirm_view(
+    ctx: operations.Context,
+    card_id: str,
+    *,
+    include_simulated: bool = False,
+    refusal: str | None = None,
+) -> View:
+    """The confirmation step, matching the pattern every other mutating route uses."""
+    body = join(
+        [
+            h(1, f"rescan card {card_id}?"),
+            p(
+                "This asks the running daemon to re-read every card awaiting "
+                "clarification on its next tick, this one included. It writes nothing to "
+                "the board and creates nothing unless a card now names one repository.",
+                class_="meta",
+            ),
+            html.banner("refused", refusal) if refusal else Markup(""),
+            div(
+                form(
+                    f"/card/{card_id}/rescan",
+                    html.hidden("include_simulated", "1") if include_simulated else None,
+                    button("rescan"),
+                ),
+                a(f"/cards{_query(include_simulated)}", "cancel"),
+                class_="actions",
+            ),
+        ]
+    )
+    return View(title=f"rescan {card_id}", data={"card_id": card_id, "action": "rescan"}, body=body)
+
+
 # -- /item/<id> (FR-015, FR-029) --------------------------------------------
 
 
@@ -942,6 +1115,8 @@ def item_view(
                         tag("dd", item["repo_key"]),
                         tag("dt", "issue"),
                         tag("dd", issue_link(item)),
+                        tag("dt", "card"),
+                        tag("dd", card_link(payload.get("card"))),
                         tag("dt", "checkout"),
                         tag("dd", span(item["worktree_path"] or "—", class_="mono")),
                         tag("dt", "branch"),

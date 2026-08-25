@@ -29,6 +29,7 @@ from robot_army import (
     db,
     dispatch,
     health,
+    intake,
     poll,
     procinfo,
     reconcile,
@@ -41,6 +42,7 @@ from robot_army import (
 )
 from robot_army.audit import AuditLog
 from robot_army.boundaries import BoundaryError, HostHandle, TransportError
+from robot_army.cardstates import CardState
 from robot_army.config import Config
 from robot_army.effects import Boundaries, EffectLevel, wire
 from robot_army.migrations import SCHEMA_VERSION
@@ -319,15 +321,21 @@ def show(ctx: Context, item_id: int) -> Result:
     attempts = db.list_sessions_for_item(ctx.conn, item_id)
     signals = resume_signals(ctx, item)
 
+    card = _card_for_item(ctx, item)
     result.data = {
         "item": _item_dict(item),
         "history": _history(item),
         "sessions": [_session_dict(s) for s in attempts],
         "resume_signals": signals,
+        # FR-017 and FR-048: where a work item's issue came from a card, the card is shown
+        # beside the issue wherever the issue is shown. ``None`` when it did not.
+        "card": card,
     }
 
     result.say(f"work item {item.id}{_mark(item)}")
     result.say(f"  source     : {item.source_id}  {item.source_url}")
+    if card:
+        result.say(f"  card       : {card['card_id']}  {card['card_url']}")
     result.say(f"  repository : {item.repo_key}")
     result.say(f"  title      : {item.title}")
     result.say(f"  state      : {item.state}")
@@ -963,6 +971,28 @@ def abandon(ctx: Context, item_id: int) -> Result:
             )
     except Exception as exc:  # noqa: BLE001 - an illegal transition is a usage error here
         return Result(code=EXIT_FAILED, lines=[str(exc)])
+    # FR-029: a card must not sit in the in-progress list claiming to be busy when nothing
+    # is. Best-effort — the item is abandoned either way, and a board that cannot be
+    # written must not turn a successful abandon into a failure.
+    try:
+        intake.on_work_abandoned(
+            ctx.conn,
+            boundaries=ctx.boundaries,
+            audit=ctx.audit,
+            config=ctx.config,
+            repo_key=item.repo_key,
+            issue_number=item.issue_number,
+            reason="the work item was abandoned",
+            dry_run=bool(item.dry_run),
+        )
+    except Exception as exc:  # noqa: BLE001 - the item is abandoned; the board is cosmetic
+        ctx.audit.error(
+            "trello.card.move",
+            error=exc,
+            entity_type="work_item",
+            entity_id=item_id,
+            detail={"stage": "returning the card to its origin list"},
+        )
     return Result(
         lines=[
             f"item {item_id} abandoned. Its worktree at "
@@ -1280,8 +1310,9 @@ def purge_simulated(ctx: Context, *, assume_yes: bool = False, confirm: Any = in
         return Result(lines=["no simulated rows to purge"], data={"purged": counts})
     if not assume_yes:
         answer = confirm(
-            f"Delete {counts['work_items']} simulated work item(s) and "
-            f"{counts['sessions']} simulated session(s)? [y/N] "
+            f"Delete {counts['work_items']} simulated work item(s), "
+            f"{counts['sessions']} simulated session(s) and "
+            f"{counts['cards']} simulated card(s)? [y/N] "
         )
         if str(answer).strip().lower() not in ("y", "yes"):
             return Result(code=EXIT_FAILED, lines=["aborted"])
@@ -1289,11 +1320,217 @@ def purge_simulated(ctx: Context, *, assume_yes: bool = False, confirm: Any = in
         purged = db.purge_simulated(ctx.conn)
     return Result(
         lines=[
-            f"purged {purged['work_items']} work item(s) and {purged['sessions']} session(s)",
+            f"purged {purged['work_items']} work item(s), {purged['sessions']} session(s) "
+            f"and {purged['cards']} card(s)",
             "worktrees those rows created were NOT removed — use `worktree remove`",
         ],
         data={"purged": purged},
     )
+
+
+# -- cards (milestone 003) --------------------------------------------------
+
+
+def _card_dict(card: Any, *, work_item_id: int | None = None) -> dict[str, Any]:
+    return {
+        "id": card.id,
+        "card_id": card.card_id,
+        "card_url": card.card_url,
+        "title": card.title,
+        "state": str(card.state),
+        "dry_run": card.dry_run,
+        "simulated": card.dry_run,
+        "repo_key": card.repo_key,
+        "issue_number": card.issue_number,
+        "issue_url": card.issue_url,
+        "source_id": card.source_id,
+        "work_item_id": work_item_id,
+        "reason": card.reason,
+        "create_failures": card.create_failures,
+        "placed_list_id": card.placed_list_id,
+        "origin_list_id": card.origin_list_id,
+        "archived_at": card.archived_at,
+        "first_seen_at": card.first_seen_at,
+        "updated_at": card.updated_at,
+        "age_seconds": _age_seconds(card.updated_at),
+    }
+
+
+def _age_seconds(stamp: str | None) -> int | None:
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    return int((datetime.now(UTC) - parsed).total_seconds())
+
+
+def _card_work_items(ctx: Context, cards: list[Any]) -> dict[int, int]:
+    """Card row id → work item id, joined on ``(repo_key, issue_number)`` (R16).
+
+    A join rather than a column on ``work_items``: the fact is already derivable from
+    ``work_items.source_id``, and storing it again would create a second place for it to be
+    wrong. One query for the whole set rather than one per card, because both front ends
+    render listings and a per-row query is how a listing becomes slow quietly.
+    """
+    wanted = {c.source_id: c.id for c in cards if c.source_id}
+    if not wanted:
+        return {}
+    placeholders = ",".join("?" * len(wanted))
+    rows = ctx.conn.execute(
+        f"SELECT id, source_id FROM work_items WHERE source_id IN ({placeholders})",  # noqa: S608
+        tuple(wanted),
+    ).fetchall()
+    return {wanted[row["source_id"]]: row["id"] for row in rows if row["source_id"] in wanted}
+
+
+def _card_for_item(ctx: Context, item: Any) -> dict[str, Any] | None:
+    """The card a work item's issue came from, or ``None`` (R16, FR-048).
+
+    Derived by joining ``cards`` on ``(repo_key, issue_number)`` against the ``repo#number``
+    in ``work_items.source_id``. **No column on ``work_items``**: the fact is already
+    derivable, and storing it again would create a second place for it to be wrong.
+    """
+    if ctx.config.trello is None or not item.repo_key or item.issue_number is None:
+        return None
+    card = db.find_card_by_issue(
+        ctx.conn,
+        repo_key=item.repo_key,
+        issue_number=item.issue_number,
+        dry_run=bool(item.dry_run),
+    )
+    return _card_dict(card, work_item_id=item.id) if card else None
+
+
+def cards(
+    ctx: Context,
+    *,
+    state: str | None = None,
+    include_simulated: bool = False,
+) -> Result:
+    """List tracked cards with their state, resolved issue, and reason (FR-026, FR-047).
+
+    Exits ``3`` when no board is configured, with a message saying so, rather than printing
+    an empty table: an empty table would misrepresent "not configured" as "nothing to do",
+    and those call for very different next actions.
+
+    An empty list on a *configured* board exits ``0`` — an empty board is not a failure.
+    """
+    if ctx.config.trello is None:
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=[
+                "no [trello] section is configured, so no board is being read.",
+                f"Add one to {ctx.config.path} to enable the card source "
+                "(specs/003-trello-source/contracts/config.md).",
+            ],
+            data={"configured": False, "cards": []},
+        )
+
+    states = [CardState(state)] if state else None
+    rows = db.list_cards(ctx.conn, include_simulated=include_simulated, states=states)
+    links = _card_work_items(ctx, rows)
+    payload = [_card_dict(card, work_item_id=links.get(card.id)) for card in rows]
+
+    result = Result(
+        data={
+            "configured": True,
+            "board_id": ctx.config.trello.board_id,
+            "cards": payload,
+            "include_simulated": include_simulated,
+        }
+    )
+    if not payload:
+        result.say("no cards tracked yet")
+        return result
+
+    table_rows = [
+        [
+            row["card_id"],
+            (row["title"][:40] + "…") if len(row["title"]) > 41 else row["title"],
+            row["state"] + ("*" if row["simulated"] else ""),
+            row["repo_key"] or "—",
+            f"#{row['issue_number']}" if row["issue_number"] else "—",
+            _human_age(row["age_seconds"]),
+            (row["reason"] or "")[:60],
+        ]
+        for row in payload
+    ]
+    for line in _table(
+        table_rows, ["card", "title", "state", "repository", "issue", "in state", "reason"]
+    ):
+        result.say(line)
+    return result
+
+
+def _human_age(seconds: int | None) -> str:
+    if seconds is None:
+        return "—"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def rescan(ctx: Context, card_id: str, *, all_needs_info: bool = False) -> Result:
+    """Force re-evaluation of a card awaiting clarification (FR-024).
+
+    A forced job request through the existing ``control.py`` marker, exactly as ``poll``
+    and ``reconcile`` already are — the daemon drains it on its next tick. The response is
+    therefore "requested", not "here is what it found", which is the honest thing to say
+    about a cross-process request.
+
+    The refusals are deliberate rather than permissive. Rescanning a *linked* card is
+    meaningless, and silently doing nothing would be worse than saying so: the author would
+    be left believing they had retried something.
+    """
+    if ctx.config.trello is None:
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=["no [trello] section is configured, so there are no cards to rescan"],
+        )
+
+    if not all_needs_info:
+        card = db.find_card(
+            ctx.conn,
+            board_id=ctx.config.trello.board_id,
+            card_id=card_id,
+            dry_run=ctx.effect_level.is_simulated,
+        )
+        if card is None:
+            return Result(
+                code=EXIT_FAILED,
+                lines=[f"card {card_id!r} is not tracked — `robot-army cards` lists what is"],
+            )
+        if card.state is not CardState.NEEDS_INFO:
+            return Result(
+                code=EXIT_USAGE,
+                lines=[
+                    f"card {card_id} is {card.state}, not needs_info. Rescanning it would "
+                    "mean nothing — only a card awaiting clarification has anything to "
+                    "re-evaluate"
+                ],
+            )
+
+    if not daemon_mod.is_locked(ctx.layout.lock_path):
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=[
+                "no daemon is running to service the request. Start `robot-army run`, or "
+                "wait for its next board interval once it is up"
+            ],
+        )
+
+    result = _request_job(
+        ctx, "rescan", detail={"card_id": None if all_needs_info else card_id}
+    )
+    result.data["card_id"] = None if all_needs_info else card_id
+    result.data["all_needs_info"] = all_needs_info
+    return result
 
 
 # -- anomalies --------------------------------------------------------------
@@ -1752,9 +1989,23 @@ def doctor(ctx: Context, *, trust_file: Path | None = None) -> Result:
             )
         )
 
+    # The board's five checks (contracts/config.md), so it can be verified without
+    # starting the daemon — which is the whole reason `doctor` performs them rather than
+    # leaving them to startup. Absent entirely when no board is configured: an
+    # unconfigured installation has nothing to check, and inventing a passing check for it
+    # would say something about a board that does not exist.
+    if ctx.config.trello is not None:
+        status = intake.check_board(
+            boundaries=ctx.boundaries, audit=ctx.audit, config=ctx.config
+        )
+        for check in status.checks:
+            checks.append((f"board: {check.name}", check.ok, check.detail))
+
     failures = [name for name, ok, _ in checks if not ok]
     result = Result(
-        code=EXIT_OK if not failures else EXIT_FAILED,
+        # 4, not 1: this is a *check* command, and the exit table reserves 4 for a check
+        # that failed. `health` already uses it for the same reason.
+        code=EXIT_OK if not failures else EXIT_CHECK_FAILED,
         data={
             "checks": [{"name": n, "ok": ok, "detail": d} for n, ok, d in checks],
             "failures": failures,

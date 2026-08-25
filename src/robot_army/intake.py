@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from robot_army import db, health
-from robot_army.boundaries import BoardInfo, TransportError
+from robot_army.boundaries import BoardInfo, BoundaryError, TransportError
 from robot_army.cardstates import CardState, transition_card, utcnow
 from robot_army.models import PollState
 
@@ -840,19 +840,39 @@ def _perform_creation(
 
     # (3) The mapping. This is the row §11's invariant is about, and the unique index is
     # what makes a skipped check loud rather than duplicating.
-    with db.transaction(conn):
-        transition_card(
+    #
+    # "Loud" has to mean *recorded and retried*, not *thrown*. An IntegrityError escaping
+    # here would abort the whole cycle: every remaining card in the pass would be skipped,
+    # and this one would be stranded in `creating` without a failure count, without a
+    # reason, and without ever reaching the anomaly threshold — the silent gap Principle III
+    # forbids, produced by the very guard meant to prevent one.
+    #
+    # The reachable case is a simulated run after a restart: SimulatedIssueWriter's counter
+    # restarts at zero each process, so a second run can mint an issue number a row from an
+    # earlier run already holds. Routing it through the ordinary failure path makes the next
+    # pass retry with a fresh number, which is what the counter having advanced guarantees.
+    try:
+        with db.transaction(conn):
+            transition_card(
+                conn,
+                audit,
+                card_row_id=card.id,
+                target=CardState.LINKED,
+                reason=f"issue {repo_key}#{issue.number} created",
+                extra_columns={
+                    "issue_number": issue.number,
+                    "issue_url": issue.url,
+                    "reason": None,
+                    "create_failures": 0,
+                },
+            )
+    except sqlite3.IntegrityError as exc:
+        return _record_create_failure(
             conn,
             audit,
-            card_row_id=card.id,
-            target=CardState.LINKED,
-            reason=f"issue {repo_key}#{issue.number} created",
-            extra_columns={
-                "issue_number": issue.number,
-                "issue_url": issue.url,
-                "reason": None,
-                "create_failures": 0,
-            },
+            card=card,
+            error=_mapping_conflict(conn, card=card, issue=issue, error=exc),
+            dry_run=dry_run,
         )
 
     # (4) The card comment, which is also R7's recovery marker.
@@ -864,6 +884,30 @@ def _perform_creation(
         dry_run=dry_run,
     )
     return Verdict(card.card_id, "created", repo_key, issue.number)
+
+
+def _mapping_conflict(
+    conn: sqlite3.Connection, *, card: Any, issue: Any, error: Exception
+) -> Exception:
+    """Turn a bare ``IntegrityError`` into something a reader can act on.
+
+    "UNIQUE constraint failed: cards.repo_key, cards.issue_number, cards.dry_run" names the
+    index and nothing else. Naming the card already holding the number is the difference
+    between a message that explains and one that merely reports.
+    """
+    holder = db.find_card_by_issue(
+        conn,
+        repo_key=card.repo_key,
+        issue_number=issue.number,
+        dry_run=bool(card.dry_run),
+    )
+    if holder is not None and holder.id != card.id:
+        return BoundaryError(
+            f"issue {card.repo_key}#{issue.number} is already mapped to card "
+            f"{holder.card_id}, so this mapping was refused by the schema. The next pass "
+            f"retries with a fresh number ({error})"
+        )
+    return BoundaryError(f"the mapping for {card.repo_key}#{issue.number} was refused: {error}")
 
 
 def _record_create_failure(

@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from robot_army import __version__, operations
+from robot_army.cardstates import CardState
 from robot_army.config import ConfigError
 from robot_army.config import load as load_config
 from robot_army.daemon import PreconditionFailed, run_daemon
@@ -29,6 +30,7 @@ from robot_army.operations import (
     Context,
     Result,
 )
+from robot_army.states import WorkItemState
 
 READ_COMMANDS = frozenset(
     {"status", "show", "repos", "worktree", "log", "anomalies", "health", "doctor", "cards"}
@@ -70,7 +72,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- read commands -----------------------------------------------------
     status = sub.add_parser("status", help="counts and listings by state, plus anomalies")
-    status.add_argument("--state", default=None, help="filter to one work item state")
+    # `choices=` rather than free text, because the value reaches `WorkItemState(...)` and
+    # an unrecognised one raised a bare ValueError straight out of `main()` — a raw
+    # traceback where the exit-code table promises a usage error. argparse refuses it
+    # before it can get that far, and lists the valid values while doing so.
+    status.add_argument(
+        "--state",
+        default=None,
+        choices=[state.value for state in WorkItemState],
+        help="filter to one work item state",
+    )
     status.add_argument("--repo", default=None, help="filter to one repository")
 
     show = sub.add_parser("show", help="everything about one work item")
@@ -178,7 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
     cards.add_argument(
         "--state",
         default=None,
-        help="filter to one card state (discovered, needs_info, creating, linked, dropped)",
+        choices=[state.value for state in CardState],
+        help="filter to one card state",
     )
 
     rescan = sub.add_parser(

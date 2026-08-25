@@ -25,7 +25,7 @@ def card(card_id="card-1"):
     return make_card(card_id, body=f"please fix https://github.com/{REPO}")
 
 
-def cycle(conn, board_config, audit, boundaries, **kwargs):
+def cycle(conn, board_config, audit, boundaries, *, dry_run=False, **kwargs):
     status = intake.check_board(boundaries=boundaries, audit=audit, config=board_config)
     return intake.run_cycle(
         conn,
@@ -33,7 +33,7 @@ def cycle(conn, board_config, audit, boundaries, **kwargs):
         audit=audit,
         config=board_config,
         status=status,
-        dry_run=False,
+        dry_run=dry_run,
         **kwargs,
     )
 
@@ -441,3 +441,90 @@ def test_an_archived_linked_card_is_not_counted_as_dropped(conn, board_config, a
     row = db.list_cards(conn)[0]
     assert row.state == CardState.LINKED and row.archived_at is not None
     assert outcome.dropped == 0
+
+
+# -- a mapping collision degrades to a retry, never an aborted cycle --------
+
+
+def simulated_boundaries(audit, cards):
+    """Board and issue writers as a **fresh process** would wire them.
+
+    A new ``SimulatedIssueWriter`` each time is the point: its counter restarts at zero on
+    every process start, which is what makes the collision below reachable at all.
+    """
+    from robot_army.boundaries.github import SimulatedIssueWriter
+    from robot_army.boundaries.trello import SimulatedCardWriter
+    from robot_army.effects import EffectLevel
+
+    return make_board_boundaries(
+        audit,
+        level=EffectLevel.NO_REMOTE,
+        cards=cards,
+        writer=SimulatedIssueWriter(audit),
+        card_writer=SimulatedCardWriter(audit),
+    )
+
+
+def test_a_restart_that_reissues_a_simulated_number_does_not_abort_the_cycle(
+    conn, board_config, audit
+):
+    """``SimulatedIssueWriter``'s counter restarts at zero each process, so a second dry
+    run can mint an issue number a row from the first run already holds — and
+    ``idx_cards_issue`` refuses it.
+
+    The refusal is correct. What was wrong is that the ``IntegrityError`` escaped: it
+    aborted the whole pass, skipping every remaining card, and stranded this one in
+    ``creating`` with no failure count, no reason, and no route to the anomaly threshold —
+    a silent gap produced by the guard meant to prevent one.
+    """
+    first = card("card-1")
+    cycle(conn, board_config, audit, simulated_boundaries(audit, [first]), dry_run=True)
+    original = db.list_cards(conn, include_simulated=True)[0]
+    assert original.issue_number is not None
+
+    # A restart, and a second card resolving to the same repository.
+    second = card("card-2")
+    boundaries = simulated_boundaries(audit, [first, second])
+    third = card("card-3")
+    boundaries.card_reader.cards.append(third)
+
+    outcome = cycle(conn, board_config, audit, boundaries, dry_run=True)
+
+    rows = {row.card_id: row for row in db.list_cards(conn, include_simulated=True)}
+    # The pass completed rather than aborting partway: every card was reached.
+    assert set(rows) == {"card-1", "card-2", "card-3"}
+    assert outcome.failed >= 1
+
+    # The colliding card carries a reason and a failure count, as any failed creation does.
+    stranded = rows["card-2"]
+    assert stranded.state == CardState.CREATING
+    assert stranded.create_failures >= 1
+    assert "already mapped to card" in stranded.reason
+    # And the first run's mapping is untouched.
+    assert rows["card-1"].issue_number == original.issue_number
+
+
+def test_the_colliding_card_succeeds_on_the_next_pass(conn, board_config, audit):
+    """The counter has advanced by then, so the retry mints a number nothing holds. A
+    failure that needs a human to clear would be a poor trade for a numbering accident."""
+    first = card("card-1")
+    cycle(conn, board_config, audit, simulated_boundaries(audit, [first]), dry_run=True)
+
+    second = card("card-2")
+    boundaries = simulated_boundaries(audit, [first, second])
+    cycle(conn, board_config, audit, boundaries, dry_run=True)
+    cycle(conn, board_config, audit, boundaries, dry_run=True)
+
+    rows = {row.card_id: row for row in db.list_cards(conn, include_simulated=True)}
+    assert rows["card-2"].state == CardState.LINKED
+    assert rows["card-2"].issue_number != rows["card-1"].issue_number
+
+
+def test_a_live_run_is_unaffected(conn, board_config, audit):
+    """Real issue numbers come from GitHub and are unique per repository, so the collision
+    is simulated-only. Asserted so the fix cannot be mistaken for one the live path needs."""
+    boundaries = make_board_boundaries(audit, cards=[card("card-1"), card("card-2")])
+    outcome = cycle(conn, board_config, audit, boundaries)
+    assert outcome.failed == 0
+    numbers = [row.issue_number for row in db.list_cards(conn)]
+    assert len(set(numbers)) == 2

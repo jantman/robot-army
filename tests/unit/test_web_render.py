@@ -16,9 +16,14 @@ from tests.conftest import seed_item, seed_session
 from robot_army import db
 from robot_army.web import html
 
-#: Every page an offline machine must render. The GitHub links themselves may point out;
-#: nothing else may (SC-009).
-ALL_VIEWS = ("/active", "/queue", "/interrupted", "/anomalies", "/log", "/item/1")
+#: Every page an offline machine must render. Links to the two systems this project reads
+#: from may point out; nothing else may (SC-009).
+ALL_VIEWS = ("/active", "/queue", "/interrupted", "/cards", "/anomalies", "/log", "/item/1")
+
+#: The only origins an href may name. Both are *sources this system already reads from*,
+#: and both links are built from data already stored with no additional call — which is
+#: the rule FR-043 states and ``github_link``/``card_link`` are the only implementations of.
+ALLOWED_ORIGINS = ("https://github.com/", "https://trello.com/")
 
 _ASSET_URL = re.compile(r'(?:src|href)="(https?://[^"]*)"')
 
@@ -83,7 +88,7 @@ def test_no_view_references_a_host_other_than_github(web, conn):
     for path in (*ALL_VIEWS[:-1], f"/item/{item_id}"):
         body = web.get(path).text
         external = _ASSET_URL.findall(body)
-        offenders = [url for url in external if not url.startswith("https://github.com/")]
+        offenders = [url for url in external if not url.startswith(ALLOWED_ORIGINS)]
         assert not offenders, f"{path} fetches from outside: {offenders}"
 
 
@@ -162,3 +167,103 @@ def test_asset_urls_carry_a_content_hash_so_an_upgrade_is_never_stale(web):
     # Different content, different URL — which is the whole mechanism.
     assert html.asset_url("/static/app.css", "a") != html.asset_url("/static/app.css", "b")
     assert html.asset_url("/static/app.css", html.APP_CSS) == css_url, "and it is stable"
+
+
+# -- the cards view (milestone 003) -----------------------------------------
+
+
+def seed_card(conn, **overrides):
+    from robot_army import db
+
+    values = {
+        "board_id": "board-1",
+        "card_id": "abc123def456abc123def456",
+        "card_url": "https://trello.com/c/abc123def456abc123def456",
+        "title": "Fix the widget",
+        "body": "",
+        "dry_run": False,
+    }
+    values.update(overrides)
+    with db.transaction(conn):
+        row_id = db.insert_card(conn, **values)
+    return row_id
+
+
+def test_a_hostile_card_title_is_escaped(board_web, conn):
+    """A card's text is written by whoever can put a card on the board, and the planning
+    document calls it semi-untrusted. It reaches a page the author trusts."""
+    seed_card(conn, title='<script>alert("card")</script>')
+    body = board_web.get("/cards").text
+    assert "<script>alert" not in body
+    assert "&lt;script&gt;" in body
+
+
+def test_a_hostile_needs_info_reason_is_escaped_too(board_web, conn):
+    """The reason is assembled from the card's own text, so it carries the same risk."""
+    from robot_army import db
+    from robot_army.cardstates import CardState
+
+    row_id = seed_card(conn, title="Vague")
+    with db.transaction(conn):
+        conn.execute(
+            "UPDATE cards SET state = ?, reason = ? WHERE id = ?",
+            (str(CardState.NEEDS_INFO), '<img src=x onerror=alert(1)>', row_id),
+        )
+    body = board_web.get("/cards").text
+    assert "<img" not in body
+    assert "&lt;img" in body
+
+
+def test_simulated_cards_are_excluded_by_default_and_marked_when_included(board_web, conn):
+    """FR-019, on the new view: excluded by default, unmistakable when asked for."""
+    seed_card(conn, card_id="simulatedcard000000000aa", title="Rehearsal", dry_run=True)
+
+    plain = board_web.get("/cards").text
+    assert "Rehearsal" not in plain
+
+    marked = board_web.get("/cards?include_simulated=1").text
+    assert "Rehearsal" in marked
+    assert 'class="sim"' in marked
+
+
+def test_a_card_links_to_the_board_and_to_its_issue(board_web, conn):
+    from robot_army import db
+    from robot_army.cardstates import CardState
+
+    row_id = seed_card(conn)
+    with db.transaction(conn):
+        conn.execute(
+            """UPDATE cards SET state = ?, repo_key = 'jantman/demo', issue_number = 7,
+                                issue_url = 'https://github.com/jantman/demo/issues/7'
+               WHERE id = ?""",
+            (str(CardState.LINKED), row_id),
+        )
+    body = board_web.get("/cards").text
+    assert 'href="https://trello.com/c/abc123def456abc123def456"' in body
+    assert 'href="https://github.com/jantman/demo/issues/7"' in body
+
+
+def test_a_work_item_shows_its_card_beside_its_issue(board_web, conn):
+    """FR-017 and FR-048. Derived by join, with no column on ``work_items`` (R16)."""
+    from robot_army import db
+    from robot_army.cardstates import CardState
+
+    row_id = seed_card(conn)
+    with db.transaction(conn):
+        conn.execute(
+            """UPDATE cards SET state = ?, repo_key = 'jantman/demo', issue_number = 42
+               WHERE id = ?""",
+            (str(CardState.LINKED), row_id),
+        )
+    item_id = seed_item(conn, repo_key="jantman/demo", issue_number=42, state="active")
+
+    body = board_web.get(f"/item/{item_id}").text
+    assert "https://trello.com/c/abc123def456abc123def456" in body
+    payload = board_web.get_json(f"/item/{item_id}").json()
+    assert payload["card"]["card_id"] == "abc123def456abc123def456"
+
+
+def test_a_work_item_with_no_card_says_so_rather_than_showing_a_gap(web, conn):
+    item_id = seed_item(conn, state="active")
+    payload = web.get_json(f"/item/{item_id}").json()
+    assert payload["card"] is None

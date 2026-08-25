@@ -1,0 +1,160 @@
+# robot-army — example configuration
+#
+# Copy to ~/.config/robot-army/config.toml and edit. Every value shown is the
+# built-in default unless marked REQUIRED, so the shortest working config is
+# just [github] author + a token source + one [repos.*] section.
+#
+# Two rules this file enforces, both worth knowing before you edit:
+#
+#   * A literal credential here is an ERROR, not a warning. The repository is
+#     public. Secrets are named, never written: `*_env` holds the NAME of an
+#     environment variable, `*_file` a path to a 0600 file.
+#   * A typo in a top-level section or key is a WARNING and the daemon starts.
+#     A typo inside [repos.*] is an ERROR — a silently disabled preparation
+#     step is worse than a refusal to start.
+#
+# Reference: specs/001-minimum-daemon/contracts/config.md
+
+[daemon]
+# plan | local | no-remote | live — how much of the world this is allowed to touch.
+# Start at "plan" the first time. "live" is the real thing.
+effect_level                = "live"
+tick_seconds                = 5      # scheduler granularity
+poll_seconds                = 60     # GitHub poll interval (ETags make this cheap)
+reconcile_seconds           = 60     # sweep for sessions that died without saying so
+dispatching_max_age_seconds = 900    # a wedged preparation is failed after this
+confirm_timeout_seconds     = 45     # how long to wait for proof a session really started
+max_concurrent_sessions     = 2      # sessions this daemon will own at once
+
+[github]
+author     = "REQUIRED — your GitHub login"   # the security boundary; cannot be disabled
+label      = "robot-army"                     # the label that means "dispatch this"
+token_env  = "GITHUB_TOKEN"                   # variable NAME, not the token
+# token_file = "~/.config/robot-army/github-token"   # or a 0600 file; pick exactly one
+include_owned   = true                        # poll every repo you own
+extra_repos     = []                          # plus these, e.g. ["someone/theirs"]
+timeout_seconds = 20
+max_retries     = 4
+api_base        = "https://api.github.com"
+
+[worker]
+permission_mode = "auto"          # passed to claude
+model           = ""              # empty means claude's own default
+base_branch     = "main"
+branch_prefix   = "robot-army"    # branches are <prefix>/<something>
+binary          = "claude"
+
+[terminal]
+socket_glob           = "/tmp/mykitty-*"   # kitty appends its PID, so this is a glob
+probe_timeout_seconds = 2
+binary                = "kitty"
+
+[health]
+max_age_seconds = 180    # heartbeat older than this means `robot-army health` exits 4
+webhook_url     = ""     # optional external ping; leave empty for none
+
+[hooks]
+default_timeout_seconds = 300    # ceiling for a post_create step that sets none
+
+[web]
+# `robot-army serve`. THE BIND ADDRESS IS THE ACCESS POLICY — there is no
+# authentication, by design. Anything that can reach this port has full control.
+# Loopback is the default; widening it is a deliberate edit, and a globally
+# routable address is refused outright.
+bind            = "127.0.0.1"   # your LAN address to reach it from the phone
+port            = 8420
+refresh_seconds = 10
+
+# [paths]
+# Omit entirely to use the XDG defaults: state under ~/.local/state/robot-army,
+# sockets under $XDG_RUNTIME_DIR/robot-army. Set only if you want them elsewhere.
+# worktree_root = "~/.cache/robot-army/worktrees"
+# state_dir     = "~/.local/state/robot-army"
+# socket_dir    = "/run/user/1000/robot-army"
+
+# ---------------------------------------------------------------------------
+# Milestone 003 — the Trello card source. OPTIONAL, and absent by default.
+#
+# Delete this whole section and the daemon makes no board request at all: the
+# source is inert, not merely disabled, so an installation that does not want it
+# behaves exactly as it did in milestone 002.
+#
+# Unlike the sections above, an unknown key in HERE is an ERROR rather than a
+# warning — for the same reason it is inside [repos.*]. A typo in a board
+# section that exists means polling the wrong thing while looking healthy.
+#
+# A tagged card becomes an UNLABELLED GitHub issue. Labelling it is still yours
+# to do, and the writer has no parameter that could carry a label — the human
+# gate is absent from the interface rather than defended by a rule.
+#
+# The board must be PRIVATE. That is the authorization model for this path:
+# there is no per-card author check, so board access IS authorization, and
+# startup refuses to ingest a board the public can read.
+#
+# Who else is on your private board is your decision, not the daemon's. The
+# member list is recorded in the audit log and never gated on. A second member
+# can cause an issue to be filed; only you labelling that issue causes anything
+# to run.
+#
+# Find the board id with:
+#   curl -s "https://api.trello.com/1/members/me/boards?fields=id,name,prefs" \
+#     -H "Authorization: OAuth oauth_consumer_key=\"$TRELLO_API_KEY\", oauth_token=\"$TRELLO_API_TOKEN\"" \
+#     | jq -r '.[] | "\(.id)  \(.prefs.permissionLevel)  \(.name)"'
+# ---------------------------------------------------------------------------
+
+[trello]
+board_id         = "REQUIRED — 24-hex board id, or the 8-char short link from its URL"
+label            = "AI-task"        # spec.md calls this the "tag", to keep it distinct
+                                    # from [github] label, which is the human gate
+in_progress_list = "In Progress"    # card moves here when a session is confirmed running
+done_list        = "Done"           # card moves here when the issue is observed closed
+poll_seconds     = 300              # slower than GitHub: no conditional-request economy
+timeout_seconds  = 20
+max_retries      = 4
+api_base         = "https://api.trello.com/1"
+key_env          = "TRELLO_API_KEY"     # variable NAMES, not the values
+token_env        = "TRELLO_API_TOKEN"
+# key_file       = "~/.config/robot-army/trello-key"      # or 0600 files; exactly one of each
+# token_file     = "~/.config/robot-army/trello-token"
+#
+# Verify it without starting the daemon:
+#   robot-army doctor      # six board checks, each reported individually
+#   robot-army cards       # what is on the board and what became of it
+
+# ---------------------------------------------------------------------------
+# Repositories. One section per repo, and a repo is only worked on after
+# `robot-army onboard <key>` — configuring it here is not consent.
+#
+# The key is the GitHub "owner/name". `path` is your existing local clone;
+# worktrees are cut from it, never from a fresh clone.
+#
+# `path` MUST exist — the loader checks it. As shipped, this file therefore
+# fails with "path does not exist: ~/GIT/example-repo" until you point it at a
+# real clone, which is the intended behaviour and the one error you should
+# expect on first copy.
+# ---------------------------------------------------------------------------
+
+[repos."you/example-repo"]
+path        = "~/GIT/example-repo"
+base_branch = "main"                # omit to inherit [worker] base_branch
+
+# Steps run inside each fresh worktree before the session starts. Exactly one
+# of run / link / copy per step. `link` and `copy` are first-class rather than
+# shell commands because they must be idempotent and readable at a glance.
+# Every step is bounded by a timeout — a hung step wedges the item with no
+# session and nothing to observe.
+post_create = [
+  { link = ".env",             timeout = 10 },
+  { copy = "config/local.yml", timeout = 10 },
+  { run  = "uv sync",          timeout = 600 },
+]
+
+# Injected into the session's environment. Sessions inherit the terminal
+# daemon's environment, not the daemon's, so anything needed must be explicit.
+[repos."you/example-repo".env]
+DATABASE_URL = "postgresql://localhost/example_dev"
+PORT         = "5199"
+
+# A second repo, minimal: everything else inherited.
+# [repos."you/other-repo"]
+# path = "~/GIT/other-repo"

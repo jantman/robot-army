@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import db, sessions
+from robot_army import db, intake, sessions
 from robot_army.boundaries import BoundaryError, TransportError
 from robot_army.states import (
     SessionState,
@@ -311,6 +311,27 @@ def _resolve_closed_issues(
                 item_id=item.id,
                 target=WorkItemState.DONE,
                 reason=f"source issue {key} is closed",
+            )
+        # The board's other half (FR-028). Best-effort for the same reason the dispatch
+        # side is: the work item is already done, and a board that cannot be written must
+        # not undo that or stall the rest of the pass.
+        try:
+            intake.on_issue_closed(
+                conn,
+                boundaries=boundaries,
+                audit=audit,
+                config=config,
+                repo_key=item.repo_key,
+                issue_number=item.issue_number,
+                dry_run=bool(item.dry_run),
+            )
+        except Exception as exc:  # noqa: BLE001 - the item is done; the board is cosmetic
+            audit.error(
+                "trello.card.move",
+                error=exc,
+                entity_type="work_item",
+                entity_id=item.id,
+                detail={"stage": "moving the card to the done list"},
             )
         resolved += 1
     return resolved

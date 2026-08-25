@@ -27,9 +27,12 @@ if TYPE_CHECKING:
     from robot_army.audit import AuditLog
     from robot_army.paths import Layout
 
-#: The only two job names a marker may carry. A literal tuple rather than a registry:
-#: there are two forcible jobs and Principle I forbids machinery with one caller.
-VALID_REQUESTS: tuple[str, ...] = ("poll", "reconcile")
+#: The only job names a marker may carry. A literal tuple rather than a registry: there
+#: are three forcible jobs and Principle I forbids machinery with one caller.
+#:
+#: ``rescan`` (milestone 003) joined without any change to the mechanism, which is what
+#: made ``robot-army rescan`` a small addition rather than a new cross-process pathway.
+VALID_REQUESTS: tuple[str, ...] = ("poll", "reconcile", "rescan")
 
 #: Unrecognised filenames already reported, so a 5-second tick reports each once rather
 #: than 17,000 times a day. Process-local by design: a restart re-reports, which is right,

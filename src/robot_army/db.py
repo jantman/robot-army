@@ -23,9 +23,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from robot_army.cardstates import CardState
 from robot_army.migrations import migrate
 from robot_army.models import (
     Anomaly,
+    Card,
     DispatchControl,
     PollState,
     Repo,
@@ -364,6 +366,127 @@ def update_session_columns(conn: sqlite3.Connection, row_id: int, **columns: Any
     )
 
 
+# -- cards (milestone 003) --------------------------------------------------
+
+
+def get_card_by_id(conn: sqlite3.Connection, card_row_id: int) -> Card | None:
+    """Fetch by primary key. No ``include_simulated``: an explicit id is already explicit."""
+    row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_row_id,)).fetchone()
+    return from_row(Card, row) if row else None
+
+
+def find_card(
+    conn: sqlite3.Connection, *, board_id: str, card_id: str, dry_run: bool
+) -> Card | None:
+    """The mapping lookup that every creation consults first (R7).
+
+    Keyed exactly as ``idx_cards_identity`` is, so "is this card already tracked?" and
+    "would this insert collide?" cannot answer differently.
+    """
+    row = conn.execute(
+        "SELECT * FROM cards WHERE board_id = ? AND card_id = ? AND dry_run = ?",
+        (board_id, card_id, int(dry_run)),
+    ).fetchone()
+    return from_row(Card, row) if row else None
+
+
+def find_card_by_issue(
+    conn: sqlite3.Connection, *, repo_key: str, issue_number: int, dry_run: bool
+) -> Card | None:
+    """The reverse-direction lookup FR-036 requires.
+
+    Nothing in this milestone creates cards from issues, and this exists so that if
+    anything ever tries, it finds the existing mapping rather than making a second one.
+    """
+    row = conn.execute(
+        "SELECT * FROM cards WHERE repo_key = ? AND issue_number = ? AND dry_run = ?",
+        (repo_key, issue_number, int(dry_run)),
+    ).fetchone()
+    return from_row(Card, row) if row else None
+
+
+def list_cards(
+    conn: sqlite3.Connection,
+    *,
+    include_simulated: bool = False,
+    states: Sequence[CardState] | None = None,
+    board_id: str | None = None,
+) -> list[Card]:
+    sql = "SELECT * FROM cards WHERE 1=1" + _scope(include_simulated)  # noqa: S608
+    params: list[Any] = []
+    if states:
+        placeholders = ",".join("?" * len(states))
+        sql += f" AND state IN ({placeholders})"
+        params.extend(str(s) for s in states)
+    if board_id:
+        sql += " AND board_id = ?"
+        params.append(board_id)
+    sql += " ORDER BY id"
+    return _rows(conn.execute(sql, params), Card)
+
+
+def insert_card(
+    conn: sqlite3.Connection,
+    *,
+    board_id: str,
+    card_id: str,
+    card_url: str,
+    title: str,
+    body: str,
+    dry_run: bool,
+    last_activity: str | None = None,
+    origin_list_id: str | None = None,
+) -> int | None:
+    """Insert a ``discovered`` row, or return ``None`` if this card is already tracked.
+
+    The row is written before the card is evaluated, so an evaluation interrupted halfway
+    is observable as a ``discovered`` row on the next pass rather than as nothing at all —
+    the same reasoning ``insert_work_item`` records, and the first line of data-model.md's
+    interruption table.
+
+    ``origin_list_id`` is captured here, at first sighting, because this is the only moment
+    the card is guaranteed to be where the author left it. Learning it later would record
+    a list *we* put it in as the place it came from.
+    """
+    now = utcnow()
+    cursor = conn.execute(
+        """
+        INSERT OR IGNORE INTO cards
+            (board_id, card_id, card_url, title, body, state, dry_run, last_activity,
+             origin_list_id, first_seen_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            board_id,
+            card_id,
+            card_url,
+            title,
+            body,
+            str(CardState.DISCOVERED),
+            int(dry_run),
+            last_activity,
+            origin_list_id,
+            now,
+            now,
+        ),
+    )
+    return cursor.lastrowid if cursor.rowcount else None
+
+
+def update_card_columns(conn: sqlite3.Connection, card_row_id: int, **columns: Any) -> None:
+    """Update non-state columns. State changes go through ``cardstates.transition_card``."""
+    if not columns:
+        return
+    if "state" in columns:
+        raise ValueError("state changes must go through cardstates.transition_card()")
+    columns["updated_at"] = utcnow()
+    assignments = ", ".join(f"{name} = ?" for name in columns)
+    conn.execute(
+        f"UPDATE cards SET {assignments} WHERE id = ?",  # noqa: S608 - names are ours
+        (*columns.values(), card_row_id),
+    )
+
+
 # -- anomalies --------------------------------------------------------------
 
 
@@ -499,10 +622,12 @@ def purge_simulated(conn: sqlite3.Connection) -> dict[str, int]:
     """
     sessions = conn.execute("DELETE FROM sessions WHERE dry_run = 1").rowcount
     items = conn.execute("DELETE FROM work_items WHERE dry_run = 1").rowcount
-    return {"work_items": items, "sessions": sessions}
+    cards = conn.execute("DELETE FROM cards WHERE dry_run = 1").rowcount
+    return {"work_items": items, "sessions": sessions, "cards": cards}
 
 
 def count_simulated(conn: sqlite3.Connection) -> dict[str, int]:
     items = conn.execute("SELECT COUNT(*) AS n FROM work_items WHERE dry_run = 1").fetchone()["n"]
     sessions = conn.execute("SELECT COUNT(*) AS n FROM sessions WHERE dry_run = 1").fetchone()["n"]
-    return {"work_items": int(items), "sessions": int(sessions)}
+    cards = conn.execute("SELECT COUNT(*) AS n FROM cards WHERE dry_run = 1").fetchone()["n"]
+    return {"work_items": int(items), "sessions": int(sessions), "cards": int(cards)}

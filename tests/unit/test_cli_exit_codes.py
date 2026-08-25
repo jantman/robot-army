@@ -449,3 +449,30 @@ def test_every_web_control_has_a_terminal_verb_here(config_file):
     for verb in ("serve", "pause", "unpause", "attach", "resume", "restart", "abandon",
                  "cancel", "retry", "anomalies", "poll", "reconcile"):
         assert verb in verbs, verb
+
+
+# -- `--state` filters reject what they cannot parse (milestone 003) --------
+
+
+@pytest.mark.parametrize("verb", ["cards", "status"])
+def test_an_invalid_state_filter_is_a_usage_error_not_a_traceback(config_file, verb, capsys):
+    """The value reaches ``WorkItemState(...)`` / ``CardState(...)``, which raises a bare
+    ``ValueError``. ``main()`` catches only ``PreconditionFailed`` and ``KeyboardInterrupt``,
+    so an unrecognised state escaped it entirely and printed a raw Python traceback — where
+    the exit-code table promises a usage error.
+
+    argparse now refuses it before it can get that far, and lists the valid values.
+    """
+    with pytest.raises(SystemExit) as caught:
+        run_cli([verb, "--state", "bogus"], config_file)
+    assert caught.value.code == EXIT_USAGE
+    assert "invalid choice" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("verb", "state"), [("cards", "needs_info"), ("status", "ready")]
+)
+def test_a_valid_state_filter_is_still_accepted(config_file, verb, state):
+    """Guards the guard: a `choices=` list that omitted a real state would refuse valid
+    usage, which is the other way to get this wrong."""
+    assert run_cli([verb, "--state", state], config_file) in (EXIT_OK, EXIT_PRECONDITION)

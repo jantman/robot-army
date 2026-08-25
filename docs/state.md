@@ -67,7 +67,7 @@ database free of values I would expect to change by editing a file.
 
 ## The database
 
-SQLite, WAL mode, `foreign_keys=ON`, `synchronous=FULL`. Six tables. Directly inspectable:
+SQLite, WAL mode, `foreign_keys=ON`, `synchronous=FULL`. Seven tables. Directly inspectable:
 
 ```bash
 sqlite3 ~/.local/state/robot-army/state.db '.tables'
@@ -116,6 +116,108 @@ restart and reboot is the entire point: a pause that lapses when the daemon rest
 than no pause, because I would believe work was held when it was not. It is also an
 *operational act* rather than something I declare, which is the line the section above draws.
 
+### `cards` — the intake board, and the mapping to what each card became
+
+Added by migration 003. A table of its own rather than columns on `work_items`, and the
+reason is concrete: `work_items.repo_key` is `NOT NULL REFERENCES repos(repo_key)` and
+`issue_number` is `NOT NULL`, while a card awaiting clarification has neither by definition.
+Accommodating it there would have meant rebuilding the central table to weaken an invariant
+every other row depends on. The mapping also has to *outlive* any work item — a card's issue
+may sit unlabelled for weeks, and may be refused at onboarding and never become a work item
+at all.
+
+`repo_key` here is deliberately **not** a foreign key into `repos`. A card may name a
+repository that is configured but not onboarded (such a card still gets an issue, because
+creating one is not dispatching), and may name one that is configured and later removed. A
+foreign key would either forbid the row or delete the mapping — and deleting a mapping is how
+a duplicate issue gets created.
+
+| Column | Meaning |
+|---|---|
+| `board_id`, `card_id` | The card's identity on the board |
+| `state` | `discovered` → `needs_info` \| `creating` → `linked`, or `dropped`. See below |
+| `repo_key`, `issue_number`, `issue_url` | The mapping, once one exists |
+| `reason` | Why this card is held, or why creating its issue keeps failing |
+| `commented_reason` | The last reason actually written **onto the card** |
+| `last_activity` | The board's activity stamp, as the rescan baseline |
+| `origin_list_id` | Where the card was before we ever touched it |
+| `placed_list_id` | Where we last put it |
+| `pending_move_to` | Where we were *about* to put it |
+| `comment_posted_at` | When the marker comment was posted |
+| `intent_at` | When creation was attempted — the bound on crash recovery |
+
+**The `§11` invariant is two unique indexes, not a rule the create path follows.**
+`idx_cards_identity` is unique on `(board_id, card_id, dry_run)`, and the partial
+`idx_cards_issue` is unique on `(repo_key, issue_number, dry_run)` where `issue_number IS NOT
+NULL`. A create path that skipped its mapping check does not produce a duplicate; it produces
+an `IntegrityError`, which is loud. That is the difference between an invariant and a
+convention. `dry_run` is part of both keys, exactly as it is for `work_items`, so a simulated
+run and a later live run of the same card coexist rather than the rehearsal suppressing the
+real thing.
+
+**`reason` versus `commented_reason`** is the whole of the one-comment rule: comment when
+they differ, stay silent when they do not. A card held for weeks accumulates one comment, not
+one per poll — and a card whose *problem* changes gets a second comment saying so, which a
+simple "have we commented?" flag would get wrong.
+
+**Three list columns, not one.** `origin_list_id` is what an abandoned card is returned to;
+`placed_list_id` is what detects a move by me; `pending_move_to` is written *before* a move is
+attempted, so a move of ours that was interrupted after it landed is not mistaken for one of
+mine on the next pass. Getting that backwards would freeze a card's lifecycle at the first
+interruption.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  'SELECT card_id, state, repo_key, issue_number, reason FROM cards'
+robot-army cards                    # the same thing, readably
+robot-army rescan --all-needs-info  # look again at everything held
+```
+
+### The board's poll bookkeeping lives in `poll_state`
+
+Under the synthetic key `trello:board:<board_id>`. `poll_state` has no foreign key and no
+consumer that renders its rows as repositories, so a non-repository key is safe and a second
+identically shaped table would have been a table added to satisfy a naming preference.
+
+The `etag` column stays `NULL` for that row. Trello offers no usable conditional request on
+the endpoint the board poll needs, so the ETag economy that makes a 60-second GitHub poll free
+does not exist here — which argues for a longer interval rather than a cleverer mechanism.
+The board poll defaults to **300 seconds** against GitHub's 60.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  "SELECT * FROM poll_state WHERE repo_key LIKE 'trello:%'"
+```
+
+### The card creation sequence, and where it can be killed
+
+Creating an issue from a card is four steps, each in its own transaction, because every seam
+between them has to be separately resumable:
+
+1. `INSERT` a `cards` row in `creating` with the resolved repository and `intent_at`.
+2. Create the issue. Its body carries the card's URL.
+3. `UPDATE` the row with the issue number and URL, state `linked`. **This is the mapping.**
+4. Comment on the card with the issue URL, then record `comment_posted_at`.
+
+The dangerous window is between 2 and 3: the issue exists and nothing local knows it. Recovery
+for a row found in `creating` lists issues in the target repository created since `intent_at`,
+authored by me, and looks for the card's URL in the body. Listing, **never search** — GitHub's
+search index lags by minutes, so an issue created two seconds before a crash may be invisible
+to it, producing exactly the duplicate the mechanism exists to prevent.
+
+**The known limit, stated rather than papered over.** A crash between steps 2 and 3 *combined
+with* total loss of the database leaves an issue nothing can find: no mapping, no intent row,
+and no card comment. The next poll creates a second issue. This is a double failure, it is
+recoverable by hand — the stray issue is visible in the repository and is unlabelled, so it
+dispatches nothing — and closing it would mean scanning every configured repository's recent
+issues before every creation, a cost paid on every card forever. If it ever actually happens,
+revisit it then.
+
+Database loss on its own is covered: each card carries a marker comment naming its issue, and
+the next poll restores the mapping from it one card at a time. The marker is a **recovery
+marker, not the primary key** — with a mapping row present the card's comments are never read
+at all.
+
 ## What a reboot does
 
 Every session is gone; every `active` row still says `active`. On the next start:
@@ -157,6 +259,12 @@ summary:
 | Mid-migration | The migration re-runs; `user_version` never advanced |
 | Mid-audit-write | A partial final line is skipped and counted by readers |
 | Mid-`set_dispatch_paused` | Rolled back; dispatch continues as before. The pause is never half-applied |
+| After a card's intent row, before its issue exists | Row in `creating`; the listing finds nothing and step 2 is retried |
+| After a card's issue, before its mapping | Row in `creating`, issue orphaned; the listing since `intent_at` finds it by the card URL in its body and adopts it |
+| After a card's mapping, before its comment | Row `linked`, `comment_posted_at` NULL; the next pass checks the board for an existing marker, then posts |
+| After a card move landed, before it was recorded | `pending_move_to` matches where the card actually is, which identifies the move as ours rather than mine |
+| Between a card write and its `last_activity` refresh | One redundant re-evaluation, which is idempotent and posts no comment because `commented_reason` is unchanged |
+| With the database lost entirely | Each card's marker comment restores its mapping on the next poll. The residual gap is the double failure above |
 | After writing a request marker, before the daemon read it | The marker persists and is consumed on the next tick or the next start |
 | After the daemon unlinked a marker, before running the job | The forced flag is lost and the job runs on its ordinary interval. Accepted: the cost is one interval, and unlinking *after* would risk running it twice |
 | Web process killed mid-request, before the transaction committed | Rolled back. The browser sees a dropped connection and the item page tells the truth on reload |

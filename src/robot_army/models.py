@@ -15,6 +15,7 @@ import json
 from dataclasses import dataclass, fields
 from typing import Any, Self
 
+from robot_army.cardstates import CardState
 from robot_army.states import SessionState, WorkItemState
 
 
@@ -93,6 +94,63 @@ class Session:
 
 
 @dataclass(frozen=True, slots=True)
+class Card:
+    """One card on the intake board, and the mapping to the issue it produced.
+
+    Almost everything is optional because almost everything is *learned*: a card starts as
+    a title and a body with no repository, no issue, and no position we put it in. The
+    columns fill in as the lifecycle advances, and the ones that stay ``NULL`` are the
+    honest record of a card that never got that far.
+
+    Three list ids rather than one, and the distinction matters (data-model.md):
+    ``origin_list_id`` is where the card was before we ever touched it and is what FR-029
+    returns it to; ``placed_list_id`` is where we last put it and is what FR-030 compares
+    against to detect a move by the author; ``pending_move_to`` is written *before* a move
+    is attempted, so an interrupted move of ours is distinguishable from a human one (R12).
+    """
+
+    id: int
+    board_id: str
+    card_id: str
+    card_url: str
+    title: str
+    body: str
+    state: CardState
+    dry_run: bool
+    first_seen_at: str
+    updated_at: str
+    repo_key: str | None = None
+    issue_number: int | None = None
+    issue_url: str | None = None
+    #: The current explanation. ``commented_reason`` is the last one actually written onto
+    #: the card, and the comparison between the two is all of FR-022: comment when they
+    #: differ, stay silent when they do not.
+    reason: str | None = None
+    commented_reason: str | None = None
+    #: The rescan-trigger baseline, carried as the string the API returned. Refreshed from
+    #: our *own* writes as well as the author's, which is what closes R9's loop.
+    last_activity: str | None = None
+    origin_list_id: str | None = None
+    placed_list_id: str | None = None
+    pending_move_to: str | None = None
+    comment_posted_at: str | None = None
+    intent_at: str | None = None
+    create_failures: int = 0
+    archived_at: str | None = None
+
+    @property
+    def source_id(self) -> str | None:
+        """The ``repo#number`` this card's issue is known by, once it has one.
+
+        The join key onto ``work_items.source_id`` (R16), kept here so the two front ends
+        cannot each invent their own spelling of it.
+        """
+        if self.repo_key is None or self.issue_number is None:
+            return None
+        return f"{self.repo_key}#{self.issue_number}"
+
+
+@dataclass(frozen=True, slots=True)
 class Anomaly:
     """A condition detected but not resolvable by the system (FR-065)."""
 
@@ -148,14 +206,21 @@ ANOMALY_KINDS: tuple[str, ...] = (
     "malformed_exit_record",
     "orphan_exit_record",
     "stale_socket",
+    # Milestone 003. Each names a board condition the system detected and cannot fix on
+    # its own: a precondition that stopped ingestion, a board it could not reach, a
+    # creation that keeps failing, and a mapping whose issue has vanished (FR-037).
+    "board_precondition",
+    "board_unreachable",
+    "card_create_failing",
+    "card_issue_missing",
 )
 
 
 def _coerce(value: Any, annotation: Any) -> Any:
     """Turn a SQLite column into the dataclass's declared type.
 
-    Only three coercions are needed: ``bool`` (SQLite has no boolean type) and the two
-    state enums. Everything else is already the right Python type.
+    Only ``bool`` (SQLite has no boolean type) and the three state enums need one.
+    Everything else is already the right Python type.
     """
     if value is None:
         return None
@@ -165,6 +230,8 @@ def _coerce(value: Any, annotation: Any) -> Any:
         return WorkItemState(value)
     if annotation is SessionState or annotation == "SessionState":
         return SessionState(value)
+    if annotation is CardState or annotation == "CardState":
+        return CardState(value)
     return value
 
 
@@ -190,4 +257,5 @@ ROW_TYPES: dict[str, type[Any]] = {
     "sessions": Session,
     "anomalies": Anomaly,
     "poll_state": PollState,
+    "cards": Card,
 }

@@ -16,6 +16,7 @@ EXPECTED_TABLES = {
     "anomalies",
     "poll_state",
     "dispatch_control",
+    "cards",
 }
 
 
@@ -254,4 +255,143 @@ def test_a_rolled_back_pause_leaves_dispatch_running(tmp_path):
         db.set_dispatch_paused(conn, paused=True, by="web")
         raise RuntimeError("killed before commit")
     assert db.get_dispatch_control(conn).paused is False
+    conn.close()
+
+
+# -- migration 003: cards (milestone 003) -----------------------------------
+
+
+def _run_only_002(conn: sqlite3.Connection) -> None:
+    """Bring a database to exactly the 002-era schema, as one in the field would be."""
+    conn.execute("BEGIN")
+    migrations._migration_001(conn)
+    migrations._migration_002(conn)
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+
+
+def _insert_card(conn, **overrides):
+    """A raw insert, bypassing ``db.insert_card``'s INSERT OR IGNORE.
+
+    These tests are about what the *schema* refuses. Going through the accessor would
+    exercise the accessor's own duplicate suppression instead, which is precisely the
+    convention the indexes exist to make unnecessary.
+    """
+    values = {
+        "board_id": "board-1",
+        "card_id": "card-1",
+        "card_url": "https://trello.com/c/card-1",
+        "title": "a card",
+        "body": "",
+        "state": "discovered",
+        "dry_run": 0,
+        "repo_key": None,
+        "issue_number": None,
+        "first_seen_at": "2026-08-24T00:00:00Z",
+        "updated_at": "2026-08-24T00:00:00Z",
+    }
+    values.update(overrides)
+    columns = ", ".join(values)
+    placeholders = ", ".join("?" * len(values))
+    return conn.execute(
+        f"INSERT INTO cards ({columns}) VALUES ({placeholders})",  # noqa: S608
+        tuple(values.values()),
+    )
+
+
+def test_migration_003_runs_on_a_002_era_database(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_002(conn)
+    assert current_version(conn) == 2
+
+    start, end = migrate(conn)
+    assert (start, end) == (2, SCHEMA_VERSION)
+
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    assert tables >= EXPECTED_TABLES
+    indexes = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+    }
+    assert {"idx_cards_identity", "idx_cards_issue", "idx_cards_state"} <= indexes
+    # 002's data survives: the migration adds a table, it does not rewrite anything.
+    assert conn.execute("SELECT COUNT(*) AS n FROM dispatch_control").fetchone()["n"] == 1
+    conn.close()
+
+
+def test_a_killed_migration_003_leaves_user_version_at_two_and_re_runs(tmp_path, monkeypatch):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_002(conn)
+
+    def _explode(connection: sqlite3.Connection) -> None:
+        migrations._migration_003(connection)
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(
+        migrations,
+        "MIGRATIONS",
+        (migrations._migration_001, migrations._migration_002, _explode),
+    )
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+
+    assert current_version(conn) == 2
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    assert "cards" not in tables, "the partial migration must have rolled back"
+
+    monkeypatch.undo()
+    start, end = migrate(conn)
+    assert (start, end) == (2, SCHEMA_VERSION)
+    assert conn.execute("SELECT COUNT(*) AS n FROM cards").fetchone()["n"] == 0
+    conn.close()
+
+
+def test_one_card_maps_to_at_most_one_issue(tmp_path):
+    """Half of the §11 invariant, enforced by ``idx_cards_identity``.
+
+    This is the point of the table: a create path that skipped its mapping check does not
+    produce a duplicate, it produces an ``IntegrityError`` — which is loud, and which is
+    the difference between an invariant and a convention.
+    """
+    conn, _ = db.open_database(tmp_path / "state.db")
+    _insert_card(conn)
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_card(conn)
+    assert conn.execute("SELECT COUNT(*) AS n FROM cards").fetchone()["n"] == 1
+    conn.close()
+
+
+def test_one_issue_maps_to_at_most_one_card(tmp_path):
+    """The other half, enforced by the partial ``idx_cards_issue``."""
+    conn, _ = db.open_database(tmp_path / "state.db")
+    _insert_card(conn, card_id="card-1", repo_key="me/demo", issue_number=7)
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert_card(conn, card_id="card-2", repo_key="me/demo", issue_number=7)
+    conn.close()
+
+
+def test_cards_without_an_issue_do_not_collide_with_each_other(tmp_path):
+    """Why ``idx_cards_issue`` is partial. Every ``needs_info`` card has a NULL issue
+    number, and a non-partial index would let the first one block all the rest."""
+    conn, _ = db.open_database(tmp_path / "state.db")
+    _insert_card(conn, card_id="card-1", repo_key="me/demo", issue_number=None)
+    _insert_card(conn, card_id="card-2", repo_key="me/demo", issue_number=None)
+    assert conn.execute("SELECT COUNT(*) AS n FROM cards").fetchone()["n"] == 2
+    conn.close()
+
+
+def test_a_simulated_row_does_not_occupy_the_live_rows_identity(tmp_path):
+    """FR-041, in the schema. ``dry_run`` is part of both keys, so a ``no-remote`` run
+    followed by a ``live`` run of the same card performs the real creation rather than
+    colliding with its own rehearsal."""
+    conn, _ = db.open_database(tmp_path / "state.db")
+    _insert_card(conn, dry_run=1, repo_key="me/demo", issue_number=7)
+    _insert_card(conn, dry_run=0, repo_key="me/demo", issue_number=7)
+    assert conn.execute("SELECT COUNT(*) AS n FROM cards").fetchone()["n"] == 2
     conn.close()

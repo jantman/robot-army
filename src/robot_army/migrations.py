@@ -118,20 +118,18 @@ def _statements(script: str) -> list[str]:
 
     Needed because ``executescript()`` issues an implicit COMMIT before running, which
     would end the transaction ``migrate()`` opened and leave a half-built schema behind
-    on a crash — exactly the interruption behaviour data-model.md promises against. The
-    naive split is safe here only because these scripts contain no semicolons inside
-    string literals or trigger bodies; a future migration that does must not use it.
+    on a crash — exactly the interruption behaviour data-model.md promises against.
+
+    Comments are stripped **before** the split, not after. Doing it the other way round
+    made a semicolon inside an explanatory comment cut a statement in half, which
+    milestone 003 discovered by writing one. The split remains safe only because these
+    scripts contain no semicolons inside string literals or trigger bodies, and a future
+    migration that does must not use this.
     """
-    statements: list[str] = []
-    for chunk in script.split(";"):
-        # Strip whole-line comments: a statement preceded by explanatory comments is
-        # still a statement, and dropping the chunk would silently omit it.
-        body = "\n".join(
-            line for line in chunk.splitlines() if not line.strip().startswith("--")
-        ).strip()
-        if body:
-            statements.append(body)
-    return statements
+    body = "\n".join(
+        line for line in script.splitlines() if not line.strip().startswith("--")
+    )
+    return [chunk.strip() for chunk in body.split(";") if chunk.strip()]
 
 
 SCHEMA_002_SQL = """
@@ -156,6 +154,70 @@ INSERT INTO dispatch_control (id, paused) VALUES (1, 0);
 """
 
 
+SCHEMA_003_SQL = """
+-- Cards on the intake board, and the mapping from each to the issue it produced
+-- (milestone 003, data-model.md).
+--
+-- A table of its own rather than columns on `work_items`, and the reason is concrete
+-- rather than aesthetic: `work_items.repo_key` is NOT NULL REFERENCES repos(repo_key) and
+-- `issue_number` is NOT NULL, while a card awaiting clarification has neither by
+-- definition. Accommodating it there would mean rebuilding the central table to weaken an
+-- invariant every other row depends on (research.md R5). The mapping must also outlive any
+-- work item: a card's issue may sit unlabelled for weeks, and may be refused at onboarding
+-- and never become a work item at all.
+--
+-- `repo_key` is deliberately NOT a foreign key into `repos`. A card may name a repository
+-- that is configured but not onboarded — such a card still gets an issue, because creating
+-- an issue is not dispatching — and may name one that is configured and later removed. An
+-- FK here would either forbid the row or delete the mapping, and deleting a mapping is how
+-- a duplicate issue gets created.
+CREATE TABLE cards (
+    id                INTEGER PRIMARY KEY,
+    board_id          TEXT    NOT NULL,
+    card_id           TEXT    NOT NULL,
+    card_url          TEXT    NOT NULL,
+    title             TEXT    NOT NULL,
+    body              TEXT    NOT NULL,
+    state             TEXT    NOT NULL,
+    dry_run           INTEGER NOT NULL,
+    repo_key          TEXT,
+    issue_number      INTEGER,
+    issue_url         TEXT,
+    reason            TEXT,
+    commented_reason  TEXT,
+    last_activity     TEXT,
+    origin_list_id    TEXT,
+    placed_list_id    TEXT,
+    pending_move_to   TEXT,
+    comment_posted_at TEXT,
+    intent_at         TEXT,
+    create_failures   INTEGER NOT NULL DEFAULT 0,
+    archived_at       TEXT,
+    first_seen_at     TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL
+);
+
+-- The §11 invariant, both halves, enforced by the schema rather than by a rule the create
+-- path has to remember. A create that skipped its mapping check does not produce a
+-- duplicate. It produces an IntegrityError, which is loud — the difference between an
+-- invariant and a convention.
+--
+-- dry_run is part of both keys, exactly as it is for work_items and for the same reason: a
+-- simulated run and a later live run of the same card must coexist, which is the normal
+-- workflow, and it is what makes FR-041 true — a simulated row cannot occupy the live
+-- row's slot and so cannot suppress the real creation.
+CREATE UNIQUE INDEX idx_cards_identity ON cards (board_id, card_id, dry_run);
+
+-- At most one card per issue. Partial, because rows that have no issue yet — every
+-- needs_info card, and every creating card before its issue exists — must not collide with
+-- each other on a shared NULL.
+CREATE UNIQUE INDEX idx_cards_issue ON cards (repo_key, issue_number, dry_run)
+    WHERE issue_number IS NOT NULL;
+
+CREATE INDEX idx_cards_state ON cards (state);
+"""
+
+
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
         conn.execute(statement)
@@ -166,10 +228,16 @@ def _migration_002(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_003(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_003_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
     _migration_002,
+    _migration_003,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

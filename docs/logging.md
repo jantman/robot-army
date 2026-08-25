@@ -129,6 +129,41 @@ them.
 grep -ri 'ghp_' ~/.local/state/robot-army/logs/ && echo "REDACTION FAILURE" || echo "clean"
 ```
 
+## The `trello.*` actions
+
+Milestone 003 adds one source and ten actions. Every one of them names the card id, and,
+where one exists, the repository and issue — so a card's whole life is `grep`-able by its id.
+
+| Action | When | Notable detail |
+|---|---|---|
+| `trello.board.check` | Startup, and `robot-army doctor` | Each precondition and its verdict, plus the board's **member list**, which is recorded and never gated on |
+| `trello.poll` | Once per board cycle | How many cards carry the tag, and how many were newly tracked |
+| `trello.evaluated` | Per card, per evaluation | Whether it resolved, to what, and the candidates it considered |
+| `trello.needs_info` | A card is held | The reason, and the reason last written onto the card |
+| `trello.issue.create` | An issue is filed from a card | Intent/outcome pair. The failure branch carries the attempt count |
+| `trello.card.comment` | Any comment we write | Intent/outcome pair |
+| `trello.card.move` | Any move we make | Intent/outcome pair, naming both lists |
+| `trello.card.move_refused` | A move we declined | Where the card is, where we last put it, and what we *would* have done |
+| `trello.recovered` | Any recovery path fires | Which path — issue listing, or marker comment — and what it found |
+| `trello.dropped` | A card leaves the board | Whether the mapping was kept, and why |
+
+A recovery that happened silently would be indistinguishable from nothing having gone wrong,
+which is why `trello.recovered` exists at all: the *absence* of duplicates is not observable,
+so the recovery that prevented one has to be.
+
+### Credentials and this source
+
+Trello's documented authentication is a **query string**. This project uses the header form
+instead, and that is a security decision rather than a stylistic one: the redaction choke
+point below is keyed on **field names**, so a secret embedded inside a string under a key
+called `url` would sail straight through it. No `trello.*` record carries a full URL — method
+and path only — and the boundary strips query strings and its own credential values from any
+text it records, in case a remote quotes back what it was sent.
+
+```bash
+grep -c "$TRELLO_API_TOKEN" ~/.local/state/robot-army/log/*.jsonl   # expect 0, always
+```
+
 ## What is deliberately not logged
 
 Principle III permits gaps only when they are named and justified in the feature plan. The
@@ -142,6 +177,7 @@ the log knows what its silence means:
 | Heartbeat writes, every 5 seconds | ~17,000 records a day of noise. The heartbeat file *is* the record, and its staleness is the signal |
 | Individual `/proc` and registry reads during reconciliation — one aggregate per pass | Same disproportion. The *conclusions* — sessions found, orphans detected, states changed — are each logged individually |
 | **Actions the session itself takes** inside the worktree | They happen outside this process entirely. This log records the dispatch, the session identity, and where the transcript lives; the worker's own transcript is the record of what it did. Claiming otherwise would be dishonest about what this log covers |
+| Individual board **reads** made within a poll cycle — the freshness re-read before a move, and the comment fetch on the recovery path | Same reasoning as the GitHub one, and the same limit: they change no state outside the process, and the cycle *is* logged with what it evaluated and what it decided about each card. Every board **write** is an intent/outcome pair, without exception |
 | **Read-only web requests** — every `GET` the interface serves | They change no state outside the process, so Principle III's own scope does not reach them. The exception is written down because the *volume* makes the omission visible: a page auto-refreshing every 10 seconds issues a `GET` every 10 seconds, and logging those would bury the record this project exists to keep readable. Nothing a `GET` does is unreconstructable — the data it read is in the database and in this log. **Every `POST` is logged**, without exception |
 
 ## Silent failure is forbidden
@@ -156,6 +192,14 @@ Every swallowed error, retry, and fallback leaves a record. Specifically:
 - A degraded terminate path (process group rather than systemd scope) logs that it was taken.
 - A GitHub comment that fails does not change the work item's state, but the failure is
   recorded.
+- A **board** transport failure raises for the same reason the GitHub one does, and is never
+  turned into an empty card list. "No cards on the board" and "I could not read the board"
+  produce identical behaviour if conflated, and only one of them is a reason to do nothing.
+- A card whose issue could not be created stays in `creating` with its reason and a failure
+  count, and — the part worth stating — **no comment is left on the card claiming an issue
+  exists**. A link to nothing is worse than silence.
+- A board precondition that fails disables ingestion only, with an anomaly naming which check
+  failed. Dispatch of issues I wrote myself is untouched.
 
 ## Reading it from the phone
 

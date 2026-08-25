@@ -1512,7 +1512,11 @@ def on_session_active(
         repo_key=repo_key,
         issue_number=issue_number,
         dry_run=dry_run,
-        target=_list_id(config, boundaries, "in_progress"),
+        # The list is named, not resolved, so nothing reaches the board until a card is
+        # known to exist. Python evaluates call arguments eagerly, so resolving it here
+        # would fetch the board for every dispatched item — including the great majority
+        # that never came from a card at all.
+        which="in_progress",
         reason="a session is running for this card's issue",
         remember_origin=True,
     )
@@ -1537,7 +1541,7 @@ def on_issue_closed(
         repo_key=repo_key,
         issue_number=issue_number,
         dry_run=dry_run,
-        target=_list_id(config, boundaries, "done"),
+        which="done",
         reason=f"issue {repo_key}#{issue_number} is closed",
         comment=f"🤖 robot-army: issue {repo_key}#{issue_number} is closed.",
     )
@@ -1579,10 +1583,12 @@ def on_work_abandoned(
 def _list_id(config: Config, boundaries: Boundaries, which: str) -> str | None:
     """Resolve a configured lifecycle list name to its board id.
 
-    The names were validated at startup (R11) and the ids resolved then; this re-reads
-    them from the board rather than threading the startup status through four call sites in
-    three modules. It is one cached call on the reader, and a board whose lists vanished
-    mid-run is a condition the caller must handle anyway.
+    The names were validated at startup (R11) and the ids resolved then; this re-reads them
+    from the reader rather than threading the startup status through four call sites in
+    three modules. The reader memoises ``board_info`` for the life of the process, so this
+    is one board round trip per run rather than one per move — which is what R10 means by
+    checking "once per process", and what this docstring used to claim without it being
+    true. A board whose lists vanished mid-run is a condition the caller handles anyway.
     """
     trello = config.trello
     reader = boundaries.card_reader
@@ -1620,15 +1626,26 @@ def _move_card_for_issue(
     repo_key: str,
     issue_number: int,
     dry_run: bool,
-    target: str | None,
+    which: str,
     reason: str,
     comment: str | None = None,
     remember_origin: bool = False,
 ) -> Verdict | None:
+    """Move the card an issue came from, if it came from one.
+
+    **The order of these two lookups is a cost decision.** The card lookup is one indexed
+    local query; resolving a list name is a board round trip. Both of these entry points
+    sit in per-item hot paths — every dispatched item, every closed issue — and the great
+    majority of those never came from a card, so the cheap local answer settles it first
+    and the board is not touched at all.
+    """
     card = _card_for_issue(
         conn, config=config, repo_key=repo_key, issue_number=issue_number, dry_run=dry_run
     )
-    if card is None or target is None:
+    if card is None:
+        return None
+    target = _list_id(config, boundaries, which)
+    if target is None:
         return None
     return _move_card(
         conn,
@@ -1888,7 +1905,18 @@ def recovery_sweep(
                         dry_run=dry_run,
                     )
                     counts["commented"] += 1
-                if _issue_has_vanished(
+                # Skipped for simulated rows (FR-055), following the same rule
+                # ``reconcile._resolve_closed_issues`` already applies. A simulated card's
+                # issue number came from ``SimulatedIssueWriter`` and is a recognisable
+                # fake, so asking the **real** reader about it is guaranteed to 404 — which
+                # would file a ``card_issue_missing`` anomaly for every simulated card,
+                # into the same operator-facing list as the real ones, and spend a GitHub
+                # request to do it. That is the dry-run mode causing exactly the outward
+                # effect it exists to avoid.
+                #
+                # This is a decision about *a simulated row*, not about which
+                # implementation to call — the latter lives only in ``effects.py``.
+                if not row.dry_run and _issue_has_vanished(
                     conn, boundaries=boundaries, audit=audit, card=row, dry_run=dry_run
                 ):
                     counts["missing_issue"] += 1

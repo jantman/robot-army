@@ -75,6 +75,7 @@ class TrelloCardReader:
         self._sleep = sleep
         self._client = client
         self._owns_client = client is None
+        self._board_info: BoardInfo | None = None
 
     # -- plumbing -----------------------------------------------------------
 
@@ -151,6 +152,7 @@ class TrelloCardReader:
         if self._client is not None and self._owns_client:
             self._client.close()
             self._client = None
+        self._board_info = None
 
     def _request(
         self,
@@ -255,11 +257,28 @@ class TrelloCardReader:
     def board_info(self) -> BoardInfo:
         """The board's identity, privacy, members, labels and lists.
 
-        Three calls, made once per process at startup (R10). Checking rather than assuming
-        is the whole point: an assumption written in a planning document does not revisit
-        itself, and sharing the board should be a loud failure rather than a silent
-        widening of who can queue work onto the author's machine.
+        Four calls, made **once per process** and memoised thereafter (R10). Checking
+        rather than assuming is the whole point: an assumption written in a planning
+        document does not revisit itself, and sharing the board should be a loud failure
+        rather than a silent widening of who can queue work onto the author's machine.
+
+        The memo is what makes "once per process" true rather than aspirational. Callers
+        other than the startup check ask for this to resolve a lifecycle list name to an
+        id, and they sit in per-item paths — without it, moving one card would cost four
+        board requests and write a duplicate ``trello.board.check`` record every time.
+
+        R10 already fixes the frequency at once per process plus a documented restart, and
+        gives the reason: the thing being checked changes approximately never, and the
+        alternative is extra calls a minute to detect it. So the memo is not merely an
+        optimisation over the previous behaviour — it is the frequency the design asked
+        for, which the previous behaviour did not implement.
+
+        A failure is **not** memoised: only a successful read is stored, so a board that
+        was unreachable at startup is retried rather than being written off for the life
+        of the process.
         """
+        if self._board_info is not None:
+            return self._board_info
         board_id = self._trello.board_id
         path = f"/boards/{quote(board_id, safe='')}"
         board = self._request("GET", path, params={"fields": "name,prefs"}).json()
@@ -296,6 +315,7 @@ class TrelloCardReader:
                 "lists": sorted(info.lists),
             },
         )
+        self._board_info = info
         return info
 
     def poll(self, board_id: str, label_id: str) -> list[Card]:

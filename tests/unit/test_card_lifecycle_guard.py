@@ -285,3 +285,104 @@ def test_a_linked_card_keeps_its_state_through_every_move(conn, board_config, au
     active(conn, board_config, audit, boundaries)
     closed(conn, board_config, audit, boundaries)
     assert db.list_cards(conn)[0].state == CardState.LINKED
+
+
+# -- the board is not touched for work that never came from a card ---------
+
+
+def test_an_issue_with_no_card_costs_no_board_request(conn, board_config, audit):
+    """``on_session_active`` and ``on_issue_closed`` sit in per-item hot paths — every
+    dispatched item, every closed issue — and the great majority never came from a card.
+
+    Resolving the lifecycle list is a board round trip; finding the card is one indexed
+    local query. Passing the resolved list id as a call *argument* made Python evaluate it
+    before the cheap check could short-circuit, so every dispatch and every close fetched
+    the board and wrote a ``trello.board.check`` record, card or no card.
+    """
+    boundaries = make_board_boundaries(audit)
+    reader = boundaries.card_reader
+
+    assert active(conn, board_config, audit, boundaries) is None
+    assert closed(conn, board_config, audit, boundaries) is None
+    assert reader.board_calls == 0, "the board was queried for an issue with no card"
+    assert boundaries.card_writer.moves == []
+
+
+def test_an_abandoned_item_with_no_card_costs_no_board_request(conn, board_config, audit):
+    boundaries = make_board_boundaries(audit)
+    result = intake.on_work_abandoned(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=board_config,
+        repo_key=REPO,
+        issue_number=999,
+        reason="abandoned",
+        dry_run=False,
+    )
+    assert result is None
+    assert boundaries.card_reader.board_calls == 0
+
+
+def test_the_real_reader_memoises_board_info(board_config, audit):
+    """R10 fixes the frequency at once per process plus a documented restart, and the
+    reader's memo is what makes that true rather than aspirational — without it, moving one
+    card cost four board requests and a duplicate ``trello.board.check`` record each time.
+
+    Asserted against the real client, because the fake cannot stand in for a memo that
+    lives inside the implementation.
+    """
+    import httpx
+
+    from robot_army.boundaries.trello import TrelloCardReader
+
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path.endswith("/boards/board-1"):
+            return httpx.Response(200, json={"name": "Intake", "prefs": {"permissionLevel": "private"}})
+        return httpx.Response(200, json=[])
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url=board_config.trello.api_base
+    )
+    reader = TrelloCardReader(board_config, audit, client=client, sleep=lambda _s: None)
+
+    first = reader.board_info()
+    after_first = len(requests)
+    assert after_first == 4, requests
+
+    for _ in range(5):
+        assert reader.board_info() is first
+    assert len(requests) == after_first, "board_info was re-fetched"
+
+
+def test_a_failed_board_read_is_not_memoised(board_config, audit):
+    """Only a successful read is stored. A board that was unreachable at startup must be
+    retried, not written off for the life of the process."""
+    import httpx
+    import pytest
+
+    from robot_army.boundaries import TransportError
+    from robot_army.boundaries.trello import TrelloCardReader
+
+    state = {"fail": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if state["fail"]:
+            raise httpx.ConnectError("refused", request=request)
+        if request.url.path.endswith("/boards/board-1"):
+            return httpx.Response(200, json={"name": "Intake", "prefs": {"permissionLevel": "private"}})
+        return httpx.Response(200, json=[])
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url=board_config.trello.api_base
+    )
+    reader = TrelloCardReader(board_config, audit, client=client, sleep=lambda _s: None)
+
+    with pytest.raises(TransportError):
+        reader.board_info()
+
+    state["fail"] = False
+    assert reader.board_info().name == "Intake"

@@ -205,3 +205,65 @@ def test_i_could_not_ask_is_not_it_is_gone(conn, board_config, audit):
 
     assert db.list_anomalies(conn) == []
     assert db.list_cards(conn)[0].state == CardState.LINKED
+
+
+# -- FR-055: a simulated card is not asked about against the real reader ----
+
+
+def test_a_simulated_cards_fake_issue_number_raises_no_anomaly(conn, board_config, audit):
+    """A simulated card's issue number comes from ``SimulatedIssueWriter`` and is a
+    recognisable fake. ``issue_reader`` is real at every effect level (FR-052), so asking
+    it about that number is guaranteed to 404 — which would file a ``card_issue_missing``
+    anomaly for **every** simulated card, into the same operator-facing list as the real
+    ones, and spend a GitHub request to do it.
+
+    The same rule ``reconcile._resolve_closed_issues`` already applies, for the same
+    reason: a dry run must not cause the outward effect it exists to avoid.
+    """
+    from robot_army.boundaries.github import SIMULATED_ISSUE_BASE, SimulatedIssueWriter
+    from robot_army.boundaries.trello import SimulatedCardWriter
+
+    boundaries = make_board_boundaries(
+        audit,
+        level=EffectLevel.NO_REMOTE,
+        cards=[make_card("card-1", body=f"https://github.com/{REPO}")],
+        writer=SimulatedIssueWriter(audit),
+        card_writer=SimulatedCardWriter(audit),
+    )
+    cycle(conn, board_config, audit, boundaries, dry_run=True)
+
+    row = db.list_cards(conn, include_simulated=True)[0]
+    assert row.state == CardState.LINKED
+    assert row.issue_number > SIMULATED_ISSUE_BASE, "the fake number is what makes this bite"
+
+    # The real reader knows nothing about issue 900001, and must not be asked.
+    asked: list[tuple[str, int]] = []
+
+    def record_and_miss(repo_key, number):
+        asked.append((repo_key, number))
+        return None
+
+    boundaries.issue_reader.get_issue = record_and_miss
+    counts = intake.recovery_sweep(
+        conn, boundaries=boundaries, audit=audit, config=board_config, dry_run=True
+    )
+
+    assert asked == [], "the real reader was asked about a simulated issue number"
+    assert counts["missing_issue"] == 0
+    assert db.list_anomalies(conn) == [], "a simulated card produced a false anomaly"
+
+
+def test_a_live_cards_vanished_issue_still_raises(conn, board_config, audit):
+    """Guards the guard: the skip above must be about *simulated* rows, not about
+    switching the check off."""
+    boundaries = make_board_boundaries(
+        audit, cards=[make_card("card-1", body=f"https://github.com/{REPO}")]
+    )
+    cycle(conn, board_config, audit, boundaries)
+    boundaries.issue_reader.issues = []
+
+    counts = intake.recovery_sweep(
+        conn, boundaries=boundaries, audit=audit, config=board_config, dry_run=False
+    )
+    assert counts["missing_issue"] == 1
+    assert [a.kind for a in db.list_anomalies(conn)] == ["card_issue_missing"]

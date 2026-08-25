@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from robot_army import audit as audit_mod
+from robot_army import capacity as capacity_mod
+from robot_army import cleanup as cleanup_mod
 from robot_army import (
     control,
     db,
@@ -40,6 +42,7 @@ from robot_army import (
 from robot_army import (
     daemon as daemon_mod,
 )
+from robot_army import ordering as ordering_mod
 from robot_army.audit import AuditLog
 from robot_army.boundaries import BoundaryError, HostHandle, TransportError
 from robot_army.cardstates import CardState
@@ -174,8 +177,15 @@ def status(
     state: str | None = None,
     repo: str | None = None,
     include_simulated: bool = False,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
 ) -> Result:
-    """The default view: effect level, health, counts and listings by state, anomalies."""
+    """The default view: effect level, health, counts, the queue, listings, anomalies.
+
+    Milestone 004 added the queue section and the capacity line. Both render
+    ``ordering.plan`` and ``capacity.snapshot`` directly rather than deriving anything of
+    their own, so what this prints as "next" is what the next dispatch will select (R8).
+    """
     result = Result()
     report = health.check(
         ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
@@ -187,6 +197,10 @@ def status(
     )
     anomalies = db.list_anomalies(ctx.conn)
     control_state = db.get_dispatch_control(ctx.conn)
+    snap = capacity_mod.snapshot(
+        ctx.conn, config=ctx.config, registry_dir=registry_dir, proc_root=proc_root
+    )
+    queue = ordering_mod.plan(ctx.conn, config=ctx.config, capacity=snap)
 
     result.data = {
         "effect_level": str(ctx.effect_level),
@@ -198,6 +212,8 @@ def status(
         "dispatch_paused": control_state.paused,
         "dispatch_paused_at": control_state.paused_at,
         "dispatch_paused_by": control_state.paused_by,
+        "capacity": _capacity_dict(snap, ctx.config.dispatch.order),
+        "queue": [_queue_dict(entry) for entry in queue],
     }
 
     result.say(f"effect level : {ctx.effect_level}")
@@ -212,8 +228,29 @@ def status(
             else "running"
         )
     )
+    result.say(f"capacity     : {snap.describe()}")
+    result.say(f"order        : {ctx.config.dispatch.order}")
     result.say(f"database     : {ctx.layout.db_path} (schema {SCHEMA_VERSION})")
     result.say()
+
+    # The queue, with a position and one reason per row. One reason, not several: two shown
+    # at once is how a surface stops being read (R9).
+    if queue:
+        result.say(f"queue ({len(queue)} eligible) — in dispatch order:")
+        rows = [
+            [
+                str(entry.position),
+                str(entry.item.id),
+                entry.item.repo_key,
+                f"#{entry.item.issue_number}",
+                str(entry.hold) if entry.hold else "ready to dispatch",
+                entry.detail[:64],
+            ]
+            for entry in queue
+        ]
+        for line in _table(rows, ["#", "item", "repo", "issue", "hold", "why"]):
+            result.say(line)
+        result.say()
     if counts:
         result.say("counts by state:")
         for name in sorted(counts):
@@ -253,9 +290,110 @@ def status(
     return result
 
 
+def capacity(
+    ctx: Context,
+    *,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+) -> Result:
+    """How full the machine is, whose sessions those are, and in what order work sits.
+
+    The terminal door onto the same snapshot the dispatcher gates on (FR-044). It is not a
+    second computation of the numbers — it is the same function, which is the whole reason
+    ``capacity.py`` exists as a module rather than as a few lines inside ``dispatch.py``.
+
+    Exits non-zero when capacity cannot be observed (FR-045). That is not a failure of the
+    command — the command worked — but the answer it produced is "I do not know how many
+    sessions are running", and a script that treats that as "zero are running" is the
+    precise mistake this milestone exists to make impossible. The same code ``health`` uses
+    for a check that ran and did not pass.
+    """
+    result = Result()
+    snap = capacity_mod.snapshot(
+        ctx.conn,
+        config=ctx.config,
+        audit=ctx.audit,
+        registry_dir=registry_dir,
+        proc_root=proc_root,
+    )
+    order = ctx.config.dispatch.order
+
+    result.data = {
+        "observable": snap.observable,
+        "degraded": snap.degraded,
+        "total": snap.total,
+        "global_cap": snap.global_cap,
+        "ours": len(snap.ours),
+        "others": snap.others,
+        "per_repo": dict(sorted(snap.per_repo.items())),
+        "order": order,
+        "reason": snap.reason,
+    }
+
+    if not snap.observable:
+        result.code = EXIT_CHECK_FAILED
+        result.say(f"capacity     : UNOBSERVABLE — {snap.reason}")
+        result.say("dispatch     : withheld until capacity can be observed again")
+        result.say(f"order        : {order}")
+        return result
+
+    result.say(f"capacity     : {snap.total} of {snap.global_cap} sessions running")
+    # FR-003. The split is the actionable half: "two of these are mine" tells the author to
+    # close one of their own, and "two are the daemon's" tells them to wait.
+    result.say(f"  ours       : {len(snap.ours)}")
+    result.say(f"  others     : {snap.others} (started outside this system)")
+    result.say(f"observable   : yes{' (degraded — counted via /proc)' if snap.degraded else ''}")
+    if snap.degraded:
+        result.say(
+            "               session ids are unavailable on that path, so the total is a "
+            "ceiling rather than a fact"
+        )
+    result.say(f"order        : {order}")
+    result.say()
+    if snap.per_repo:
+        result.say("per repository:")
+        for key in sorted(snap.per_repo):
+            result.say(f"  {key:<28} {snap.per_repo[key]}")
+    else:
+        result.say("no repository has a live session")
+    return result
+
+
+def _capacity_dict(snap: Any, order: str) -> dict[str, Any]:
+    """The capacity summary both the terminal and the web chrome render."""
+    return {
+        "observable": snap.observable,
+        "degraded": snap.degraded,
+        "total": snap.total,
+        "global_cap": snap.global_cap,
+        "ours": len(snap.ours),
+        "others": snap.others,
+        "per_repo": dict(sorted(snap.per_repo.items())),
+        "order": order,
+        "reason": snap.reason,
+        "summary": snap.describe(),
+    }
+
+
+def _queue_dict(entry: Any) -> dict[str, Any]:
+    return {
+        "position": entry.position,
+        "item_id": entry.item.id,
+        "repo_key": entry.item.repo_key,
+        "issue_number": entry.item.issue_number,
+        "title": entry.item.title,
+        "dry_run": entry.item.dry_run,
+        "hold": str(entry.hold) if entry.hold else None,
+        "detail": entry.detail,
+    }
+
+
 def _item_dict(item: Any) -> dict[str, Any]:
     return {
         "id": item.id,
+        "cleanup_state": item.cleanup_state,
+        "cleanup_reason": item.cleanup_reason,
+        "cleaned_at": item.cleaned_at,
         "source_id": item.source_id,
         "source_url": item.source_url,
         "repo_key": item.repo_key,
@@ -345,6 +483,11 @@ def show(ctx: Context, item_id: int) -> Result:
         result.say(f"  failure    : {item.failure_reason}")
     if item.blocked_reason:
         result.say(f"  blocked    : {item.blocked_reason}")
+    # A retained worktree or branch is visible here rather than only in the log, which is
+    # what makes "why is this 499 MB still here?" answerable without reading anything.
+    if item.cleanup_state:
+        result.say(f"  cleanup    : {item.cleanup_state} — {item.cleanup_reason or ''}")
+        result.say(f"  cleaned at : {item.cleaned_at}")
 
     result.say()
     result.say("state history:")
@@ -700,6 +843,55 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
 # -- worktree ---------------------------------------------------------------
 
 
+def cleanup_now(ctx: Context, item_id: int | None = None) -> Result:
+    """Reclaim finished work's disk, now, under exactly the automatic pass's guards.
+
+    Runs whether or not ``[cleanup] on_issue_close`` is enabled (FR-029) — the setting
+    governs *when* cleanup happens, not whether it is possible — and calls the same
+    function ``reconcile._cleanup_worktrees`` calls, so the manual path cannot drift from
+    the automatic one.
+
+    Naming an item is also the act of *reconsidering* it: ``retained`` and
+    ``branch_retained`` are decisions the automatic pass will not revisit, and this is what
+    revisits them.
+    """
+    result = Result()
+    try:
+        decisions = cleanup_mod.sweep(
+            ctx.conn,
+            boundaries=ctx.boundaries,
+            audit=ctx.audit,
+            config=ctx.config,
+            item_id=item_id,
+        )
+    except LookupError as exc:
+        return Result(code=EXIT_FAILED, lines=[str(exc)])
+
+    result.data = {
+        "decisions": [
+            {
+                "item_id": d.item_id,
+                "state": d.state,
+                "reason": d.reason,
+                "worktree_removed": d.worktree_removed,
+                "branch_deleted": d.branch_deleted,
+            }
+            for d in decisions
+        ],
+        "considered": len(decisions),
+        "on_issue_close": ctx.config.cleanup.on_issue_close,
+    }
+    if not decisions:
+        result.say("nothing eligible for cleanup")
+        return result
+    for decision in decisions:
+        result.say(f"item {decision.item_id}: {decision.state} — {decision.reason}")
+    reclaimed = sum(1 for d in decisions if d.reclaimed)
+    result.say()
+    result.say(f"{reclaimed} of {len(decisions)} considered item(s) had their worktree removed")
+    return result
+
+
 def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
     result = Result()
     rows: list[list[str]] = []
@@ -730,6 +922,7 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
                 item.branch or "—",
                 condition.label if condition else "unknown",
                 worktree.human_size(size),
+                item.cleanup_state or "—",
             ]
         )
         payload.append(
@@ -742,12 +935,15 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
                 "commits_ahead": condition.commits_ahead if condition else None,
                 "size_bytes": size,
                 "simulated": item.dry_run,
+                "cleanup_state": item.cleanup_state,
+                "cleanup_reason": item.cleanup_reason,
+                "cleaned_at": item.cleaned_at,
             }
         )
     result.data = {"worktrees": payload}
     if not rows:
         return result.say("no worktrees recorded")
-    for line in _table(rows, ["item", "path", "branch", "condition", "size"]):
+    for line in _table(rows, ["item", "path", "branch", "condition", "size", "cleanup"]):
         result.say(line)
     return result
 
@@ -1289,7 +1485,13 @@ def reconcile_now(ctx: Context, *, registry_dir: Path | None = None) -> Result:
 
 
 def drain_spool(ctx: Context) -> Result:
-    outcome = spool.drain(ctx.conn, audit=ctx.audit, layout=ctx.layout)
+    outcome = spool.drain(
+        ctx.conn,
+        audit=ctx.audit,
+        layout=ctx.layout,
+        boundaries=ctx.boundaries,
+        config=ctx.config,
+    )
     return Result(
         lines=[
             f"applied={outcome.applied} duplicates={outcome.duplicates} "

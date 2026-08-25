@@ -22,6 +22,7 @@ VersionControl       simulated   real        real         real
 HookRunner           simulated   real        real         real
 SessionHost          simulated   simulated   real         real
 Display              simulated   simulated   real         real
+Notifier             simulated   simulated   simulated    real
 ===================  ==========  ==========  ===========  ========
 
 Reads are always real (FR-052) — a dry run that fakes its reads tells you nothing about
@@ -41,6 +42,7 @@ from robot_army.boundaries import (
     HookRunner,
     IssueSourceReader,
     IssueSourceWriter,
+    Notifier,
     SessionHost,
     VersionControl,
 )
@@ -75,6 +77,9 @@ REAL_AT: dict[str, frozenset[EffectLevel]] = {
     "hook_runner": frozenset({EffectLevel.LOCAL, EffectLevel.NO_REMOTE, EffectLevel.LIVE}),
     "session_host": frozenset({EffectLevel.NO_REMOTE, EffectLevel.LIVE}),
     "display": frozenset({EffectLevel.NO_REMOTE, EffectLevel.LIVE}),
+    # A notification leaves the machine, so it is an outward-facing write and follows the
+    # board writer's rule rather than the session host's: real only at ``live`` (FR-040).
+    "notifier": frozenset({EffectLevel.LIVE}),
 }
 
 
@@ -98,6 +103,7 @@ class Boundaries:
     hook_runner: HookRunner
     session_host: SessionHost
     display: Display
+    notifier: Notifier
 
     def describe(self) -> dict[str, str]:
         """Which implementation each boundary got, for the startup log (FR-057)."""
@@ -115,6 +121,7 @@ class Boundaries:
                 "hook_runner",
                 "session_host",
                 "display",
+                "notifier",
             )
         }
 
@@ -134,6 +141,7 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
     )
     from robot_army.boundaries.hooks import SimulatedHookRunner, SubprocessHookRunner
     from robot_army.boundaries.kitty import KittyDisplay, SimulatedDisplay
+    from robot_army.boundaries.notifier import SimulatedNotifier, WebhookNotifier
     from robot_army.boundaries.trello import (
         SimulatedCardWriter,
         TrelloCardReader,
@@ -185,6 +193,11 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
         if is_real("display", level)
         else SimulatedDisplay(audit)
     )
+    notifier: Notifier = (
+        WebhookNotifier(config, audit)
+        if is_real("notifier", level)
+        else SimulatedNotifier(audit)
+    )
 
     return Boundaries(
         level=level,
@@ -196,4 +209,5 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
         hook_runner=hooks,
         session_host=host,
         display=display,
+        notifier=notifier,
     )

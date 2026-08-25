@@ -224,6 +224,34 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
         span(f"effect level: {chrome.get('effect_level')}", class_="pill level"),
         span(state, class_="pill " + ("ok" if running and daemon.get("healthy") else "warn")),
     ]
+    # The capacity pill (milestone 004). On every view rather than on the queue alone,
+    # because "why is nothing running?" is asked from wherever the author is looking, and
+    # the answer — including whether the sessions filling the machine are the author's own —
+    # is one line. It links to the queue, where the per-item reasons are.
+    capacity = chrome.get("capacity") or {}
+    if capacity:
+        if not capacity.get("observable", True):
+            pills.append(
+                a("/queue", f"capacity UNOBSERVABLE — {capacity.get('reason')}", class_="pill warn")
+            )
+        else:
+            total = int(capacity.get("total") or 0)
+            cap = int(capacity.get("global_cap") or 0)
+            label = (
+                f"{total}/{cap} sessions "
+                f"({capacity.get('ours', 0)} ours, {capacity.get('others', 0)} other)"
+            )
+            if capacity.get("degraded"):
+                label += " — degraded"
+            pills.append(
+                a(
+                    "/queue",
+                    label,
+                    class_="pill " + ("warn" if cap and total >= cap else "quiet"),
+                )
+            )
+        pills.append(span(f"order: {capacity.get('order')}", class_="pill quiet"))
+
     anomalies = int(chrome.get("anomaly_count") or 0)
     pills.append(
         a(

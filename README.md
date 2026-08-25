@@ -213,6 +213,81 @@ rebuilds the mapping from it rather than filing a second one. The one gap left o
 between creating the issue and recording it *combined with* losing the database, and it is
 written down in [docs/state.md](docs/state.md) rather than pretended away.
 
+## How many sessions run at once
+
+The cap counts **every** Claude session running as me, not just the ones the daemon
+started. My own terminal sessions share the same subscription, so a cap that ignored them
+protected nothing on the machine where I actually work.
+
+```toml
+[daemon]
+max_concurrent_sessions = 2         # the whole machine, mine included
+
+[dispatch]
+order = "oldest-first"              # or "repo-priority"
+default_repo_max_sessions = 1       # per repository, unless overridden below
+
+[repos.example]
+path = "~/GIT/example"
+max_sessions = 2                    # optional; overrides the default above
+priority = 10                       # optional; higher runs first under repo-priority
+```
+
+```bash
+uv run robot-army capacity     # total, cap, mine vs. others, per repo, order in force
+uv run robot-army status       # the same summary, plus the queue with positions
+```
+
+**Set the cap higher than feels right.** The first live `capacity` on this desktop reported
+`2 of 2 sessions running, 0 ours, 2 other` — with the daemon having started nothing. Two
+sessions of my own is my ordinary working state, so the default of 2 gives the daemon zero
+slots and it never dispatches. The cap has to be my usual session count *plus* however many
+robots I actually want; 3–4 is the realistic starting point.
+
+Four things worth knowing:
+
+- **One session per repository by default.** Two sessions in one clone share its ports, its
+  dev server, and its submodule fetches. A repository that genuinely tolerates two says so.
+- **A repository at its cap blocks its own work and nothing else.** A busy repository never
+  stalls the queue; the next item in a different repository dispatches in the same pass.
+- **When the count cannot be observed, nothing dispatches.** If the session registry is
+  unreadable *and* `/proc` cannot be enumerated, the number of live sessions is unknown
+  rather than zero — so work is held, an anomaly is raised, and `capacity` exits non-zero.
+  A visible stall is a better failure than an invisible over-subscription. The middle case —
+  registry unusable, `/proc` readable — counts via `/proc` and says `degraded`. Be aware that
+  the `/proc` fallback matches on the binary *name*, so on this machine it also counts Claude
+  Desktop: 11 processes where the registry says 2. The over-count is the safe direction, but
+  in practice a degraded observation means "permanently at capacity". If the registry becomes
+  unreliable, fix the registry.
+- **Running work is never touched to reclaim capacity.** Lowering the cap under running
+  sessions withholds new dispatch and leaves everything in flight alone.
+
+`repo-priority` drains higher-priority repositories first and breaks ties oldest-first.
+There is deliberately no aging: a low-priority repository can wait indefinitely while a
+high-priority one keeps producing work, which is what choosing that mode means.
+
+## Being told when something happens
+
+Off by default — nothing is sent until I ask, and there is no second webhook to configure.
+It reuses `[health] webhook_url`.
+
+```toml
+[health]
+webhook_url = "https://ntfy.sh/my-private-topic"
+
+[notifications]
+events = ["failure", "needs_info"]  # dispatch | completion | failure | needs_info
+max_per_cycle = 5
+```
+
+At most `max_per_cycle` messages per daemon tick, then one summary naming how many were
+held back and of which kinds. The bound is per *burst* rather than per event, because a
+backlog produces different items and per-item de-duplication would not bound it at all.
+Every send is in the audit log whether or not it left the machine.
+
+Messages carry identifiers and state names only. There is no field a credential could
+reach, and a test asserts it across a run that includes an authentication failure.
+
 ## Pausing dispatch
 
 ```bash
@@ -233,12 +308,16 @@ read as one that is healthy and doing nothing for no reason.
 
 Four graduated effect levels, enforced at the boundaries rather than at call sites:
 
-| Level | Polls | Worktrees | Sessions | GitHub writes |
-|---|---|---|---|---|
-| `plan` | real | no | no | no |
-| `local` | real | **real** | no | no |
-| `no-remote` | real | real | **real** | no |
-| `live` | real | real | real | **real** |
+| Level | Polls | Worktrees | Sessions | GitHub writes | Notifications |
+|---|---|---|---|---|---|
+| `plan` | real | no | no | no | no |
+| `local` | real | **real** | no | no | no |
+| `no-remote` | real | real | **real** | no | no |
+| `live` | real | real | real | **real** | **real** |
+
+Cleanup follows the *worktree* row rather than the GitHub one: simulated at `plan`, real at
+`local` and above, because removing a worktree is a local effect. A notification leaves the
+machine, so it follows the GitHub row.
 
 Polling and eligibility are always real — a dry run that fakes its reads tells you nothing
 about the main thing you want to check.
@@ -338,17 +417,54 @@ uv run robot-army health          # exits 4 if the heartbeat is stale or absent
 
 ## Cleaning up
 
-There is no automatic worktree removal — a prepared worktree was measured at up to 499 MB,
-so disk is a real constraint, but deleting work automatically is worse.
+A prepared worktree was measured at up to 499 MB, so disk is a real constraint — but
+deleting work is irreversible, so automatic cleanup is **off by default** and stays off
+until I turn it on.
 
-```bash
-uv run robot-army worktree list             # size, branch, condition
-uv run robot-army worktree remove <id>      # refuses if dirty — that refusal is the point
-uv run robot-army worktree prune
+```toml
+[cleanup]
+on_issue_close = false      # true: reclaim a finished item's worktree and branch
 ```
 
-Removal is two steps: the worktree *and* its branch. Skipping the second accumulates
-`robot-army/*` branches forever.
+```bash
+uv run robot-army worktree list             # size, branch, condition, cleanup state
+uv run robot-army worktree remove <id>      # refuses if dirty — that refusal is the point
+uv run robot-army worktree prune
+uv run robot-army cleanup                   # every eligible item, under the same guards
+uv run robot-army cleanup <id>              # one item, reconsidering a retained decision
+```
+
+With `on_issue_close = true`, an item whose issue has closed has its worktree and branch
+reclaimed on the next reconciliation pass — provided nothing in either exists only there.
+`robot-army cleanup` runs the identical function under the identical guards whether or not
+the automatic path is enabled, so the manual route cannot drift from the automatic one.
+
+**The two guards are different guards, and that is the whole design.**
+
+- **The worktree**: git's own refusal, taken as-is. `git worktree remove` refuses on a dirty
+  tree — *including merely untracked files* — and `--force` is never passed. A refused
+  worktree is recorded as `retained` with git's own message, and the branch half is not
+  attempted, because a dirty worktree means the branch may hold the only copy of something.
+- **The branch**: my own containment check, because git's is the wrong one here. `git branch
+  -d` accepts only a branch merged into the clone's current `HEAD`; the normal case is a PR
+  merged on GitHub while my clone has a stale `main` checked out, so `-d` would refuse every
+  time and `robot-army/*` branches would accumulate forever. Instead the base ref is
+  fetched and the branch is deleted only if every commit on it is provably on the remote —
+  contained in the published base, or pushed and up to date. If git cannot answer, that is
+  "unproven", never "safe", and the branch is kept.
+
+Four outcomes, all visible in `robot-army show <id>` and on the item's web page:
+
+| `cleanup_state` | Worktree | Branch | Meaning |
+|---|---|---|---|
+| `done` | removed | removed | both guards passed |
+| `branch_retained` | removed | kept | containment could not be proved |
+| `retained` | kept | kept | git refused the worktree |
+| `skipped` | kept | kept | a session was still live — reconsidered next pass |
+
+`skipped` is the only one the automatic pass revisits: it means "not yet", where `retained`
+means "we looked and decided no". `worktree_path` and `branch` are kept on the record even
+after a successful removal, so "what was at this path?" stays answerable.
 
 ## Design notes
 

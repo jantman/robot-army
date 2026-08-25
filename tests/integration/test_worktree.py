@@ -398,3 +398,37 @@ def test_a_real_remote_is_fetched_and_the_worktree_starts_from_it(config, audit,
         cwd=result.worktree_path, check=True, capture_output=True, text=True,
     ).stdout.strip()
     assert log == "moved on", "the worktree was created from a stale local base"
+
+
+# -- the trap R11 disarms (T047) --------------------------------------------
+
+
+def test_a_failing_rev_list_yields_none_from_the_boundary_and_zero_from_condition(
+    config, audit, repo_clone
+):
+    """The same failure, read two ways, on purpose.
+
+    ``commits_ahead`` used to swallow a failed ``rev-list`` into ``return 0``. To the
+    resume-signal caller that is a harmless "no information"; to a branch-deletion decision
+    the identical value reads as "every commit here exists elsewhere, delete it". Keeping
+    the two readings apart is the whole point of the signature change — so this asserts
+    both halves at once, because either alone would pass with the trap still armed.
+    """
+    vcs = GitVersionControl(audit)
+
+    # A ref that does not exist is the ordinary shape of the failure: a base branch that
+    # was renamed, a remote-tracking ref that was never fetched.
+    assert vcs.commits_ahead(str(repo_clone), "refs/heads/no-such-base", "main") is None
+
+    condition = worktree.condition(
+        vcs, str(repo_clone), str(repo_clone), "main", "refs/heads/no-such-base"
+    )
+    assert condition.commits_ahead == 0, (
+        "the resume signal keeps its old reading, explicitly mapped rather than inherited"
+    )
+
+
+def test_a_real_count_still_comes_back_as_a_number(config, audit, repo_clone):
+    """The failure case must not have swallowed the success case with it."""
+    vcs = GitVersionControl(audit)
+    assert vcs.commits_ahead(str(repo_clone), "main", "main") == 0

@@ -237,3 +237,56 @@ def test_summarise_reports_the_aggregate_a_reconcile_pass_logs(tmp_path):
     summary = sessions.summarise(scan, root)
     assert summary["sessions_found"] == 2
     assert summary["under_worktree_root"] == 1
+
+
+# -- the gap that reads as free capacity (milestone 004, R4) ----------------
+
+
+def test_a_missing_registry_directory_is_distinguished_from_an_empty_one(tmp_path):
+    """The only registry failure that looks identical to an idle machine.
+
+    No version is refused, no file is unreadable, the scan simply returns nothing — and
+    an under-count of live sessions is the one capacity error that causes harm. So the
+    distinction is made at the only place that can still tell the difference.
+    """
+    scan = sessions.scan(registry_dir=tmp_path / "nope", proc_root=tmp_path / "proc")
+    assert scan.entries == ()
+    assert scan.directory_missing is True
+
+
+def test_a_path_that_is_a_file_rather_than_a_directory_counts_as_missing(tmp_path):
+    not_a_directory = tmp_path / "registry"
+    not_a_directory.write_text("", encoding="utf-8")
+    scan = sessions.scan(registry_dir=not_a_directory, proc_root=tmp_path / "proc")
+    assert scan.entries == ()
+    assert scan.directory_missing is True
+
+
+def test_an_unreadable_registry_directory_counts_as_missing(tmp_path):
+    """Exists, will not be listed. Same conclusion as absent, different cause."""
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    registry.chmod(0o000)
+    try:
+        scan = sessions.scan(registry_dir=registry, proc_root=tmp_path / "proc")
+    finally:
+        registry.chmod(0o700)
+    assert scan.entries == ()
+    assert scan.directory_missing is True
+
+
+def test_an_empty_but_present_registry_directory_is_not_missing(tmp_path):
+    """The genuinely idle machine. This is the case that must stay dispatchable."""
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    scan = sessions.scan(registry_dir=registry, proc_root=tmp_path / "proc")
+    assert scan.entries == ()
+    assert scan.directory_missing is False
+    assert scan.degraded is False
+
+
+def test_a_populated_registry_directory_is_not_missing(tmp_path):
+    registry, proc = build(tmp_path, proc_start="777")
+    write_proc(proc, 4242, starttime="777")
+    scan = sessions.scan(registry_dir=registry, proc_root=proc)
+    assert scan.directory_missing is False

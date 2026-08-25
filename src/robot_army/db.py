@@ -248,6 +248,47 @@ def update_work_item_columns(
     )
 
 
+def list_cleanup_candidates(
+    conn: sqlite3.Connection, *, include_simulated: bool = False
+) -> list[WorkItem]:
+    """Finished items whose disk may still be reclaimable (milestone 004, R13).
+
+    ``done``, a worktree path on record, and a ``cleanup_state`` the automatic pass would
+    still reconsider — ``NULL`` (never looked) or ``skipped`` (looked, a session was live).
+    ``retained`` and ``branch_retained`` are decisions rather than pending steps and are
+    deliberately absent: only ``robot-army cleanup <id>`` revisits those.
+
+    Scoped by ``dry_run`` like every other listing (FR-056). A simulated item's cleanup is
+    simulated too, but *which* rows the caller sees stays the caller's explicit choice.
+    """
+    sql = (
+        "SELECT * FROM work_items WHERE state = ? AND worktree_path IS NOT NULL "  # noqa: S608
+        "AND (cleanup_state IS NULL OR cleanup_state = 'skipped')"
+        + _scope(include_simulated)
+        + " ORDER BY id"
+    )
+    return _rows(conn.execute(sql, (str(WorkItemState.DONE),)), WorkItem)
+
+
+def record_cleanup(
+    conn: sqlite3.Connection, item_id: int, *, state: str, reason: str | None
+) -> None:
+    """Write what cleanup decided, and when.
+
+    ``worktree_path`` and ``branch`` are deliberately left alone even on success: FR-024
+    requires the record to retain what was removed, ``_sweep_worktrees`` keys on the path
+    being present, and "what was at this path?" is exactly the question a retained-branch
+    record has to answer months later.
+    """
+    update_work_item_columns(
+        conn,
+        item_id,
+        cleanup_state=state,
+        cleanup_reason=reason,
+        cleaned_at=utcnow(),
+    )
+
+
 # -- sessions ---------------------------------------------------------------
 
 
@@ -294,19 +335,16 @@ def list_sessions(
     return _rows(conn.execute(sql, params), Session)
 
 
-def count_live_sessions(conn: sqlite3.Connection) -> int:
-    """Sessions occupying a concurrency slot.
-
-    Deliberately **not** scoped by ``dry_run``: FR-055 requires simulated sessions to
-    count against the cap, because they burn the same subscription quota. This is the
-    one place where including simulated rows is the default, and it is a requirement
-    rather than an oversight.
-    """
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM sessions WHERE state IN (?, ?)",
-        (str(SessionState.STARTING), str(SessionState.RUNNING)),
-    ).fetchone()
-    return int(row["n"])
+# ``count_live_sessions`` was retired in milestone 004. It counted the daemon's own
+# bookkeeping, which is precisely the number that is blind to the author's own Claude
+# sessions — right for milestone 001, where the daemon was the only actor being modelled,
+# and wrong for a cap that is supposed to protect one subscription on one machine. The
+# question changed from "how many did I start?" to "how many are running?", and only the
+# session registry answers that.
+#
+# Its FR-055 reasoning — that simulated sessions occupy a slot, because they burn the same
+# quota — did not go away with it. It lives in ``capacity.snapshot``, which counts them for
+# the global cap and the per-repository cap alike.
 
 
 def next_attempt(conn: sqlite3.Connection, item_id: int) -> int:

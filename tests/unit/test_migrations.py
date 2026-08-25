@@ -395,3 +395,114 @@ def test_a_simulated_row_does_not_occupy_the_live_rows_identity(tmp_path):
     _insert_card(conn, dry_run=0, repo_key="me/demo", issue_number=7)
     assert conn.execute("SELECT COUNT(*) AS n FROM cards").fetchone()["n"] == 2
     conn.close()
+
+
+# -- migration 004 (milestone 004) ------------------------------------------
+
+
+def _run_only_003(conn: sqlite3.Connection) -> None:
+    """Bring a database to exactly the 003-era schema, as one in the field would be."""
+    conn.execute("BEGIN")
+    migrations._migration_001(conn)
+    migrations._migration_002(conn)
+    migrations._migration_003(conn)
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+
+
+def _seed_finished_item(conn: sqlite3.Connection) -> int:
+    conn.execute(
+        "INSERT INTO repos (repo_key, onboarded_at, fingerprint_approved_at) "
+        "VALUES ('demo', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+    )
+    cursor = conn.execute(
+        """
+        INSERT INTO work_items (source, source_id, source_url, repo_key, issue_number,
+                                title, body, labels, state, dry_run, worktree_path,
+                                discovered_at, updated_at)
+        VALUES ('github', 'demo#1', 'u', 'demo', 1, 't', 'b', '[]', 'done', 0,
+                '/w/demo/issue-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+        """
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
+
+
+def test_migration_004_runs_on_a_003_era_database(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_003(conn)
+    assert current_version(conn) == 3
+    item_id = _seed_finished_item(conn)
+
+    start, end = migrate(conn)
+    assert (start, end) == (3, SCHEMA_VERSION)
+
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(work_items)")
+    }
+    assert {"cleanup_state", "cleanup_reason", "cleaned_at"} <= columns
+
+    # A pre-existing row reads back as never considered, which is exactly what NULL means:
+    # not "clean", not "retained", but "nobody has looked at this yet".
+    row = conn.execute("SELECT * FROM work_items WHERE id = ?", (item_id,)).fetchone()
+    assert row["cleanup_state"] is None
+    assert row["cleanup_reason"] is None
+    assert row["cleaned_at"] is None
+    # And it is still a candidate, so enabling cleanup picks up work that finished before
+    # the feature existed — no backfill command.
+    assert [i.id for i in db.list_cleanup_candidates(conn)] == [item_id]
+    conn.close()
+
+
+def test_migration_004_does_not_touch_the_work_item_state_machine(tmp_path):
+    """``done`` is terminal and stays terminal (R13). Whether the disk has been reclaimed is
+    a different axis, and adding a ``cleaned`` state would make every existing query that
+    treats ``done`` as terminal subtly wrong."""
+    from robot_army.states import WORK_ITEM_TRANSITIONS, WorkItemState
+
+    # No ``cleaned`` state was added, and ``done`` gained no way out of itself.
+    assert "cleaned" not in {state.value for state in WorkItemState}
+    assert [
+        target for source, target in WORK_ITEM_TRANSITIONS if source is WorkItemState.DONE
+    ] == []
+
+
+def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
+    tmp_path, monkeypatch
+):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_003(conn)
+
+    def _explode(connection: sqlite3.Connection) -> None:
+        migrations._migration_004(connection)
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(
+        migrations,
+        "MIGRATIONS",
+        (
+            migrations._migration_001,
+            migrations._migration_002,
+            migrations._migration_003,
+            _explode,
+        ),
+    )
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+
+    assert current_version(conn) == 3
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
+    assert "cleanup_state" not in columns, "the partial migration must have rolled back"
+
+    monkeypatch.undo()
+    start, end = migrate(conn)
+    assert (start, end) == (3, SCHEMA_VERSION)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
+    assert {"cleanup_state", "cleanup_reason", "cleaned_at"} <= columns
+    conn.close()
+
+
+def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
+    """Appending a migration is the whole act of adding one. A hand-maintained constant
+    beside the tuple is a second thing to remember and a second thing to get wrong."""
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 4

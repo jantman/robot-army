@@ -70,7 +70,7 @@ throwaway board.
 
 ## 004 — Concurrency & Polish (`specs/004-concurrency-polish/`)
 
-**Status:** not yet specified
+**Status:** implemented
 
 Planning doc M4. The full concurrency model — global and per-repo caps, counting the author's own
 out-of-band sessions against the global cap, queue position — plus per-repo configuration
@@ -78,6 +78,45 @@ overrides, priority and ordering modes, worktree cleanup policy, and event notif
 
 Depends on 001's session registry scan, which already does most of the observation work this
 milestone needs; 004 is largely policy layered on top of it.
+
+Four decisions the planning document leaves open in §16 were taken during specification, each
+recorded with its reasoning in the spec's Assumptions. **Worktree cleanup triggers on issue close
+and is opt-in** — issue close is the trigger §6's 499 MB measurement argues for, and the
+constitution's rule that irreversible actions must not be reachable by default settles the opt-in
+half. **The per-repo cap defaults to one**, per §10. **Aging is not built**, per §5's own deferral,
+so starvation under repository-priority ordering is accepted and documented rather than mitigated.
+And **notifications reuse the health channel** rather than introducing a second delivery mechanism.
+
+The global concurrency cap's *value* is deliberately not decided here. §16 lists it as open; the
+spec treats it as configuration with a documented default, because only running the system answers
+it. A branch guard is added beyond what §6 describes: git refuses to remove a dirty worktree for
+free, but nothing stops a branch deletion from destroying unpushed commits, so that check has to be
+made explicitly.
+
+### What running it taught
+
+Two things the design could not have known, both from `robot-army capacity` on the real machine.
+
+**The cap's value is smaller than it looks, because I am most of it.** The first live run reported
+`2 of 2 sessions running, 0 ours, 2 other` — with the daemon having started nothing at all. Two
+Claude sessions of my own is my ordinary working state, not a busy day, so a global cap of 2 leaves
+the daemon exactly zero slots and it would never dispatch. §16 left the number open on the grounds
+that only running the system answers it; the answer is that **the cap has to be my usual session
+count plus however many robots I actually want**, and the shipped default of 2 is therefore a value
+that looks conservative and behaves as "off". Treat 3–4 as the starting point and expect to raise it.
+That is exactly the class of thing this milestone existed to make visible, and it was invisible
+before, because the old cap counted only the daemon's own bookkeeping.
+
+**The `/proc` fallback matches more than Claude Code.** With the registry moved aside, the degraded
+path counted **11** processes where the registry counts 2. Eight of them are Claude Desktop
+(`/usr/lib/claude-desktop-bin/claude`), which shares the binary *name* the fallback matches on. The
+over-count is in the safe direction and is announced as `degraded`, exactly as designed — but the
+practical consequence is that a degraded observation on this machine means *permanently at capacity*,
+not "slightly conservative". The fallback is milestone 001's, written for the orphan sweep where an
+extra candidate is harmless; 004 is the first thing to gate dispatch on it. Narrowing it would mean a
+new identification rule and FR-002 forbids the obvious one (command-line matching), so it is recorded
+here rather than fixed: **if the registry ever becomes unreliable, fix the registry, do not lean on
+the fallback.**
 
 ## 005 — Whatever survives contact with reality
 

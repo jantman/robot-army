@@ -34,7 +34,17 @@ from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
-from robot_army import control, db, dispatch, health, intake, poll, reconcile, spool
+from robot_army import (
+    control,
+    db,
+    dispatch,
+    health,
+    intake,
+    notifications,
+    poll,
+    reconcile,
+    spool,
+)
 from robot_army.audit import AuditLog
 from robot_army.effects import Boundaries, EffectLevel
 from robot_army.migrations import SCHEMA_VERSION
@@ -344,7 +354,13 @@ class Daemon:
 
     def job_drain_spool(self) -> dict[str, Any]:
         self.activity = "draining exit spool"
-        result = spool.drain(self.conn, audit=self.audit, layout=self.layout)
+        result = spool.drain(
+            self.conn,
+            audit=self.audit,
+            layout=self.layout,
+            boundaries=self.boundaries,
+            config=self.config,
+        )
         return {"applied": result.applied, "quarantined": result.quarantined}
 
     def job_poll(self) -> dict[str, Any]:
@@ -571,6 +587,10 @@ class Daemon:
         # honoured by *this* tick rather than the next one. Unlinking before running means
         # an interruption costs one ordinary interval; unlinking after would risk running
         # the job twice, and a duplicate poll spends rate limit the daemon needs.
+        # The per-cycle notification bound is scoped to exactly this: one tick (R15). It
+        # bounds a *burst* rather than an event, because a backlog produces different items
+        # and per-item de-duplication would not bound it at all.
+        notifications.begin_cycle()
         for name in control.take_requests(self.layout, self.audit):
             if self.request(name):
                 self.audit.record(
@@ -591,6 +611,15 @@ class Daemon:
                 ran[job.name] = {"error": str(exc)}
             finally:
                 job.schedule(time.monotonic())
+        # One summary for whatever the bound held back, so a suppressed burst is visible
+        # rather than silent — the difference between a bound and a channel that lies by
+        # omission. Outside every job, so a slow webhook delays nothing that mattered.
+        try:
+            notifications.end_cycle(
+                boundaries=self.boundaries, audit=self.audit, config=self.config
+            )
+        except Exception as exc:  # noqa: BLE001 - a channel failure is never the loop's
+            self.audit.error("notify.summary", error=exc)
         self.cycles += 1
         self.activity = "idle"
         self._heartbeat()

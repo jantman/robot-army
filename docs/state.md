@@ -173,6 +173,45 @@ robot-army cards                    # the same thing, readably
 robot-army rescan --all-needs-info  # look again at everything held
 ```
 
+### `work_items` cleanup columns — what happened to a finished item's disk
+
+Added by migration 004. Three nullable columns rather than a table: one row per item, one
+shot, no lifecycle of its own, so a table would have been a join for nothing.
+
+| Column | Meaning |
+|---|---|
+| `cleanup_state` | `NULL` \| `done` \| `branch_retained` \| `retained` \| `skipped`. See the table below |
+| `cleanup_reason` | Why — git's own refusal message, the containment evidence, or the session that was live |
+| `cleaned_at` | When the decision was recorded |
+
+| `cleanup_state` | Worktree | Branch | What the next pass does |
+|---|---|---|---|
+| `NULL` | — | — | Considers it, if eligible. Every pre-migration row reads this way, and so does every row while `[cleanup] on_issue_close` is false |
+| `done` | removed | removed | Nothing |
+| `branch_retained` | removed | kept | Nothing — a retained branch is a *decision*, not a pending step |
+| `retained` | kept | kept | Nothing automatically; `robot-army cleanup <id>` reconsiders |
+| `skipped` | kept | kept | Reconsiders it — a session was live, which means "not yet" |
+
+`skipped` is the only non-`NULL` value the automatic pass revisits, and that is the entire
+point of distinguishing it from `retained`: one means "not yet", the other means "we looked
+and decided no".
+
+**`work_items.state` is untouched and `WORK_ITEM_TRANSITIONS` gains no entries.** `done` is
+terminal and means the *work* is finished; whether its disk has been reclaimed is a different
+axis — the same separation this project already makes between work state and session state.
+Adding a `cleaned` state would have made every existing query that treats `done` as terminal
+subtly wrong.
+
+**`worktree_path` and `branch` are never nulled**, not even after a successful removal. The
+record has to retain what was removed: `_sweep_worktrees` keys on the path being present, and
+"what was at this path?" is exactly the question a `branch_retained` row has to answer months
+later.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  'SELECT id, state, cleanup_state, cleanup_reason FROM work_items WHERE cleanup_state IS NOT NULL'
+```
+
 ### The board's poll bookkeeping lives in `poll_state`
 
 Under the synthetic key `trello:board:<board_id>`. `poll_state` has no foreign key and no
@@ -269,17 +308,32 @@ summary:
 | After the daemon unlinked a marker, before running the job | The forced flag is lost and the job runs on its ordinary interval. Accepted: the cost is one interval, and unlinking *after* would risk running it twice |
 | Web process killed mid-request, before the transaction committed | Rolled back. The browser sees a dropped connection and the item page tells the truth on reload |
 | Web process killed while a worker thread was dispatching | The item is left mid-dispatch and reconciliation resolves it — the same path any interrupted dispatch takes. This is not a new way to produce that condition |
+| After a capacity snapshot, before the dispatch it authorised | Nothing written. The next pass takes a fresh snapshot; a snapshot is never stored, so it cannot be stale |
+| Between two dispatches in one pass | Earlier items dispatched, later ones still `ready`. The next pass re-observes and re-plans — `select_and_dispatch` holds no cross-pass state |
+| During a capacity hold, before its signature was recorded | No `dispatch.at_capacity` record for this hold. The next pass sees no remembered signature and writes one. Worst case is one extra record, never a missing hold |
+| After `git worktree remove`, before the branch half | Worktree gone, branch present, `cleanup_state` unwritten. The next pass finds the directory already absent, treats git's "not a working tree" as a refusal about its *record* rather than about the contents, completes the branch half, and records the outcome |
+| After both cleanup removals, before the row is written | Both gone, `cleanup_state` still `NULL`. The next pass re-attempts, both steps refuse harmlessly, and the row is written `done` |
+| During the containment fetch | Nothing removed. Containment is unproven, so the branch is retained and the item is reconsidered. The failure direction is always *keep* |
+| After a state transition, before its notification | State committed and logged; no message sent. The state change is fully reconstructible; the lost message is the named gap in [logging.md](logging.md) |
+| Mid-notification, after the POST left | Possibly delivered, recorded as attempted with its outcome. **No retry** — a duplicate notification is noise, and a retry loop is a Principle IV violation |
 
 ## Disk
 
-A prepared worktree was measured at up to **499 MB** once a virtualenv exists. There is no
-automatic removal in this milestone — deleting work automatically is worse than running out
-of disk, and `doctor` warns when free space is low.
+A prepared worktree was measured at up to **499 MB** once a virtualenv exists. Automatic
+removal exists as of milestone 004 and is **off by default** — deleting work is irreversible,
+and the Operating Constraints require irreversible actions to be unreachable until asked for.
+`doctor` still warns when free space is low.
 
 ```bash
-robot-army worktree list        # sizes and conditions
+robot-army worktree list        # sizes, conditions, and cleanup state
+robot-army cleanup              # every eligible item, under both guards
 df -h ~/worktrees
 ```
+
+With `[cleanup] on_issue_close = true`, an item whose issue has closed has its worktree and
+branch reclaimed on the next reconciliation pass — unless anything in either exists nowhere
+else, in which case it is kept and the reason is on the row. See the `cleanup_state` table
+above and the README's "Cleaning up" section.
 
 Worktrees live at `~/worktrees/` rather than under `~/.local/state` so they stay out of any
 backup set aimed at `~/.local` — which matters at half a gigabyte each — and sit at a short

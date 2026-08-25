@@ -478,3 +478,169 @@ def test_reading_a_credential_from_an_empty_variable_is_an_error(repo_clone, lay
     config = build(repo_clone, layout, tmp_path, trello=trello_section())
     with pytest.raises(ConfigError):
         config.trello.read_key()
+
+
+# -- [dispatch] (milestone 004) ---------------------------------------------
+
+
+def test_dispatch_defaults_match_the_contract(repo_clone, layout, tmp_path):
+    config = build(repo_clone, layout, tmp_path)
+    assert config.dispatch.order == "oldest-first"
+    assert config.dispatch.default_repo_max_sessions == 1
+
+
+def test_an_absent_dispatch_section_leaves_the_defaults_alone(repo_clone, layout, tmp_path):
+    """The no-op case FR-046 depends on: an installation that never heard of milestone
+    004 keeps milestone 003's ordering without editing anything."""
+    raw = config_dict(repo_clone, layout, tmp_path / "worktrees")
+    assert "dispatch" not in raw
+    monkey_token()
+    config = parse(raw, tmp_path / "config.toml")
+    assert config.dispatch.order == "oldest-first"
+    assert config.dispatch.default_repo_max_sessions == 1
+
+
+def test_dispatch_overrides_are_honoured(repo_clone, layout, tmp_path):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        dispatch={"order": "repo-priority", "default_repo_max_sessions": 3},
+    )
+    assert config.dispatch.order == "repo-priority"
+    assert config.dispatch.default_repo_max_sessions == 3
+
+
+def test_an_unknown_ordering_mode_refuses_to_load(repo_clone, layout, tmp_path):
+    """FR-014's named case. Falling back silently would run the author's work in an order
+    they did not choose and would not know about."""
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, dispatch={"order": "newest-first"})
+    joined = "\n".join(caught.value.problems)
+    assert "[dispatch] order" in joined
+    # The message lists what is valid, so the fix does not require reading the source.
+    assert "oldest-first" in joined
+    assert "repo-priority" in joined
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_non_positive_default_repo_cap_refuses_to_load(repo_clone, layout, tmp_path, value):
+    """Zero would disable every repository silently; negative is meaningless."""
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, dispatch={"default_repo_max_sessions": value})
+    assert any("default_repo_max_sessions" in p for p in caught.value.problems)
+
+
+def test_a_non_integer_default_repo_cap_refuses_to_load(repo_clone, layout, tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, dispatch={"default_repo_max_sessions": "2"})
+    assert any(
+        "[dispatch] default_repo_max_sessions must be an integer" in p
+        for p in caught.value.problems
+    )
+
+
+def test_a_typo_in_the_dispatch_section_is_an_error_not_a_warning(repo_clone, layout, tmp_path):
+    """The [repos.*] and [trello] rule, for the same reason: a typo in a section that
+    exists is a setting that quietly does nothing while looking applied."""
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, dispatch={"oder": "repo-priority"})
+    assert any("[dispatch] unknown key 'oder'" in p for p in caught.value.problems)
+
+
+# -- per-repository caps and priority (milestone 004) -----------------------
+
+
+def test_a_repository_cap_defaults_to_the_dispatch_default(repo_clone, layout, tmp_path):
+    config = build(repo_clone, layout, tmp_path)
+    assert config.repos["demo"].max_sessions is None
+    cap, explicit = config.effective_repo_cap("demo")
+    assert (cap, explicit) == (1, False)
+
+
+def test_an_explicit_repository_cap_is_reported_as_chosen(repo_clone, layout, tmp_path):
+    """US2 AS4: "you chose 1" and "1 is what you get" are different answers, and the second
+    one needs a pointer to the file the author would edit."""
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        daemon={"max_concurrent_sessions": 4},
+        repos={"demo": {"path": str(repo_clone), "base_branch": "main", "max_sessions": 2}},
+    )
+    assert config.repos["demo"].max_sessions == 2
+    assert config.effective_repo_cap("demo") == (2, True)
+
+
+@pytest.mark.parametrize("value", [0, -1, "2", 1.5])
+def test_a_bad_repository_cap_refuses_to_load(repo_clone, layout, tmp_path, value):
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            repos={
+                "demo": {"path": str(repo_clone), "base_branch": "main", "max_sessions": value}
+            },
+        )
+    assert any("max_sessions must be a positive integer" in p for p in caught.value.problems)
+
+
+def test_a_repository_cap_above_the_global_cap_warns_and_takes_the_minimum(
+    repo_clone, layout, tmp_path
+):
+    """Resolvable, and usually a leftover from lowering the global cap — so it warns and
+    proceeds, mirroring the existing dispatching_max_age_seconds cross-check rather than
+    refusing to start over a harmless over-specification (R17)."""
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        daemon={"max_concurrent_sessions": 2},
+        repos={"demo": {"path": str(repo_clone), "base_branch": "main", "max_sessions": 9}},
+    )
+    assert config.effective_repo_cap("demo") == (2, True)
+    assert any("exceeds [daemon] max_concurrent_sessions" in w for w in config.warnings)
+
+
+def test_a_repository_priority_defaults_to_zero(repo_clone, layout, tmp_path):
+    """Equal priority everywhere makes repo-priority degrade to oldest-first, which is the
+    harmless reading of a repository nobody has ranked."""
+    assert build(repo_clone, layout, tmp_path).repos["demo"].priority == 0
+
+
+def test_an_explicit_repository_priority_is_honoured(repo_clone, layout, tmp_path):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        repos={"demo": {"path": str(repo_clone), "base_branch": "main", "priority": 10}},
+    )
+    assert config.repos["demo"].priority == 10
+
+
+@pytest.mark.parametrize("value", ["10", 1.5])
+def test_a_non_integer_repository_priority_refuses_to_load(repo_clone, layout, tmp_path, value):
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            repos={"demo": {"path": str(repo_clone), "base_branch": "main", "priority": value}},
+        )
+    assert any("priority must be an integer" in p for p in caught.value.problems)
+
+
+def test_a_typo_in_a_repo_section_is_still_an_error(repo_clone, layout, tmp_path):
+    """The two new keys joined ``_REPO_KEYS``, where an unknown key was already an error.
+    ``max_session`` silently capping nothing is exactly the failure that rule prevents."""
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            repos={
+                "demo": {"path": str(repo_clone), "base_branch": "main", "max_session": 2}
+            },
+        )
+    assert any("unknown key 'max_session'" in p for p in caught.value.problems)

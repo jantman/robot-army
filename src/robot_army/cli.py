@@ -84,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status.add_argument("--repo", default=None, help="filter to one repository")
 
+    sub.add_parser(
+        "capacity",
+        help="how full the machine is, whose sessions those are, and the order in force",
+    )
+
     show = sub.add_parser("show", help="everything about one work item")
     show.add_argument("item_id", type=int)
 
@@ -102,6 +107,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="override git's refusal on a dirty worktree; requires typed confirmation",
     )
     worktree_sub.add_parser("prune", help="clear git's record of worktrees whose dirs are gone")
+
+    cleanup = sub.add_parser(
+        "cleanup",
+        help="reclaim finished work's worktree and branch, under the same two guards",
+    )
+    cleanup.add_argument(
+        "item_id",
+        type=int,
+        nargs="?",
+        default=None,
+        help="one item to consider, reconsidering a retained decision; omit for every "
+        "eligible item",
+    )
 
     log = sub.add_parser("log", help="read the audit JSONL — the reconstruction path")
     log.add_argument("--since", default=None, metavar="DURATION", help="e.g. 30s, 10m, 2h, 1d")
@@ -345,9 +363,11 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "status": lambda: operations.status(
             ctx, state=args.state, repo=args.repo, include_simulated=include_simulated
         ),
+        "capacity": lambda: operations.capacity(ctx),
         "show": lambda: operations.show(ctx, args.item_id),
         "repos": lambda: operations.repos(ctx),
         "worktree": lambda: _worktree(args, ctx),
+        "cleanup": lambda: operations.cleanup_now(ctx, args.item_id),
         "log": lambda: (
             _follow(ctx)
             if args.follow

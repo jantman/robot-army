@@ -148,25 +148,24 @@ def check(
     )
 
 
-def notify(webhook_url: str, report: HealthReport, *, timeout: float = 10.0) -> tuple[bool, str]:
-    """POST a plain JSON body to the configured webhook. Vendor-neutral by design.
+def post_json(
+    webhook_url: str, body: dict[str, Any], *, timeout: float = 10.0
+) -> tuple[bool, str]:
+    """The one bounded-timeout POST this project makes. Vendor-neutral by design.
 
     A generic webhook covers ntfy and Pushover — both named in the planning document —
     without either becoming a dependency. The timeout is explicit because Principle IV
-    requires it of every network call, including this one.
+    requires it of every network call, and there is exactly one call site's worth of that
+    requirement to get right because there is exactly one function.
+
+    Extracted from ``notify`` in milestone 004 so the notifier shares it rather than
+    growing a second HTTP client with a second timeout to keep correct (R14). ``notify``'s
+    own behaviour is unchanged.
     """
     if not webhook_url:
         return False, "no webhook_url configured"
     import httpx
 
-    body = {
-        "title": "robot-army health check failed",
-        "message": report.reason,
-        "healthy": report.healthy,
-        "age_seconds": report.age_seconds,
-        "host": os.uname().nodename,
-        "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
     try:
         response = httpx.post(webhook_url, json=body, timeout=timeout)
     except httpx.HTTPError as exc:
@@ -174,6 +173,22 @@ def notify(webhook_url: str, report: HealthReport, *, timeout: float = 10.0) -> 
     if response.status_code >= 400:
         return False, f"webhook returned HTTP {response.status_code}"
     return True, f"notified {webhook_url} (HTTP {response.status_code})"
+
+
+def notify(webhook_url: str, report: HealthReport, *, timeout: float = 10.0) -> tuple[bool, str]:
+    """POST the health signal. The body's shape is this function's; the transport is shared."""
+    return post_json(
+        webhook_url,
+        {
+            "title": "robot-army health check failed",
+            "message": report.reason,
+            "healthy": report.healthy,
+            "age_seconds": report.age_seconds,
+            "host": os.uname().nodename,
+            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        timeout=timeout,
+    )
 
 
 def board_signal(

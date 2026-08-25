@@ -39,6 +39,7 @@ EXPECTED = {
         "hook_runner": "simulated",
         "session_host": "simulated",
         "display": "simulated",
+        "notifier": "simulated",
     },
     EffectLevel.LOCAL: {
         "issue_reader": "real",
@@ -49,6 +50,7 @@ EXPECTED = {
         "hook_runner": "real",
         "session_host": "simulated",
         "display": "simulated",
+        "notifier": "simulated",
     },
     EffectLevel.NO_REMOTE: {
         "issue_reader": "real",
@@ -59,6 +61,9 @@ EXPECTED = {
         "hook_runner": "real",
         "session_host": "real",
         "display": "real",
+        # A notification leaves the machine, so it follows the board writer's rule rather
+        # than the session host's: still simulated here (FR-040).
+        "notifier": "simulated",
     },
     EffectLevel.LIVE: {
         "issue_reader": "real",
@@ -69,6 +74,7 @@ EXPECTED = {
         "hook_runner": "real",
         "session_host": "real",
         "display": "real",
+        "notifier": "real",
     },
 }
 
@@ -81,6 +87,7 @@ REAL_CLASSES = {
     "hook_runner": "SubprocessHookRunner",
     "session_host": "DtachHost",
     "display": "KittyDisplay",
+    "notifier": "WebhookNotifier",
 }
 SIMULATED_CLASSES = {
     "issue_writer": "SimulatedIssueWriter",
@@ -89,6 +96,7 @@ SIMULATED_CLASSES = {
     "hook_runner": "SimulatedHookRunner",
     "session_host": "SimulatedSessionHost",
     "display": "SimulatedDisplay",
+    "notifier": "SimulatedNotifier",
 }
 
 
@@ -119,7 +127,7 @@ def test_there_is_no_simulated_issue_reader_anywhere():
     assert not hasattr(github, "SimulatedIssueReader")
 
 
-def test_the_table_covers_exactly_the_eight_boundaries():
+def test_the_table_covers_exactly_the_nine_boundaries():
     assert set(REAL_AT) == set(REAL_CLASSES)
     assert set(REAL_AT) == set(EXPECTED[EffectLevel.LIVE])
 

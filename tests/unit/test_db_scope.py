@@ -13,7 +13,7 @@ import pytest
 from tests.conftest import seed_item
 
 from robot_army import db
-from robot_army.states import SessionState, WorkItemState
+from robot_army.states import WorkItemState
 
 LISTING_ACCESSORS = [
     db.list_work_items,
@@ -70,26 +70,11 @@ def test_fetching_by_id_needs_no_flag(conn):
     assert item is not None and item.dry_run is True
 
 
-def test_the_concurrency_cap_counts_simulated_sessions(conn):
-    """The one place where including simulated rows is the default, and it is FR-055
-    rather than an oversight: a simulated session burns the same subscription quota."""
-    live, simulated = _seed_both(conn)
-    with db.transaction(conn):
-        db.insert_session(conn, work_item_id=live, session_id="s-live", attempt=1, dry_run=False)
-        db.insert_session(conn, work_item_id=simulated, session_id="s-sim", attempt=1, dry_run=True)
-    assert db.count_live_sessions(conn) == 2
-
-
-def test_ended_sessions_do_not_occupy_a_slot(conn):
-    live, _ = _seed_both(conn)
-    with db.transaction(conn):
-        row_id = db.insert_session(
-            conn, work_item_id=live, session_id="s-1", attempt=1, dry_run=False
-        )
-    conn.execute(
-        "UPDATE sessions SET state = ? WHERE id = ?", (str(SessionState.EXITED_CLEAN), row_id)
-    )
-    assert db.count_live_sessions(conn) == 0
+# The two cases that used to sit here — a simulated session occupying a slot, and an ended
+# one not — moved to tests/unit/test_capacity.py in milestone 004, along with the counting
+# itself. ``db.count_live_sessions`` was retired: it answered "how many did I start?", and
+# the cap's question became "how many are running?". The requirement did not move; only the
+# module that keeps it did.
 
 
 def test_purge_removes_only_simulated_rows(conn):

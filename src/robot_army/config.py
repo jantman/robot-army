@@ -98,6 +98,15 @@ class RepoConfig:
     env: dict[str, str] = field(default_factory=dict)
     permission_mode: str | None = None
     model: str | None = None
+    #: How many sessions may run in this repository at once. ``None`` falls back to
+    #: ``[dispatch] default_repo_max_sessions``, and the distinction is kept rather than
+    #: resolved at parse time so ``robot-army capacity`` can tell "you chose 1" from "1 is
+    #: what you get" (US2 AS4).
+    max_sessions: int | None = None
+    #: Higher runs first under ``repo-priority`` ordering; ignored under ``oldest-first``.
+    #: Zero by default, which makes that mode degrade to oldest-first — the harmless
+    #: reading of an unconfigured repository.
+    priority: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +220,69 @@ class HooksConfig:
     default_timeout_seconds: int = 300
 
 
+#: The two dispatch orders FR-016 names. A tuple of strings rather than an enum because
+#: the value is validated against config text and rendered back to the author verbatim;
+#: an enum would add a translation in each direction and remove nothing.
+VALID_ORDER_MODES: tuple[str, ...] = ("oldest-first", "repo-priority")
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchConfig:
+    """Ordering policy and the per-repository default cap (contracts/config.md).
+
+    ``order`` defaults to ``oldest-first`` because that is the behaviour milestone 003
+    already has, and FR-046 requires the previous behaviour to be recoverable by
+    configuration alone — making it the default makes that recovery the no-op it should be.
+
+    ``default_repo_max_sessions`` defaults to ``1`` because every collision risk planning
+    §6 measured is per-clone: two sessions under one repository share its ports, its dev
+    server, and its submodule fetches. A repository that genuinely tolerates two says so.
+    """
+
+    order: str = "oldest-first"
+    default_repo_max_sessions: int = 1
+
+
+#: The four things worth saying out loud (contracts/notifications.md). A closed set: an
+#: unknown kind is refused at load rather than ignored, because an event the author asked
+#: for and never receives is a channel that lies by omission.
+VALID_NOTIFICATION_EVENTS: tuple[str, ...] = ("dispatch", "completion", "failure", "needs_info")
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationsConfig:
+    """What to say, and at most how often (contracts/notifications.md).
+
+    ``events`` is empty by default, so an unconfigured installation makes no outbound
+    request at all (FR-033) — the Operating Constraints' rule for outward-facing actions,
+    the same one that sets ``[cleanup] on_issue_close``.
+
+    ``max_per_cycle`` bounds one burst rather than one event. Per-``(kind, item)``
+    de-duplication would not bound a backlog, because a backlog produces *different* items —
+    the very case that would flood (R15).
+    """
+
+    events: tuple[str, ...] = ()
+    max_per_cycle: int = 5
+
+    def wants(self, kind: str) -> bool:
+        return kind in self.events
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupConfig:
+    """Whether a closed issue reclaims its worktree and branch (contracts/cleanup.md).
+
+    ``False`` by default, and not out of caution: the Operating Constraints require
+    irreversible and outward-facing actions to be unreachable by default, and removing a
+    worktree and deleting a branch are both. ``robot-army cleanup`` runs the same function
+    under the same guards whether or not this is on (FR-029), so enabling it changes when
+    cleanup happens rather than whether it is possible.
+    """
+
+    on_issue_close: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class WebConfig:
     """``robot-army serve``'s three settings (research.md R13).
@@ -235,6 +307,9 @@ class Config:
     health: HealthConfig
     hooks: HooksConfig
     web: WebConfig
+    dispatch: DispatchConfig
+    cleanup: CleanupConfig
+    notifications: NotificationsConfig
     repos: dict[str, RepoConfig]
     worktree_root: Path
     layout: Layout
@@ -267,6 +342,27 @@ class Config:
             return repo.base_branch
         return self.worker.base_branch
 
+    def effective_repo_cap(self, key: str) -> tuple[int, bool]:
+        """How many sessions this repository may run, and whether the author said so.
+
+        Returns ``(cap, explicit)``. The cap is the lower of the repository's own setting
+        and the global one, because a per-repository cap above the global cap is an
+        over-specification that resolves cleanly rather than a contradiction worth refusing
+        to start over (R17) — the config loader has already warned about it.
+
+        The second half of the tuple exists for US2's fourth scenario: a surface reporting
+        "1 of 1" should be able to say whether that 1 was chosen or merely inherited, so the
+        author knows which file to edit.
+        """
+        repo = self.repos.get(key)
+        explicit = repo is not None and repo.max_sessions is not None
+        requested = (
+            repo.max_sessions
+            if repo is not None and repo.max_sessions is not None
+            else self.dispatch.default_repo_max_sessions
+        )
+        return min(requested, self.daemon.max_concurrent_sessions), explicit
+
 
 # -- loading ---------------------------------------------------------------
 
@@ -280,8 +376,17 @@ _TOP_LEVEL_SECTIONS = {
     "hooks",
     "web",
     "trello",
+    "dispatch",
+    "cleanup",
+    "notifications",
     "repos",
 }
+
+#: Sections where an unknown key is a **problem** rather than the top level's warning.
+#: The rule is the one ``[repos.*]`` established and this file states above: a typo in a
+#: section that exists is a setting that quietly does nothing, which is worse than a
+#: setting that is missing, because it looks applied.
+_STRICT_KEY_SECTIONS = frozenset({"trello", "dispatch", "cleanup", "notifications"})
 
 _KNOWN_KEYS: dict[str, set[str]] = {
     "daemon": {
@@ -310,6 +415,11 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "health": {"max_age_seconds", "webhook_url"},
     "hooks": {"default_timeout_seconds"},
     "web": {"bind", "port", "refresh_seconds"},
+    # Unknown keys here are an **error** too — see _STRICT_KEY_SECTIONS. An ordering the
+    # author thought they configured and did not is the failure this prevents.
+    "dispatch": {"order", "default_repo_max_sessions"},
+    "cleanup": {"on_issue_close"},
+    "notifications": {"events", "max_per_cycle"},
     # Unknown keys here are an **error**, not the top level's warning, and are handled
     # separately below: a typo in a board section that exists is a board that quietly
     # polls the wrong thing, which is the same class of failure as a typo in [repos.*].
@@ -329,7 +439,16 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     },
 }
 
-_REPO_KEYS = {"path", "base_branch", "post_create", "env", "permission_mode", "model"}
+_REPO_KEYS = {
+    "path",
+    "base_branch",
+    "post_create",
+    "env",
+    "permission_mode",
+    "model",
+    "max_sessions",
+    "priority",
+}
 _STEP_KEYS = {"run", "link", "copy", "timeout"}
 
 
@@ -353,8 +472,8 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         if section not in _TOP_LEVEL_SECTIONS:
             warnings.append(f"unknown top-level section [{section}] — ignored")
     for section, known in _KNOWN_KEYS.items():
-        if section == "trello":
-            continue  # an error rather than a warning; see the [trello] block below
+        if section in _STRICT_KEY_SECTIONS:
+            continue  # an error rather than a warning; see each section's block below
         for key in raw.get(section, {}):
             if key not in known:
                 warnings.append(f"unknown key [{section}].{key} — ignored")
@@ -515,6 +634,67 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
     if web.port > 65535:
         problems.append(f"[web] port must be <= 65535, got {web.port}")
 
+    # -- [dispatch] --------------------------------------------------------
+    dispatch_raw = raw.get("dispatch", {})
+    for unknown in sorted(set(dispatch_raw) - _KNOWN_KEYS["dispatch"]):
+        problems.append(f"[dispatch] unknown key {unknown!r}")
+    order = _str("dispatch", "order", "oldest-first")
+    if order not in VALID_ORDER_MODES:
+        # A problem rather than a warning (R17, FR-014). Falling back silently would run
+        # the author's work in an order they did not choose and would not know about,
+        # which is the one contradiction here that cannot be resolved by taking a side.
+        problems.append(
+            f"[dispatch] order must be one of {', '.join(VALID_ORDER_MODES)}; got {order!r}"
+        )
+        order = "oldest-first"
+    dispatch = DispatchConfig(
+        order=order,
+        default_repo_max_sessions=_int("dispatch", "default_repo_max_sessions", 1, minimum=1),
+    )
+
+    # -- [cleanup] ---------------------------------------------------------
+    cleanup_raw = raw.get("cleanup", {})
+    for unknown in sorted(set(cleanup_raw) - _KNOWN_KEYS["cleanup"]):
+        problems.append(f"[cleanup] unknown key {unknown!r}")
+    on_issue_close = cleanup_raw.get("on_issue_close", False)
+    if not isinstance(on_issue_close, bool):
+        problems.append(
+            f"[cleanup] on_issue_close must be true or false, got {on_issue_close!r}"
+        )
+        on_issue_close = False
+    cleanup = CleanupConfig(on_issue_close=on_issue_close)
+
+    # -- [notifications] ---------------------------------------------------
+    notify_raw = raw.get("notifications", {})
+    for unknown in sorted(set(notify_raw) - _KNOWN_KEYS["notifications"]):
+        problems.append(f"[notifications] unknown key {unknown!r}")
+    events_raw = notify_raw.get("events", [])
+    events: tuple[str, ...] = ()
+    if not isinstance(events_raw, list) or any(not isinstance(e, str) for e in events_raw):
+        problems.append("[notifications] events must be a list of strings")
+    else:
+        unknown_kinds = [e for e in events_raw if e not in VALID_NOTIFICATION_EVENTS]
+        if unknown_kinds:
+            # A problem rather than a warning: silently ignoring a kind means an event the
+            # author asked for never arrives, and a channel that is silent for the wrong
+            # reason is worse than no channel.
+            problems.append(
+                f"[notifications] unknown event kind(s) {', '.join(sorted(unknown_kinds))}; "
+                f"valid kinds are {', '.join(VALID_NOTIFICATION_EVENTS)}"
+            )
+        events = tuple(dict.fromkeys(events_raw))
+    notifications = NotificationsConfig(
+        events=events,
+        max_per_cycle=_int("notifications", "max_per_cycle", 5, minimum=1),
+    )
+    if notifications.events and not health.webhook_url:
+        # A warning, not a problem: the intent is legible and the fix is obvious, and
+        # refusing to start over a stretch feature would be disproportionate (R17).
+        warnings.append(
+            "[notifications] events are configured but [health] webhook_url is empty, so "
+            "nothing can be sent; set the webhook or clear the events"
+        )
+
     # -- [trello] ----------------------------------------------------------
     # Absent by default. ``None`` here is what FR-001 means by inert: there is no section
     # to read, so no board request is ever constructed — as against a configured-but-empty
@@ -572,6 +752,26 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             env_raw = {}
         env = {str(k): str(v) for k, v in env_raw.items()}
 
+        max_sessions = section.get("max_sessions")
+        if max_sessions is not None and (
+            not isinstance(max_sessions, int)
+            or isinstance(max_sessions, bool)
+            or max_sessions < 1
+        ):
+            # A problem rather than a warning: zero would disable the repository silently,
+            # which is indistinguishable from a repository nobody labelled anything in.
+            problems.append(
+                f"[repos.{key}] max_sessions must be a positive integer, got {max_sessions!r}"
+            )
+            max_sessions = None
+
+        priority = section.get("priority", 0)
+        if not isinstance(priority, int) or isinstance(priority, bool):
+            problems.append(
+                f"[repos.{key}] priority must be an integer, got {priority!r}"
+            )
+            priority = 0
+
         repos[key] = RepoConfig(
             key=key,
             path=repo_path,
@@ -580,6 +780,8 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             env=env,
             permission_mode=str(repo_mode) if repo_mode else None,
             model=str(section["model"]) if section.get("model") else None,
+            max_sessions=max_sessions,
+            priority=priority,
         )
 
     # A cross-field check that is a warning rather than an error, because the maintainer
@@ -589,6 +791,21 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         (sum(s.timeout for s in r.post_create) for r in repos.values()),
         default=0,
     )
+    # The second cross-field check, and a warning for the same reason as the first: it
+    # resolves cleanly by taking the minimum, and it is usually a leftover from lowering the
+    # global cap rather than a mistake worth refusing to start over (R17).
+    for repo_config in repos.values():
+        if (
+            repo_config.max_sessions is not None
+            and repo_config.max_sessions > daemon.max_concurrent_sessions
+        ):
+            warnings.append(
+                f"[repos.{repo_config.key}] max_sessions ({repo_config.max_sessions}) "
+                f"exceeds [daemon] max_concurrent_sessions "
+                f"({daemon.max_concurrent_sessions}); the effective limit is the lower of "
+                "the two"
+            )
+
     if longest and daemon.dispatching_max_age_seconds <= longest:
         warnings.append(
             f"[daemon] dispatching_max_age_seconds ({daemon.dispatching_max_age_seconds}) "
@@ -608,6 +825,9 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         health=health,
         hooks=hooks,
         web=web,
+        dispatch=dispatch,
+        cleanup=cleanup,
+        notifications=notifications,
         repos=repos,
         worktree_root=worktree_root,
         layout=layout,

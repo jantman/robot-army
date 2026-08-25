@@ -62,10 +62,27 @@ class WorkItem:
     active_at: str | None = None
     ended_at: str | None = None
     done_at: str | None = None
+    #: What cleanup did to this item's disk, and why (milestone 004, R13). ``NULL`` means
+    #: never considered — every pre-migration row, and every row while cleanup is disabled.
+    #: A different axis from ``state``: ``done`` says the work finished, these say whether
+    #: the 499 MB it left behind is still there.
+    cleanup_state: str | None = None
+    cleanup_reason: str | None = None
+    cleaned_at: str | None = None
 
     @property
     def label_list(self) -> list[str]:
         return json.loads(self.labels)
+
+    @property
+    def cleanup_pending(self) -> bool:
+        """Would the automatic pass reconsider this item?
+
+        ``skipped`` is the only non-``NULL`` value it revisits, and that is the whole point
+        of distinguishing it from ``retained``: one means "not yet", the other means "we
+        looked and decided no".
+        """
+        return self.cleanup_state in (None, "skipped")
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +230,11 @@ ANOMALY_KINDS: tuple[str, ...] = (
     "board_unreachable",
     "card_create_failing",
     "card_issue_missing",
+    # Milestone 004. The registry could not be read and the /proc enumeration meant to
+    # replace it returned nothing at all, so the count of live sessions is unknown rather
+    # than zero. Dispatch is withheld while it holds (R4, FR-007), which makes it the one
+    # anomaly here that stops work rather than merely describing it.
+    "capacity_unobservable",
 )
 
 

@@ -496,6 +496,27 @@ class StubDisplay:
         return {"id": handle.window_id, "title": handle.title}
 
 
+class RecordingNotifier:
+    """Captures every event instead of posting it.
+
+    Milestone 004's ninth boundary. A test asserting "nothing was sent" needs somewhere for
+    a send to have gone, and a test asserting "no credential appears anywhere" needs the
+    composed bodies rather than only the events.
+    """
+
+    def __init__(self, *, ok: bool = True) -> None:
+        self.ok = ok
+        self.events: list[Any] = []
+
+    def send(self, event: Any) -> bool:
+        self.events.append(event)
+        return self.ok
+
+    @property
+    def kinds(self) -> list[str]:
+        return [event.kind for event in self.events]
+
+
 def make_boundaries(
     audit: AuditLog,
     *,
@@ -508,6 +529,7 @@ def make_boundaries(
     hooks: Any = None,
     host: Any = None,
     display: Any = None,
+    notifier: Any = None,
 ) -> Boundaries:
     from robot_army.boundaries.git import GitVersionControl
 
@@ -524,6 +546,7 @@ def make_boundaries(
         hook_runner=hooks or StubHookRunner(),
         session_host=host or StubSessionHost(),
         display=display or StubDisplay(),
+        notifier=notifier or RecordingNotifier(),
     )
 
 
@@ -647,6 +670,67 @@ def write_exit_record(
     path = spool / f"{session_id}.{event}.json"
     path.write_text(text, encoding="utf-8")
     return path
+
+
+@pytest.fixture(autouse=True)
+def _no_real_session_registry(tmp_path: Path, monkeypatch: Any) -> Any:
+    """Point the *default* session registry at an empty directory of this test's own.
+
+    Milestone 004 made the concurrency cap count the machine, and the machine is read from
+    ``~/.claude/sessions``. Two call sites do not take a ``registry_dir`` — the web chrome
+    and the queue view, both of which render on every request — so without this a test
+    suite run would silently depend on how many Claude sessions the person running it
+    happens to have open. That is not a flake to chase later; it is the same class of
+    non-determinism the fixture directories at the top of this file exist to remove, and it
+    is fixed the same way: point the default somewhere this test built.
+
+    Tests that want a *populated* registry still pass ``registry_dir`` explicitly. This only
+    replaces the fallback, so nothing that already says which machine it means is affected.
+    """
+    empty = tmp_path / "no-registry"
+    empty.mkdir(exist_ok=True)
+    monkeypatch.setattr("robot_army.sessions.claude_registry_dir", lambda: empty)
+    return empty
+
+
+@pytest.fixture(autouse=True)
+def _forget_in_process_state() -> Any:
+    """Reset the two pieces of deliberately volatile state milestone 004 added.
+
+    The capacity hold's signature (R16) and the notifier's per-cycle counter (R15) live in
+    process memory on purpose: losing them costs one extra audit record and a handful of
+    extra messages, which is far less than a table costs to keep correct. The cost of that
+    choice is that they are shared between tests in a way a database row is not — one
+    test's hold would suppress the next test's record. Clearing them here is exactly what a
+    daemon restart does, so the isolation is honest rather than a workaround.
+    """
+    from robot_army import dispatch as dispatch_mod
+    from robot_army import notifications as notifications_mod
+
+    dispatch_mod._HOLD.clear()
+    notifications_mod.begin_cycle()
+    yield
+    dispatch_mod._HOLD.clear()
+    notifications_mod.begin_cycle()
+
+
+@pytest.fixture
+def idle_machine(tmp_path: Path) -> tuple[Path, Path]:
+    """A machine with nothing running on it, stated explicitly.
+
+    Milestone 004 made the concurrency cap count *the machine* — the author's own Claude
+    sessions included — rather than the daemon's own bookkeeping. A dispatch test that does
+    not say which machine therefore reads the real ``~/.claude/sessions`` and passes or
+    fails depending on what the person running it happens to have open. This is the empty
+    one: a registry directory that exists and holds nothing (which is not the same as one
+    that is absent), and a ``/proc`` holding a single non-worker process so enumeration is
+    demonstrably working rather than merely returning nothing.
+    """
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    proc = tmp_path / "proc"
+    write_proc(proc, 1, starttime="1", exe="/usr/lib/systemd/systemd")
+    return registry, proc
 
 
 def seed_item(

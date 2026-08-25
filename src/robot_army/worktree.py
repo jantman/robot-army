@@ -210,7 +210,11 @@ def condition(
         except BoundaryError:
             status = ""
     try:
-        ahead = vcs.commits_ahead(clone_path, base_ref, branch)
+        # ``None`` means git could not answer (R11). For a *resume signal* shown to a human
+        # that is the same thing as "nothing to tell you", so it maps to zero here — and it
+        # is mapped rather than inherited, because the branch-deletion caller must read the
+        # identical value as "unproven, keep the branch".
+        ahead = vcs.commits_ahead(clone_path, base_ref, branch) or 0
     except BoundaryError:
         ahead = 0
 

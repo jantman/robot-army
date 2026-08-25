@@ -22,8 +22,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from robot_army import capacity as capacity_mod
 from robot_army import control, db, health, operations
 from robot_army import daemon as daemon_mod
+from robot_army import ordering as ordering_mod
 from robot_army.cardstates import CardState
 from robot_army.states import SessionState, WorkItemState, is_legal_work_item_transition
 from robot_army.web import html
@@ -212,6 +214,11 @@ def chrome(ctx: operations.Context, *, include_simulated: bool = False) -> dict[
         "dispatch_paused_at": pause.paused_at,
         "dispatch_paused_by": pause.paused_by,
         "anomaly_count": len(anomalies),
+        # On every view rather than only on the queue: "why is nothing running?" is asked
+        # from wherever the author happens to be looking, and the answer is one line.
+        "capacity": operations._capacity_dict(
+            capacity_mod.snapshot(ctx.conn, config=ctx.config), ctx.config.dispatch.order
+        ),
         "include_simulated": include_simulated,
         "pending_job_requests": control.pending(ctx.layout),
         "rendered_at": datetime.now(UTC).strftime(STAMP),
@@ -573,22 +580,40 @@ def queue_view(
     include_simulated: bool = False,
     chrome_payload: dict[str, Any] | None = None,
 ) -> View:
-    """Ready in dispatch order, dispatching with its age, and blocked with the reason.
+    """Ready in dispatch order with each hold's reason, dispatching with its age, blocked
+    with the reason.
 
-    Dispatch order is ``ORDER BY id`` because that is the order ``select_and_dispatch``
-    actually uses — the position shown is the real one, not a plausible-looking one.
+    The order is not derived here. ``ordering.plan`` produces it and ``select_and_dispatch``
+    walks the same function, so the position shown is the real one by identity rather than
+    by agreement (R8). This view used to carry a comment asserting that its ``ORDER BY id``
+    matched what the dispatcher happened to do — true when it was written, and false the
+    moment an ordering mode existed. There is nothing left to assert.
     """
     all_items = _items(ctx, include_simulated=include_simulated)
     max_age = ctx.config.daemon.dispatching_max_age_seconds
 
-    ready: list[dict[str, Any]] = []
+    snap = capacity_mod.snapshot(ctx.conn, config=ctx.config)
+    plan = ordering_mod.plan(ctx.conn, config=ctx.config, capacity=snap)
+    by_id = {item["id"]: item for item in all_items}
+    ready: list[dict[str, Any]] = [
+        {
+            **by_id.get(entry.item.id, {}),
+            "id": entry.item.id,
+            "position": entry.position,
+            "hold": str(entry.hold) if entry.hold else None,
+            "hold_detail": entry.detail,
+        }
+        for entry in plan
+        # A simulated row is planned regardless, because it occupies a slot; whether it is
+        # *shown* is the viewer's filter, exactly as it is everywhere else.
+        if entry.item.id in by_id
+    ]
+
     dispatching: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
     for item in all_items:
         state = item["state"]
-        if state == str(WorkItemState.READY):
-            ready.append({**item, "position": len(ready) + 1})
-        elif state == str(WorkItemState.DISPATCHING):
+        if state == str(WorkItemState.DISPATCHING):
             row = db.get_work_item(ctx.conn, item["id"])
             age = age_seconds(row.dispatching_at if row else None)
             dispatching.append(
@@ -632,7 +657,7 @@ def queue_view(
             _empty("Nothing is ready.")
             if not ready
             else table(
-                ["#", "item", "repo", "issue", "title", "ready since"],
+                ["#", "item", "repo", "issue", "title", "status", "ready since"],
                 [
                     [
                         row["position"],
@@ -640,6 +665,12 @@ def queue_view(
                         row["repo_key"],
                         issue_link(row),
                         row["title"],
+                        # One reason per row and no log required, which is all FR-013 asks
+                        # for. Held rows are marked so a full queue does not read as a
+                        # queue that is simply about to move.
+                        span(row["hold_detail"], class_="outcome-error")
+                        if row["hold"]
+                        else span("next to dispatch" if row["position"] == 1 else "waiting"),
                         when(row["updated_at"]),
                     ]
                     for row in ready
@@ -704,6 +735,7 @@ def queue_view(
                 "blocked": len(blocked),
             },
             "dispatching_max_age_seconds": max_age,
+            "capacity": operations._capacity_dict(snap, ctx.config.dispatch.order),
         },
         body=body,
     )
@@ -1074,6 +1106,21 @@ def card_confirm_view(
 # -- /item/<id> (FR-015, FR-029) --------------------------------------------
 
 
+def _cleanup_cell(item: dict[str, Any]) -> Any:
+    """What cleanup decided about this item's disk, in one cell.
+
+    ``—`` means never considered, which is what ``NULL`` means and is not the same as
+    "clean": every item predating the migration reads this way, and so does every item
+    while ``[cleanup] on_issue_close`` is off.
+    """
+    state = item.get("cleanup_state")
+    if not state:
+        return span("— never considered", class_="quiet")
+    reason = item.get("cleanup_reason") or ""
+    label = f"{state} — {reason}" if reason else state
+    return span(label, class_="outcome-error" if state != "done" else None)
+
+
 def item_view(
     ctx: operations.Context, item_id: int, *, include_simulated: bool = False
 ) -> View:
@@ -1125,6 +1172,14 @@ def item_view(
                         tag("dd", item["failure_reason"] or "—"),
                         tag("dt", "blocked"),
                         tag("dd", item["blocked_reason"] or "—"),
+                        # A retained worktree or branch, with the guard that kept it. The
+                        # question this answers is asked long after the fact — "why is this
+                        # 499 MB still here?" — so it belongs beside the path, not in a log.
+                        tag("dt", "cleanup"),
+                        tag(
+                            "dd",
+                            _cleanup_cell(item),
+                        ),
                     ]
                 ),
                 class_="kv",

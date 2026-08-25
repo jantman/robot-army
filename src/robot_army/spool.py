@@ -234,6 +234,46 @@ def apply_record(
     return "applied"
 
 
+def _item_for_record(conn: sqlite3.Connection, payload: dict[str, Any]) -> Any:
+    """The work item this exit record belongs to, as it stood *before* the record applied."""
+    session = db.get_session(conn, str(payload.get("session_id") or ""))
+    return db.get_work_item(conn, session.work_item_id) if session else None
+
+
+def _announce(
+    conn: sqlite3.Connection,
+    audit: AuditLog,
+    boundaries: Any,
+    config: Any,
+    before: Any,
+) -> None:
+    """Say that a session finished, if the author asked to be told."""
+    if before is None:
+        return
+    from robot_army import notifications
+
+    after = db.get_work_item(conn, before.id)
+    if after is None or after.state is before.state:
+        return
+    if after.state is WorkItemState.AWAITING_REVIEW:
+        kind, title = "completion", f"robot-army: item {after.id} is awaiting review"
+    elif after.state is WorkItemState.FAILED:
+        kind, title = "failure", f"robot-army: item {after.id} failed"
+    else:
+        return
+    notifications.emit(
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        kind=kind,
+        item_id=after.id,
+        repo_key=after.repo_key,
+        title=title,
+        detail=f"{after.title} — {after.failure_reason or 'the session exited'}",
+        url=after.source_url,
+    )
+
+
 def quarantine(
     layout: Layout, path: Path, reason: str, conn: sqlite3.Connection, audit: AuditLog
 ) -> None:
@@ -270,8 +310,23 @@ def drain(
     *,
     audit: AuditLog,
     layout: Layout,
+    boundaries: Any = None,
+    config: Any = None,
 ) -> DrainResult:
-    """Read, apply, and unlink every record in the spool. Safe to call at any time."""
+    """Read, apply, and unlink every record in the spool. Safe to call at any time.
+
+    ``boundaries`` and ``config`` are optional and exist only so a completed session can be
+    announced (milestone 004). They are optional because a drain must keep working without
+    them: this is a recovery path, and a recovery path that needs more plumbing than the
+    thing it recovers is not one. When they are absent nothing is sent and nothing else
+    changes.
+
+    contracts/notifications.md attributes the ``awaiting_review`` notification to
+    ``reconcile.py``. It is here instead, because here is where that transition actually
+    happens — a session exiting is what ends the work, and reconciliation never sees the
+    moment. Emitting it from reconcile would mean polling for a state change the spool
+    already observed exactly.
+    """
     result = DrainResult()
     spool = layout.spool_dir
     if not spool.is_dir():
@@ -293,6 +348,7 @@ def drain(
             result += DrainResult(quarantined=1)
             continue
 
+        item_before = _item_for_record(conn, payload)
         try:
             with db.transaction(conn):
                 verdict = apply_record(conn, audit, payload)
@@ -321,6 +377,11 @@ def drain(
             pass
         except OSError as exc:
             audit.error("spool.unlink", error=exc, detail={"path": str(path)})
+
+        if verdict == "applied" and boundaries is not None and config is not None:
+            # Outside the transaction that applied it (R14), and only when the item really
+            # changed state — a duplicate record must not produce a second message.
+            _announce(conn, audit, boundaries, config, item_before)
 
         result += (
             DrainResult(applied=1) if verdict == "applied" else DrainResult(duplicates=1)

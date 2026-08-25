@@ -357,7 +357,7 @@ def test_the_prompt_carries_the_issue_and_the_repo_instructions(
     assert "#42" in prompt_text
 
 
-def test_the_concurrency_cap_holds_items_in_ready(conn, audit, config, tmp_path, layout):
+def test_the_concurrency_cap_holds_items_in_ready(conn, audit, config, tmp_path, layout, idle_machine):
     """FR-028. Items above the cap stay in ``ready`` — not a queue, just the state they
     are already in, which is what makes an interrupted dispatcher harmless."""
     from dataclasses import replace
@@ -367,6 +367,7 @@ def test_the_concurrency_cap_holds_items_in_ready(conn, audit, config, tmp_path,
     first = ready_item(conn, config, issue_number=1)
     second = ready_item(conn, config, issue_number=2)
 
+    registry, proc = idle_machine
     dispatched = dispatch.select_and_dispatch(
         conn,
         boundaries=boundaries,
@@ -374,13 +375,15 @@ def test_the_concurrency_cap_holds_items_in_ready(conn, audit, config, tmp_path,
         config=config,
         layout=layout,
         trust_file=trust_file(tmp_path, config.repos["demo"].path),
+        registry_dir=registry,
+        proc_root=proc,
     )
     assert dispatched == 1
     assert db.get_work_item(conn, first).state is WorkItemState.ACTIVE
     assert db.get_work_item(conn, second).state is WorkItemState.READY
 
 
-def test_a_simulated_session_occupies_a_slot(conn, audit, config, tmp_path, layout):
+def test_a_simulated_session_occupies_a_slot(conn, audit, config, tmp_path, layout, idle_machine):
     """FR-055: simulated sessions burn the same subscription quota, so pretending they
     are free would make dry-run runs misleading about capacity."""
     from dataclasses import replace
@@ -390,6 +393,7 @@ def test_a_simulated_session_occupies_a_slot(conn, audit, config, tmp_path, layo
     simulated = ready_item(conn, config, issue_number=1, dry_run=True)
     live = ready_item(conn, config, issue_number=2, dry_run=False)
 
+    registry, proc = idle_machine
     dispatched = dispatch.select_and_dispatch(
         conn,
         boundaries=boundaries,
@@ -397,6 +401,8 @@ def test_a_simulated_session_occupies_a_slot(conn, audit, config, tmp_path, layo
         config=config,
         layout=layout,
         trust_file=trust_file(tmp_path, config.repos["demo"].path),
+        registry_dir=registry,
+        proc_root=proc,
     )
     assert dispatched == 1
     assert db.get_work_item(conn, simulated).state is WorkItemState.ACTIVE

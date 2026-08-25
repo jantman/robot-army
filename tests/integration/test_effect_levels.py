@@ -209,9 +209,15 @@ def test_local_still_performs_no_github_writes(conn, audit, config, tmp_path, la
 
 
 def test_a_simulated_item_still_counts_against_the_concurrency_cap(
-    conn, audit, config, tmp_path, layout
+    conn, audit, config, tmp_path, layout, idle_machine
 ):
-    """T113, FR-055. They burn the same subscription quota."""
+    """T113, FR-055 — carried into milestone 004 as FR-004. They burn the same
+    subscription quota, so pretending they are free would make a dry run misleading about
+    the one thing it exists to rehearse. The counting moved from ``db.count_live_sessions``
+    to ``capacity.snapshot``; the requirement did not move at all."""
+    from robot_army import capacity
+
+    registry, proc = idle_machine
     config = replace(config, daemon=replace(config.daemon, max_concurrent_sessions=1))
     boundaries = wired_at(EffectLevel.LOCAL, config, audit)
     simulated = seed_item(
@@ -226,9 +232,12 @@ def test_a_simulated_item_still_counts_against_the_concurrency_cap(
         config=config,
         layout=layout,
         trust_file=trust_file(tmp_path, config.repos["demo"].path),
+        registry_dir=registry,
+        proc_root=proc,
     )
     assert dispatched == 1
-    assert db.count_live_sessions(conn) == 1
+    snap = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
+    assert snap.total == 1
     assert db.get_work_item(conn, simulated).state is WorkItemState.ACTIVE
     assert db.get_work_item(conn, second).state is WorkItemState.READY
 

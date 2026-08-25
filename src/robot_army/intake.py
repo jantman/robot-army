@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import db, health
+from robot_army import db, health, notifications
 from robot_army.boundaries import BoardInfo, BoundaryError, TransportError
 from robot_army.cardstates import CardState, transition_card, utcnow
 from robot_army.models import PollState
@@ -756,6 +756,7 @@ def evaluate_card(
             conn,
             boundaries=boundaries,
             audit=audit,
+            config=config,
             card=card,
             reason=resolution.reason or "unresolvable",
             dry_run=dry_run,
@@ -1050,6 +1051,7 @@ def _hold_for_info(
     *,
     boundaries: Boundaries,
     audit: AuditLog,
+    config: Config,
     card: Any,
     reason: str,
     dry_run: bool,
@@ -1073,6 +1075,21 @@ def _hold_for_info(
                 reason=reason,
                 extra_columns={"reason": reason},
             )
+        # Outside the transaction, deliberately (R14): an HTTP POST inside BEGIN IMMEDIATE
+        # holds a write transaction open for as long as a slow webhook takes to answer.
+        # Only on *entering* the state — a card held for weeks earns one message, not one
+        # per poll, which is the same judgement FR-022 makes about the card comment.
+        notifications.emit(
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            kind="needs_info",
+            item_id=None,
+            repo_key=None,
+            title=f"robot-army: a card needs more information — {card.title}",
+            detail=reason,
+            url=card.card_url,
+        )
     else:
         with db.transaction(conn):
             db.update_card_columns(conn, card.id, reason=reason)

@@ -28,11 +28,24 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import db, intake, procinfo, prompt, sessions, worktree
+from robot_army import (
+    capacity,
+    db,
+    intake,
+    notifications,
+    ordering,
+    procinfo,
+    prompt,
+    sessions,
+    worktree,
+)
+from robot_army.audit import utc_now_iso
 from robot_army.boundaries import BoundaryError, DisplayHandle, Issue
+from robot_army.ordering import HoldReason
 from robot_army.paths import claude_trust_file
 from robot_army.states import (
     SessionState,
@@ -53,6 +66,17 @@ if TYPE_CHECKING:
 SETTINGS_PATHS: tuple[str, ...] = (".claude/settings.json", ".claude/settings.local.json")
 
 WRAPPER_NAME = "robot-army-session-wrapper"
+
+#: Hold reasons that end the pass rather than skipping one item.
+#:
+#: ``break`` versus ``continue`` is the entire distinction FR-012 and FR-020 draw. A paused
+#: system and an unobservable capacity stop everything; a full machine stops everything
+#: because no *later* item could fit into a slot this one could not. Anything else is a
+#: condition of one item, and a queue that stops on one item's condition is a queue where
+#: one blocked repository stalls every other.
+_GLOBAL_HOLDS: frozenset[HoldReason] = frozenset(
+    {HoldReason.PAUSED, HoldReason.CAPACITY_UNOBSERVABLE, HoldReason.GLOBAL_CAP}
+)
 
 
 class DispatchBlocked(Exception):
@@ -328,7 +352,15 @@ def dispatch_item(
     dry_run = item.dry_run
     repo = config.repos.get(item.repo_key)
     if repo is None:
-        _fail(conn, audit, item_id, f"repository {item.repo_key!r} is no longer in the config")
+        _fail(
+            conn,
+            audit,
+            item_id,
+            f"repository {item.repo_key!r} is no longer in the config",
+            boundaries=boundaries,
+            config=config,
+            item=item,
+        )
         return False
 
     with db.transaction(conn):
@@ -351,7 +383,16 @@ def dispatch_item(
                 trust_file=trust_file,
             )
         except DispatchBlocked as exc:
-            _fail(conn, audit, item_id, str(exc), blocked=True)
+            _fail(
+                conn,
+                audit,
+                item_id,
+                str(exc),
+                blocked=True,
+                boundaries=boundaries,
+                config=config,
+                item=item,
+            )
             _comment_failure(boundaries, audit, config, item, str(exc))
             return False
 
@@ -383,7 +424,15 @@ def dispatch_item(
                 prepare_output=preparation.output or None,
             )
         if not preparation.ok:
-            _fail(conn, audit, item_id, preparation.failure_reason or "preparation failed")
+            _fail(
+                conn,
+                audit,
+                item_id,
+                preparation.failure_reason or "preparation failed",
+                boundaries=boundaries,
+                config=config,
+                item=item,
+            )
             _comment_failure(
                 boundaries, audit, config, item, preparation.failure_reason or "preparation failed"
             )
@@ -426,7 +475,7 @@ def dispatch_item(
     )
     if problems:
         reason = "pre-launch validation failed: " + "; ".join(problems)
-        _fail(conn, audit, item_id, reason)
+        _fail(conn, audit, item_id, reason, boundaries=boundaries, config=config, item=item)
         _comment_failure(boundaries, audit, config, item, reason)
         return False
 
@@ -462,7 +511,7 @@ def dispatch_item(
                 target=SessionState.LOST,
                 reason=reason,
             )
-        _fail(conn, audit, item_id, reason)
+        _fail(conn, audit, item_id, reason, boundaries=boundaries, config=config, item=item)
         _comment_failure(boundaries, audit, config, item, reason)
         return False
 
@@ -524,7 +573,7 @@ def dispatch_item(
             },
             dry_run=dry_run,
         )
-        _fail(conn, audit, item_id, reason)
+        _fail(conn, audit, item_id, reason, boundaries=boundaries, config=config, item=item)
         _comment_failure(boundaries, audit, config, item, reason)
         return False
 
@@ -556,6 +605,21 @@ def dispatch_item(
             reason="session confirmed present",
             extra_columns={"failure_reason": None},
         )
+
+    # Outside the transaction above, deliberately (R14). Also *after* confirmation rather
+    # than after the launch call: M0 F16 measured that call's success as meaningless on its
+    # own, and a message saying a session started when none did is worse than silence.
+    notifications.emit(
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        kind="dispatch",
+        item_id=item_id,
+        repo_key=item.repo_key,
+        title=f"robot-army: session running for {item.repo_key}#{item.issue_number}",
+        detail=f"{item.title} — worktree {worktree_path}",
+        url=item.source_url,
+    )
 
     # The board follows reality, and reality is a *confirmed* session (FR-027). Placed
     # here rather than at the launch call because M0 F16 measured that call's success as
@@ -685,7 +749,17 @@ def _fail(
     reason: str,
     *,
     blocked: bool = False,
+    boundaries: Boundaries | None = None,
+    config: Config | None = None,
+    item: Any = None,
 ) -> None:
+    """The single funnel every dispatch failure passes through.
+
+    The notification lives here rather than at each of the six call sites for the reason
+    ``states.transition`` was *rejected* as a hook and this was not: this function is one
+    module's gate rather than the whole system's, and its transaction closes before the
+    send. One place to get right, and nothing held open while a webhook thinks about it.
+    """
     columns: dict[str, Any] = {"failure_reason": reason}
     if blocked:
         columns["blocked_reason"] = reason
@@ -697,6 +771,18 @@ def _fail(
             target=WorkItemState.FAILED,
             reason=reason,
             extra_columns=columns,
+        )
+    if boundaries is not None and config is not None:
+        notifications.emit(
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            kind="failure",
+            item_id=item_id,
+            repo_key=getattr(item, "repo_key", None),
+            title=f"robot-army: dispatch failed for item {item_id}",
+            detail=reason,
+            url=getattr(item, "source_url", None),
         )
 
 
@@ -745,6 +831,92 @@ def _safe_comment(boundaries: Boundaries, audit: AuditLog, item: Any, body: str)
         )
 
 
+#: The hold currently in force, held in process memory (R16).
+#:
+#: ``dispatch.at_capacity`` used to be written once per pass. At a five-second tick that is
+#: 17,280 identical records a day, which does not make the log more reconstructible — it
+#: makes it less, by burying the records that carry information under records that carry
+#: none. So the record is written when the hold's *signature* changes and once more when it
+#: ends, carrying the duration and how many passes it spanned.
+#:
+#: This is a change of representation, not of content: the hold's existence, cause, counts,
+#: start, end, and extent are all still recorded. It is a documented summarisation under
+#: Principle III's retention clause, and the same judgement already lives in this codebase
+#: as ``raise_anomaly``'s partial unique index.
+#:
+#: Deliberately volatile. Losing it across a restart costs exactly one extra record, which
+#: is far less than a table costs to keep correct.
+_HOLD: dict[str, Any] = {}
+
+
+def _hold_signature(entry: Any, snap: Any) -> tuple[Any, ...]:
+    """What makes this hold *the same hold* as the last pass's.
+
+    The counts, the cap, and which item is at the head. Any of those changing is news; none
+    of them changing is the same sentence repeated.
+    """
+    return (snap.total, snap.others, snap.global_cap, entry.item.id)
+
+
+def _note_hold(audit: AuditLog, entry: Any, snap: Any) -> None:
+    signature = _hold_signature(entry, snap)
+    if _HOLD.get("signature") == signature:
+        _HOLD["passes"] = _HOLD.get("passes", 0) + 1
+        return
+    _HOLD.clear()
+    _HOLD.update(
+        signature=signature,
+        passes=1,
+        started_at=utc_now_iso(),
+        reason=str(entry.hold),
+    )
+    audit.record(
+        "dispatch.at_capacity",
+        outcome="ok",
+        detail={
+            "reason": str(entry.hold),
+            "detail": entry.detail,
+            "live_sessions": snap.total,
+            "cap": snap.global_cap,
+            "ours": len(snap.ours),
+            "others": snap.others,
+            "degraded": snap.degraded,
+            "held_in_ready": entry.item.id,
+        },
+    )
+
+
+def _clear_hold(audit: AuditLog, snap: Any, *, freed_by: str) -> None:
+    """Write ``dispatch.hold_ended`` if a hold was in force, and forget it."""
+    if not _HOLD:
+        return
+    started = _HOLD.get("started_at")
+    audit.record(
+        "dispatch.hold_ended",
+        outcome="ok",
+        detail={
+            "reason": _HOLD.get("reason"),
+            "duration_seconds": _elapsed_seconds(started),
+            "started_at": started,
+            "passes_spanned": _HOLD.get("passes", 0),
+            "freed_by": freed_by,
+            "live_sessions": snap.total,
+            "cap": snap.global_cap,
+        },
+    )
+    _HOLD.clear()
+
+
+def _elapsed_seconds(started_at: str | None) -> float | None:
+    if not started_at:
+        return None
+    try:
+        began = datetime.fromisoformat(started_at)
+    except ValueError:
+        return None
+    return round((datetime.now(UTC) - began).total_seconds(), 3)
+
+
 def select_and_dispatch(
     conn: sqlite3.Connection,
     *,
@@ -756,37 +928,77 @@ def select_and_dispatch(
     registry_dir: Path | None = None,
     proc_root: Path | None = None,
 ) -> int:
-    """Dispatch as many ``ready`` items as the concurrency cap allows.
+    """Dispatch as many ``ready`` items as the machine has room for.
 
-    The cap counts simulated sessions too (FR-055): they burn the same subscription
-    quota, so pretending they are free would make dry-run runs misleading about capacity.
-    Items above the cap stay in ``ready`` — not a queue, just the state they are already
-    in, which is what makes an interrupted dispatcher harmless.
+    Two things changed in milestone 004, and both are about the cap being honest.
+
+    **The count is of the machine, not of our own bookkeeping.** ``capacity.snapshot``
+    counts every live worker session running as this user, the author's own included, so
+    the cap protects the subscription rather than merely rationing the daemon against
+    itself. Simulated sessions still count (FR-004, and FR-055 before it) — that reasoning
+    now lives in ``capacity.snapshot``'s docstring, where the counting does.
+
+    **The order is not this function's to decide.** ``ordering.plan`` produces it, and the
+    queue view and ``robot-army status`` render the very same list, which is what makes
+    SC-006 structural rather than a claim (R8).
+
+    The selection itself is the whole of FR-012 and FR-020: a *global* condition ends the
+    pass, because no later item could fit into a slot this one could not, while a *per-item*
+    one skips that item and leaves the rest of the queue moving.
+
+    **The snapshot is taken once per candidate, not once per pass** (FR-009). A plan built
+    from a stale snapshot would carry hold reasons computed before the previous dispatch
+    took its slot, so a batch could collectively exceed the cap while every individual
+    decision looked correct — and the same staleness is what would let two overlapping
+    passes each see the same free slot. Re-observing is cheap (a directory listing and a
+    handful of ``/proc`` reads) and subtracting one from a remembered number is not
+    observing at all.
     """
     dispatched = 0
-    cap = config.daemon.max_concurrent_sessions
-    ready = db.list_work_items(
-        conn, include_simulated=True, states=[WorkItemState.READY]
-    )
-    for item in ready:
-        live = db.count_live_sessions(conn)
-        if live >= cap:
-            audit.record(
-                "dispatch.at_capacity",
-                outcome="ok",
-                detail={"live_sessions": live, "cap": cap, "held_in_ready": item.id},
-            )
+    # An item leaves ``ready`` the moment ``dispatch_item`` starts — it transitions to
+    # ``dispatching`` before anything else — so re-planning always shrinks and this set is
+    # belt to that braces. It costs one integer per pass and forecloses a spin.
+    attempted: set[int] = set()
+
+    while True:
+        snap = capacity.snapshot(
+            conn,
+            config=config,
+            audit=audit,
+            registry_dir=registry_dir,
+            proc_root=proc_root,
+        )
+        selected = None
+        blocked = None
+        for entry in ordering.plan(conn, config=config, capacity=snap):
+            if entry.item.id in attempted:
+                continue
+            if entry.hold in _GLOBAL_HOLDS:
+                blocked = entry
+                break
+            if entry.hold is not None:
+                continue
+            selected = entry
             break
+
+        if blocked is not None:
+            _note_hold(audit, blocked, snap)
+            return dispatched
+        if selected is None:
+            _clear_hold(audit, snap, freed_by="the queue drained")
+            return dispatched
+
+        _clear_hold(audit, snap, freed_by=f"item {selected.item.id} became dispatchable")
+        attempted.add(selected.item.id)
         if dispatch_item(
             conn,
             boundaries=boundaries,
             audit=audit,
             config=config,
             layout=layout,
-            item_id=item.id,
+            item_id=selected.item.id,
             trust_file=trust_file,
             registry_dir=registry_dir,
             proc_root=proc_root,
         ):
             dispatched += 1
-    return dispatched

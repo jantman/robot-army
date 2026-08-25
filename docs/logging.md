@@ -164,6 +164,56 @@ text it records, in case a remote quotes back what it was sent.
 grep -c "$TRELLO_API_TOKEN" ~/.local/state/robot-army/log/*.jsonl   # expect 0, always
 ```
 
+## The milestone 004 actions
+
+Six new actions, and one changed one. Every one of them exists to answer a question that is
+asked long after the fact: *why did nothing dispatch for twenty minutes?* and *why is this
+499 MB still here?*
+
+| Action | When | Notable detail |
+|---|---|---|
+| `dispatch.at_capacity` | **Changed** — when a hold's signature changes, not every pass | The counts, the cap, the ours/others split, and which item is at the head |
+| `dispatch.hold_ended` | A capacity hold clears | How long it lasted, how many passes it spanned, and what freed it |
+| `capacity.unobservable` | The registry and `/proc` both failed | Which failed, and that dispatch is being withheld as a result. Also raises a de-duplicated anomaly of the same kind |
+| `cleanup.considered` | An item is evaluated for cleanup | The decision and the guard that made it — including "not eligible", so an item that was looked at and passed over is distinguishable from one nobody looked at |
+| `cleanup.retained` | A guard refused a removal | Which guard, what it saw, and the worktree and branch it kept |
+| `notify.send` | A notification is attempted | The kind, the item, and whether the per-cycle bound suppressed it. Written whether or not it left the machine |
+| `notify.suppressed` | The per-cycle bound was reached | How many were held back, and of which kinds |
+
+The existing `git.remove_worktree` and `git.delete_branch` gain a new caller and are
+otherwise unchanged. `git.delete_branch` from cleanup always carries `force: true`, which
+here means a *stronger* guard than git's has already passed — containment against the remote
+was proved — rather than that a guard was skipped.
+
+### The `dispatch.at_capacity` retention rule
+
+A hold is recorded when its **signature** changes — `(total, others, cap, head item)` — and
+once more when it ends. Not once per pass.
+
+This is a documented summarisation under Principle III's retention clause, not an exception
+to it. Everything about the hold is recorded: that it happened, what caused it, the counts
+behind it, when it started, when it ended, and how many passes it spanned. What is *not*
+written is 17,280 identical records a day at a five-second tick, which would not make the log
+more reconstructible — it would make it less, by burying the records that carry information
+under records that carry none. The same judgement already lives in this project as
+`raise_anomaly`'s partial unique index.
+
+The rule is written down here rather than improvised because the constitution requires a
+retention policy to be documented, and because milestone 004 makes holds routine rather than
+rare.
+
+### Notifications carry no credentials
+
+A `NotificationEvent` has exactly six fields — kind, item id, repository key, title, detail,
+url — and every value is an identifier or a state name this system chose. There is no field
+a secret could reach, which makes it a property of the shape rather than of the discipline of
+whoever fills it in. A test asserts it across a run that includes an authentication failure,
+because that is the case where a token would otherwise ride along inside an error string.
+
+```bash
+grep -c "$ROBOT_ARMY_GITHUB_TOKEN" ~/.local/state/robot-army/logs/*.jsonl   # expect 0
+```
+
 ## What is deliberately not logged
 
 Principle III permits gaps only when they are named and justified in the feature plan. The
@@ -178,6 +228,7 @@ the log knows what its silence means:
 | Individual `/proc` and registry reads during reconciliation — one aggregate per pass | Same disproportion. The *conclusions* — sessions found, orphans detected, states changed — are each logged individually |
 | **Actions the session itself takes** inside the worktree | They happen outside this process entirely. This log records the dispatch, the session identity, and where the transcript lives; the worker's own transcript is the record of what it did. Claiming otherwise would be dishonest about what this log covers |
 | Individual board **reads** made within a poll cycle — the freshness re-read before a move, and the comment fetch on the recovery path | Same reasoning as the GitHub one, and the same limit: they change no state outside the process, and the cycle *is* logged with what it evaluated and what it decided about each card. Every board **write** is an intent/outcome pair, without exception |
+| A **notification never attempted** because the process died between a state transition and the send | The state change itself is fully recorded, so nothing the system *did* is unreconstructable. What is lost is the knowledge that I was not told. Closing it would need a durable outbound queue with its own retry and persistence, which is more machinery than an optional stretch feature is worth — the gap is named here rather than hidden |
 | **Read-only web requests** — every `GET` the interface serves | They change no state outside the process, so Principle III's own scope does not reach them. The exception is written down because the *volume* makes the omission visible: a page auto-refreshing every 10 seconds issues a `GET` every 10 seconds, and logging those would bury the record this project exists to keep readable. Nothing a `GET` does is unreconstructable — the data it read is in the database and in this log. **Every `POST` is logged**, without exception |
 
 ## Silent failure is forbidden

@@ -18,6 +18,7 @@ is a test (T060) asserting no code path does.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,16 @@ class RegistryScan:
     unknown_versions: tuple[str | None, ...]
     unreadable: tuple[str, ...]
     degraded: bool = False
+    #: The registry directory was absent, was not a directory, or could not be listed.
+    #:
+    #: Distinguished from an empty-but-present directory because those two are otherwise
+    #: byte-for-byte identical at the glob — no version is refused, no file is unreadable,
+    #: the scan simply returns nothing — and one of them means "the machine is idle" while
+    #: the other means "the registry moved and this observation is worthless" (R4). It is
+    #: the only failure mode in this file that reads as *free capacity*, which is the one
+    #: direction a capacity error is allowed to cause harm in, so it is distinguished here
+    #: at the only place that can still tell the difference.
+    directory_missing: bool = False
 
     def by_session_id(self) -> dict[str, RegistryEntry]:
         return {entry.session_id: entry for entry in self.entries}
@@ -173,10 +184,23 @@ def scan(
     unknown: list[str | None] = []
     unreadable: list[str] = []
 
-    try:
-        candidates = sorted(directory.glob("*.json"))
-    except OSError:
-        candidates = []
+    # ``is_dir()`` answers False rather than raising for an absent path, a path that is
+    # not a directory, and a parent we may not traverse — all three of which are the same
+    # thing to a caller: no usable registry here.
+    directory_missing = not directory.is_dir()
+    candidates: list[Path] = []
+    if not directory_missing:
+        try:
+            # ``os.listdir`` rather than ``Path.glob``: glob quietly swallows a directory
+            # it is not permitted to read and yields nothing, which is exactly the silence
+            # this flag exists to break. listdir raises, so "will not be listed" stays
+            # distinguishable from "has nothing in it".
+            names = sorted(os.listdir(directory))
+        except OSError:
+            # It exists but will not be listed. Same conclusion, different cause.
+            directory_missing = True
+        else:
+            candidates = [directory / name for name in names if name.endswith(".json")]
 
     for path in candidates:
         # Never even stat a .key file. glob("*.json") already excludes them; this is the
@@ -200,6 +224,7 @@ def scan(
         entries=tuple(entries),
         unknown_versions=tuple(unknown),
         unreadable=tuple(unreadable),
+        directory_missing=directory_missing,
     )
 
 

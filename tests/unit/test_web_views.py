@@ -302,3 +302,77 @@ def test_concurrent_loads_never_invent_a_running_daemon(web, conn, layout):
 def test_a_real_daemon_is_still_detected_through_the_shared_probe(web, running_daemon):
     """The shared probe must not have traded a false positive for a false negative."""
     assert web.get_json("/active").json()["daemon"]["running"] is True
+
+
+# -- the queue speaks the dispatcher's vocabulary (milestone 004, T037) -----
+
+
+def test_the_queue_renders_a_position_and_a_reason_for_every_held_item(web, conn):
+    """FR-013 at the level the queue works at: not "held", but *why*, per row, without the
+    log. The rows come from ``ordering.plan``, which is the same function the dispatcher
+    walks — so the position is the real one by identity rather than by agreement."""
+    from dataclasses import replace
+
+    web.app.config = replace(
+        web.app.config,
+        daemon=replace(web.app.config.daemon, max_concurrent_sessions=1),
+    )
+    running = seed_item(conn, issue_number=9, state="active")
+    seed_session(conn, running, state="running")
+    first = seed_item(conn, issue_number=1, state="ready")
+    second = seed_item(conn, issue_number=2, state="ready")
+
+    payload = web.get_json("/queue").json()
+    rows = {row["id"]: row for row in payload["ready"]}
+    assert [rows[first]["position"], rows[second]["position"]] == [1, 2]
+    assert rows[first]["hold"] == "global_cap"
+    assert "1 of 1 sessions" in rows[first]["hold_detail"]
+
+
+def test_a_held_items_reason_is_visible_on_the_page_itself(web, conn):
+    """"Without consulting the log" is the requirement, so the assertion is against the
+    rendered page rather than only against the payload a script would read."""
+    from dataclasses import replace
+
+    web.app.config = replace(
+        web.app.config,
+        daemon=replace(web.app.config.daemon, max_concurrent_sessions=1),
+    )
+    running = seed_item(conn, issue_number=9, state="active")
+    seed_session(conn, running, state="running")
+    seed_item(conn, issue_number=1, state="ready")
+
+    text = web.get("/queue").text
+    assert "1 of 1 sessions" in text
+    assert "ours" in text and "other" in text
+
+
+def test_an_unheld_queue_says_which_item_is_next(web, conn):
+    seed_item(conn, issue_number=1, state="ready")
+    assert "next to dispatch" in web.get("/queue").text
+
+
+def test_the_queue_payload_carries_the_capacity_summary(web, conn):
+    seed_item(conn, issue_number=1, state="ready")
+    payload = web.get_json("/queue").json()
+    capacity = payload["capacity"]
+    assert capacity["observable"] is True
+    assert capacity["global_cap"] == web.app.config.daemon.max_concurrent_sessions
+    assert capacity["order"] == "oldest-first"
+
+
+def test_every_view_carries_the_capacity_pill(web, conn):
+    """On every view rather than on the queue alone: "why is nothing running?" is asked
+    from wherever the author happens to be looking."""
+    seed_item(conn, issue_number=1, state="ready")
+    for path in ("/active", "/queue", "/interrupted"):
+        text = web.get(path).text
+        assert "sessions (" in text, path
+        assert "order: oldest-first" in text, path
+
+
+def test_the_capacity_summary_is_in_every_payload_too(web, conn):
+    payload = web.get_json("/queue").json()
+    assert "capacity" in payload
+    chrome = web.get_json("/active").json()
+    assert "capacity" in chrome.get("chrome", chrome)

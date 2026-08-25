@@ -181,7 +181,9 @@ class GitVersionControl:
             raise BoundaryError(f"git status failed in {worktree_path}: {result.output}")
         return result.stdout
 
-    def commits_ahead(self, clone_path: str, base_ref: str, branch: str) -> int:
+    def commits_ahead(self, clone_path: str, base_ref: str, branch: str) -> int | None:
+        """``None`` when git could not answer — a missing ref, a broken repository, a
+        timeout. Never ``0``, which is a real answer meaning "contained elsewhere" (R11)."""
         result = self._run(
             ["rev-list", "--count", f"{base_ref}..{branch}"],
             cwd=clone_path,
@@ -190,11 +192,11 @@ class GitVersionControl:
             check=False,
         )
         if not result.ok:
-            return 0
+            return None
         try:
             return int(result.stdout.strip())
         except ValueError:
-            return 0
+            return None
 
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None:
         """Read a file from the git object store, not the filesystem.
@@ -296,8 +298,12 @@ class SimulatedVersionControl:
         self._log("git.status_porcelain", worktree=worktree_path)
         return ""
 
-    def commits_ahead(self, clone_path: str, base_ref: str, branch: str) -> int:
+    def commits_ahead(self, clone_path: str, base_ref: str, branch: str) -> int | None:
         self._log("git.commits_ahead", clone=clone_path, base_ref=base_ref, branch=branch)
+        # ``0`` rather than ``None``: the simulation answers the question it was asked, and
+        # answering "I could not determine" would make every simulated cleanup retain its
+        # branch — a divergence from the real path, which is what the simulated boundaries
+        # exist to avoid.
         return 0
 
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None:

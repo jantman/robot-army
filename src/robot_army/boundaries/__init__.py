@@ -329,9 +329,34 @@ class VersionControl(Protocol):
 
     def status_porcelain(self, worktree_path: str) -> str: ...
 
-    def commits_ahead(self, clone_path: str, base_ref: str, branch: str) -> int: ...
+    def commits_ahead(self, clone_path: str, base_ref: str, branch: str) -> int | None:
+        """How many commits ``branch`` has that ``base_ref`` does not, or ``None``.
+
+        ``None`` means **could not determine**, and keeping it distinct from ``0`` is the
+        whole reason this signature changed in milestone 004 (R11). The implementation used
+        to swallow a failed ``rev-list`` into ``return 0``. To the resume-signal caller that
+        reads as a harmless "no information"; to a branch-deletion decision the very same
+        value reads as *"every commit on this branch already exists elsewhere, delete it"*.
+        Same number, opposite meanings, and the difference invisible at the call site — so a
+        transient git failure would have authorised destroying commits that exist nowhere
+        else.
+
+        Callers that want the old reading say so explicitly: ``worktree.condition`` maps
+        ``None`` to ``0``. Callers making an irreversible decision must treat ``None`` as
+        unproven.
+        """
+        ...
 
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None: ...
+
+    def rev_parse(self, clone_path: str, ref: str) -> str | None:
+        """Resolve a ref to a sha, or ``None`` if it does not resolve.
+
+        Declared here in milestone 004 rather than added: both implementations have always
+        had it and ``worktree.prepare`` has always called it, so the protocol was quietly
+        understating what a ``VersionControl`` must provide.
+        """
+        ...
 
     def default_remote(self, clone_path: str) -> str | None: ...
 
@@ -345,6 +370,44 @@ class VersionControl(Protocol):
         path — the divergence contracts/boundaries.md forbids.
         """
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationEvent:
+    """One thing worth saying out loud (contracts/notifications.md).
+
+    Composed **only** from identifiers and state names. There is no field a secret could
+    reach — no token, no header, no request body, no exception text from an authenticated
+    call — and that is a property of the shape rather than of the discipline of whoever
+    fills it in. FR-037 is checked against a run that includes an authentication failure,
+    which is the case where a credential would otherwise ride along inside an error string.
+    """
+
+    #: ``dispatch`` | ``completion`` | ``failure`` | ``needs_info``.
+    kind: str
+    item_id: int | None
+    repo_key: str | None
+    #: One line, safe to render anywhere.
+    title: str
+    #: Where to look next — a state name, an item id, a command to run.
+    detail: str
+    #: The issue or the card, whichever exists.
+    url: str | None = None
+
+
+@runtime_checkable
+class Notifier(Protocol):
+    """Says something happened, on the channel the health signal already uses.
+
+    A boundary rather than a direct call to ``health.post_json`` from four service modules,
+    and the reason is structural: FR-040 requires sends to be simulated below the ``live``
+    effect level, and ``effects.py`` is the only module in this package permitted to know an
+    effect level exists. Calling the transport directly would put an effect-level check back
+    at a call site — the exact pattern milestone 001 built ``effects.py`` to eliminate, and
+    the one a test greps for.
+    """
+
+    def send(self, event: NotificationEvent) -> bool: ...
 
 
 @runtime_checkable
@@ -429,6 +492,8 @@ __all__ = [
     "Issue",
     "IssueSourceReader",
     "IssueSourceWriter",
+    "NotificationEvent",
+    "Notifier",
     "PollResult",
     "PullRequest",
     "RemovalResult",

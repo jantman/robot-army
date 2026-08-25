@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import db, intake, sessions
+from robot_army import cleanup, db, intake, notifications, sessions
 from robot_army.boundaries import BoundaryError, TransportError
 from robot_army.states import (
     SessionState,
@@ -45,6 +45,8 @@ class ReconcileResult:
     orphans: int = 0
     stale_sockets: int = 0
     prunable: int = 0
+    cleaned: int = 0
+    retained: int = 0
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
@@ -56,6 +58,8 @@ class ReconcileResult:
             "orphans": self.orphans,
             "stale_sockets": self.stale_sockets,
             "prunable_worktrees": self.prunable,
+            "cleaned": self.cleaned,
+            "retained": self.retained,
             "notes": self.notes,
         }
 
@@ -213,12 +217,38 @@ def reconcile(
                     "prepare_output": (item.prepare_output or "")[:4000],
                 },
             )
+        # Outside the transaction (R14).
+        notifications.emit(
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            kind="failure",
+            item_id=item.id,
+            repo_key=item.repo_key,
+            title=f"robot-army: item {item.id} failed to dispatch",
+            detail=reason,
+            url=item.source_url,
+        )
         result.dispatching_failed += 1
 
     # -- issues that have been closed (FR-035, FR-042) ---------------------
     result.closed_done += _resolve_closed_issues(
         conn, boundaries=boundaries, audit=audit, config=config
     )
+
+    # -- reclaiming the disk of finished work (milestone 004, R10) ---------
+    #
+    # Immediately after ``_resolve_closed_issues`` and in the same pass, because that pass
+    # already asks the exact question cleanup needs — is the issue closed? — and a daemon
+    # job of its own would re-ask it on a different clock. Running as a *pass* rather than
+    # as a side effect of the ``done`` transition also means items that finished before
+    # cleanup was enabled are picked up on the next pass, with no backfill command.
+    if config.cleanup.on_issue_close:
+        decisions = _cleanup_worktrees(conn, boundaries=boundaries, audit=audit, config=config)
+        result.cleaned += sum(1 for d in decisions if d.state == cleanup.DONE)
+        result.retained += sum(
+            1 for d in decisions if d.state in (cleanup.RETAINED, cleanup.BRANCH_RETAINED)
+        )
 
     # -- the orphan sweep (FR-043, M0 F17) ---------------------------------
     result.orphans += _orphan_sweep(
@@ -235,6 +265,22 @@ def reconcile(
         detail={**result.summary(), **sessions.summarise(scan, config.worktree_root)},
     )
     return result
+
+
+def _cleanup_worktrees(
+    conn: sqlite3.Connection,
+    *,
+    boundaries: Boundaries,
+    audit: AuditLog,
+    config: Config,
+) -> list[cleanup.Decision]:
+    """Reclaim what finished work left on disk, under both of ``cleanup``'s guards.
+
+    A thin wrapper on purpose: the guards, the outcomes, and the records live in
+    ``cleanup.py``, and ``robot-army cleanup`` calls the same function so the manual path
+    cannot drift from the automatic one (FR-029).
+    """
+    return cleanup.sweep(conn, boundaries=boundaries, audit=audit, config=config)
 
 
 def _interrupt(conn: sqlite3.Connection, audit: AuditLog, item_id: int, reason: str) -> None:
@@ -312,6 +358,19 @@ def _resolve_closed_issues(
                 target=WorkItemState.DONE,
                 reason=f"source issue {key} is closed",
             )
+        # Outside the transaction (R14). The state change is already committed and already
+        # in the log, so a webhook that never answers costs a message, never a pass.
+        notifications.emit(
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            kind="completion",
+            item_id=item.id,
+            repo_key=item.repo_key,
+            title=f"robot-army: {key} is done",
+            detail=f"{item.title} — the source issue is closed",
+            url=item.source_url,
+        )
         # The board's other half (FR-028). Best-effort for the same reason the dispatch
         # side is: the work item is already done, and a board that cannot be written must
         # not undo that or stall the rest of the pass.

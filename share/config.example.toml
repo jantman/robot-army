@@ -24,7 +24,11 @@ poll_seconds                = 60     # GitHub poll interval (ETags make this che
 reconcile_seconds           = 60     # sweep for sessions that died without saying so
 dispatching_max_age_seconds = 900    # a wedged preparation is failed after this
 confirm_timeout_seconds     = 45     # how long to wait for proof a session really started
-max_concurrent_sessions     = 2      # sessions this daemon will own at once
+# EVERY live Claude session running as you, not just this daemon's — your own
+# terminal sessions share the subscription, so a cap that ignored them would
+# protect nothing. Measured on a real desktop: two of your own open at once is
+# ordinary, so 2 here means the daemon gets zero slots. Start at 3 or 4.
+max_concurrent_sessions     = 2
 
 [github]
 author     = "REQUIRED — your GitHub login"   # the security boundary; cannot be disabled
@@ -52,6 +56,32 @@ binary                = "kitty"
 [health]
 max_age_seconds = 180    # heartbeat older than this means `robot-army health` exits 4
 webhook_url     = ""     # optional external ping; leave empty for none
+
+[dispatch]
+# What runs next, and how many sessions one repository may have at once.
+# Both defaults reproduce milestone 003's behaviour exactly, so an existing
+# config that never mentions this section changes nothing by upgrading.
+order                     = "oldest-first"  # or "repo-priority" — see [repos.*].priority
+default_repo_max_sessions = 1               # per repository, unless a repo overrides it
+
+[cleanup]
+# Reclaim a finished item's worktree (up to 499 MB) and branch when its issue
+# closes. OFF by default: removal is irreversible, and irreversible actions must
+# not be reachable without asking for them. `robot-army cleanup` runs the same
+# two guards on demand whether or not this is true.
+#
+# Guard 1 is git's own refusal to remove a dirty worktree (untracked files
+# included) — --force is never passed. Guard 2 is a containment check against
+# the remote: the branch is deleted only if every commit on it is provably on
+# origin. "Could not determine" is never taken as "safe".
+on_issue_close = false
+
+[notifications]
+# Say something out loud when a run starts, finishes, fails, or a card is
+# waiting on you. Empty by default, so nothing is sent until you ask. Uses
+# [health] webhook_url — there is deliberately no second URL to configure.
+events        = []   # any of: "dispatch", "completion", "failure", "needs_info"
+max_per_cycle = 5    # per daemon tick, then one summary naming what was held back
 
 [hooks]
 default_timeout_seconds = 300    # ceiling for a post_create step that sets none
@@ -137,6 +167,15 @@ token_env        = "TRELLO_API_TOKEN"
 [repos."you/example-repo"]
 path        = "~/GIT/example-repo"
 base_branch = "main"                # omit to inherit [worker] base_branch
+
+# Optional, both new in milestone 004. A typo in either is an ERROR, like every
+# other key in this section.
+# max_sessions = 2   # overrides [dispatch] default_repo_max_sessions. Above the
+#                    # global cap it warns and the lower value wins.
+# priority     = 10  # higher runs first under [dispatch] order = "repo-priority";
+#                    # ties break oldest-first. Default 0. There is no aging, so a
+#                    # low-priority repo can wait indefinitely — that is what
+#                    # choosing that mode means.
 
 # Steps run inside each fresh worktree before the session starts. Exactly one
 # of run / link / copy per step. `link` and `copy` are first-class rather than

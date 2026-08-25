@@ -218,6 +218,27 @@ CREATE INDEX idx_cards_state ON cards (state);
 """
 
 
+SCHEMA_004_SQL = """
+-- What cleanup did to a finished item's disk, and why (milestone 004, R13).
+--
+-- Three nullable columns rather than a `cleanups` table: one row per item, one shot, no
+-- lifecycle of its own, so a table would be a join for nothing.
+--
+-- `work_items.state` is deliberately untouched and WORK_ITEM_TRANSITIONS gains no entries.
+-- `done` is terminal and means the *work* is finished; whether its disk has been reclaimed
+-- is a different axis — the same separation §7 makes between work state and session state.
+-- Adding a `cleaned` state would make every existing query that treats `done` as terminal
+-- subtly wrong.
+--
+-- `worktree_path` and `branch` are never nulled after a removal. FR-024 requires the record
+-- to retain what was removed, `_sweep_worktrees` already keys on the path being present,
+-- and "what was at this path?" is exactly the question a retained-branch record must answer.
+ALTER TABLE work_items ADD COLUMN cleanup_state  TEXT;
+ALTER TABLE work_items ADD COLUMN cleanup_reason TEXT;
+ALTER TABLE work_items ADD COLUMN cleaned_at     TEXT;
+"""
+
+
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
         conn.execute(statement)
@@ -233,11 +254,17 @@ def _migration_003(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_004(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_004_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
     _migration_002,
     _migration_003,
+    _migration_004,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

@@ -944,7 +944,13 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
         if repo is None or repo.path is None:
             # Onboarded before migration 005, with nothing to say where. The row is real
             # and the location is not, and saying so is the whole content of the line.
-            rows.append([key, "(never recorded)", "yes", "?", "?", "?"])
+            #
+            # The third cell is the **path source** column, so it says what to do rather
+            # than what is unknown — everything after it depends on a clone path we do not
+            # have, and four question marks would describe the problem without naming the
+            # one command that fixes it. It shouts for the same reason the not-onboarded
+            # row below does: both are rows the author has to act on.
+            rows.append([key, "(never recorded)", "NEEDS REAPPROVE", "?", "?", "?"])
             payload.append(
                 {
                     "repo_key": key,

@@ -337,6 +337,27 @@ def test_an_onboarded_repository_with_no_section_is_polled(conn, audit, config):
     assert outcomes[0].error is None
 
 
+def repos_table(result):
+    """Rendered `robot-army repos` rows as {header: cell} dicts.
+
+    Parsed against the **dashed rule**, which `_table` sizes to each column, rather than
+    against cell order. That is the whole point: this file shipped a row whose cells were
+    correct in order and wrong under the headers, because a column had been renamed and one
+    row-builder was not updated with it. Asserting on positions would have missed it again.
+    """
+    lines = [line for line in result.lines if line.strip()]
+    header, rule, *body = lines
+    spans, start = [], 0
+    for dashes in rule.split("  "):
+        spans.append((start, start + len(dashes)))
+        start += len(dashes) + 2
+    names = [header[a:b].strip() for a, b in spans]
+    return [
+        {name: row[a:b].strip() for name, (a, b) in zip(names, spans, strict=True)}
+        for row in body
+    ]
+
+
 def test_the_repos_verb_reports_a_section_without_a_record_as_not_onboarded(
     conn, audit, config
 ):
@@ -359,3 +380,56 @@ def test_the_repos_verb_reports_a_section_without_a_record_as_not_onboarded(
     assert rows["demo"]["onboarded"] is False
     assert "never onboarded" in rows["demo"]["note"]
     assert "NOT ONBOARDED" in "\n".join(result.lines)
+
+
+def test_every_repos_row_puts_its_values_under_the_right_headers(conn, audit, config):
+    """The three row shapes the verb produces, checked against the headers rather than
+    against each other. A renamed column is invisible to a test that reads by position."""
+    from robot_army import operations
+    from robot_army.effects import EffectLevel
+
+    onboard(conn, "jantman/pre-005")  # a record with no clone_path — the pre-005 shape
+    ctx = operations.Context(
+        config=config,
+        conn=conn,
+        audit=audit,
+        boundaries=make_boundaries(audit),
+        effect_level=EffectLevel.LIVE,
+    )
+
+    rows = {row["repo"]: row for row in repos_table(operations.repos(ctx))}
+
+    # Onboarded before migration 005: no location, and the cell that would say where it
+    # came from says what to do instead.
+    legacy = rows["jantman/pre-005"]
+    assert legacy["clone path"] == "(never recorded)"
+    assert legacy["path source"] == "NEEDS REAPPROVE"
+    assert "yes" not in legacy.values(), (
+        "'yes' was the boolean for the old 'onboarded' column; nothing may still emit it"
+    )
+
+    # A section with no record: not watched, and the verb says so in the same column.
+    assert rows["demo"]["path source"] == "NOT ONBOARDED"
+
+
+def test_a_normal_row_reports_its_path_source_verbatim(conn, audit, config, repo_clone):
+    from tests.conftest import onboard_repo
+
+    from robot_army import operations
+    from robot_army.effects import EffectLevel
+
+    onboard_repo(conn, "jantman/derived", repo_clone, path_source="derived")
+    onboard_repo(conn, "jantman/explicit", repo_clone, path_source="configured")
+    ctx = operations.Context(
+        config=config,
+        conn=conn,
+        audit=audit,
+        boundaries=make_boundaries(audit),
+        effect_level=EffectLevel.LIVE,
+    )
+
+    rows = {row["repo"]: row for row in repos_table(operations.repos(ctx))}
+
+    assert rows["jantman/derived"]["path source"] == "derived"
+    assert rows["jantman/explicit"]["path source"] == "configured"
+    assert rows["jantman/derived"]["clone path"] == str(repo_clone)

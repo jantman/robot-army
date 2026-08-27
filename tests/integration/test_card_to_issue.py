@@ -16,6 +16,8 @@ from tests.conftest import (
     make_board_boundaries,
     make_card,
     make_issue,
+    make_repo,
+    onboard_repo,
 )
 
 from robot_army import db, intake, poll
@@ -302,3 +304,48 @@ def test_no_board_or_issue_write_happens_below_live(conn, board_config, audit, l
 )
 def test_against_a_real_disposable_board():  # pragma: no cover - never runs in CI
     raise AssertionError("run quickstart.md scenario 2 by hand")
+
+
+# -- a repository with no [repos.*] section (milestone 005, T035) -----------
+
+
+def test_a_card_resolves_to_an_onboarded_repository_that_has_no_section(
+    conn, board_config, audit, tmp_path
+):
+    """US1's headline reaching milestone 003's path. Before this, a card naming a
+    repository with no section was held as ``needs_info`` with a reason listing only the
+    configured repositories — telling the author to name a repository they already named
+    (research R8)."""
+    sectionless = make_repo(tmp_path / "clones" / "sectionless")
+    onboard_repo(conn, "jantman/sectionless", sectionless)
+    assert "jantman/sectionless" not in board_config.repos
+
+    boundaries = make_board_boundaries(
+        audit,
+        cards=[make_card("card-1", body="fix https://github.com/jantman/sectionless")],
+    )
+    outcome = run(conn, board_config, audit, boundaries)
+
+    assert outcome.issues_created == 1
+    assert boundaries.issue_writer.created[0][0] == "jantman/sectionless"
+    assert db.list_cards(conn)[0].repo_key == "jantman/sectionless"
+
+
+def test_a_filesystem_path_inside_a_sectionless_clone_resolves_it(
+    conn, board_config, audit, tmp_path
+):
+    """The consumer research R8 found: ``_key_for_path`` compares against clone *paths*,
+    not only keys, so it needs the recorded location rather than the configured one."""
+    sectionless = make_repo(tmp_path / "clones" / "sectionless")
+    onboard_repo(conn, "jantman/sectionless", sectionless)
+
+    boundaries = make_board_boundaries(
+        audit,
+        cards=[
+            make_card("card-1", body=f"the failure is in {sectionless}/src/thing.py")
+        ],
+    )
+    outcome = run(conn, board_config, audit, boundaries)
+
+    assert outcome.issues_created == 1
+    assert boundaries.issue_writer.created[0][0] == "jantman/sectionless"

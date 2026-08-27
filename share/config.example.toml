@@ -35,7 +35,10 @@ author     = "REQUIRED — your GitHub login"   # the security boundary; cannot 
 label      = "robot-army"                     # the label that means "dispatch this"
 token_env  = "GITHUB_TOKEN"                   # variable NAME, not the token
 # token_file = "~/.config/robot-army/github-token"   # or a 0600 file; pick exactly one
-include_owned   = true                        # poll every repo you own
+# What may be ONBOARDED. Not what is polled — polling follows the onboarding record.
+# A mistake guard against a mistyped name, not a security boundary: the issue-author
+# check is that one, and it cannot be disabled.
+include_owned   = true                        # any repo you own may be onboarded
 extra_repos     = []                          # plus these, e.g. ["someone/theirs"]
 timeout_seconds = 20
 max_retries     = 4

@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from robot_army import db
+from robot_army import db, repos
 from robot_army.models import WorkItem
 from robot_army.states import WorkItemState
 
@@ -103,9 +103,12 @@ def plan(
     ``db.list_work_items``'s ``ORDER BY id`` stays exactly as it is and serves as the
     *stable input* to the sort rather than as the policy itself (R7).
     """
+    # Resolved once for the whole plan rather than per item: this function runs on every
+    # web page render, and one query beats one per queued item.
+    resolved = repos.resolved_all(conn, config)
     items = sorted(
         db.list_work_items(conn, include_simulated=True, states=[WorkItemState.READY]),
-        key=lambda item: order_key(item, config.repos.get(item.repo_key), config.dispatch.order),
+        key=lambda item: order_key(item, resolved.get(item.repo_key), config.dispatch.order),
     )
     control = db.get_dispatch_control(conn)
 
@@ -116,6 +119,7 @@ def plan(
             config=config,
             capacity=capacity,
             paused=control.paused,
+            resolved=resolved,
         )
         entries.append(
             QueueEntry(item=item, position=position, hold=hold, detail=detail)
@@ -155,6 +159,7 @@ def _hold_for(
     config: Config,
     capacity: CapacitySnapshot,
     paused: bool,
+    resolved: dict[str, RepoConfig],
 ) -> tuple[HoldReason | None, str]:
     """The first applicable reason, in ``HoldReason``'s declaration order (R9).
 
@@ -205,14 +210,16 @@ def _hold_for(
     #   object store. ``plan`` is pure and runs on every web page render, so they stay in
     #   ``dispatch.check_gates`` where they fail closed with the message they always had.
     #
-    # What is left is the case the schema cannot prevent: the repository was onboarded, and
-    # then removed from the configuration file. ``dispatch_item`` already fails such an item;
-    # reporting it here means the author sees it in the queue instead of after an attempt.
-    if item.repo_key not in config.repos:
+    # What is left is the case the schema cannot prevent: the row exists but no longer
+    # resolves to a clone — its onboarding record was deleted, or it predates migration
+    # 005 and so was never recorded at a verified location. ``dispatch_item`` already
+    # fails such an item; reporting it here means the author sees it in the queue instead
+    # of after an attempt.
+    if item.repo_key not in resolved:
         return (
             HoldReason.NOT_ONBOARDED,
-            f"repository {item.repo_key!r} is no longer in the config — "
-            "re-add its [repos.*] section or abandon the item",
+            f"repository {item.repo_key!r} does not resolve to a clone — run "
+            f"`robot-army onboard {item.repo_key} --reapprove`, or abandon the item",
         )
 
     # Last, because it is not a queueing condition at all: it would hold this item on a

@@ -229,6 +229,19 @@ class GitVersionControl:
         )
         return result.stdout.strip() if result.ok else None
 
+    def list_remotes(self, clone_path: str) -> list[str]:
+        """Every configured remote name, in git's order.
+
+        Split out of ``default_remote`` in milestone 005 rather than added beside it: the
+        identity check needs the *count* — several remotes and none named ``origin`` is a
+        refusal, not a pick (research R3) — and two functions shelling out to ``git
+        remote`` would be two chances for the parsing to drift.
+        """
+        result = self._run(
+            ["remote"], cwd=clone_path, timeout=QUICK_TIMEOUT, action="git.subprocess", check=False
+        )
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
     def default_remote(self, clone_path: str) -> str | None:
         """The remote to fetch from, or ``None`` when the repository has none.
 
@@ -236,13 +249,28 @@ class GitVersionControl:
         and legitimate case, and inventing a remote name would turn it into a confusing
         fetch failure instead of a skipped step.
         """
-        result = self._run(
-            ["remote"], cwd=clone_path, timeout=QUICK_TIMEOUT, action="git.subprocess", check=False
-        )
-        remotes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        remotes = self.list_remotes(clone_path)
         if "origin" in remotes:
             return "origin"
         return remotes[0] if remotes else None
+
+    def remote_url(self, clone_path: str, remote: str) -> str | None:
+        """The configured URL of one remote, or ``None`` when it has none.
+
+        New in milestone 005 and the first time this codebase has read a remote *URL* —
+        ``default_remote`` returns a name, because until identity had to be checked nothing
+        needed more. The value may embed credentials; every caller normalises before
+        recording, comparing or printing it (FR-032).
+        """
+        result = self._run(
+            ["remote", "get-url", remote],
+            cwd=clone_path,
+            timeout=QUICK_TIMEOUT,
+            action="git.subprocess",
+            check=False,
+        )
+        url = result.stdout.strip()
+        return url if result.ok and url else None
 
 
 class SimulatedVersionControl:
@@ -255,6 +283,11 @@ class SimulatedVersionControl:
 
     def __init__(self, audit: AuditLog) -> None:
         self._audit = audit
+        #: For the reads that must be **real** at every effect level. Delegating to the
+        #: real implementation rather than re-implementing them keeps one parser for one
+        #: question, and keeps those reads audited exactly as the real path audits them —
+        #: they genuinely happened, so recording them as simulated would be a lie.
+        self._real = GitVersionControl(audit)
 
     def _log(self, action: str, **detail: Any) -> None:
         self._audit.record(action, outcome="ok", simulated=True, detail=detail)
@@ -320,8 +353,23 @@ class SimulatedVersionControl:
         self._log("git.rev_parse", clone=clone_path, ref=ref)
         return "0" * 40
 
+    def list_remotes(self, clone_path: str) -> list[str]:
+        # A real read, for the reason ``remote_url`` states below.
+        return self._real.list_remotes(clone_path)
+
     def default_remote(self, clone_path: str) -> str | None:
         return "origin"
+
+    def remote_url(self, clone_path: str, remote: str) -> str | None:
+        """The **real** URL, at every effect level.
+
+        This class's rule is that cheap, side-effect-free reads answer honestly rather
+        than returning a fake, and "what repository is at this path" has one true answer
+        no matter what level we are simulating (research R3). Answering with an invented
+        URL would let a ``plan``-level onboarding approve a location a ``live`` one would
+        refuse — a divergence contracts/boundaries.md exists to prevent.
+        """
+        return self._real.remote_url(clone_path, remote)
 
 
 def _parse_worktree_porcelain(text: str) -> list[WorktreeInfo]:

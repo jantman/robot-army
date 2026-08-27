@@ -74,10 +74,13 @@ def test_missing_label_is_rejected_without_a_row(config):
     assert not verdict.persist
 
 
-def test_unconfigured_repo_is_rejected_without_a_row(config):
+def test_a_section_is_no_longer_what_makes_a_repository_eligible(config):
+    """Milestone 005's intentional inversion. An onboarded repository with no
+    ``[repos.*]`` section is eligible — that is the whole milestone — and the section that
+    used to be the gate is now an override the eligibility check has no opinion about."""
     verdict = poll.evaluate(make_issue(), config=config, repo_key="other", onboarded=True)
-    assert not verdict.eligible
-    assert not verdict.persist
+    assert verdict.eligible
+    assert "other" not in config.repos, "and it genuinely has no section"
 
 
 def test_not_onboarded_is_rejected_without_a_row(config):
@@ -281,3 +284,78 @@ def test_poll_all_continues_past_one_repositorys_failure(conn, audit, config):
     )
     assert len(outcomes) == 1
     assert outcomes[0].error is not None
+
+
+# -- the polled set comes from the record, not the file (milestone 005, T034) ----
+
+
+def test_a_section_with_no_onboarding_record_is_never_polled(conn, audit, config):
+    """The one intentional breaking change in milestone 005 (FR-015, FR-016).
+
+    ``demo`` has a ``[repos.*]`` section in the fixture and no row in ``repos``. It was
+    never dispatchable — onboarding has always been the gate — so what changes is that the
+    system stops *pretending* to watch it."""
+    assert "demo" in config.repos
+    boundaries = make_boundaries(audit, reader=FakeIssueReader([make_issue()]))
+
+    outcomes = poll.poll_all(
+        conn, boundaries=boundaries, audit=audit, config=config, dry_run=False
+    )
+
+    assert outcomes == []
+    assert boundaries.issue_reader.poll_calls == [], "not even a request was made"
+    assert db.list_work_items(conn, include_simulated=True) == []
+
+
+def test_naming_an_unonboarded_repository_explicitly_reports_why(conn, audit, config):
+    boundaries = make_boundaries(audit, reader=FakeIssueReader([make_issue()]))
+
+    outcomes = poll.poll_all(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        dry_run=False,
+        only_repo="demo",
+    )
+
+    assert len(outcomes) == 1
+    assert "is not onboarded" in (outcomes[0].error or "")
+    assert "robot-army onboard demo" in (outcomes[0].error or "")
+
+
+def test_an_onboarded_repository_with_no_section_is_polled(conn, audit, config):
+    """The mirror image, and the milestone's actual point."""
+    onboard(conn, "jantman/no-section")
+    boundaries = make_boundaries(audit, reader=FakeIssueReader([]))
+
+    outcomes = poll.poll_all(
+        conn, boundaries=boundaries, audit=audit, config=config, dry_run=False
+    )
+
+    assert [o.repo_key for o in outcomes] == ["jantman/no-section"]
+    assert outcomes[0].error is None
+
+
+def test_the_repos_verb_reports_a_section_without_a_record_as_not_onboarded(
+    conn, audit, config
+):
+    """FR-017. Listing it as known is how "why is nothing happening for this repo" got
+    asked in the first place."""
+    from robot_army import operations
+    from robot_army.effects import EffectLevel
+
+    ctx = operations.Context(
+        config=config,
+        conn=conn,
+        audit=audit,
+        boundaries=make_boundaries(audit),
+        effect_level=EffectLevel.LIVE,
+    )
+
+    result = operations.repos(ctx)
+
+    rows = {entry["repo_key"]: entry for entry in result.data["repos"]}
+    assert rows["demo"]["onboarded"] is False
+    assert "never onboarded" in rows["demo"]["note"]
+    assert "NOT ONBOARDED" in "\n".join(result.lines)

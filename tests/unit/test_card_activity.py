@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from tests.conftest import make_board_boundaries, make_card
+from tests.conftest import make_board_boundaries, make_card, onboard_repo
 
 from robot_army import db, intake
 from robot_army.cardstates import CardState
@@ -128,15 +128,16 @@ def test_a_changed_reason_does_earn_a_second_comment(conn, board_config, audit):
     wrong thing."""
     boundaries = make_board_boundaries(audit, cards=[unresolvable()])
     cycle(conn, board_config, audit, boundaries)
-    assert "no configured repository" in boundaries.card_writer.comments[0][1]
+    assert "no onboarded repository" in boundaries.card_writer.comments[0][1]
 
     edit(
         boundaries,
         body=f"either https://github.com/{REPO} or https://github.com/jantman/other",
         last_activity="2026-08-25T10:00:00Z",
     )
-    # A second configured repository, so the card becomes ambiguous rather than empty.
+    # A second **onboarded** repository, so the card becomes ambiguous rather than empty.
     board_config.repos["jantman/other"] = board_config.repos[REPO]
+    onboard_repo(conn, "jantman/other", board_config.repos[REPO].path)
     cycle(conn, board_config, audit, boundaries)
 
     assert len(boundaries.card_writer.comments) == 2

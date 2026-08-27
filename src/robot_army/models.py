@@ -28,6 +28,21 @@ class Repo:
     fingerprint_approved_at: str
     settings_fingerprint: str | None = None
     trust_verified_at: str | None = None
+    #: The clone location as approved, absolute and with symlinks resolved. ``None`` means
+    #: *onboarded, location never verified* — a row written before migration 005 — and
+    #: **not** "onboarded at an unknown path". The difference decides what dispatch does:
+    #: the first is re-approvable with ``onboard --reapprove``, the second would invite a
+    #: guess, and guessing which repository to act in is the failure milestone 005 exists
+    #: to prevent (research R6).
+    clone_path: str | None = None
+    #: ``derived`` or ``configured`` — which of the two answers produced ``clone_path``,
+    #: so a surface can tell the author which file to edit when it is wrong (FR-011).
+    path_source: str | None = None
+    #: The **normalised** ``host/owner/name`` found at ``clone_path``, never a raw remote
+    #: URL: a raw URL may embed credentials and this column is read back into terminal
+    #: output and JSON views (FR-032).
+    verified_origin: str | None = None
+    origin_verified_at: str | None = None
 
     @property
     def fingerprint(self) -> dict[str, str]:
@@ -235,6 +250,12 @@ ANOMALY_KINDS: tuple[str, ...] = (
     # than zero. Dispatch is withheld while it holds (R4, FR-007), which makes it the one
     # anomaly here that stops work rather than merely describing it.
     "capacity_unobservable",
+    # Milestone 005. The machine changed under an approval: the clone approved at
+    # onboarding is no longer where it was, or a different repository is now there. Both
+    # are distinct from an ordinary gate refusal, which means a precondition was never met
+    # rather than that the world moved (FR-028, US5).
+    "clone_path_missing",
+    "clone_origin_changed",
 )
 
 

@@ -28,7 +28,7 @@ author         = "jantman"          # FR-007 security boundary; see note below
 label          = "robot-army"
 token_env      = "ROBOT_ARMY_GITHUB_TOKEN"
 # token_file   = "~/.config/robot-army/github-token"   # alternative, must be mode 0600
-include_owned  = true               # enumerate the authenticated user's own repos
+include_owned  = true               # any repo you own may be onboarded (see note below)
 extra_repos    = ["someorg/theirrepo"]
 timeout_seconds = 20
 max_retries     = 4
@@ -109,6 +109,15 @@ permission_mode = "acceptEdits"     # per-repo override of [worker]
 - `token_file` must be mode 0600 or startup fails.
 - `extra_repos` are repositories the maintainer does not own. They still require onboarding, and the
   committed-permission fingerprint check (FR-004) matters most for exactly these.
+- **Superseded by [milestone 005](../../005-onboard-is-enough/contracts/config.md).** `include_owned`
+  and `extra_repos` were written here as though they governed *what is polled*, and enumerating the
+  author's own repositories was the mechanism implied. Neither is true. Nothing enumerates — the
+  ownership question is answered by one `GET /repos/{owner}/{name}` for the repository being named —
+  and polling follows the **onboarding record**, not either key. What these two govern is what may be
+  **onboarded**: `include_owned = true` permits any repository the author owns, `extra_repos` permits
+  the specific repositories listed regardless of owner, and a repository permitted by neither is
+  refused at onboarding with the setting named. This is a **mistake guard and not a security
+  boundary** (005 FR-026) — the `author` check above is the boundary, and it remains undisableable.
 
 **`[web]`** *(milestone 002)*
 - `bind` is the interface's **access policy**, because it has no authentication by design

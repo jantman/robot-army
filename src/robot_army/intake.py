@@ -23,14 +23,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import db, health, notifications
+from robot_army import db, health, notifications, repos
 from robot_army.boundaries import BoardInfo, BoundaryError, TransportError
 from robot_army.cardstates import CardState, transition_card, utcnow
 from robot_army.models import PollState
 
 if TYPE_CHECKING:
     from robot_army.audit import AuditLog
-    from robot_army.config import Config, TrelloConfig
+    from robot_army.config import Config, RepoConfig, TrelloConfig
     from robot_army.effects import Boundaries
 
 
@@ -493,12 +493,14 @@ class Resolution:
         return self.repo_key is not None
 
 
-def resolve_repository(title: str, body: str, config: Config) -> Resolution:
-    """Find the one configured repository a card names, or say why there isn't one.
+def resolve_repository(
+    conn: sqlite3.Connection, title: str, body: str, config: Config
+) -> Resolution:
+    """Find the one **onboarded** repository a card names, or say why there isn't one.
 
     Three forms are scanned — a ``github.com/<owner>/<name>`` URL, a bare
     ``<owner>/<name>``, and a filesystem path — and **every candidate is filtered against
-    the configured repositories before it counts**. That filter is the whole security
+    the onboarded repositories before it counts**. That filter is the whole security
     argument: an unknown reference cannot select anything, so the worst case for a card
     full of pasted log output is ``needs_info``, which is the safe direction. Filing an
     issue in a repository named by a stray path fragment is the failure worth engineering
@@ -511,12 +513,17 @@ def resolve_repository(title: str, body: str, config: Config) -> Resolution:
     text = f"{title}\n{body}"
     found: dict[str, str] = {}  # repo key → the text that produced it
 
+    # Read once. This runs on every board poll for every card, and both questions —
+    # "is this a repository we watch" and "does this path sit inside one of their
+    # clones" — are answered from the same resolved view (research R8).
+    onboarded = repos.resolved_all(conn, config)
+
     for owner, name in _URL_REF.findall(text):
-        _offer(found, f"{owner}/{name}", config, f"github.com/{owner}/{name}")
+        _offer(found, f"{owner}/{name}", onboarded, f"github.com/{owner}/{name}")
     for owner, name in _BARE_REF.findall(text):
-        _offer(found, f"{owner}/{name}", config, f"{owner}/{name}")
+        _offer(found, f"{owner}/{name}", onboarded, f"{owner}/{name}")
     for raw in _PATH_REF.findall(text):
-        key = _key_for_path(raw, config)
+        key = _key_for_path(raw, onboarded)
         if key is not None:
             found.setdefault(key, raw)
 
@@ -524,27 +531,32 @@ def resolve_repository(title: str, body: str, config: Config) -> Resolution:
         key = next(iter(found))
         return Resolution(repo_key=key, candidates=(key,))
     if not found:
+        # "onboarded:", not "configured:". After milestone 005 that is what the list is,
+        # and telling the author to name a repository they already named — because it has
+        # no ``[repos.*]`` section — is exactly the quiet failure R8 exists to prevent.
         return Resolution(
             repo_key=None,
             reason=(
-                "no configured repository could be identified from this card. Name one by "
-                "its GitHub URL, its owner/name, or its local path — configured: "
-                f"{', '.join(sorted(config.repos)) or 'none'}"
+                "no onboarded repository could be identified from this card. Name one by "
+                "its GitHub URL, its owner/name, or its local path — onboarded: "
+                f"{', '.join(sorted(onboarded)) or 'none'}"
             ),
         )
     keys = tuple(sorted(found))
     return Resolution(
         repo_key=None,
         reason=(
-            f"this card names {len(keys)} configured repositories ({', '.join(keys)}); "
+            f"this card names {len(keys)} onboarded repositories ({', '.join(keys)}); "
             "it must name exactly one"
         ),
         candidates=keys,
     )
 
 
-def _offer(found: dict[str, str], candidate: str, config: Config, seen_as: str) -> None:
-    """Accept a candidate only if it **is** a configured repository key, exactly.
+def _offer(
+    found: dict[str, str], candidate: str, onboarded: dict[str, RepoConfig], seen_as: str
+) -> None:
+    """Accept a candidate only if it **is** an onboarded repository key, exactly.
 
     Exactly, and not by last segment. A ``demo`` suffix rule would let ``vendor/demo`` or
     ``demos/demo`` in a pasted log select the ``you/demo`` repository, which is precisely
@@ -552,22 +564,26 @@ def _offer(found: dict[str, str], candidate: str, config: Config, seen_as: str) 
     is ``owner/name`` throughout this project (``[repos."you/example-repo"]``, and
     ``GitHubReader._repo_path`` splits on the slash to build an API path).
     """
-    if candidate in config.repos:
+    if candidate in onboarded:
         found.setdefault(candidate, seen_as)
 
 
-def _key_for_path(raw: str, config: Config) -> str | None:
-    """Map a filesystem path onto a configured repository, or ``None``.
+def _key_for_path(raw: str, onboarded: dict[str, RepoConfig]) -> str | None:
+    """Map a filesystem path onto an onboarded repository, or ``None``.
 
-    A path *inside* a configured clone counts as naming it: the author pasting
+    A path *inside* a clone counts as naming it: the author pasting
     ``/home/me/git/demo/src/thing.py`` plainly means ``demo``. The comparison is on
-    resolved paths so that a symlinked or ``~``-relative spelling does not miss.
+    resolved paths so that a symlinked or ``~``-relative spelling does not miss — and
+    since milestone 005 "resolved" means the location recorded at onboarding, which is why
+    a repository with no ``[repos.*]`` section still matches (research R8).
     """
     try:
         path = Path(raw).expanduser()
     except (OSError, ValueError):
         return None
-    for key, repo in config.repos.items():
+    for key, repo in onboarded.items():
+        if repo.path is None:
+            continue
         try:
             if path == repo.path or repo.path in path.parents:
                 return key
@@ -736,7 +752,7 @@ def evaluate_card(
     ):
         return Verdict(card.card_id, "unchanged", reason=card.reason)
 
-    resolution = resolve_repository(card.title, card.body, config)
+    resolution = resolve_repository(conn, card.title, card.body, config)
     audit.record(
         "trello.evaluated",
         outcome="ok",

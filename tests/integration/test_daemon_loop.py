@@ -24,6 +24,7 @@ from tests.conftest import (
     StubDisplay,
     make_boundaries,
     make_issue,
+    onboard_repo,
     seed_item,
     write_exit_record,
 )
@@ -364,8 +365,7 @@ def test_one_cycle_takes_a_labelled_issue_all_the_way_to_active(
     """The MVP, end to end through the loop rather than through dispatch directly."""
     (tmp_path / "registry").mkdir()
     (tmp_path / "proc").mkdir()
-    with db.transaction(conn):
-        db.upsert_repo(conn, repo_key="demo", settings_fingerprint=None, trust_verified=True)
+    onboard_repo(conn, "demo", config.repos["demo"].path)
 
     from robot_army.boundaries.hooks import SubprocessHookRunner
 

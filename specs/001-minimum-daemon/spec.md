@@ -576,6 +576,12 @@ Each is a starting value to be revised in use, not a finding.
 - **The author's own repositories are enumerated from GitHub for the authenticated user**, and a
   configured list adds repositories the author does not own. Both still require explicit onboarding
   per FR-001.
+  > **Amended by milestone 005.** The second sentence is what 005 implements: both routes require
+  > explicit onboarding, and that is now the *only* thing `include_owned` and `extra_repos` govern.
+  > The first sentence is **superseded** — nothing enumerates, because nothing needs to. Ownership is
+  > answered by one `GET /repos/{owner}/{name}` for the repository being named, which costs one
+  > request regardless of how many repositories the author owns; the enumeration this decision
+  > implied was implemented, never called, and has been deleted.
 - **The daemon is started manually after graphical login**, per planning §8. Automatic start at boot
   is not a requirement and is deliberately excluded, because it would place the daemon in an
   environment with no terminal instance to launch into.

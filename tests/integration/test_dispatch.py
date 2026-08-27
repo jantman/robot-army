@@ -31,14 +31,19 @@ pytestmark = pytest.mark.requires_git
 
 
 def ready_item(conn, config, **kwargs) -> int:
-    item_id = seed_item(conn, state=str(WorkItemState.READY), **kwargs)
-    return item_id
+    # The clone location is part of an approval since milestone 005, and
+    # ``dispatch.check_gates`` re-verifies it before creating anything (FR-028). A row
+    # without one is the pre-005 shape FR-014 deliberately blocks.
+    kwargs.setdefault("clone_path", config.repos["demo"].path)
+    return seed_item(conn, state=str(WorkItemState.READY), **kwargs)
 
 
-def trust_file(tmp_path: Path, clone: Path) -> Path:
+def trust_file(tmp_path: Path, *clones: Path) -> Path:
     path = tmp_path / "claude.json"
     path.write_text(
-        json.dumps({"projects": {str(clone.resolve()): {"hasTrustDialogAccepted": True}}}),
+        json.dumps(
+            {"projects": {str(c.resolve()): {"hasTrustDialogAccepted": True} for c in clones}}
+        ),
         encoding="utf-8",
     )
     return path
@@ -525,3 +530,184 @@ def test_resume_adds_the_resume_flag(config, layout, audit):
     assert "--resume" in plan.worker_argv
     assert plan.worker_argv[plan.worker_argv.index("--resume") + 1] == "old-id"
     assert plan.worker_argv[plan.worker_argv.index("--session-id") + 1] == "new-id"
+
+
+# -- the recorded location, re-verified at dispatch (milestone 005) ---------
+#
+# ``check_gates`` gained a fourth precondition: the clone approved at onboarding is still
+# there, is still a primary clone, and is still the same repository. All three failures
+# create nothing anywhere, which is the entire point (FR-029, SC-004).
+
+
+def onboarded_at(conn, key, clone, *, origin=None):
+    from tests.conftest import onboard_repo
+
+    onboard_repo(conn, key, clone, verified_origin=origin)
+
+
+def gates(conn, audit, config, repo, trust):
+    dispatch.check_gates(
+        conn, boundaries=make_boundaries(audit), config=config, repo=repo, trust_file=trust
+    )
+
+
+def test_a_null_clone_path_blocks_dispatch_naming_reapprove(conn, audit, config, tmp_path):
+    """FR-014. A row predating migration 005 means *onboarded, location never verified*,
+    and nothing backfills it: writing a path nobody approved into an approval record is the
+    one thing that table exists not to do (research R6)."""
+    from robot_army import db as _db
+
+    with _db.transaction(conn):
+        _db.upsert_repo(
+            conn, repo_key="demo", settings_fingerprint=None, trust_verified=True
+        )
+
+    with pytest.raises(dispatch.DispatchBlocked, match="before its clone location was recorded"):
+        gates(
+            conn,
+            audit,
+            config,
+            config.repos["demo"],
+            trust_file(tmp_path, config.repos["demo"].path),
+        )
+
+
+def test_a_configured_path_that_disagrees_with_the_record_blocks_naming_both(
+    conn, audit, config, tmp_path
+):
+    """T048, FR-013. Editing ``path`` after onboarding does not silently take effect, and
+    it does not silently lose either — it blocks pending re-approval, exactly as a changed
+    settings fingerprint already does."""
+    from dataclasses import replace
+
+    from tests.conftest import make_repo
+
+    recorded = config.repos["demo"].path
+    onboarded_at(conn, "demo", recorded)
+    moved = make_repo(tmp_path / "moved")
+    edited = replace(config, repos={"demo": replace(config.repos["demo"], path=moved)})
+
+    with pytest.raises(dispatch.DispatchBlocked) as caught:
+        gates(conn, audit, edited, edited.repos["demo"], trust_file(tmp_path, moved, recorded))
+
+    assert str(moved) in str(caught.value), "the configured path"
+    assert str(recorded) in str(caught.value), "and the approved one"
+    assert "--reapprove" in str(caught.value)
+
+
+def test_recorded_clone_moved(conn, audit, config, tmp_path, layout):
+    """T057, SC-005. The clone is renamed after approval. The item fails naming the
+    **recorded** path, an anomaly is raised, and no worktree exists anywhere — and
+    specifically nothing re-derives or finds another directory of the same name, which is
+    what a re-derivation design would silently get wrong."""
+    from dataclasses import replace
+
+    from tests.conftest import make_repo
+
+    from robot_army import db as _db
+
+    # Approved somewhere other than the derived location, so that "did it re-derive?" is a
+    # question this test can actually answer.
+    approved = make_repo(tmp_path / "approved" / "demo")
+    derived_root = tmp_path / "GIT"
+    derived_root.mkdir()
+    config = replace(
+        config,
+        repo_root=derived_root,
+        repos={"demo": replace(config.repos["demo"], path=approved)},
+    )
+    onboarded_at(conn, "demo", approved)
+    item_id = seed_item(
+        conn, state=str(WorkItemState.READY), clone_path=approved
+    )
+
+    # The author moves the clone. A **real, valid** clone of the same name is then left
+    # sitting exactly where derivation would look — so an implementation that re-derived
+    # instead of reading the record would sail straight past this and cut a branch in it.
+    approved.rename(tmp_path / "renamed-away")
+    decoy = make_repo(config.repo_root / "demo")
+    assert decoy.is_dir(), "the decoy is the whole point of this test"
+
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=make_boundaries(audit),
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, tmp_path / "renamed-away", decoy),
+    )
+
+    item = _db.get_work_item(conn, item_id)
+    assert item.state is WorkItemState.FAILED
+    assert str(approved) in (item.failure_reason or ""), "the recorded path is named"
+    assert item.worktree_path is None
+    assert not (config.worktree_root.exists() and any(config.worktree_root.iterdir()))
+    assert list(decoy.glob("../*")) , "sanity: the decoy directory really is populated"
+    assert not any(
+        p.name.startswith("issue-") for p in decoy.parent.iterdir()
+    ), "and nothing was created next to it either"
+
+    kinds = [a.kind for a in _db.list_anomalies(conn)]
+    assert "clone_path_missing" in kinds
+
+
+def test_a_different_repository_at_the_recorded_path_is_refused_naming_both(
+    conn, audit, config, tmp_path, layout
+):
+    """T058. Scenario 3's failure arriving months later, and the case a re-derivation
+    design would silently get wrong: the derived answer is still this directory, and this
+    directory now holds someone else's work."""
+    from tests.conftest import make_repo
+
+    from robot_army import db as _db
+
+    clone = config.repos["demo"].path
+    onboarded_at(conn, "demo", clone, origin="github.com/jantman/demo")
+
+    # The clone is replaced by a real clone of a different repository, at the same path.
+    import shutil
+
+    shutil.rmtree(clone)
+    make_repo(clone, origin="git@github.com:someoneelse/other.git")
+
+    with pytest.raises(dispatch.DispatchBlocked) as caught:
+        gates(conn, audit, config, config.repos["demo"], trust_file(tmp_path, clone))
+
+    assert "someoneelse/other" in str(caught.value), "the identity found"
+    assert "demo" in str(caught.value), "and the one approved"
+    assert "clone_origin_changed" in [a.kind for a in _db.list_anomalies(conn)]
+    assert not (config.worktree_root.exists() and any(config.worktree_root.iterdir()))
+
+
+def test_reapprove_after_either_failure_lets_dispatch_resume(conn, audit, config, tmp_path):
+    """T059. The resolution the refusals name actually resolves them."""
+    import shutil
+
+    from tests.conftest import make_repo
+
+    from robot_army import db as _db
+
+    clone = config.repos["demo"].path
+    onboarded_at(conn, "demo", clone, origin="github.com/jantman/demo")
+    shutil.rmtree(clone)
+    make_repo(clone, origin="git@github.com:someoneelse/other.git")
+    trust = trust_file(tmp_path, clone)
+
+    with pytest.raises(dispatch.DispatchBlocked):
+        gates(conn, audit, config, config.repos["demo"], trust)
+
+    # `onboard --reapprove` re-records what is actually there.
+    onboarded_at(conn, "demo", clone, origin="github.com/someoneelse/other")
+    with _db.transaction(conn):
+        _db.upsert_repo(
+            conn,
+            repo_key="demo",
+            settings_fingerprint=None,
+            trust_verified=True,
+            clone_path=str(clone),
+            path_source="configured",
+            verified_origin="github.com/someoneelse/other",
+        )
+
+    gates(conn, audit, config, config.repos["demo"], trust)

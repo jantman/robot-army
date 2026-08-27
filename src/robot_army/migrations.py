@@ -239,6 +239,36 @@ ALTER TABLE work_items ADD COLUMN cleaned_at     TEXT;
 """
 
 
+SCHEMA_005_SQL = """
+-- The location this repository was approved at, and how we arrived at it (milestone 005).
+--
+-- The **outcome** is recorded rather than the rule, and that is the whole design. A
+-- derivation rule evaluated later can produce a different answer than the one a human
+-- approved, and the wrong answer here is not an error — it is a real clone of a real
+-- repository, which is why the five known collisions on the author's machine would fail
+-- silently under any re-derive-on-demand design. Nothing re-derives after approval; a
+-- clone that moves produces a refusal naming the recorded path.
+--
+-- Four nullable columns rather than a table: one row per repository, no lifecycle of its
+-- own, so a table would be a join for nothing.
+--
+-- `verified_origin` holds the **normalised** host/owner/name and never a raw URL. A raw
+-- remote URL may embed credentials, and storing one would put a secret into
+-- `robot-army repos` output and every JSON view of it (FR-032). The normalised triple is
+-- what the comparison uses, is stable across a clone being re-pointed between SSH and
+-- HTTPS, and cannot carry a secret because normalisation strips userinfo first.
+--
+-- A NULL `clone_path` means *onboarded, location never verified* — a row predating this
+-- migration — and not "onboarded at an unknown path". Nothing backfills it: writing a path
+-- nobody approved into an approval record is the one thing this table exists not to do
+-- (research R6).
+ALTER TABLE repos ADD COLUMN clone_path         TEXT;
+ALTER TABLE repos ADD COLUMN path_source        TEXT;   -- 'derived' | 'configured'
+ALTER TABLE repos ADD COLUMN verified_origin    TEXT;   -- normalised host/owner/name
+ALTER TABLE repos ADD COLUMN origin_verified_at TEXT;
+"""
+
+
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
         conn.execute(statement)
@@ -259,12 +289,18 @@ def _migration_004(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_005(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_005_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
     _migration_002,
     _migration_003,
     _migration_004,
+    _migration_005,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

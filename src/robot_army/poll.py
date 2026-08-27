@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from robot_army import db
+from robot_army import db, repos
 from robot_army.boundaries import Issue, PollResult, TransportError
 from robot_army.models import PollState
 from robot_army.states import WorkItemState, dumps_labels, transition_work_item, utcnow
@@ -82,16 +82,15 @@ def evaluate(
             f"(has: {', '.join(issue.labels) or 'none'})",
             persist=False,
         )
-    if repo_key not in config.repos:
-        return Eligibility(
-            False,
-            f"repository {repo_key!r} has no [repos.{repo_key}] section",
-            persist=False,
-        )
     if not onboarded:
+        # Onboarding, not configuration, is what makes a repository known (FR-015,
+        # FR-016). Before milestone 005 this was two conditions and the first of them —
+        # "has a [repos.*] section" — was the one that decided whether the repository
+        # existed at all. A section is now an override and nothing more, so testing for
+        # one here would refuse exactly the repositories this milestone exists to serve.
         return Eligibility(
             False,
-            f"repository {repo_key!r} is configured but not onboarded — "
+            f"repository {repo_key!r} is not onboarded — "
             f"run `robot-army onboard {repo_key}`",
             persist=False,
         )
@@ -308,14 +307,22 @@ def poll_all(
     dry_run: bool,
     only_repo: str | None = None,
 ) -> list[PollOutcome]:
-    """Poll every configured repository. One repository's failure does not stop the rest."""
-    keys = [only_repo] if only_repo else sorted(config.repos)
+    """Poll every onboarded repository. One repository's failure does not stop the rest.
+
+    The set comes from the database rather than from a ``Config`` loaded at process start,
+    which has one consequence nothing asked for and everything gets: a repository onboarded
+    **while the daemon is running** is polled on the next cycle, with no restart (research
+    R7). ``poll_state`` is keyed by repository, so a key that appears between cycles simply
+    has no prior state — a case this code already handled.
+    """
+    onboarded_keys = repos.known(conn)
+    keys = [only_repo] if only_repo else onboarded_keys
     outcomes: list[PollOutcome] = []
     for repo_key in keys:
-        if repo_key not in config.repos:
+        if repo_key not in onboarded_keys:
             audit.error(
                 "poll.repo",
-                error=f"no [repos.{repo_key}] section",
+                error=f"repository {repo_key!r} is not onboarded",
                 entity_type="repo",
                 entity_id=repo_key,
             )
@@ -326,7 +333,10 @@ def poll_all(
                     found=0,
                     created=0,
                     rejected=0,
-                    error=f"no [repos.{repo_key}] section in config",
+                    error=(
+                        f"repository {repo_key!r} is not onboarded — "
+                        f"run `robot-army onboard {repo_key}`"
+                    ),
                 )
             )
             continue

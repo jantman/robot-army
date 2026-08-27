@@ -67,7 +67,14 @@ def trust_file(tmp_path: Path, clone: Path) -> Path:
     return path
 
 
-def ready_item(conn, **kwargs) -> int:
+def ready_item(conn, config=None, **kwargs) -> int:
+    # The recorded clone location is part of an approval since milestone 005, and
+    # ``check_gates`` re-verifies it before creating anything (FR-028). ``config`` is
+    # optional only because several cases here never dispatch the row they seed.
+    if config is not None:
+        section = config.repos.get(kwargs.get("repo_key", "demo"))
+        if section is not None:
+            kwargs.setdefault("clone_path", section.path)
     return seed_item(conn, state=str(WorkItemState.READY), **kwargs)
 
 
@@ -122,7 +129,7 @@ def test_nothing_dispatches_when_the_author_has_filled_the_machine(
     config = capped_at(config, 2)
     out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
     out_of_band(registry, proc, pid=102, cwd=str(tmp_path / "GIT" / "two"))
-    item = ready_item(conn, issue_number=1)
+    item = ready_item(conn, config, issue_number=1)
 
     assert run(conn, audit, config, layout, tmp_path, machine) == 0
     assert db.get_work_item(conn, item).state is WorkItemState.READY
@@ -137,7 +144,7 @@ def test_one_dispatch_follows_one_of_the_authors_sessions_ending(
     config = capped_at(config, 2)
     first = out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
     out_of_band(registry, proc, pid=102, cwd=str(tmp_path / "GIT" / "two"))
-    item = ready_item(conn, issue_number=1)
+    item = ready_item(conn, config, issue_number=1)
     assert run(conn, audit, config, layout, tmp_path, machine) == 0
 
     first.unlink()  # the author closed one
@@ -152,7 +159,7 @@ def test_the_hold_reason_names_the_split_so_the_author_knows_what_to_close(
     registry, proc = machine
     config = capped_at(config, 1)
     out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
-    ready_item(conn, issue_number=1)
+    ready_item(conn, config, issue_number=1)
 
     snap = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
     entries = ordering.plan(conn, config=config, capacity=snap)
@@ -169,8 +176,8 @@ def test_two_items_in_one_pass_never_exceed_the_cap(
     """Capacity is re-observed before each individual dispatch. Subtracting one from a
     remembered number is not observing, and it is how a batch quietly oversubscribes."""
     config = capped_at(config, 1)
-    first = ready_item(conn, issue_number=1)
-    second = ready_item(conn, issue_number=2)
+    first = ready_item(conn, config, issue_number=1)
+    second = ready_item(conn, config, issue_number=2)
 
     assert run(conn, audit, config, layout, tmp_path, machine) == 1
     assert db.get_work_item(conn, first).state is WorkItemState.ACTIVE
@@ -183,7 +190,7 @@ def test_a_pass_fills_exactly_the_room_available_and_no_more(
     registry, proc = machine
     config = capped_at(config, 3, per_repo=3)
     out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
-    items = [ready_item(conn, issue_number=n) for n in (1, 2, 3)]
+    items = [ready_item(conn, config, issue_number=n) for n in (1, 2, 3)]
 
     assert run(conn, audit, config, layout, tmp_path, machine) == 2
     states = [db.get_work_item(conn, i).state for i in items]
@@ -205,7 +212,7 @@ def test_a_dispatch_in_flight_with_no_registry_file_yet_still_occupies_its_slot(
     seed_session(
         conn, launching, state=str(SessionState.STARTING), session_id="s-in-flight"
     )
-    waiting = ready_item(conn, issue_number=2)
+    waiting = ready_item(conn, config, issue_number=2)
 
     registry, proc = machine
     snap = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
@@ -233,7 +240,7 @@ def test_exceeding_the_cap_withholds_new_dispatch_and_touches_nothing_running(
     running_row = seed_session(
         conn, running_item, state=str(SessionState.RUNNING), session_id="s-running"
     )
-    waiting = ready_item(conn, issue_number=2)
+    waiting = ready_item(conn, config, issue_number=2)
 
     host = StubSessionHost(confirm=True)
     boundaries = make_boundaries(
@@ -255,7 +262,7 @@ def test_no_out_of_band_session_is_ever_signalled(
     registry, proc = machine
     config = capped_at(config, 1)
     out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
-    ready_item(conn, issue_number=1)
+    ready_item(conn, config, issue_number=1)
 
     host = StubSessionHost(confirm=True)
     boundaries = make_boundaries(
@@ -290,7 +297,7 @@ def test_an_unchanging_hold_is_recorded_once_rather_than_once_per_pass(
     registry, proc = machine
     config = capped_at(config, 1)
     out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
-    ready_item(conn, issue_number=1)
+    ready_item(conn, config, issue_number=1)
 
     for _ in range(5):
         run(conn, audit, config, layout, tmp_path, machine)
@@ -307,7 +314,7 @@ def test_a_hold_that_ends_is_recorded_with_its_duration_and_extent(
     registry, proc = machine
     config = capped_at(config, 1)
     entry = out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
-    ready_item(conn, issue_number=1)
+    ready_item(conn, config, issue_number=1)
 
     for _ in range(3):
         run(conn, audit, config, layout, tmp_path, machine)
@@ -330,7 +337,7 @@ def test_a_changed_hold_signature_is_recorded_again(
     config = capped_at(config, 2)
     out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
     out_of_band(registry, proc, pid=102, cwd=str(tmp_path / "GIT" / "two"))
-    ready_item(conn, issue_number=1)
+    ready_item(conn, config, issue_number=1)
     run(conn, audit, config, layout, tmp_path, machine)
 
     out_of_band(registry, proc, pid=103, cwd=str(tmp_path / "GIT" / "three"))
@@ -352,7 +359,7 @@ def test_the_item_at_position_one_is_the_item_the_next_dispatch_selects(
     registry, proc = machine
     config = capped_at(config, 2)
     for n in (1, 2, 3):
-        ready_item(conn, issue_number=n)
+        ready_item(conn, config, issue_number=n)
 
     def head() -> int:
         snap = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
@@ -433,8 +440,8 @@ def test_two_items_in_one_repository_yield_one_session(
     """One clone, one session: they would share its ports, its dev server, and its
     submodule fetches. Every collision risk planning §6 measured is per-clone."""
     config = capped_at(two_repos, 4)
-    first = ready_item(conn, repo_key="demo", issue_number=1)
-    second = ready_item(conn, repo_key="demo", issue_number=2)
+    first = ready_item(conn, config, repo_key="demo", issue_number=1)
+    second = ready_item(conn, config, repo_key="demo", issue_number=2)
 
     assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
     assert db.get_work_item(conn, first).state is WorkItemState.ACTIVE
@@ -448,9 +455,9 @@ def test_a_third_item_in_a_different_repository_dispatches_in_the_same_pass(
     condition ends the pass; a per-repository one skips that item and leaves the queue
     moving — otherwise one busy repository stalls every other."""
     config = capped_at(two_repos, 4)
-    first = ready_item(conn, repo_key="demo", issue_number=1)
-    blocked = ready_item(conn, repo_key="demo", issue_number=2)
-    elsewhere = ready_item(conn, repo_key="other", issue_number=3)
+    first = ready_item(conn, config, repo_key="demo", issue_number=1)
+    blocked = ready_item(conn, config, repo_key="demo", issue_number=2)
+    elsewhere = ready_item(conn, config, repo_key="other", issue_number=3)
 
     assert run_two(conn, audit, config, layout, tmp_path, machine) == 2
     assert db.get_work_item(conn, first).state is WorkItemState.ACTIVE
@@ -465,8 +472,8 @@ def test_the_hold_reason_is_repo_cap_rather_than_global_cap(
     raise a number in a file. Reporting the wrong one wastes the trip."""
     registry, proc = machine
     config = capped_at(two_repos, 4)
-    ready_item(conn, repo_key="demo", issue_number=1)
-    ready_item(conn, repo_key="demo", issue_number=2)
+    ready_item(conn, config, repo_key="demo", issue_number=1)
+    ready_item(conn, config, repo_key="demo", issue_number=2)
     running = seed_item(conn, repo_key="demo", issue_number=3, state=str(WorkItemState.ACTIVE))
     seed_session(conn, running, state=str(SessionState.RUNNING), session_id="s-demo")
 
@@ -487,7 +494,7 @@ def test_an_explicit_repository_cap_is_reported_as_chosen(conn, two_repos, tmp_p
     config = capped_at(
         _replace(two_repos, repos={**two_repos.repos, "demo": demo}), 4
     )
-    ready_item(conn, repo_key="demo", issue_number=1)
+    ready_item(conn, config, repo_key="demo", issue_number=1)
     running = seed_item(conn, repo_key="demo", issue_number=3, state=str(WorkItemState.ACTIVE))
     seed_session(conn, running, state=str(SessionState.RUNNING), session_id="s-demo")
 
@@ -509,7 +516,7 @@ def test_a_simulated_session_occupies_a_per_repository_slot(
     seed_session(
         conn, simulated, state=str(SessionState.RUNNING), session_id="s-sim", dry_run=True
     )
-    waiting = ready_item(conn, repo_key="demo", issue_number=2)
+    waiting = ready_item(conn, config, repo_key="demo", issue_number=2)
 
     assert run_two(conn, audit, config, layout, tmp_path, machine) == 0
     assert db.get_work_item(conn, waiting).state is WorkItemState.READY
@@ -521,7 +528,7 @@ def test_a_repository_at_its_cap_frees_up_when_its_session_ends(
     config = capped_at(two_repos, 4)
     running = seed_item(conn, repo_key="demo", issue_number=1, state=str(WorkItemState.ACTIVE))
     row = seed_session(conn, running, state=str(SessionState.RUNNING), session_id="s-demo")
-    waiting = ready_item(conn, repo_key="demo", issue_number=2)
+    waiting = ready_item(conn, config, repo_key="demo", issue_number=2)
     assert run_two(conn, audit, config, layout, tmp_path, machine) == 0
 
     with db.transaction(conn):

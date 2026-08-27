@@ -200,14 +200,15 @@ def test_a_work_item_cannot_outlive_its_onboarding_record(conn, config):
         conn.execute("DELETE FROM repos WHERE repo_key = 'demo'")
 
 
-def test_a_repository_removed_from_the_config_is_held_rather_than_attempted(conn, config):
-    """The one case the schema cannot prevent: onboarded, then deleted from the config
-    file. ``dispatch_item`` already fails such an item; reporting it here means the author
-    sees it in the queue instead of after an attempt."""
+def test_a_repository_that_does_not_resolve_is_held_rather_than_attempted(conn, config):
+    """The one case the schema cannot prevent: a row exists but resolves to no clone —
+    onboarded before migration 005 with no section to supply a path, or its record since
+    deleted. ``dispatch_item`` already fails such an item; reporting it here means the
+    author sees it in the queue instead of after an attempt."""
     seed_item(conn, repo_key="ghost", issue_number=1, state=str(WorkItemState.READY))
     entries = ordering.plan(conn, config=config, capacity=snapshot(global_cap=9))
     assert entries[0].hold is ordering.HoldReason.NOT_ONBOARDED
-    assert "no longer in the config" in entries[0].detail
+    assert "does not resolve to a clone" in entries[0].detail
 
 
 def test_a_residual_failure_reason_is_reported_last(conn, config):

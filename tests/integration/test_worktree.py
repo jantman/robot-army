@@ -432,3 +432,36 @@ def test_a_real_count_still_comes_back_as_a_number(config, audit, repo_clone):
     """The failure case must not have swallowed the success case with it."""
     vcs = GitVersionControl(audit)
     assert vcs.commits_ahead(str(repo_clone), "main", "main") == 0
+
+
+def test_a_repository_with_no_section_prepares_with_the_shared_steps(
+    conn, config, audit, repo_clone, tmp_path
+):
+    """US4 end to end: the resolved view is what ``prepare`` receives, so the shared steps
+    reach a worktree cut for a repository the configuration file never mentions."""
+    from dataclasses import replace
+
+    from tests.conftest import onboard_repo
+
+    from robot_army import repos
+
+    marker = tmp_path / "shared-ran"
+    shared = (HookStep(kind="run", value=f"touch {marker}", timeout=10),)
+    config = replace(config, hooks=replace(config.hooks, post_create=shared), repos={})
+    onboard_repo(conn, "jantman/demo", repo_clone)
+    resolved = repos.resolve(conn, config, "jantman/demo")
+    assert resolved.post_create == shared
+
+    result = worktree.prepare(
+        boundaries=make_boundaries(audit, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=config,
+        repo=resolved,
+        item_id=1,
+        issue_number=42,
+        title="Fix the login flow",
+        dry_run=False,
+    )
+
+    assert result.ok, result.failure_reason
+    assert marker.exists(), "the shared step ran in the prepared worktree"

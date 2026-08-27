@@ -24,7 +24,7 @@ from robot_army.boundaries import (
     Issue,
     PollResult,
     PullRequest,
-    RepoRef,
+    RepoInfo,
     TransportError,
 )
 
@@ -323,29 +323,28 @@ class GitHubReader:
             issues.append(issue)
         return issues
 
-    def list_owned_repos(self) -> list[RepoRef]:
-        refs: list[RepoRef] = []
-        page = 1
-        while True:
-            response = self._request(
-                "GET",
-                "/user/repos",
-                params={"affiliation": "owner", "per_page": 100, "page": page},
-            )
-            payloads = response.json()
-            if not payloads:
-                break
-            refs.extend(
-                RepoRef(
-                    full_name=str(p["full_name"]),
-                    default_branch=str(p.get("default_branch") or "main"),
-                )
-                for p in payloads
-            )
-            if len(payloads) < 100:
-                break
-            page += 1
-        return refs
+    def get_repo(self, repo_key: str) -> RepoInfo:
+        """One repository, in **one** request (research R5, SC-009).
+
+        A page walk over ``/user/repos`` would answer the same ownership question and cost
+        three requests today and more later, for no additional information. This costs one
+        regardless of how many repositories the author owns, and the same response carries
+        the canonical name — which matters because a case-mismatched name would otherwise
+        surface as a missing directory rather than as the typo it is.
+        """
+        response = self._request(
+            "GET", f"/repos/{self._repo_path(repo_key)}", allow_404=True
+        )
+        if response.status_code == 404:
+            return RepoInfo(exists=False)
+        payload = response.json()
+        owner = payload.get("owner") or {}
+        return RepoInfo(
+            exists=True,
+            owner=str(owner.get("login") or ""),
+            name=str(payload.get("name") or ""),
+            default_branch=str(payload.get("default_branch") or "main"),
+        )
 
 
 class GitHubWriter:

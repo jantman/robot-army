@@ -63,7 +63,8 @@ def test_plan_makes_no_filesystem_changes_under_the_worktree_root(
     """quickstart scenario 1's central expectation."""
     before = snapshot(config.worktree_root)
     boundaries = wired_at(EffectLevel.PLAN, config, audit)
-    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True)
+    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True,
+        clone_path=config.repos["demo"].path)
 
     dispatch.dispatch_item(
         conn,
@@ -91,7 +92,8 @@ def test_plan_creates_no_branches_in_the_repository(conn, audit, config, tmp_pat
 
     before = branches()
     boundaries = wired_at(EffectLevel.PLAN, config, audit)
-    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True)
+    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True,
+        clone_path=config.repos["demo"].path)
     dispatch.dispatch_item(
         conn,
         boundaries=boundaries,
@@ -111,7 +113,8 @@ def test_plan_performs_zero_github_writes(conn, audit, config, tmp_path, layout)
         "SimulatedIssueWriter"
     )
     boundaries = wired_at(EffectLevel.PLAN, config, audit)
-    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True)
+    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True,
+        clone_path=config.repos["demo"].path)
     dispatch.dispatch_item(
         conn,
         boundaries=boundaries,
@@ -166,7 +169,8 @@ def test_local_creates_a_real_worktree_but_launches_no_session(
     """The loop for getting a repository's ``post_create`` right without burning
     subscription quota (quickstart scenario 2)."""
     boundaries = wired_at(EffectLevel.LOCAL, config, audit)
-    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True)
+    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True,
+        clone_path=config.repos["demo"].path)
 
     assert dispatch.dispatch_item(
         conn,
@@ -192,7 +196,8 @@ def test_local_creates_a_real_worktree_but_launches_no_session(
 
 def test_local_still_performs_no_github_writes(conn, audit, config, tmp_path, layout):
     boundaries = wired_at(EffectLevel.LOCAL, config, audit)
-    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True)
+    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True,
+        clone_path=config.repos["demo"].path)
     dispatch.dispatch_item(
         conn,
         boundaries=boundaries,
@@ -221,9 +226,14 @@ def test_a_simulated_item_still_counts_against_the_concurrency_cap(
     config = replace(config, daemon=replace(config.daemon, max_concurrent_sessions=1))
     boundaries = wired_at(EffectLevel.LOCAL, config, audit)
     simulated = seed_item(
-        conn, issue_number=1, state=str(WorkItemState.READY), dry_run=True
+        conn,
+        issue_number=1,
+        state=str(WorkItemState.READY),
+        dry_run=True,
+        clone_path=config.repos["demo"].path,
     )
-    second = seed_item(conn, issue_number=2, state=str(WorkItemState.READY), dry_run=True)
+    second = seed_item(conn, issue_number=2, state=str(WorkItemState.READY), dry_run=True,
+        clone_path=config.repos["demo"].path)
 
     dispatched = dispatch.select_and_dispatch(
         conn,
@@ -248,7 +258,8 @@ def test_purging_simulated_rows_leaves_their_worktrees_on_disk(
     """Those are real directories, and removing them is ``worktree remove``'s job —
     deliberately separate so purging is never destructive."""
     boundaries = wired_at(EffectLevel.LOCAL, config, audit)
-    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True)
+    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True,
+        clone_path=config.repos["demo"].path)
     dispatch.dispatch_item(
         conn,
         boundaries=boundaries,
@@ -270,7 +281,8 @@ def test_purging_simulated_rows_leaves_their_worktrees_on_disk(
 def test_live_is_the_only_level_that_writes_to_github(conn, audit, config, tmp_path, layout):
     writer = RecordingWriter()
     boundaries = wired_at(EffectLevel.LIVE, config, audit, writer=writer)
-    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=False)
+    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=False,
+        clone_path=config.repos["demo"].path)
 
     dispatch.dispatch_item(
         conn,
@@ -292,7 +304,8 @@ def test_a_simulated_item_traverses_the_same_states_as_a_live_one(
     the same code path*, not shunted into a failure branch because no real directory
     exists for it. This is what the ``worktree_exists`` boundary method buys."""
     boundaries = wired_at(EffectLevel.PLAN, config, audit)
-    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True)
+    item_id = seed_item(conn, state=str(WorkItemState.READY), dry_run=True,
+        clone_path=config.repos["demo"].path)
 
     assert dispatch.dispatch_item(
         conn,

@@ -505,4 +505,120 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 4
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 5
+
+
+# -- migration 005 (milestone 005, T019) ------------------------------------
+
+
+def _run_only_004(conn: sqlite3.Connection) -> None:
+    """Bring a database to exactly the 004-era schema, as one in the field would be."""
+    conn.execute("BEGIN")
+    migrations._migration_001(conn)
+    migrations._migration_002(conn)
+    migrations._migration_003(conn)
+    migrations._migration_004(conn)
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+
+
+NEW_REPO_COLUMNS = {"clone_path", "path_source", "verified_origin", "origin_verified_at"}
+
+
+def test_migration_005_runs_on_a_004_era_database(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_004(conn)
+    assert current_version(conn) == 4
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (4, SCHEMA_VERSION)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(repos)")}
+    assert columns >= NEW_REPO_COLUMNS
+    conn.close()
+
+
+def test_a_killed_migration_005_leaves_user_version_at_four_and_re_runs(tmp_path, monkeypatch):
+    """The property data-model.md promises and research R12 says must be *tested* rather
+    than assumed: ``ALTER TABLE ... ADD COLUMN`` on an existing column errors, so a
+    partially applied set would make the re-run fail permanently. It does not, because the
+    ladder wraps the whole sequence in one transaction and rolls back."""
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_004(conn)
+
+    def _explode(connection: sqlite3.Connection) -> None:
+        migrations._migration_005(connection)
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(
+        migrations,
+        "MIGRATIONS",
+        (
+            migrations._migration_001,
+            migrations._migration_002,
+            migrations._migration_003,
+            migrations._migration_004,
+            _explode,
+        ),
+    )
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+
+    assert current_version(conn) == 4
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(repos)")}
+    assert not (NEW_REPO_COLUMNS & columns), (
+        "no half-applied column set may be observable — the whole point of the transaction"
+    )
+
+    monkeypatch.undo()
+    start, end = migrate(conn)
+
+    assert (start, end) == (4, SCHEMA_VERSION)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(repos)")}
+    assert columns >= NEW_REPO_COLUMNS
+    conn.close()
+
+
+def test_a_pre_005_row_reads_back_with_a_null_clone_path_and_its_fingerprint_intact(tmp_path):
+    """A NULL ``clone_path`` means *onboarded, location never verified* — not "onboarded at
+    an unknown path". Nothing backfills it (research R6), and the row's existing approval
+    is untouched by the migration."""
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_004(conn)
+    conn.execute(
+        "INSERT INTO repos (repo_key, onboarded_at, settings_fingerprint, "
+        "fingerprint_approved_at, trust_verified_at) "
+        "VALUES ('jantman/demo', '2026-01-01T00:00:00Z', '{\"a\": \"sha\"}', "
+        "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    record = db.get_repo(conn, "jantman/demo")
+    assert record is not None
+    assert record.clone_path is None
+    assert record.path_source is None
+    assert record.verified_origin is None
+    assert record.origin_verified_at is None
+    assert record.fingerprint == {"a": "sha"}, "the existing approval survives untouched"
+    assert record.trust_verified_at == "2026-01-01T00:00:00Z"
+    conn.close()
+
+
+def test_migration_005_adds_no_table_and_no_index(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_004(conn)
+    before = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
+    }
+
+    migrate(conn)
+
+    after = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
+    }
+    assert after == before
+    conn.close()

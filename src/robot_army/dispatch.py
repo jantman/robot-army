@@ -40,6 +40,7 @@ from robot_army import (
     ordering,
     procinfo,
     prompt,
+    repos,
     sessions,
     worktree,
 )
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from robot_army.audit import AuditLog
     from robot_army.config import Config, RepoConfig
     from robot_army.effects import Boundaries
+    from robot_army.models import Repo
     from robot_army.paths import Layout
 
 #: The committed files whose bytes make up the fingerprint. Their *contents* are never
@@ -182,12 +184,29 @@ def check_gates(
     repo: RepoConfig,
     trust_file: Path | None = None,
 ) -> None:
-    """Raise ``DispatchBlocked`` unless onboarding, trust, and fingerprint all pass."""
+    """Raise ``DispatchBlocked`` unless onboarding, location, trust, and fingerprint pass.
+
+    Milestone 005 added the second of those. It re-runs the part of onboarding's
+    verification that can go stale — the recorded path still exists, is still a primary
+    clone, and still normalises to the same repository — because the clone can move, be
+    replaced, or be deleted between an approval and a dispatch months later (US5).
+
+    It lives here rather than in ``dispatch_item`` for three reasons that are all about not
+    duplicating existing logic (research R9): this function already loads the record the
+    check needs, its exception type is already turned into a ``failed`` item with a reason
+    by the caller, and every existing precondition of the same kind is already here. Three
+    local reads, no fetch, and it runs before anything is created — so a failure creates
+    nothing anywhere, which is the entire point (FR-029, SC-004).
+    """
     record = db.get_repo(conn, repo.key)
     if record is None:
         raise DispatchBlocked(
             f"repository {repo.key!r} is not onboarded — run `robot-army onboard {repo.key}`"
         )
+
+    _check_recorded_location(
+        conn, boundaries=boundaries, config=config, repo=repo, record=record
+    )
 
     trusted, explanation = is_trusted(repo.path, trust_file=trust_file)
     if not trusted:
@@ -207,6 +226,128 @@ def check_gates(
             f"changed: {changed or 'none'}). "
             f"Review them and run `robot-army onboard {repo.key} --reapprove`"
         )
+
+
+def _check_recorded_location(
+    conn: sqlite3.Connection,
+    *,
+    boundaries: Boundaries,
+    config: Config,
+    repo: RepoConfig,
+    record: Repo,
+) -> None:
+    """The fourth precondition (contracts/onboarding.md). Raises, or returns silently.
+
+    Nothing is written on success, deliberately: the worktree-creation record that follows
+    on the same item milliseconds later already implies this passed, so a record here would
+    be one line per dispatch answering a question the next line answers anyway. Under
+    Principle III's reconstruction standard that is not a gap — "did the clone still check
+    out?" is answered by the presence of the next record — and it is the only omission this
+    milestone makes.
+    """
+    if record.clone_path is None:
+        # A row predating migration 005. Nothing backfills it, and nothing guesses: writing
+        # a path nobody approved into an approval record is the one thing that table exists
+        # not to do (FR-014, research R6).
+        raise DispatchBlocked(
+            f"repository {repo.key!r} was onboarded before its clone location was "
+            f"recorded — run `robot-army onboard {repo.key} --reapprove`"
+        )
+
+    section = config.repos.get(repo.key)
+    if section is not None and section.path is not None and str(section.path) != record.clone_path:
+        # A changed ``path`` does not silently take effect, and it does not silently lose
+        # either. This mirrors how a changed settings fingerprint already behaves (FR-013).
+        raise DispatchBlocked(
+            f"[repos.{repo.key!r}] path is {section.path}, but {record.clone_path} was "
+            f"approved at onboarding. Run `robot-army onboard {repo.key} --reapprove` to "
+            "approve the new location"
+        )
+
+    recorded = Path(record.clone_path)
+    if not recorded.is_dir():
+        _raise_location_anomaly(
+            conn,
+            repo.key,
+            kind="clone_path_missing",
+            detail={"recorded_path": record.clone_path},
+            message=(
+                f"the clone approved for {repo.key!r} is no longer at {record.clone_path}. "
+                f"Restore it, or run `robot-army onboard {repo.key} --reapprove`"
+            ),
+        )
+
+    if not repos.is_primary_clone(recorded):
+        raise DispatchBlocked(
+            f"{record.clone_path} is no longer a primary clone. Restore it, or run "
+            f"`robot-army onboard {repo.key} --reapprove`"
+        )
+
+    if record.verified_origin is None:
+        # Nothing was approved to compare against. This cannot arise from onboarding —
+        # verification produces an identity before anything is written — so it means a row
+        # written by hand or by an older build. Blocking on it would refuse a repository
+        # for a reason the author cannot act on, and the path checks above have already
+        # confirmed a primary clone is where it was approved to be.
+        return
+
+    remote, _ambiguous = repos.select_remote(boundaries.version_control, recorded)
+    found = (
+        repos.normalise_remote(boundaries.version_control.remote_url(str(recorded), remote) or "")
+        if remote
+        else None
+    )
+    # Compared against what was **recorded**, not against a fresh derivation from the
+    # repository key. That is the same discipline the location itself follows: onboarding
+    # decided this identity with a human reading it, and a rule re-evaluated here could
+    # reach a different answer than the one that was approved.
+    if found is None or str(found) != record.verified_origin:
+        # Scenario 3's failure arriving months later: a *different* repository cloned into
+        # the recorded path. A design that re-derived the location instead of recording it
+        # would get this exactly wrong, because the derived answer would still be this
+        # directory and this directory now holds someone else's work.
+        _raise_location_anomaly(
+            conn,
+            repo.key,
+            kind="clone_origin_changed",
+            detail={
+                "recorded_path": record.clone_path,
+                "approved_origin": record.verified_origin,
+                # Normalised, never the raw URL, on this path as on every other (FR-032).
+                "found_origin": str(found) if found else None,
+            },
+            message=(
+                f"the clone at {record.clone_path} is "
+                f"{found or 'no longer readable as a repository'}, not {repo.key}. "
+                f"Run `robot-army onboard {repo.key} --reapprove` once it is right"
+            ),
+        )
+
+
+def _raise_location_anomaly(
+    conn: sqlite3.Connection,
+    repo_key: str,
+    *,
+    kind: str,
+    detail: dict[str, Any],
+    message: str,
+) -> None:
+    """Raise an anomaly **and** ``DispatchBlocked``, in that order.
+
+    Distinct from an ordinary gate refusal because these two mean *the machine changed
+    under an approval*, not that a precondition was never met. An un-trusted clone is a
+    setup step the author has not done yet; a clone that moved is a fact about the world
+    that the author probably does not know, and an anomaly is how this system says so.
+    """
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn,
+            kind=kind,
+            entity_type="repo",
+            entity_id=repo_key,
+            detail=detail,
+        )
+    raise DispatchBlocked(message)
 
 
 # -- launch -----------------------------------------------------------------
@@ -350,13 +491,15 @@ def dispatch_item(
     if item is None:
         raise LookupError(f"no work item {item_id}")
     dry_run = item.dry_run
-    repo = config.repos.get(item.repo_key)
+    repo = repos.resolve(conn, config, item.repo_key)
     if repo is None:
         _fail(
             conn,
             audit,
             item_id,
-            f"repository {item.repo_key!r} is no longer in the config",
+            f"repository {item.repo_key!r} is no longer onboarded, or was onboarded "
+            "before its location was recorded — run "
+            f"`robot-army onboard {item.repo_key} --reapprove`",
             boundaries=boundaries,
             config=config,
             item=item,

@@ -142,10 +142,13 @@ def test_unparseable_toml_exits_three(tmp_path, capsys):
     assert "TOML parse error" in capsys.readouterr().err
 
 
-def test_onboarding_an_unconfigured_repo_is_a_usage_error(config_file, capsys):
+def test_onboarding_a_malformed_key_is_a_refusal_not_a_usage_error(config_file, capsys):
+    """Changed by milestone 005. "No section" stopped being a reason to refuse — a
+    repository needs no section — so what is left is the key not being ``owner/name``,
+    which is a precondition the author can fix rather than a misuse of the command."""
     code = run_cli(["onboard", "not-a-repo"], config_file)
-    assert code == EXIT_USAGE
-    assert "no [repos.not-a-repo] section" in capsys.readouterr().err
+    assert code == EXIT_PRECONDITION
+    assert "is not a repository key" in capsys.readouterr().err
 
 
 # -- operation failures (exit 1) --------------------------------------------

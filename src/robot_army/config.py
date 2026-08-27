@@ -19,7 +19,7 @@ import os
 import re
 import stat
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -91,8 +91,19 @@ class HookStep:
 
 @dataclass(frozen=True, slots=True)
 class RepoConfig:
+    """A repository's settings — as a ``[repos.*]`` section states them, or as
+    ``repos.resolve`` produces them from the onboarding record over that section over the
+    global defaults.
+
+    ``path`` is ``None`` **only** on the section form, and only when the author wrote no
+    ``path`` — which since milestone 005 means *derive it* (FR-003). The resolved form
+    always carries a real path, because a repository has no resolved form until it has
+    been onboarded at a location a human approved. Every consumer other than ``onboard``
+    itself reads the resolved form, so ``None`` does not reach them.
+    """
+
     key: str
-    path: Path
+    path: Path | None
     base_branch: str
     post_create: tuple[HookStep, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
@@ -218,6 +229,12 @@ class HealthConfig:
 @dataclass(frozen=True, slots=True)
 class HooksConfig:
     default_timeout_seconds: int = 300
+    #: The preparation steps every repository gets unless its own section says otherwise
+    #: (milestone 005, FR-020). A repository's own ``post_create`` **replaces** these — it
+    #: does not extend them, and there is no way to ask for both: the repositories that
+    #: need their own steps need *different* steps, not the common one plus extras, and
+    #: appending would make the shared default impossible to opt out of (research R10).
+    post_create: tuple[HookStep, ...] = ()
 
 
 #: The two dispatch orders FR-016 names. A tuple of strings rather than an enum because
@@ -312,6 +329,11 @@ class Config:
     notifications: NotificationsConfig
     repos: dict[str, RepoConfig]
     worktree_root: Path
+    #: Where clones live. A repository's default location is ``<repo_root>/<name>`` and
+    #: there is exactly one candidate — no search path, no ``<owner>/<name>`` fallback
+    #: (milestone 005, contracts/config.md). Validated at load, so "your root is missing"
+    #: is one message rather than one per repository (FR-001).
+    repo_root: Path
     layout: Layout
     #: ``None`` when no ``[trello]`` section exists, which is the default and means the
     #: board source is inert — not merely disabled at a call site (FR-001).
@@ -398,7 +420,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "confirm_timeout_seconds",
         "max_concurrent_sessions",
     },
-    "paths": {"worktree_root", "state_dir", "socket_dir"},
+    "paths": {"worktree_root", "repo_root", "state_dir", "socket_dir"},
     "github": {
         "author",
         "label",
@@ -413,7 +435,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "worker": {"permission_mode", "model", "base_branch", "branch_prefix", "binary"},
     "terminal": {"socket_glob", "probe_timeout_seconds", "binary"},
     "health": {"max_age_seconds", "webhook_url"},
-    "hooks": {"default_timeout_seconds"},
+    "hooks": {"default_timeout_seconds", "post_create"},
     "web": {"bind", "port", "refresh_seconds"},
     # Unknown keys here are an **error** too — see _STRICT_KEY_SECTIONS. An ordering the
     # author thought they configured and did not is the failure this prevents.
@@ -621,6 +643,15 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
     hooks = HooksConfig(
         default_timeout_seconds=_int("hooks", "default_timeout_seconds", 300, minimum=1)
     )
+    # Parsed by the same ``_parse_steps`` the per-repository form uses, so it inherits the
+    # same shape, the same per-step key validation, and the same ``default_timeout_seconds``
+    # for a step that sets none. A second parser would be a second set of rules to keep in
+    # step with the first.
+    shared_steps, shared_problems = _parse_steps(
+        None, raw.get("hooks", {}).get("post_create", []), hooks
+    )
+    problems.extend(shared_problems)
+    hooks = replace(hooks, post_create=tuple(shared_steps))
 
     # -- [web] -------------------------------------------------------------
     # The bind address is only *parsed* here; whether it is permitted is decided at
@@ -706,6 +737,15 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
     # -- [paths] -----------------------------------------------------------
     paths_raw = raw.get("paths", {})
     worktree_root = Path(str(paths_raw.get("worktree_root", "~/worktrees"))).expanduser()
+    # Validated here rather than at onboarding time (FR-001, contracts/config.md): a
+    # missing clone root is one fact about the machine, so it is one message reported
+    # alongside every other configuration problem — not 227 identical refusals discovered
+    # one repository at a time.
+    repo_root = Path(str(paths_raw.get("repo_root", "~/GIT"))).expanduser()
+    if not repo_root.exists():
+        problems.append(f"[paths] repo_root does not exist: {repo_root}")
+    elif not repo_root.is_dir():
+        problems.append(f"[paths] repo_root is not a directory: {repo_root}")
     layout = Layout.build(
         state_dir=Path(str(paths_raw["state_dir"])).expanduser()
         if paths_raw.get("state_dir")
@@ -726,15 +766,20 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             # and produces a broken worktree.
             problems.append(f"[repos.{key}] unknown key {unknown!r}")
 
+        # Optional since milestone 005 (FR-003). Absent means *derive it* from
+        # ``[paths] repo_root``; present means *use this and do not derive*. The
+        # load-time existence checks are kept for the explicit case only, because they
+        # are checks on something the author wrote in this file — a derived path is
+        # verified at onboarding instead, where the author is reading an approval screen
+        # and a refusal can name the edit that fixes it.
         path_raw = section.get("path")
-        if not path_raw:
-            problems.append(f"[repos.{key}] path is required")
-            continue
-        repo_path = Path(str(path_raw)).expanduser()
-        if not repo_path.exists():
-            problems.append(f"[repos.{key}] path does not exist: {repo_path}")
-        elif not (repo_path / ".git").exists():
-            problems.append(f"[repos.{key}] path is not a git repository: {repo_path}")
+        repo_path: Path | None = None
+        if path_raw:
+            repo_path = Path(str(path_raw)).expanduser()
+            if not repo_path.exists():
+                problems.append(f"[repos.{key}] path does not exist: {repo_path}")
+            elif not (repo_path / ".git").exists():
+                problems.append(f"[repos.{key}] path is not a git repository: {repo_path}")
 
         repo_mode = section.get("permission_mode")
         if repo_mode is not None and repo_mode not in VALID_PERMISSION_MODES:
@@ -787,9 +832,17 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
     # A cross-field check that is a warning rather than an error, because the maintainer
     # may deliberately want a short leash: FR-041's sweep should not fire before the
     # longest repo's preparation could plausibly finish.
+    # Inherited steps count for **every** repository that inherits them, not once
+    # (FR-022, research R10). Counting the shared set a single time would under-report for
+    # exactly the repositories that have no section — the majority after milestone 005 —
+    # and a warning that under-reports for the common case is worse than none.
+    shared_total = sum(s.timeout for s in hooks.post_create)
     longest = max(
-        (sum(s.timeout for s in r.post_create) for r in repos.values()),
-        default=0,
+        (
+            sum(s.timeout for s in r.post_create) if r.post_create else shared_total
+            for r in repos.values()
+        ),
+        default=shared_total,
     )
     # The second cross-field check, and a warning for the same reason as the first: it
     # resolves cleanly by taking the minimum, and it is usually a leftover from lowering the
@@ -830,6 +883,7 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         notifications=notifications,
         repos=repos,
         worktree_root=worktree_root,
+        repo_root=repo_root,
         layout=layout,
         trello=trello,
         warnings=tuple(warnings),
@@ -932,14 +986,20 @@ def _parse_trello(section: Any, problems: list[str]) -> TrelloConfig | None:
 
 
 def _parse_steps(
-    repo_key: str, raw_steps: Any, hooks: HooksConfig
+    repo_key: str | None, raw_steps: Any, hooks: HooksConfig
 ) -> tuple[list[HookStep], list[str]]:
+    """Parse an array of preparation steps. ``repo_key`` of ``None`` is ``[hooks]``.
+
+    One function for both forms, so a typo inside a shared step is the same **problem** the
+    per-repository form already gives rather than a warning invented separately here.
+    """
+    section = f"[repos.{repo_key}]" if repo_key is not None else "[hooks]"
     problems: list[str] = []
     steps: list[HookStep] = []
     if not isinstance(raw_steps, list):
-        return [], [f"[repos.{repo_key}] post_create must be an array of tables"]
+        return [], [f"{section} post_create must be an array of tables"]
     for index, step in enumerate(raw_steps):
-        where = f"[repos.{repo_key}] post_create[{index}]"
+        where = f"{section} post_create[{index}]"
         if not isinstance(step, dict):
             problems.append(f"{where} must be a table")
             continue

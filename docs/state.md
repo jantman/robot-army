@@ -57,13 +57,23 @@ identify-the-process-by-weaker-evidence pattern this project has already been bi
 
 `config.toml` holds what I **declare**. The database holds what the system **observed**.
 
-A repository's clone path, base branch, and preparation steps are configuration and never
-appear in the database. Its onboarding approval, the fingerprint of its committed
-permissions, and when its trust was last verified are observations and never appear in the
-config.
+A repository's base branch and preparation steps are configuration and never appear in the
+database. Its onboarding approval, the fingerprint of its committed permissions, and when
+its trust was last verified are observations and never appear in the config.
 
 That split is what keeps the config hand-editable with no migration story, and keeps the
 database free of values I would expect to change by editing a file.
+
+**The clone path sits on the state side of that line, and it is the one exception worth
+understanding.** Milestone 005 made onboarding sufficient: a repository's clone location is
+derived from `[paths] repo_root`, verified against the clone's actual `origin`, and the
+**outcome** is recorded in `repos.clone_path` at the moment I approve it. Nothing re-derives
+it afterwards. That is deliberate — a rule evaluated later can produce a different answer
+than the one I approved, and the wrong answer here is not an error message, it is a real
+clone of a real repository. A `[repos.*]` `path` is still configuration, but after
+onboarding it is an *input* to the next approval rather than the answer: if it disagrees
+with the recorded path, dispatch blocks and names `onboard --reapprove` instead of quietly
+switching to either one.
 
 ## The database
 
@@ -88,6 +98,44 @@ sqlite3 ~/.local/state/robot-army/state.db 'PRAGMA user_version'
 ```
 
 There are no downgrades. The rollback plan is restoring the file from backup.
+
+### `repos` — what I approved, and where
+
+One row per onboarded repository. **The row is what makes a repository known**: since
+milestone 005 the polled set, the dispatchable set, and what `robot-army repos` lists all
+come from this table, and a `[repos.*]` section with no row here is a set of overrides for a
+repository the system does not watch.
+
+| Column | Added | Meaning |
+|---|---|---|
+| `repo_key` | 001 | `owner/name`, primary key |
+| `onboarded_at` | 001 | first approval |
+| `settings_fingerprint` | 001 | approved committed-settings hashes; `NULL` means there were none |
+| `fingerprint_approved_at` | 001 | last approval of that fingerprint |
+| `trust_verified_at` | 001 | when the worker trust dialog was last seen accepted |
+| `clone_path` | 005 | the location approved, absolute and with symlinks resolved |
+| `path_source` | 005 | `derived` or `configured` — which answer produced `clone_path` |
+| `verified_origin` | 005 | the **normalised** `host/owner/name` found there |
+| `origin_verified_at` | 005 | when that comparison last passed |
+
+Two things about these four are worth stating rather than inferring.
+
+**`verified_origin` stores the normalised identity and never a raw URL.** A git remote URL
+may embed credentials (`https://user:token@host/owner/name`), and this column is read back
+into `robot-army repos` output and every JSON view of it. Normalisation strips the
+`userinfo@` component before anything else, so the stored value cannot carry a secret. The
+same rule applies to the audit log and to every refusal message.
+
+**A `NULL` `clone_path` means *onboarded, location never verified*** — a row written before
+migration 005 — and **not** "onboarded at an unknown path". Nothing backfills it. Writing a
+path nobody approved into an approval record is the one thing this table exists not to do,
+so dispatch refuses for such a repository and names `onboard --reapprove` as the fix. That
+is one command per repository, and it is the honest price of never guessing.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  'SELECT repo_key, clone_path, path_source, verified_origin FROM repos'
+```
 
 ### `dispatch_control` — is dispatch paused?
 

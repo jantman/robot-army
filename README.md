@@ -37,9 +37,72 @@ $EDITOR ~/.config/robot-army/config.toml     # see specs/001-minimum-daemon/cont
 export ROBOT_ARMY_GITHUB_TOKEN=ghp_...       # or a mode-0600 token_file
 
 uv run robot-army doctor       # run this first, every time
-uv run robot-army onboard <repo-key>
+uv run robot-army onboard jantman/some-repo
 uv run robot-army run
 ```
+
+### Adding a repository
+
+**`onboard` is the whole job.** No file edit, no restart:
+
+```bash
+uv run robot-army onboard jantman/some-repo
+```
+
+It works out where the clone is — `<repo_root>/<name>`, one candidate, no searching — checks
+that the clone actually *is* that repository by reading its `origin`, shows me what it found,
+and asks. Onboard a repository while the daemon is running and it is polled on the next cycle.
+
+```toml
+[paths]
+repo_root = "~/GIT"        # where clones live; a repo's default location is <repo_root>/<name>
+
+[hooks]
+post_create = [ { run = "uv sync", timeout = 120 } ]   # the steps every repo gets
+```
+
+The origin check is the part that earns its keep. Five of my 252 repositories have a clone of
+a *different* repository sitting at the derived path — `~/GIT/zoneminder` is upstream's clone,
+not my fork's — and without the check those five would get a branch cut in someone else's
+repository. They are refused, by name:
+
+```
+$ robot-army onboard jantman/zoneminder
+refusing: the clone at /home/jantman/GIT/zoneminder is zoneminder/zoneminder,
+          not jantman/zoneminder.
+          The path was derived from [paths] repo_root. If your clone of
+          jantman/zoneminder is elsewhere, set it explicitly:
+
+              [repos."jantman/zoneminder"]
+              path = "/where/it/actually/is"
+```
+
+### `[repos.*]` is for exceptions
+
+A section is a set of **overrides**, not a registration. Nothing needs one. Write one when a
+repository is genuinely unusual:
+
+```toml
+# The derived path holds upstream's clone, not mine.
+[repos."jantman/zoneminder"]
+path = "~/GIT/jantman-zoneminder"
+
+# This one needs something other than the shared step.
+[repos."jantman/some-node-thing"]
+post_create = [ { run = "npm ci", timeout = 300 } ]
+
+# Everything else: nothing here at all. Onboarded, and that is enough.
+```
+
+A section with no onboarding record is not a repository this system watches, and
+`robot-army repos` says so rather than listing it as known. Changing a `path` after
+onboarding does not silently take effect either — dispatch blocks and names
+`onboard --reapprove`, because which repository is acted upon is not a setting to change
+behind my back.
+
+`[github] include_owned` and `extra_repos` decide what may be **onboarded** — any repository
+I own, plus any I list. They are a guard against a mistyped name, not a security boundary;
+the issue-author check is that one, and it cannot be disabled.
 
 Two things are easy to overlook:
 
@@ -186,7 +249,7 @@ only I can cause one to run.
 
 ### When a card doesn't say enough
 
-A card that names no configured repository, or names two, is **held** rather than guessed at.
+A card that names no onboarded repository, or names two, is **held** rather than guessed at.
 It gets one comment saying what is missing, it appears in `robot-army cards` and on `/cards`
 with its reason, and editing the card to name a repository resolves it on the next pass with
 no further action.
@@ -196,10 +259,10 @@ uv run robot-army cards --state needs_info
 uv run robot-army rescan <card-id>          # or --all-needs-info
 ```
 
-A repository reference only counts if it is **already configured**. A card description is
+A repository reference only counts if it is **already onboarded**. A card description is
 often pasted from a log, and `src/robot_army` and `docs/roadmap.md` both look exactly like an
-`owner/name`; filtering against `[repos.*]` means an unknown reference cannot select anything,
-so the worst case is a held card rather than an issue filed somewhere I never named.
+`owner/name`; filtering against the onboarded set means an unknown reference cannot select
+anything, so the worst case is a held card rather than an issue filed somewhere I never named.
 
 ### One card, one issue
 
@@ -227,8 +290,7 @@ max_concurrent_sessions = 2         # the whole machine, mine included
 order = "oldest-first"              # or "repo-priority"
 default_repo_max_sessions = 1       # per repository, unless overridden below
 
-[repos.example]
-path = "~/GIT/example"
+[repos."jantman/example"]           # an override, not a registration — see above
 max_sessions = 2                    # optional; overrides the default above
 priority = 10                       # optional; higher runs first under repo-priority
 ```

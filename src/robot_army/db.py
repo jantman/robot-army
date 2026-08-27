@@ -112,21 +112,47 @@ def upsert_repo(
     repo_key: str,
     settings_fingerprint: dict[str, str] | None,
     trust_verified: bool,
+    clone_path: str | None = None,
+    path_source: str | None = None,
+    verified_origin: str | None = None,
 ) -> None:
-    """Record an onboarding approval. Re-approval updates the fingerprint timestamp."""
+    """Record an onboarding approval. Re-approval updates the fingerprint timestamp.
+
+    ``verified_origin`` must already be normalised (``repos.normalise_remote``). This
+    function does not normalise it, deliberately: a helpful last-minute strip here would
+    make it possible to pass a raw credentialed URL and have it appear to be handled,
+    which is how the one rule FR-032 states would eventually be broken somewhere else.
+
+    ``get_repo`` and ``list_repos`` need no change — both ``SELECT *``.
+    """
     now = utcnow()
     fingerprint = json.dumps(settings_fingerprint, sort_keys=True) if settings_fingerprint else None
     conn.execute(
         """
         INSERT INTO repos (repo_key, onboarded_at, settings_fingerprint,
-                           fingerprint_approved_at, trust_verified_at)
-        VALUES (?, ?, ?, ?, ?)
+                           fingerprint_approved_at, trust_verified_at,
+                           clone_path, path_source, verified_origin, origin_verified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(repo_key) DO UPDATE SET
             settings_fingerprint    = excluded.settings_fingerprint,
             fingerprint_approved_at = excluded.fingerprint_approved_at,
-            trust_verified_at       = excluded.trust_verified_at
+            trust_verified_at       = excluded.trust_verified_at,
+            clone_path              = excluded.clone_path,
+            path_source             = excluded.path_source,
+            verified_origin         = excluded.verified_origin,
+            origin_verified_at      = excluded.origin_verified_at
         """,
-        (repo_key, now, fingerprint, now, now if trust_verified else None),
+        (
+            repo_key,
+            now,
+            fingerprint,
+            now,
+            now if trust_verified else None,
+            clone_path,
+            path_source,
+            verified_origin,
+            now if verified_origin else None,
+        ),
     )
 
 

@@ -12,9 +12,8 @@ import json
 import subprocess
 
 import pytest
-from tests.conftest import make_boundaries, make_repo
+from tests.conftest import make_boundaries, make_repo, onboard_repo
 
-from robot_army import db
 from robot_army.dispatch import (
     DispatchBlocked,
     check_gates,
@@ -156,8 +155,7 @@ def test_gates_refuse_a_repository_that_is_not_onboarded(conn, audit, config, tm
 
 @pytest.mark.requires_git
 def test_gates_refuse_an_untrusted_repository(conn, audit, config, tmp_path):
-    with db.transaction(conn):
-        db.upsert_repo(conn, repo_key="demo", settings_fingerprint=None, trust_verified=False)
+    onboard_repo(conn, "demo", config.repos["demo"].path, trust_verified=False)
     with pytest.raises(DispatchBlocked, match="workspace trust check failed"):
         check_gates(
             conn,
@@ -178,8 +176,7 @@ def test_gates_refuse_when_committed_settings_appeared_since_onboarding(
     trust = write_trust(
         tmp_path / "claude.json", {str(clone.resolve()): {"hasTrustDialogAccepted": True}}
     )
-    with db.transaction(conn):
-        db.upsert_repo(conn, repo_key="demo", settings_fingerprint=None, trust_verified=True)
+    onboard_repo(conn, "demo", config.repos["demo"].path)
 
     boundaries = make_boundaries(audit)
     check_gates(conn, boundaries=boundaries, config=config, repo=config.repos["demo"], trust_file=trust)
@@ -212,10 +209,9 @@ def test_gates_pass_once_the_new_fingerprint_is_approved(conn, audit, config, tm
 
     boundaries = make_boundaries(audit)
     fingerprint = compute_fingerprint(boundaries, str(clone), "main")
-    with db.transaction(conn):
-        db.upsert_repo(
-            conn, repo_key="demo", settings_fingerprint=fingerprint, trust_verified=True
-        )
+    onboard_repo(
+        conn, "demo", config.repos["demo"].path, settings_fingerprint=fingerprint
+    )
     check_gates(
         conn, boundaries=boundaries, config=config, repo=config.repos["demo"], trust_file=trust
     )

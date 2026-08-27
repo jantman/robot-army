@@ -348,16 +348,20 @@ def test_an_item_with_no_branch_on_record_is_done_after_the_worktree_goes(
     assert vcs.deletes == []
 
 
-def test_a_repository_removed_from_the_config_retains_everything(conn, config, audit):
+def test_a_repository_that_no_longer_resolves_retains_everything(conn, config, audit):
     """Neither guard can be evaluated without the clone. Retaining is the only safe answer,
-    and it is recorded rather than passed over in silence."""
+    and it is recorded rather than passed over in silence.
+
+    After milestone 005 "no clone" means the *resolved* view has none — the onboarding
+    record was deleted, or it predates migration 005 and no section supplies a path —
+    rather than "the config file lost its section"."""
     item = finished(conn)
     config = replace(config, repos={})
     vcs = FakeVcs()
     decision = run(conn, audit, config, vcs, item)
     assert decision.state == cleanup.RETAINED
     assert vcs.removals == []
-    assert "no longer in the config" in decision.reason
+    assert "no longer resolves to a clone" in decision.reason
 
 
 # -- the log answers "why is this 499 MB still here?" -----------------------

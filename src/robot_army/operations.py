@@ -18,7 +18,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -43,6 +43,9 @@ from robot_army import (
     daemon as daemon_mod,
 )
 from robot_army import ordering as ordering_mod
+from robot_army import (
+    repos as repos_mod,
+)
 from robot_army.audit import AuditLog
 from robot_army.boundaries import BoundaryError, HostHandle, TransportError
 from robot_army.cardstates import CardState
@@ -574,7 +577,7 @@ def local_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
         "uncommitted_changes": None,
         "commits_on_branch": None,
     }
-    repo = ctx.config.repos.get(item.repo_key)
+    repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
     if repo is None or not item.worktree_path or not item.branch:
         return signals
     base_ref = ctx.config.base_branch_for(item.repo_key)
@@ -605,7 +608,7 @@ def remote_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
         "open_pull_request": None,
         "signals_age_seconds": 0,
     }
-    repo = ctx.config.repos.get(item.repo_key)
+    repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
     if repo is None or not item.branch:
         return empty
     if item.dry_run:
@@ -649,6 +652,109 @@ def resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
 # -- onboard ----------------------------------------------------------------
 
 
+def _resolve_for_onboarding(ctx: Context, repo_key: str) -> repos_mod.Verification:
+    """Run contracts/onboarding.md's resolution order and return what it found.
+
+    A thin wrapper rather than inlined, so ``onboard`` reads as *resolve, then refuse or
+    approve* and so that ``--reapprove`` and the ``repos`` verb can ask the same question
+    without repeating the order. The order itself lives in ``repos``; the decision to
+    refuse lives here, which is the module boundary plan.md draws.
+    """
+    # Step 1 and 2 first: whether this may be onboarded at all is settled before the path
+    # is even derived (FR-024). Refusing "no clone at ..." for a repository the author
+    # mistyped would send them to look for a directory rather than at the name they typed.
+    try:
+        permitted = repos_mod.eligibility(ctx.config, repo_key, ctx.boundaries.issue_reader)
+    except TransportError as exc:
+        # contracts/onboarding.md lists "the source system is unreachable" as a refusal of
+        # step 2, not as a crash. Onboarding is the one command that must ask the source
+        # system a question, and a bad token or a dropped network is the most ordinary way
+        # for that to fail — it deserves the same named, recorded, non-zero exit every
+        # other refusal gets rather than a traceback.
+        return repos_mod.Verification(
+            repo_key,
+            None,
+            "derived",
+            cause="source_unreachable",
+            refusal=(
+                f"refusing: could not ask {ctx.config.github.api_base} about {repo_key}.\n"
+                f"          {exc}\n"
+                "          Check the token and the network, then try again."
+            ),
+        )
+    if not permitted.ok:
+        return permitted
+
+    verification = repos_mod.verify(
+        ctx.config, repo_key, ctx.boundaries.version_control
+    )
+    return replace(verification, owner_verdict=permitted.owner_verdict)
+
+
+def _record_onboard_outcome(
+    ctx: Context, repo_key: str, cause: str, verification: repos_mod.Verification
+) -> None:
+    """Record a non-zero onboarding exit that is not a verification refusal.
+
+    Separate from :func:`_refuse_onboarding` because these two happen *after* the approval
+    screen was printed and therefore print nothing new — but they are still results, and
+    Principle III's reconstruction standard makes "the author saw the settings and said no"
+    exactly as worth recording as "the clone was in the wrong place" (FR-031).
+    """
+    ctx.audit.record(
+        "repo.onboard",
+        outcome="error",
+        entity_type="repo",
+        entity_id=repo_key,
+        detail={
+            "refused": True,
+            "cause": cause,
+            "clone_path": str(verification.path) if verification.path else None,
+            "path_source": verification.path_source,
+            "verified_origin": str(verification.identity) if verification.identity else None,
+        },
+    )
+
+
+def _refuse_onboarding(
+    ctx: Context, repo_key: str, verification: repos_mod.Verification
+) -> Result:
+    """Print a refusal, record it, and exit 3.
+
+    **Every** refusal comes through here, including the ones that happen before any
+    prompt. That is the point: before milestone 005 a refusal was printed and forgotten,
+    which under Principle III's reconstruction standard means the log cannot answer what
+    the system did (research R11, FR-031).
+    """
+    ctx.audit.record(
+        "repo.onboard",
+        outcome="error",
+        entity_type="repo",
+        entity_id=repo_key,
+        detail={
+            "refused": True,
+            "cause": verification.cause,
+            "clone_path": str(verification.path) if verification.path else None,
+            "path_source": verification.path_source,
+            "remote": verification.remote,
+            # The normalised identity, never the raw URL it came from (FR-032).
+            "found_origin": str(verification.identity) if verification.identity else None,
+            "owner_verdict": verification.owner_verdict,
+        },
+    )
+    return Result(
+        code=EXIT_PRECONDITION,
+        lines=(verification.refusal or "refusing: onboarding failed").splitlines(),
+        data={
+            "repo_key": repo_key,
+            "refused": True,
+            "cause": verification.cause,
+            "clone_path": str(verification.path) if verification.path else None,
+            "path_source": verification.path_source,
+        },
+    )
+
+
 def onboard(
     ctx: Context,
     repo_key: str,
@@ -665,22 +771,32 @@ def onboard(
     dispatched session will honour (FR-004, M0 F9), not whatever is in a working tree.
     """
     result = Result()
-    repo = ctx.config.repos.get(repo_key)
-    if repo is None:
-        return Result(
-            code=EXIT_USAGE,
-            lines=[f"no [repos.{repo_key}] section in {ctx.config.path}"],
-        )
+    section = ctx.config.repos.get(repo_key)
 
-    base_ref = repo.base_branch or ctx.config.worker.base_branch
-    trusted, explanation = dispatch.is_trusted(repo.path, trust_file=trust_file)
-    committed = dispatch.read_committed_settings(ctx.boundaries, str(repo.path), base_ref)
-    fingerprint = dispatch.compute_fingerprint(ctx.boundaries, str(repo.path), base_ref)
+    # Resolution and verification come first, and their refusals are recorded (FR-031).
+    # Before milestone 005 this function returned ``EXIT_USAGE`` for a missing section
+    # *before* opening any audit action, so a refusal was printed and forgotten — a live
+    # Principle III violation this milestone inherits and fixes rather than introduces
+    # (research R11).
+    resolved = _resolve_for_onboarding(ctx, repo_key)
+    if resolved.refusal is not None:
+        return _refuse_onboarding(ctx, repo_key, resolved)
+
+    clone_path = resolved.path
+    assert clone_path is not None  # noqa: S101 - guaranteed by the refusal above
+    base_ref = (section.base_branch if section else "") or ctx.config.worker.base_branch
+    trusted, explanation = dispatch.is_trusted(clone_path, trust_file=trust_file)
+    committed = dispatch.read_committed_settings(ctx.boundaries, str(clone_path), base_ref)
+    fingerprint = dispatch.compute_fingerprint(ctx.boundaries, str(clone_path), base_ref)
     existing = db.get_repo(ctx.conn, repo_key)
 
     result.data = {
         "repo_key": repo_key,
-        "clone_path": str(repo.path),
+        "clone_path": str(clone_path),
+        "path_source": resolved.path_source,
+        "verified_origin": str(resolved.identity) if resolved.identity else None,
+        "remote": resolved.remote,
+        "owner_verdict": resolved.owner_verdict,
         "base_ref": base_ref,
         "trusted": trusted,
         "trust_explanation": explanation,
@@ -688,10 +804,22 @@ def onboard(
         "fingerprint": fingerprint,
         "previously_onboarded": existing is not None,
         "previous_fingerprint": existing.fingerprint if existing else None,
+        "previous_clone_path": existing.clone_path if existing else None,
     }
 
+    # These three lines come **first**, ahead of trust and the committed settings, because
+    # they answer *which repository is about to be trusted* — and that must be settled
+    # before anything about trust is read (FR-011, contracts/onboarding.md).
     result.say(f"repository   : {repo_key}")
-    result.say(f"primary clone: {repo.path}")
+    result.say(
+        f"clone path   : {clone_path}   "
+        f"({repos_mod.describe_source(resolved.path_source, repo_key)})"
+    )
+    result.say(f"verified     : {resolved.verified_line()}")
+    if reapprove and existing is not None and existing.clone_path:
+        recorded = existing.clone_path
+        marker = "" if recorded == str(clone_path) else "   ** CHANGED **"
+        result.say(f"recorded path: {recorded}{marker}")
     result.say(f"base ref     : {base_ref}")
     result.say(f"trust        : {'accepted' if trusted else 'NOT ACCEPTED'} — {explanation}")
     result.say()
@@ -730,6 +858,7 @@ def onboard(
     if assume_yes and committed and (existing is None or existing.fingerprint != fingerprint):
         # --yes refuses to skip when committed settings are present and unapproved.
         # Skipping the prompt is a convenience; skipping the *review* is the hazard.
+        _record_onboard_outcome(ctx, repo_key, "unapproved_committed_settings", resolved)
         return Result(
             code=EXIT_PRECONDITION,
             lines=[
@@ -746,7 +875,13 @@ def onboard(
             f"Approve {repo_key} for dispatch, recording this fingerprint? [y/N] "
         )
         if str(answer).strip().lower() not in ("y", "yes"):
-            return Result(code=EXIT_FAILED, lines=[*result.lines, "aborted"], data=result.data)
+            # Exit 4, distinct from the 3 every refusal uses (contracts/onboarding.md):
+            # "I decided not to" and "the system would not let me" are different results,
+            # and a script that retries on one must not retry on the other.
+            _record_onboard_outcome(ctx, repo_key, "aborted_at_prompt", resolved)
+            return Result(
+                code=EXIT_CHECK_FAILED, lines=[*result.lines, "aborted"], data=result.data
+            )
 
     with (
         ctx.audit.action(
@@ -754,7 +889,11 @@ def onboard(
             entity_type="repo",
             entity_id=repo_key,
             detail={
-                "clone_path": str(repo.path),
+                "clone_path": str(clone_path),
+                "path_source": resolved.path_source,
+                "remote": resolved.remote,
+                "verified_origin": str(resolved.identity) if resolved.identity else None,
+                "owner_verdict": resolved.owner_verdict,
                 "base_ref": base_ref,
                 "fingerprint": fingerprint,
                 "trusted": trusted,
@@ -764,11 +903,14 @@ def onboard(
         db.transaction(ctx.conn),
     ):
         db.upsert_repo(
-                ctx.conn,
-                repo_key=repo_key,
-                settings_fingerprint=fingerprint or None,
-                trust_verified=trusted,
-            )
+            ctx.conn,
+            repo_key=repo_key,
+            settings_fingerprint=fingerprint or None,
+            trust_verified=trusted,
+            clone_path=str(clone_path),
+            path_source=resolved.path_source,
+            verified_origin=str(resolved.identity) if resolved.identity else None,
+        )
 
     result.say(f"onboarded {repo_key}")
     if not trusted:
@@ -783,14 +925,45 @@ def onboard(
 
 
 def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
-    """Where "why is nothing happening for this repo" gets answered."""
+    """Where "why is nothing happening for this repo" gets answered.
+
+    Listed by **onboarding record**, not by configuration section (FR-017). A section for
+    a repository that was never onboarded is not a repository this system watches, and
+    listing it as one is how "why is nothing happening for this repo" got asked in the
+    first place. Such a section is still reported — at the end, as *not onboarded* —
+    because silence about a section the author wrote would be its own confusion.
+    """
     result = Result()
     rows: list[list[str]] = []
     payload: list[dict[str, Any]] = []
+    resolved = repos_mod.resolved_all(ctx.conn, ctx.config)
 
-    for key in sorted(ctx.config.repos):
-        repo = ctx.config.repos[key]
+    for key in repos_mod.known(ctx.conn):
         record = db.get_repo(ctx.conn, key)
+        repo = resolved.get(key)
+        if repo is None or repo.path is None:
+            # Onboarded before migration 005, with nothing to say where. The row is real
+            # and the location is not, and saying so is the whole content of the line.
+            #
+            # The third cell is the **path source** column, so it says what to do rather
+            # than what is unknown — everything after it depends on a clone path we do not
+            # have, and four question marks would describe the problem without naming the
+            # one command that fixes it. It shouts for the same reason the not-onboarded
+            # row below does: both are rows the author has to act on.
+            rows.append([key, "(never recorded)", "NEEDS REAPPROVE", "?", "?", "?"])
+            payload.append(
+                {
+                    "repo_key": key,
+                    "path": None,
+                    "path_source": None,
+                    "onboarded": True,
+                    "onboarded_at": record.onboarded_at if record else None,
+                    "note": "onboarded before the clone location was recorded — "
+                    f"run `robot-army onboard {key} --reapprove`",
+                }
+            )
+            continue
+
         trusted, explanation = dispatch.is_trusted(repo.path, trust_file=trust_file)
         base_ref = repo.base_branch or ctx.config.worker.base_branch
         try:
@@ -798,18 +971,14 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
         except BoundaryError:
             current = {}
         approved = record.fingerprint if record else {}
-        if record is None:
-            fingerprint_state = "n/a"
-        elif current == approved:
-            fingerprint_state = "matches"
-        else:
-            fingerprint_state = "CHANGED"
+        fingerprint_state = "matches" if current == approved else "CHANGED"
+        source = record.path_source if record else None
 
         rows.append(
             [
                 key,
                 str(repo.path),
-                "yes" if record else "NO",
+                source or "?",
                 "yes" if trusted else "NO",
                 fingerprint_state,
                 str(len(repo.post_create)),
@@ -819,8 +988,11 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
             {
                 "repo_key": key,
                 "path": str(repo.path),
-                "onboarded": record is not None,
+                "path_source": source,
+                "onboarded": True,
                 "onboarded_at": record.onboarded_at if record else None,
+                "verified_origin": record.verified_origin if record else None,
+                "origin_verified_at": record.origin_verified_at if record else None,
                 "trusted": trusted,
                 "trust_explanation": explanation,
                 "fingerprint_state": fingerprint_state,
@@ -830,11 +1002,27 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
             }
         )
 
+    unonboarded = sorted(set(ctx.config.repos) - set(repos_mod.known(ctx.conn)))
+    for key in unonboarded:
+        section = ctx.config.repos[key]
+        where = str(section.path) if section.path else "(derived)"
+        rows.append([key, where, "NOT ONBOARDED", "-", "-", "-"])
+        payload.append(
+            {
+                "repo_key": key,
+                "path": str(section.path) if section.path else None,
+                "path_source": None,
+                "onboarded": False,
+                "note": f"has a [repos.\"{key}\"] section but was never onboarded — "
+                f"run `robot-army onboard {key}`",
+            }
+        )
+
     result.data = {"repos": payload}
     if not rows:
-        return result.say("no [repos.*] sections configured")
+        return result.say("no repositories are onboarded — run `robot-army onboard owner/name`")
     for line in _table(
-        rows, ["repo", "clone path", "onboarded", "trusted", "fingerprint", "steps"]
+        rows, ["repo", "clone path", "path source", "trusted", "fingerprint", "steps"]
     ):
         result.say(line)
     return result
@@ -899,7 +1087,7 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
     for item in db.list_work_items(ctx.conn, include_simulated=include_simulated):
         if not item.worktree_path:
             continue
-        repo = ctx.config.repos.get(item.repo_key)
+        repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
         base_ref = ctx.config.base_branch_for(item.repo_key)
         if repo is None:
             condition = None
@@ -963,11 +1151,11 @@ def worktree_remove(
         return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
     if not item.worktree_path:
         return Result(code=EXIT_FAILED, lines=[f"work item {item_id} has no worktree"])
-    repo = ctx.config.repos.get(item.repo_key)
+    repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
     if repo is None:
         return Result(
             code=EXIT_PRECONDITION,
-            lines=[f"repository {item.repo_key!r} is not in the config any more"],
+            lines=[f"repository {item.repo_key!r} does not resolve to a clone any more"],
         )
 
     vcs = ctx.boundaries.version_control
@@ -1021,7 +1209,7 @@ def worktree_prune(ctx: Context) -> Result:
     """Clear git's record of worktrees whose directories are gone."""
     result = Result()
     outputs: dict[str, str] = {}
-    for key, repo in sorted(ctx.config.repos.items()):
+    for key, repo in sorted(repos_mod.resolved_all(ctx.conn, ctx.config).items()):
         try:
             outputs[key] = ctx.boundaries.version_control.prune_worktrees(str(repo.path))
         except BoundaryError as exc:
@@ -1209,11 +1397,14 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
             code=EXIT_PRECONDITION,
             lines=[f"work item {item_id} is {item.state}; retry applies to failed items"],
         )
-    repo = ctx.config.repos.get(item.repo_key)
+    repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
     if repo is None:
         return Result(
             code=EXIT_PRECONDITION,
-            lines=[f"repository {item.repo_key!r} is not in the config any more"],
+            lines=[
+                f"repository {item.repo_key!r} does not resolve to a clone any more — "
+                f"run `robot-army onboard {item.repo_key} --reapprove`"
+            ],
         )
     try:
         dispatch.check_gates(
@@ -2180,7 +2371,7 @@ def doctor(ctx: Context, *, trust_file: Path | None = None) -> Result:
         )
     )
 
-    for key, repo in sorted(ctx.config.repos.items()):
+    for key, repo in sorted(repos_mod.resolved_all(ctx.conn, ctx.config).items()):
         record = db.get_repo(ctx.conn, key)
         trusted, explanation = dispatch.is_trusted(repo.path, trust_file=trust_file)
         checks.append(

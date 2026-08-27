@@ -214,6 +214,75 @@ because that is the case where a token would otherwise ride along inside an erro
 grep -c "$ROBOT_ARMY_GITHUB_TOKEN" ~/.local/state/robot-army/logs/*.jsonl   # expect 0
 ```
 
+## The milestone 005 actions
+
+One action changed, no new ones. `repo.onboard` was always an intent/outcome pair; what it
+carries and *when it is written* both changed.
+
+**The detail grew** to answer "which repository did I actually approve?" — the question the
+whole milestone exists to make answerable:
+
+| Field | Meaning |
+|---|---|
+| `clone_path` | the location approved, absolute and with symlinks resolved |
+| `path_source` | `derived` (from `[paths] repo_root`) or `configured` (from a `[repos.*]` section) |
+| `remote` | which remote was consulted — `origin`, or the sole remote when there is no `origin` |
+| `verified_origin` | the **normalised** `host/owner/name` found there. Never a raw URL |
+| `owner_verdict` | `owned`, `listed`, or the owner found, from the one repository lookup |
+
+**Refusals are now written, and that is a bug fix rather than new behaviour.** Before this
+milestone `onboard` returned for a missing `[repos.*]` section *before* opening any audit
+action, so a refusal was printed and forgotten. Under Principle III's reconstruction standard
+a refusal is a result, and one that leaves no trace is a gap. Every non-zero exit from
+`onboard` now writes an outcome carrying a `cause`:
+
+| `cause` | What was refused |
+|---|---|
+| `not_permitted` | neither owned-and-`include_owned` nor listed in `extra_repos` |
+| `no_such_repository` | the source system has no such repository |
+| `malformed_key` | not `owner/name` |
+| `no_clone` | nothing at the resolved path |
+| `linked_worktree` | the path is a linked worktree, not a primary clone |
+| `inside_worktree_root` | the path is inside `[paths] worktree_root` |
+| `no_remote` / `ambiguous_remote` | no remote, or several with none named `origin` |
+| `unparseable_url` | the remote URL is not a repository URL |
+| `wrong_repository` | a real clone of a **different** repository is there |
+| `source_unreachable` | the source system could not be asked — a bad token, or no network |
+| `unapproved_committed_settings` | `--yes` refused to skip an unreviewed settings change |
+| `aborted_at_prompt` | I said no |
+
+```bash
+jq -r 'select(.action == "repo.onboard" and .detail.refused) | "\(.entity_id) \(.detail.cause)"' \
+  ~/.local/state/robot-army/logs/audit-*.jsonl
+```
+
+### The dispatch-time re-verification writes only on failure
+
+Before creating anything, dispatch re-checks that the recorded clone is still there, is still
+a primary clone, and still has the same origin. A **pass** writes nothing.
+
+That is a deliberate omission and it is not a gap. The worktree-creation record for the same
+item follows milliseconds later on the same code path, so the question "did the clone still
+check out?" is answered by the presence of the next record — which is exactly Principle III's
+reconstruction standard, met by the log as a whole rather than by one line in it. Writing a
+line per dispatch to say "yes, still fine" would add volume and no information.
+
+A **failure** writes the existing `DispatchBlocked` path — the item goes `failed` with the
+reason, naming the *recorded* path — and the two failures that mean *the machine changed
+under an approval* also raise an anomaly: `clone_path_missing` and `clone_origin_changed`.
+Those two are distinguished from an ordinary gate refusal on purpose. An untrusted clone is a
+setup step I have not done yet; a clone that moved is a fact about the world I probably do
+not know.
+
+### No credential from a remote URL reaches this log
+
+A git remote URL may embed credentials, and milestone 005 is the first time this codebase
+reads one at all. Normalisation strips the `userinfo@` component before anything else, and
+what is recorded, compared, and printed is the normalised triple — which cannot carry a
+secret because it is three lowercase strings with no room for one. The refusal path is held
+to the same rule, including the unparseable-URL refusal, which deliberately does **not** echo
+the URL back even though that is the case where doing so would feel most helpful.
+
 ## What is deliberately not logged
 
 Principle III permits gaps only when they are named and justified in the feature plan. The
@@ -229,6 +298,7 @@ the log knows what its silence means:
 | **Actions the session itself takes** inside the worktree | They happen outside this process entirely. This log records the dispatch, the session identity, and where the transcript lives; the worker's own transcript is the record of what it did. Claiming otherwise would be dishonest about what this log covers |
 | Individual board **reads** made within a poll cycle — the freshness re-read before a move, and the comment fetch on the recovery path | Same reasoning as the GitHub one, and the same limit: they change no state outside the process, and the cycle *is* logged with what it evaluated and what it decided about each card. Every board **write** is an intent/outcome pair, without exception |
 | A **notification never attempted** because the process died between a state transition and the send | The state change itself is fully recorded, so nothing the system *did* is unreconstructable. What is lost is the knowledge that I was not told. Closing it would need a durable outbound queue with its own retry and persistence, which is more machinery than an optional stretch feature is worth — the gap is named here rather than hidden |
+| A **passing** dispatch-time clone re-verification | The worktree-creation record that follows on the same item milliseconds later already implies it passed, so a record here would be one line per dispatch answering a question the next line answers anyway. Every **failure** is logged, and the two that mean the machine changed under an approval also raise an anomaly. See the milestone 005 section above |
 | **Read-only web requests** — every `GET` the interface serves | They change no state outside the process, so Principle III's own scope does not reach them. The exception is written down because the *volume* makes the omission visible: a page auto-refreshing every 10 seconds issues a `GET` every 10 seconds, and logging those would bury the record this project exists to keep readable. Nothing a `GET` does is unreconstructable — the data it read is in the database and in this log. **Every `POST` is logged**, without exception |
 
 ## Silent failure is forbidden

@@ -395,14 +395,17 @@ def test_retry_is_refused_with_the_reason_while_the_block_still_holds(web, conn)
     assert state_of(conn, item_id) == WorkItemState.FAILED
 
 
-def test_retry_moves_a_failed_item_back_to_ready_when_it_can(web, conn, monkeypatch):
+def test_retry_moves_a_failed_item_back_to_ready_when_it_can(web, conn, config, monkeypatch):
     # The gate that would otherwise refuse here is the trust check, which reads the real
     # ~/.claude.json. The web calls `operations.retry` with exactly the arguments the CLI
     # does, so this stands in for a trusted clone rather than changing the call.
     monkeypatch.setattr(
         operations.dispatch, "is_trusted", lambda path, trust_file=None: (True, "trusted in test")
     )
-    item_id = seed_item(conn, state="failed")
+    # The clone location too, since milestone 005: ``check_gates`` re-verifies the
+    # recorded path before it re-verifies anything else, and a row without one is the
+    # pre-005 shape FR-014 blocks.
+    item_id = seed_item(conn, state="failed", clone_path=config.repos["demo"].path)
     with db.transaction(conn):
         db.update_work_item_columns(conn, item_id, failure_reason="a transient thing")
     assert web.post_json(f"/item/{item_id}/retry").status == 303
@@ -473,13 +476,13 @@ def test_a_confirmed_action_never_redirects_back_to_its_own_confirm_page(web, co
 
 
 @pytest.mark.parametrize("action", ["abandon", "cancel", "retry"])
-def test_every_confirmed_action_lands_on_a_200(web, conn, monkeypatch, action):
+def test_every_confirmed_action_lands_on_a_200(web, conn, config, monkeypatch, action):
     """The bug hit every confirmed action, so every confirmed action is checked."""
     monkeypatch.setattr(
         operations.dispatch, "is_trusted", lambda path, trust_file=None: (True, "trusted in test")
     )
     state = {"abandon": "interrupted", "cancel": "active", "retry": "failed"}[action]
-    item_id = seed_item(conn, state=state)
+    item_id = seed_item(conn, state=state, clone_path=config.repos["demo"].path)
     seed_session(conn, item_id, state="running" if state == "active" else "lost")
 
     response = web.post(

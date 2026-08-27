@@ -70,11 +70,20 @@ def conn(layout: Layout) -> Any:
 
 @pytest.fixture
 def repo_clone(tmp_path: Path) -> Path:
-    """A real git repository with one commit on ``main``."""
+    """A real git repository with one commit on ``main`` and **no** remote.
+
+    No remote, deliberately and permanently: ``worktree.prepare`` fetches whenever one
+    exists, so a fixture with a plausible ``git@github.com:`` origin would make the test
+    suite dial GitHub — hanging on an SSH agent or a network round trip in a suite that
+    must run offline. Tests that need a clone with an identity build one and add the
+    remote themselves; see ``tests/integration/test_onboard.py``.
+    """
     return make_repo(tmp_path / "clones" / "demo")
 
 
-def make_repo(path: Path, *, files: dict[str, str] | None = None) -> Path:
+def make_repo(
+    path: Path, *, files: dict[str, str] | None = None, origin: str | None = None
+) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
@@ -102,6 +111,12 @@ def make_repo(path: Path, *, files: dict[str, str] | None = None) -> Path:
         target.write_text(content, encoding="utf-8")
     run("add", "-A")
     run("commit", "-q", "-m", "initial")
+    # A real ``origin``, because milestone 005 made "what repository is this?" a question
+    # the product asks of a clone at onboarding *and again* before every dispatch. A
+    # fixture with no remote is a repository the product would refuse, so a suite built on
+    # one would test a shape that cannot exist.
+    if origin:
+        run("remote", "add", "origin", origin)
     return path
 
 
@@ -123,6 +138,11 @@ def config_dict(
         },
         "paths": {
             "worktree_root": str(worktree_root),
+            # The clone root is the *parent* of ``repo_clone`` deliberately: milestone
+            # 005 derives ``<repo_root>/<name>``, so a fixture repository keyed
+            # ``owner/demo`` derives to exactly the clone this fixture built. A separate
+            # empty directory would make every derivation test build its own clone.
+            "repo_root": str(repo_clone.parent),
             "state_dir": str(layout.state_dir),
             "socket_dir": str(layout.socket_dir),
         },
@@ -167,7 +187,7 @@ TRELLO_SECTION: dict[str, Any] = {
 
 
 @pytest.fixture
-def board_config(repo_clone: Path, layout: Layout, tmp_path: Path) -> Config:
+def board_config(conn: Any, repo_clone: Path, layout: Layout, tmp_path: Path) -> Config:
     """A config with a board configured, for the milestone 003 paths.
 
     Its repository is keyed ``jantman/demo`` rather than the bare ``demo`` the other
@@ -175,11 +195,40 @@ def board_config(repo_clone: Path, layout: Layout, tmp_path: Path) -> Config:
     names ``owner/name``, which is what ``[repos."you/example-repo"]`` looks like in the
     shipped example and what ``GitHubReader._repo_path`` requires. A short key here would
     make every resolution test resolve nothing.
+
+    It also **onboards** that repository, which milestone 005 made load-bearing: card
+    resolution filters candidates against the onboarded set rather than the configured
+    one (research R8), so a section alone no longer makes a card resolvable. Doing it in
+    the fixture rather than in each test keeps every board test asserting what it is about
+    instead of re-stating the precondition.
     """
     monkey_token()
     raw = config_dict(repo_clone, layout, tmp_path / "worktrees", trello=dict(TRELLO_SECTION))
     raw["repos"] = {"jantman/demo": {"path": str(repo_clone), "base_branch": "main"}}
+    onboard_repo(conn, "jantman/demo", repo_clone)
     return parse(raw, tmp_path / "config.toml")
+
+
+def onboard_repo(conn: Any, repo_key: str, clone_path: Path, **overrides: Any) -> None:
+    """Write the onboarding record milestone 005 made the source of truth.
+
+    A helper rather than raw SQL in each test, because the four columns migration 005 added
+    are the difference between "the system watches this repository" and "there is a section
+    about it", and a test that seeds only three of them is testing a state the product
+    cannot produce.
+    """
+    with db.transaction(conn):
+        db.upsert_repo(
+            conn,
+            repo_key=repo_key,
+            settings_fingerprint=overrides.get("settings_fingerprint"),
+            trust_verified=overrides.get("trust_verified", True),
+            clone_path=str(clone_path),
+            path_source=overrides.get("path_source", "derived"),
+            verified_origin=overrides.get(
+                "verified_origin", _recorded_origin(clone_path)
+            ),
+        )
 
 
 def monkey_token() -> None:
@@ -210,6 +259,10 @@ class FakeIssueReader:
         self.raise_on_remote: Exception | None = None
         self.listing_calls: list[tuple[str, str, str | None]] = []
         self.created: dict[int, str] = {}
+        self.repo_calls: list[str] = []
+        #: Keys this fake reports as 404, and keys whose owner differs from the key's.
+        self.missing_repos: set[str] = set()
+        self.repo_owners: dict[str, str] = {}
 
     def poll(self, repo_key: str, etag: str | None) -> PollResult:
         self.poll_calls.append((repo_key, etag))
@@ -252,8 +305,25 @@ class FakeIssueReader:
             found.append(issue)
         return found[:limit]
 
-    def list_owned_repos(self) -> list[Any]:
-        return []
+    def get_repo(self, repo_key: str) -> Any:
+        """Milestone 005's single-repository lookup.
+
+        ``repo_calls`` is counted because SC-009's requirement is about the *shape* of the
+        traffic, not the answer: a fake with three repositories would let a page-walking
+        implementation pass, so the assertion is on how many times this was called.
+        """
+        from robot_army.boundaries import RepoInfo
+
+        self.repo_calls.append(repo_key)
+        if repo_key in self.missing_repos:
+            return RepoInfo(exists=False)
+        owner, _, name = repo_key.partition("/")
+        return RepoInfo(
+            exists=True,
+            owner=self.repo_owners.get(repo_key, owner),
+            name=name,
+            default_branch="main",
+        )
 
 
 class RecordingWriter:
@@ -741,12 +811,32 @@ def seed_item(
     dry_run: bool = False,
     state: str | None = None,
     title: str = "Fix the thing",
+    clone_path: Path | None = None,
 ) -> int:
-    """Insert an onboarded repo and one work item, returning the item id."""
+    """Insert an onboarded repo and one work item, returning the item id.
+
+    ``clone_path`` records the location milestone 005 made part of an approval. It is
+    optional because most callers here never reach ``dispatch.check_gates`` and only need a
+    row that satisfies the foreign key — but any test that *does* dispatch must pass it,
+    because a record with no recorded location is precisely the pre-005 row FR-014 blocks.
+    """
     with db.transaction(conn):
-        if db.get_repo(conn, repo_key) is None:
+        existing = db.get_repo(conn, repo_key)
+        if existing is None or (clone_path and existing.clone_path is None):
+            # The second half matters because tests seed several items per repository and
+            # only some of them pass a location: the row created by the first call must not
+            # leave the repository permanently un-dispatchable for the rest.
             db.upsert_repo(
-                conn, repo_key=repo_key, settings_fingerprint=None, trust_verified=True
+                conn,
+                repo_key=repo_key,
+                settings_fingerprint=existing.fingerprint if existing else None,
+                trust_verified=True,
+                clone_path=str(clone_path) if clone_path else None,
+                path_source="configured" if clone_path else None,
+                # What onboarding would have recorded: the identity actually found in that
+                # clone. Inventing one from the repository key would let a test pass with a
+                # record the product could never have written.
+                verified_origin=_recorded_origin(clone_path),
             )
         item_id = db.insert_work_item(
             conn,
@@ -764,6 +854,24 @@ def seed_item(
     if state:
         conn.execute("UPDATE work_items SET state = ? WHERE id = ?", (state, item_id))
     return item_id
+
+
+def _recorded_origin(clone_path: Path | None) -> str | None:
+    """The normalised identity of a clone's ``origin``, as onboarding would record it."""
+    if clone_path is None:
+        return None
+    import subprocess
+
+    from robot_army.repos import normalise_remote
+
+    result = subprocess.run(
+        ["git", "-C", str(clone_path), "config", "--get", "remote.origin.url"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    identity = normalise_remote(result.stdout.strip())
+    return str(identity) if identity else None
 
 
 def make_issue(number: int = 42, **overrides: Any) -> Issue:

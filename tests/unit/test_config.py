@@ -644,3 +644,140 @@ def test_a_typo_in_a_repo_section_is_still_an_error(repo_clone, layout, tmp_path
             },
         )
     assert any("unknown key 'max_session'" in p for p in caught.value.problems)
+
+
+# -- [paths] repo_root (milestone 005, T004) --------------------------------
+
+
+def test_repo_root_defaults_to_the_conventional_location(repo_clone, layout, tmp_path, monkeypatch):
+    """``~/GIT`` is the author's convention, and it is a *default* rather than a
+    hard-coded path — the value is configurable and every test above overrides it."""
+    home = tmp_path / "home"
+    (home / "GIT").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkey_token()
+    raw = config_dict(repo_clone, layout, tmp_path / "worktrees")
+    del raw["paths"]["repo_root"]
+
+    config = parse(raw, tmp_path / "config.toml")
+
+    assert config.repo_root == home / "GIT"
+
+
+def test_an_explicit_repo_root_overrides_the_default(repo_clone, layout, tmp_path):
+    elsewhere = tmp_path / "code"
+    elsewhere.mkdir()
+
+    config = build(repo_clone, layout, tmp_path, paths={"repo_root": str(elsewhere)})
+
+    assert config.repo_root == elsewhere
+
+
+def test_repo_root_expands_a_tilde_like_every_other_path(repo_clone, layout, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / "src").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    config = build(repo_clone, layout, tmp_path, paths={"repo_root": "~/src"})
+
+    assert config.repo_root == home / "src"
+
+
+def test_a_repo_root_that_does_not_exist_refuses_to_load(repo_clone, layout, tmp_path):
+    """FR-001: reported here, with every other configuration problem, rather than
+    discovered per repository at onboarding time. "Your root is missing" is one message,
+    not 227 of them."""
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, paths={"repo_root": str(tmp_path / "absent")})
+
+    assert any("repo_root does not exist" in p for p in caught.value.problems)
+
+
+def test_a_repo_root_that_is_a_file_refuses_to_load(repo_clone, layout, tmp_path):
+    not_a_directory = tmp_path / "file.txt"
+    not_a_directory.write_text("x", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, paths={"repo_root": str(not_a_directory)})
+
+    assert any("repo_root is not a directory" in p for p in caught.value.problems)
+
+
+# -- [hooks] post_create, the shared preparation steps (milestone 005, T053) ----
+
+
+def test_shared_steps_parse_with_the_same_shape_as_the_per_repository_form(
+    repo_clone, layout, tmp_path
+):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        hooks={"default_timeout_seconds": 10, "post_create": [{"run": "uv sync"}]},
+    )
+
+    assert len(config.hooks.post_create) == 1
+    step = config.hooks.post_create[0]
+    assert (step.kind, step.value) == ("run", "uv sync")
+    assert step.timeout == 10, "default_timeout_seconds applies here exactly as it does there"
+
+
+def test_an_invalid_shared_step_refuses_to_load(repo_clone, layout, tmp_path):
+    """Same rule as ``[repos.*]``: a typo in a step that exists is a step that quietly does
+    nothing, which is worse than one that is missing, because it looks applied."""
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            hooks={"post_create": [{"run": "uv sync", "timout": 30}]},
+        )
+
+    assert any("[hooks] post_create[0] unknown key 'timout'" in p for p in caught.value.problems)
+
+
+def test_shared_steps_that_are_not_an_array_of_tables_refuse_to_load(
+    repo_clone, layout, tmp_path
+):
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, hooks={"post_create": "uv sync"})
+
+    assert any("[hooks] post_create must be an array of tables" in p for p in caught.value.problems)
+
+
+def test_the_startup_budget_counts_inherited_steps_for_every_inheriting_repository(
+    repo_clone, layout, tmp_path
+):
+    """FR-022. Counting the shared set once would under-report for exactly the repositories
+    that have no section — the majority after milestone 005."""
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        daemon={"dispatching_max_age_seconds": 30},
+        hooks={"default_timeout_seconds": 10, "post_create": [{"run": "slow", "timeout": 60}]},
+        repos={"jantman/inherits": {}},
+    )
+
+    assert any("does not exceed the longest repository's preparation timeouts (60s)" in w
+               for w in config.warnings)
+
+
+def test_a_repositorys_own_steps_are_what_the_budget_counts_for_it(
+    repo_clone, layout, tmp_path
+):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        daemon={"dispatching_max_age_seconds": 30},
+        hooks={"default_timeout_seconds": 10, "post_create": [{"run": "slow", "timeout": 60}]},
+        repos={
+            # Every repository in this config overrides, so nothing inherits the 60s set.
+            "demo": {"path": str(repo_clone), "post_create": [{"run": "fast", "timeout": 5}]},
+            "jantman/own": {"post_create": [{"run": "fast", "timeout": 5}]},
+        },
+    )
+
+    # 5s each, from their own steps — not the 60s neither of them inherits.
+    assert not any("preparation timeouts" in w for w in config.warnings)

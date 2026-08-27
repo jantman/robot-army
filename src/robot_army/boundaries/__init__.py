@@ -125,9 +125,23 @@ class PullRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class RepoRef:
-    full_name: str
-    default_branch: str
+class RepoInfo:
+    """One repository as the source system describes it (milestone 005, research R5).
+
+    Answers three questions from **one** request — does it exist, who owns it, and what is
+    its canonical name — because SC-009 caps onboarding at one additional request no matter
+    how many repositories the author owns, and because a case-mismatched name is otherwise
+    diagnosed as a missing directory.
+    """
+
+    exists: bool
+    owner: str = ""
+    name: str = ""
+    default_branch: str = ""
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.owner}/{self.name}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,7 +249,14 @@ class IssueSourceReader(Protocol):
         """
         ...
 
-    def list_owned_repos(self) -> list[RepoRef]: ...
+    def get_repo(self, repo_key: str) -> RepoInfo:
+        """One repository, in one request. ``RepoInfo(exists=False)`` for a 404.
+
+        A 404 is a *fact about the repository*, not a transport failure, so it is returned
+        rather than raised — the distinction milestone 005's allowlist needs in order to
+        say "no such repository" differently from "you may not onboard that one".
+        """
+        ...
 
 
 @runtime_checkable
@@ -358,7 +379,21 @@ class VersionControl(Protocol):
         """
         ...
 
+    def list_remotes(self, clone_path: str) -> list[str]:
+        """Every configured remote name. Milestone 005: the identity check needs the
+        *count*, because several remotes and none named ``origin`` is a refusal rather
+        than a pick (research R3)."""
+        ...
+
     def default_remote(self, clone_path: str) -> str | None: ...
+
+    def remote_url(self, clone_path: str, remote: str) -> str | None:
+        """One remote's configured URL, or ``None``.
+
+        The value may embed credentials, so every caller normalises it through
+        ``repos.normalise_remote`` before recording, comparing or printing (FR-032).
+        """
+        ...
 
     def worktree_exists(self, worktree_path: str) -> bool:
         """Does this worktree really exist?
@@ -497,7 +532,7 @@ __all__ = [
     "PollResult",
     "PullRequest",
     "RemovalResult",
-    "RepoRef",
+    "RepoInfo",
     "SessionHost",
     "TransportError",
     "VersionControl",

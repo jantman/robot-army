@@ -13,7 +13,7 @@ Three properties, each of which is a requirement rather than a behaviour:
 
 from __future__ import annotations
 
-from tests.conftest import FakeCardReader, make_board_boundaries, make_card
+from tests.conftest import FakeCardReader, make_board_boundaries, make_card, onboard_repo
 
 from robot_army import db, health, intake
 from robot_army.boundaries import TransportError
@@ -356,6 +356,9 @@ def test_a_rescan_re_evaluates_a_held_card_the_ordinary_pass_would_skip(
     board_config.repos["jantman/newrepo"] = dataclasses.replace(
         next(iter(board_config.repos.values())), key="jantman/newrepo"
     )
+    # And onboarded: milestone 005 made the onboarding record, not the section, the thing
+    # that makes a repository nameable by a card (research R8).
+    onboard_repo(conn, "jantman/newrepo", next(iter(board_config.repos.values())).path)
     boundaries.card_reader.cards[0] = dataclasses.replace(
         boundaries.card_reader.cards[0], body="https://github.com/jantman/newrepo"
     )

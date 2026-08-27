@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import cleanup, db, intake, notifications, sessions
+from robot_army import cleanup, db, intake, notifications, repos, sessions
 from robot_army.boundaries import BoundaryError, TransportError
 from robot_army.states import (
     SessionState,
@@ -512,7 +512,7 @@ def _sweep_worktrees(
 
     prunable_by_clone: dict[str, set[str]] = {}
     for item in tracked:
-        repo = config.repos.get(item.repo_key)
+        repo = repos.resolve(conn, config, item.repo_key)
         if repo is None:
             with db.transaction(conn):
                 db.raise_anomaly(
@@ -522,7 +522,7 @@ def _sweep_worktrees(
                     entity_id=str(item.id),
                     detail={
                         "repo_key": item.repo_key,
-                        "note": "the item's repository has no [repos.*] section any more",
+                        "note": "the item's repository no longer resolves to a clone",
                     },
                 )
             continue

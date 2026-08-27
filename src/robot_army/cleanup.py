@@ -26,7 +26,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from robot_army import db
+from robot_army import db, repos
 from robot_army.models import WorkItem
 from robot_army.states import SessionState, WorkItemState
 
@@ -121,16 +121,16 @@ def clean_item(
             item_id=item.id, state=SKIPPED if live_session else "ineligible", reason=reason
         )
 
-    repo = config.repos.get(item.repo_key)
+    repo = repos.resolve(conn, config, item.repo_key)
     if repo is None:
-        # Nothing to remove *from*: the clone the worktree belongs to is not configured any
-        # more, so neither guard can be evaluated. Retaining is the only safe answer.
+        # Nothing to remove *from*: the clone the worktree belongs to no longer resolves,
+        # so neither guard can be evaluated. Retaining is the only safe answer.
         return _retain(
             conn,
             audit,
             item,
             RETAINED,
-            f"repository {item.repo_key!r} is no longer in the config",
+            f"repository {item.repo_key!r} no longer resolves to a clone",
         )
 
     audit.record(

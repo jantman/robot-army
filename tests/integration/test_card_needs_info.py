@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from tests.conftest import make_board_boundaries, make_card
+from tests.conftest import make_board_boundaries, make_card, onboard_repo
 
 from robot_army import db, intake, operations
 from robot_army.cardstates import CardState
@@ -66,7 +66,7 @@ def test_an_unresolvable_card_creates_nothing_and_is_listed_with_its_reason(
     row = db.list_cards(conn)[0]
     assert row.state == CardState.NEEDS_INFO
     assert row.repo_key is None and row.issue_number is None
-    assert "no configured repository" in row.reason
+    assert "no onboarded repository" in row.reason
 
     listing = operations.cards(context(board_config, conn, audit, boundaries))
     assert listing.code == 0
@@ -118,9 +118,14 @@ def test_a_card_naming_two_configured_repositories_is_held_not_resolved_to_eithe
 ):
     from tests.conftest import make_repo
 
+    other = make_repo(tmp_path / "other")
     board_config.repos["jantman/other"] = dataclasses.replace(
-        board_config.repos[REPO], key="jantman/other", path=make_repo(tmp_path / "other")
+        board_config.repos[REPO], key="jantman/other", path=other
     )
+    # Onboarded as well as configured: since milestone 005 a section alone does not make a
+    # repository a candidate, so without this the card would name *one* repository and
+    # resolve rather than being held — the opposite of what this test is about.
+    onboard_repo(conn, "jantman/other", other)
     boundaries = make_board_boundaries(
         audit,
         cards=[
@@ -155,6 +160,7 @@ def test_a_forced_rescan_re_evaluates_a_held_card_that_has_not_changed(
     board_config.repos["jantman/newrepo"] = dataclasses.replace(
         board_config.repos[REPO], key="jantman/newrepo"
     )
+    onboard_repo(conn, "jantman/newrepo", board_config.repos[REPO].path)
     assert cycle(conn, board_config, audit, boundaries).issues_created == 0
 
     outcome = cycle(conn, board_config, audit, boundaries, forced=True)

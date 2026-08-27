@@ -118,7 +118,48 @@ new identification rule and FR-002 forbids the obvious one (command-line matchin
 here rather than fixed: **if the registry ever becomes unreliable, fix the registry, do not lean on
 the fallback.**
 
-## 005 — Whatever survives contact with reality
+## 005 — Onboarding Is Enough (`specs/005-onboard-is-enough/`)
+
+**Status:** implemented
+
+Not from the planning document. This milestone came from *using* 001–004: adding a repository meant
+editing a file, restarting the daemon, and then running `onboard` — three steps where one would do,
+repeated 227 times if I ever wanted the repositories I actually own to be usable.
+
+The answer to "which repositories does this system know about" moves from the `[repos.*]` section
+keys to the `repos` table. `robot-army onboard owner/name` is the whole job: the clone's location is
+derived as `<repo_root>/<name>` — **one** candidate, no searching — and a `[repos.*]` section becomes
+a set of overrides for the exceptions rather than a registration for everything.
+
+The derivation rule alone would have been a bad idea, and the milestone is shaped around why. It is
+right for 222 of my 252 repositories and **wrong for five**, and the five fail by finding a real
+clone of a *different* repository at the derived path. So derivation is paired with an origin check
+that runs at onboarding, where a human is already reading an approval screen, and the **outcome** is
+recorded rather than the rule. Nothing re-derives afterwards: a clone that moves produces a refusal
+naming the recorded path instead of a worktree in a repository nobody named. The same three local
+reads run again before every dispatch, because months pass between an approval and a work item.
+
+It also closes [issue #8](https://github.com/jantman/robot-army/issues/8): `include_owned` and
+`extra_repos` were parsed, validated, and read by nothing. They now govern what may be **onboarded**
+— a mistake guard against a mistyped name, explicitly *not* a security boundary, since the author can
+edit them and the issue-author check cannot be disabled. The enumeration the original 001 decision
+implied was deleted rather than given a caller: nothing needs to enumerate 252 repositories to answer
+a question one `GET /repos/{owner}/{name}` answers.
+
+**User story 7 was dropped.** A `repos --onboardable` listing was the only story that would have
+added a surface rather than removing a step, and the spec named the consequence in advance: dropping
+it means deleting `list_owned_repos()` rather than leaving it uncalled. That was done.
+
+### What running it taught
+
+*To be filled in after the live round — in particular whether the derivation rule holds beyond the
+222 repositories that were measured, and whether five is really the number of collisions.* The three
+things CI cannot establish are recorded in [issue #1](https://github.com/jantman/robot-army/issues/1):
+the five real wrong-location clones being refused, a clone moving out from under an approval, and the
+request count being one against an account with 252 repositories rather than against a fake with
+three.
+
+## 006 — Whatever survives contact with reality
 
 **Status:** not specified
 

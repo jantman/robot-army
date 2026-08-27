@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from robot_army import db, migrations
+from robot_army.cardstates import CardState
 from robot_army.migrations import SCHEMA_VERSION, current_version, migrate
 
 EXPECTED_TABLES = {
@@ -505,7 +506,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 5
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 6
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -609,6 +610,116 @@ def test_a_pre_005_row_reads_back_with_a_null_clone_path_and_its_fingerprint_int
 def test_migration_005_adds_no_table_and_no_index(tmp_path):
     conn = db.connect(tmp_path / "state.db")
     _run_only_004(conn)
+    before = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
+    }
+
+    migrate(conn)
+
+    after = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
+    }
+    assert after == before
+    conn.close()
+
+
+# -- migration 006 (milestone 006, T012) ------------------------------------
+
+
+def _run_only_005(conn: sqlite3.Connection) -> None:
+    """Bring a database to exactly the 005-era schema, as one in the field would be."""
+    conn.execute("BEGIN")
+    for step in migrations.MIGRATIONS[:5]:
+        step(conn)
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+
+
+def test_migration_006_runs_on_a_005_era_database(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_005(conn)
+    assert current_version(conn) == 5
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (5, SCHEMA_VERSION)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(cards)")}
+    assert "current_list_id" in columns
+    conn.close()
+
+
+def test_a_pre_006_card_reads_back_with_a_null_current_list_id(tmp_path):
+    """Nothing backfills it. A pre-006 row is *tracked but not yet re-polled*, and the
+    parked derivation treats NULL as not parked — milestone 003's behaviour, which is the
+    safe direction for a value we do not have.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_005(conn)
+    conn.execute(
+        """
+        INSERT INTO cards (board_id, card_id, card_url, title, body, state, dry_run,
+                           origin_list_id, first_seen_at, updated_at)
+        VALUES ('board-1', 'card-1', 'https://trello.example/c/card-1', 'Old', '',
+                'needs_info', 0, 'list-inbox', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+        """
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    row = db.find_card(conn, board_id="board-1", card_id="card-1", dry_run=False)
+    assert row is not None
+    assert row.current_list_id is None
+    # The columns it did have are untouched — a migration that adds must not disturb.
+    assert row.origin_list_id == "list-inbox"
+    assert row.state is CardState.NEEDS_INFO
+    conn.close()
+
+
+def test_a_killed_migration_006_leaves_user_version_at_five_and_re_runs(tmp_path, monkeypatch):
+    """``ALTER TABLE ... ADD COLUMN`` on an existing column errors, so a half-applied
+    migration would make the re-run fail permanently. It does not, because the ladder
+    wraps the whole sequence in one transaction and rolls back.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_005(conn)
+
+    def _explode(connection: sqlite3.Connection) -> None:
+        migrations._migration_006(connection)
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:5], _explode))
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+
+    assert current_version(conn) == 5
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(cards)")}
+    assert "current_list_id" not in columns
+
+    monkeypatch.undo()
+    start, end = migrate(conn)
+
+    assert (start, end) == (5, SCHEMA_VERSION)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(cards)")}
+    assert "current_list_id" in columns
+    conn.close()
+
+
+def test_migrate_is_idempotent_on_an_already_migrated_database(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    migrate(conn)
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (SCHEMA_VERSION, SCHEMA_VERSION)
+    conn.close()
+
+
+def test_migration_006_adds_no_table_and_no_index(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_005(conn)
     before = {
         row["name"]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")

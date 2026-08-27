@@ -1724,7 +1724,36 @@ def purge_simulated(ctx: Context, *, assume_yes: bool = False, confirm: Any = in
 # -- cards (milestone 003) --------------------------------------------------
 
 
-def _card_dict(card: Any, *, work_item_id: int | None = None) -> dict[str, Any]:
+#: States for which the ignore list is not consulted at all (milestone 006, FR-013).
+#: ``linked`` is past intake; ``creating`` has a recorded intent that recovery must still
+#: run against; ``dropped`` is terminal and the ignore list is not a route back.
+_NEVER_PARKED = frozenset({CardState.LINKED, CardState.CREATING, CardState.DROPPED})
+
+
+def card_is_parked(card: Any, config: Any) -> bool:
+    """Is this tracked card sitting in a column the author excluded? (data-model.md)
+
+    **Derived, never stored.** A stored flag would go stale the moment ``ignore_lists`` is
+    edited, and FR-011 requires that edit to take effect on the next poll with nothing else
+    done — a derivation cannot be stale.
+
+    Compared by *name*, against the configuration, so this makes **no board request** and
+    keeps working with the board unreachable. That constraint is why the poll stores the
+    column's name beside its id.
+
+    A ``NULL`` name — a row tracked before milestone 006's migration and not yet re-polled
+    — is not parked, which is milestone 003's behaviour and the safe direction for a value
+    we do not have.
+    """
+    trello = getattr(config, "trello", None)
+    if trello is None or not trello.ignore_lists or card.state in _NEVER_PARKED:
+        return False
+    return bool(card.current_list_name) and card.current_list_name in trello.ignore_lists
+
+
+def _card_dict(
+    card: Any, *, work_item_id: int | None = None, parked: bool = False
+) -> dict[str, Any]:
     return {
         "id": card.id,
         "card_id": card.card_id,
@@ -1742,6 +1771,10 @@ def _card_dict(card: Any, *, work_item_id: int | None = None) -> dict[str, Any]:
         "create_failures": card.create_failures,
         "placed_list_id": card.placed_list_id,
         "origin_list_id": card.origin_list_id,
+        "current_list_id": card.current_list_id,
+        "current_list_name": card.current_list_name,
+        "parked": parked,
+        "parked_list": card.current_list_name if parked else None,
         "archived_at": card.archived_at,
         "first_seen_at": card.first_seen_at,
         "updated_at": card.updated_at,
@@ -1793,7 +1826,12 @@ def _card_for_item(ctx: Context, item: Any) -> dict[str, Any] | None:
         issue_number=item.issue_number,
         dry_run=bool(item.dry_run),
     )
-    return _card_dict(card, work_item_id=item.id) if card else None
+    if card is None:
+        return None
+    # Always False in practice — a card attached to a work item is `linked`, and a linked
+    # card is never parked (FR-013). Derived rather than hardcoded so the two paths cannot
+    # disagree if that ever stops being true.
+    return _card_dict(card, work_item_id=item.id, parked=card_is_parked(card, ctx.config))
 
 
 def cards(
@@ -1824,7 +1862,14 @@ def cards(
     states = [CardState(state)] if state else None
     rows = db.list_cards(ctx.conn, include_simulated=include_simulated, states=states)
     links = _card_work_items(ctx, rows)
-    payload = [_card_dict(card, work_item_id=links.get(card.id)) for card in rows]
+    payload = [
+        _card_dict(
+            card,
+            work_item_id=links.get(card.id),
+            parked=card_is_parked(card, ctx.config),
+        )
+        for card in rows
+    ]
 
     result = Result(
         data={
@@ -1846,7 +1891,10 @@ def cards(
             row["repo_key"] or "—",
             f"#{row['issue_number']}" if row["issue_number"] else "—",
             _human_age(row["age_seconds"]),
-            (row["reason"] or "")[:60],
+            # Alongside whatever else the card is, never instead of it: a card can be
+            # awaiting clarification *and* parked, which is what writing an ambiguous card
+            # and parking it produces.
+            _card_reason(row)[:60],
         ]
         for row in payload
     ]
@@ -1855,6 +1903,16 @@ def cards(
     ):
         result.say(line)
     return result
+
+
+def _card_reason(row: dict[str, Any]) -> str:
+    """The reason column: the parked note, the state's own reason, or both."""
+    parts = []
+    if row["parked"]:
+        parts.append(f"parked in {row['parked_list']!r}")
+    if row["reason"]:
+        parts.append(row["reason"])
+    return " — ".join(parts)
 
 
 def _human_age(seconds: int | None) -> str:

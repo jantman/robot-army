@@ -134,11 +134,14 @@ class Card:
     columns fill in as the lifecycle advances, and the ones that stay ``NULL`` are the
     honest record of a card that never got that far.
 
-    Three list ids rather than one, and the distinction matters (data-model.md):
+    Four list ids rather than one, and the distinction matters (data-model.md):
     ``origin_list_id`` is where the card was before we ever touched it and is what FR-029
     returns it to; ``placed_list_id`` is where we last put it and is what FR-030 compares
     against to detect a move by the author; ``pending_move_to`` is written *before* a move
-    is attempted, so an interrupted move of ours is distinguishable from a human one (R12).
+    is attempted, so an interrupted move of ours is distinguishable from a human one (R12);
+    and ``current_list_id`` is where the card is **now**, which none of the other three
+    answers and which milestone 006 needs so a listing can say whether a card is parked
+    without asking the board.
     """
 
     id: int
@@ -165,6 +168,14 @@ class Card:
     origin_list_id: str | None = None
     placed_list_id: str | None = None
     pending_move_to: str | None = None
+    #: Refreshed from the board every poll. ``None`` means tracked before milestone 006's
+    #: migration and not yet re-polled, which is treated as *not parked*.
+    #:
+    #: The name is carried beside the id because the listing commands must answer "is this
+    #: parked?" with the board unreachable, and can only compare against the names in
+    #: ``[trello] ignore_lists``. Written by the same statement, so they cannot disagree.
+    current_list_id: str | None = None
+    current_list_name: str | None = None
     comment_posted_at: str | None = None
     intent_at: str | None = None
     create_failures: int = 0

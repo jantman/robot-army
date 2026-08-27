@@ -269,6 +269,41 @@ ALTER TABLE repos ADD COLUMN origin_verified_at TEXT;
 """
 
 
+SCHEMA_006_SQL = """
+-- Where the card is **now**, as the last poll saw it (milestone 006).
+--
+-- A fourth list id, and the three that already exist answer different questions, which is
+-- why none of them could be reused:
+--
+--   origin_list_id   where the card was before we ever touched it — what FR-029 returns
+--                    an abandoned card to. Overwriting it with the card's current
+--                    position would return a card to wherever it last happened to be.
+--   placed_list_id   where *we* last put it — what FR-030 compares against to detect a
+--                    move the author made by hand.
+--   pending_move_to  where we are in the middle of putting it, written before the move.
+--   current_list_id  where it is now.
+--
+-- It exists so `robot-army cards` and the web listing can answer "is this card parked?"
+-- with the board unreachable. Deriving that at render time would mean a board request
+-- from a read-only listing command, which would then fail whenever the board is down.
+--
+-- NULL means *tracked before this migration and not yet re-polled*, never "in no column",
+-- which Trello cannot produce. Nothing backfills it: the next poll writes it, and until
+-- then the card is treated as not parked — milestone 003's behaviour, and the safe
+-- direction for a value we do not have.
+--
+-- The **name** is stored beside the id because the two consumers cannot share one
+-- representation. The intake gate runs inside the poll, where the board's id->name map is
+-- in hand, and wants an id: an equality check that is duplicate-safe and survives a column
+-- being renamed mid-run. `robot-army cards` and the web listing run where the board is
+-- not available at all — they must answer "is this parked?" with the board down — and can
+-- only compare against the *names* in `[trello] ignore_lists`. Both values are written by
+-- the same statement from the same poll, so they cannot disagree.
+ALTER TABLE cards ADD COLUMN current_list_id   TEXT;
+ALTER TABLE cards ADD COLUMN current_list_name TEXT;
+"""
+
+
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
         conn.execute(statement)
@@ -294,6 +329,11 @@ def _migration_005(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_006(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_006_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -301,6 +341,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_003,
     _migration_004,
     _migration_005,
+    _migration_006,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

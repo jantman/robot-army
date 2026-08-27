@@ -336,6 +336,97 @@ def test_trello_overrides_are_honoured(repo_clone, layout, tmp_path):
     assert config.trello.api_base == "https://api.trello.example/1"
 
 
+# -- [trello] ignore_lists (milestone 006) ----------------------------------
+
+
+def test_ignore_lists_defaults_to_empty(repo_clone, layout, tmp_path):
+    """FR-002. The default has to be *empty*, not merely unused: an installation that
+    never writes the key must be behaviourally identical to milestone 003, and that is
+    only structural if every downstream comparison is against an empty set."""
+    config = build(repo_clone, layout, tmp_path, trello=trello_section())
+    assert config.trello.ignore_lists == ()
+
+
+def test_ignore_lists_is_carried_in_the_order_written(repo_clone, layout, tmp_path):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        trello=trello_section(ignore_lists=["Icebox", "Blocked", "Someday"]),
+    )
+    assert config.trello.ignore_lists == ("Icebox", "Blocked", "Someday")
+
+
+def test_ignore_lists_collapses_duplicates_preserving_order(repo_clone, layout, tmp_path):
+    """FR-019a. Listing a column twice means what listing it once means."""
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        trello=trello_section(ignore_lists=["Icebox", "Blocked", "Icebox"]),
+    )
+    assert config.trello.ignore_lists == ("Icebox", "Blocked")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("Icebox", id="a bare string, not a list"),
+        pytest.param(["Icebox", 7], id="a list containing a non-string"),
+        pytest.param(["Icebox", None], id="a list containing null"),
+    ],
+)
+def test_a_malformed_ignore_lists_is_an_error(repo_clone, layout, tmp_path, value):
+    """FR-020. An error rather than a warning, following the section's existing rule: a
+    typo inside a board section that exists means excluding nothing while looking
+    configured."""
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, trello=trello_section(ignore_lists=value))
+    assert any("ignore_lists must be a list of strings" in p for p in caught.value.problems)
+
+
+def test_an_empty_column_name_in_ignore_lists_is_an_error(repo_clone, layout, tmp_path):
+    """An empty name cannot match a board column, so accepting it would configure an
+    exclusion that silently excludes nothing."""
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, trello=trello_section(ignore_lists=["Icebox", ""]))
+    assert any("contains an empty column name" in p for p in caught.value.problems)
+
+
+def test_ignore_lists_is_a_recognised_key(repo_clone, layout, tmp_path):
+    """Unknown keys in ``[trello]`` are errors, so the new key has to be in the
+    allowlist — otherwise writing it would be rejected as the typo it is not."""
+    config = build(repo_clone, layout, tmp_path, trello=trello_section(ignore_lists=["Icebox"]))
+    assert config.trello.ignore_lists == ("Icebox",)
+
+
+def test_the_credential_sweep_still_covers_ignore_lists(repo_clone, layout, tmp_path):
+    """Principle II, and free: the sweep runs over every string value in ``[trello]``, so
+    a secret pasted into a *new* key is caught without the sweep being told about it. The
+    assertion is that the new key did not arrive as a list the sweep skips silently."""
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            trello=trello_section(label="0123456789abcdef0123456789abcdef"),
+        )
+    assert any("literal credential" in p for p in caught.value.problems)
+
+
+def test_the_lifecycle_columns_may_themselves_be_ignored(repo_clone, layout, tmp_path):
+    """FR-015. The two settings act on disjoint sets of cards — the ignore list is
+    consulted only for cards with no recorded issue — so this loads rather than being
+    rejected as the contradiction it looks like."""
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        trello=trello_section(ignore_lists=["In Progress", "Done"]),
+    )
+    assert config.trello.ignore_lists == ("In Progress", "Done")
+
+
 def test_a_trello_section_without_a_board_id_is_rejected(repo_clone, layout, tmp_path):
     with pytest.raises(ConfigError) as caught:
         build(repo_clone, layout, tmp_path, trello=trello_section(board_id=""))

@@ -165,3 +165,61 @@ def test_the_audit_log_written_by_a_real_boundary_is_the_one_being_checked(audit
     audit.record("trello.poll", outcome="ok", detail={"cards": 0})
     audit.close()
     assert "trello.poll" in log_text(layout)
+
+
+# -- lists_by_id (milestone 006, T008, FR-019b) ------------------------------
+
+
+def _board_handler(list_payload: list[dict]):
+    """A transport answering the four calls ``board_info()`` makes, counting them."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        calls.append(path)
+        if path.endswith("/members"):
+            return httpx.Response(200, json=[{"id": "member-1"}])
+        if path.endswith("/labels"):
+            return httpx.Response(200, json=[{"id": "label-ai", "name": "AI-task"}])
+        if path.endswith("/lists"):
+            return httpx.Response(200, json=list_payload)
+        return httpx.Response(200, json={"name": "Intake", "prefs": {"permissionLevel": "private"}})
+
+    return handler, calls
+
+
+def test_lists_by_id_is_the_inverse_of_lists(board_config, audit):
+    handler, calls = _board_handler(
+        [{"id": "list-doing", "name": "In Progress"}, {"id": "list-done", "name": "Done"}]
+    )
+    info = reader_with(board_config, audit, handler).board_info()
+
+    assert info.lists == {"In Progress": "list-doing", "Done": "list-done"}
+    assert info.lists_by_id == {"list-doing": "In Progress", "list-done": "Done"}
+    # Built from the same response, so the call count is unchanged from milestone 003's.
+    assert sum(1 for path in calls if path.endswith("/lists")) == 1
+    assert len(calls) == 4
+
+
+def test_two_columns_of_one_name_both_survive_in_lists_by_id(board_config, audit):
+    """FR-019b, and the reason the inverse map exists at all.
+
+    Trello permits duplicate list names. ``lists`` is name-keyed, so the two collapse and
+    one of them would quietly stay intake — an exclusion the author configured and did not
+    get. Ids are unique, so the inverse keeps both.
+    """
+    handler, _ = _board_handler(
+        [
+            {"id": "list-ice-1", "name": "Icebox"},
+            {"id": "list-ice-2", "name": "Icebox"},
+            {"id": "list-doing", "name": "In Progress"},
+        ]
+    )
+    info = reader_with(board_config, audit, handler).board_info()
+
+    assert len(info.lists) == 2, "lists collapses the duplicate — that is the problem"
+    assert info.lists_by_id == {
+        "list-ice-1": "Icebox",
+        "list-ice-2": "Icebox",
+        "list-doing": "In Progress",
+    }

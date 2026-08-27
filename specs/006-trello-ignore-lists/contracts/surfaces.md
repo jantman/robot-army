@@ -112,15 +112,20 @@ p4Xz9...  Bump the timeout          discovered  —                 parked in 'B
 c7Qw1...  Fix the exit codes        needs_info  —                 no repository named
 ```
 
-`_card_dict` gains `current_list_id`, `parked` (bool) and `parked_list` (the column's name, or
-`null`), so the JSON view answers the same question as the table.
+`_card_dict` gains `current_list_id`, `current_list_name`, `parked` (bool) and `parked_list`
+(the column's name, or `null`), so the JSON view answers the same question as the table.
+
+The derivation compares the stored **name** against `[trello] ignore_lists`, never an id against
+a resolved set: the id map lives on the board, and this listing must not need it. That is why the
+poll stores the column's name beside its id — see [data-model.md](../data-model.md).
 
 **Cards that were never tracked do not appear**, because they have no row. That is FR-006, and it is
 why `robot-army cards` is not the place to look for "what is being ignored" — `doctor` names the
 columns, and the poll record counts the cards.
 
-**No board request.** The listing reads `current_list_id` from the database, so it keeps working with
-the board unreachable. That constraint is what forced the column to exist at all.
+**No board request.** The listing reads `current_list_name` from the database and compares it against
+the configuration, so it keeps working with the board unreachable. That constraint is what forced the
+columns to exist at all, and what forced the *name* to be stored and not only the id.
 
 ## The web cards page
 

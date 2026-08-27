@@ -141,6 +141,19 @@ label            = "AI-task"        # spec.md calls this the "tag", to keep it d
                                     # from [github] label, which is the human gate
 in_progress_list = "In Progress"    # card moves here when a session is confirmed running
 done_list        = "Done"           # card moves here when the issue is observed closed
+# Columns whose cards are NOT intake. Empty by default — nothing is ignored until you
+# say so. A tagged card sitting in one of these produces no issue, no comment and no
+# move; drag it out and it is picked up on the next poll, with no re-tag and no restart.
+# That reversibility is the point: removing the tag says something about the card, moving
+# it between columns says something about *when*.
+#
+# It gates INTAKE ONLY. A card that already has an issue is never affected, which is also
+# why listing in_progress_list or done_list here is harmless rather than contradictory.
+#
+# A name that is not on the board is a STARTUP FAILURE, not a warning: a warning would
+# leave intake silently widened back to where it was, which is indistinguishable from
+# this working. Match is exact, including case. `robot-army doctor` checks each one.
+ignore_lists     = []               # e.g. ["Icebox", "Blocked", "Someday"]
 poll_seconds     = 300              # slower than GitHub: no conditional-request economy
 timeout_seconds  = 20
 max_retries      = 4

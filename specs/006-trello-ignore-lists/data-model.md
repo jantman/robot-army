@@ -2,8 +2,8 @@
 
 **Feature**: [spec.md](spec.md) | **Research**: [research.md](research.md)
 
-Almost nothing here is new, which is the point. One configuration field, one database column, one
-field on a value type, and one condition that is computed rather than stored.
+Almost nothing here is new, which is the point. One configuration field, two database columns, two
+fields on value types, and one condition that is computed rather than stored.
 
 ## Configuration
 
@@ -27,25 +27,37 @@ is looking at while reading it.
 | Entries must be non-empty after nothing is stripped | `[trello] ignore_lists contains an empty column name` |
 | Duplicates | Accepted, collapsed with `dict.fromkeys` — the same treatment `[notifications] events` already gives (FR-019a) |
 | Unknown key | `ignore_lists` joins `_SECTION_KEYS["trello"]`, so writing it is not itself an "unknown key" error |
-| Literal credential | Covered for free: the existing `_looks_like_token` sweep runs over every string value in `[trello]` |
+| Literal credential | The `[trello]` sweep, **extended** to look inside lists. It tested `isinstance(value, str)` and stopped, so this section's first list-valued key arrived as a hole in the choke point rather than a key it covered — caught in review, not by design |
 
 Existence on the board is **not** checked here — the config loader does not make network calls.
 That check is `check_board`'s, below.
 
 ## Persistence
 
-### `cards.current_list_id` — new, migration 006
+### `cards.current_list_id` and `cards.current_list_name` — new, migration 006
 
 ```sql
-ALTER TABLE cards ADD COLUMN current_list_id TEXT;
+ALTER TABLE cards ADD COLUMN current_list_id   TEXT;
+ALTER TABLE cards ADD COLUMN current_list_name TEXT;
 ```
+
+**Two columns, not the one this document originally specified.** The gap surfaced during
+implementation and is recorded rather than smoothed over: the plan said "store the id", and the id
+alone cannot answer the question the listing asks. The intake gate runs inside the poll, where the
+board's `lists_by_id` map is in hand, and wants an **id** — an equality check that is duplicate-safe
+and survives a rename mid-run. `robot-army cards` and the web listing run where the board is not
+available at all, by design, and can only compare against the **names** in `[trello] ignore_lists`.
+Neither representation serves both callers, and deriving one from the other needs exactly the board
+mapping the listing does not have.
+
+Both values are written by the same statement from the same poll, so they cannot disagree.
 
 Where the card is **now**, as the last poll saw it. Nullable, and NULL means *tracked before this
 migration and not yet re-polled* — not "in no column", which is impossible. Nothing backfills it:
 the next poll writes it, and until then the card is treated as not parked, which is milestone 003's
 behaviour and therefore the safe direction for a value we do not have.
 
-The three list-id columns that already exist answer different questions, and the distinction is the
+The three list columns that already exist answer different questions, and the distinction is the
 whole reason a fourth is needed rather than one of them being reused:
 
 | Column | Question it answers | Written when |
@@ -54,10 +66,12 @@ whole reason a fourth is needed rather than one of them being reused:
 | `placed_list_id` | Where did *we* last put it? | after a successful move — what FR-030 compares against to detect a human move |
 | `pending_move_to` | Where are we in the middle of putting it? | before a move is attempted, so our interrupted move is distinguishable from a human's |
 | **`current_list_id`** | **Where is it now?** | **every poll, from the board's `idList`** |
+| **`current_list_name`** | **What is that column called?** | **alongside the id, resolved through `lists_by_id`** |
 
 **Written by** `intake._refresh_tracked_card`, inside the transaction it already opens for
-title/body changes. **Read by** the parked derivation, the `robot-army cards` listing, the web cards
-page, and the park/release records.
+title/body changes, and seeded by `db.insert_card` at first sighting so a newly tracked card is never
+briefly unanswerable about where it is. **Read by** the parked derivation, the `robot-army cards`
+listing, the web cards page, and the park/release records.
 
 **Interruption**: a kill before the write leaves the previous value; the next poll overwrites it from
 the board. Because parked is derived from this column rather than stored beside it, a stale value
@@ -123,10 +137,20 @@ tagged" are different facts.
 **Parked** is computed, never stored:
 
 ```
-parked(card) ==
-    card.state not in (LINKED, DROPPED, CREATING)
-    and card.current_list_id in status.ignored_list_ids
+# in the poll, where the board's id map is in hand:
+ignored(card)  ==  card.list_id in status.ignored_list_ids
+
+# in the listings, where the board is not available:
+parked(card)   ==  card.state not in cardstates.NEVER_PARKED
+                   and card.current_list_name in config.trello.ignore_lists
 ```
+
+`NEVER_PARKED` — `{LINKED, CREATING, DROPPED}` — lives in `cardstates.py` because it has two
+consumers that cannot otherwise share it: `intake` decides whether to **record** a park, `operations`
+decides whether to **show** one, and `operations` imports `intake`. They were two separate literals
+until they disagreed — the record side tested only `linked`, so a `creating` card moved into an
+excluded column wrote a park record nothing would ever show, and then suppressed its own release once
+it resumed to `linked`. One set now, asserted identical by a test.
 
 No `CardState.PARKED`, no transition table entry, no boolean column. The reasons, in order of how
 badly each alternative fails:

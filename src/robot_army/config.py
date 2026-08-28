@@ -994,13 +994,23 @@ def _parse_trello(section: Any, problems: list[str]) -> TrelloConfig | None:
 
     # The same shape [github] uses: the *name* of the variable goes in the file, never
     # the value. The repository is public (Principle V).
-    for key, value in section.items():
-        if isinstance(value, str) and _looks_like_token(value):
+    #
+    # A list's *elements* are swept too, not only plain string values. The sweep predates
+    # any list-valued key in this section, so it only ever looked at strings — and when
+    # ``ignore_lists`` arrived it became a hole the choke point was blind to rather than a
+    # key it covered. A review caught it. Anything added here that can hold a string must
+    # be reachable from this loop, or the guard silently stops guarding.
+    for key, raw in section.items():
+        values = raw if isinstance(raw, list) else [raw]
+        for value in values:
+            if not (isinstance(value, str) and _looks_like_token(value)):
+                continue
             problems.append(
                 f"[trello] {key} appears to contain a literal credential. Credentials must "
                 "come from key_env/token_env or a mode-0600 key_file/token_file, never this "
                 "file — the repository is public"
             )
+            break  # one problem per key, however many elements carry a secret
 
     files = {
         f"{what}_file": _trello_credential(section, what, problems) for what in ("key", "token")

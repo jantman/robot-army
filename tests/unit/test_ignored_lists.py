@@ -28,7 +28,7 @@ from tests.conftest import (
 )
 
 from robot_army import db, intake, operations
-from robot_army.cardstates import CardState, transition_card
+from robot_army.cardstates import NEVER_PARKED, CardState, transition_card
 from robot_army.effects import EffectLevel
 
 #: The board every test here runs against. ``Icebox`` is the parking column.
@@ -599,3 +599,63 @@ def test_the_web_page_still_counts_an_unparked_needs_info_card_as_outstanding(
 
     assert view.data["needs_info"] == 1
     assert view.data["parked"] == 0
+
+
+# -- the record set and the derivation set must agree ----------------------
+
+
+@pytest.mark.parametrize("state", sorted(NEVER_PARKED, key=str))
+def test_no_park_record_is_written_for_a_state_nothing_shows_as_parked(
+    board_config, audit, conn, layout, state
+):
+    """One set, two consumers, and they must not drift.
+
+    ``intake`` decides whether to *record* a park; ``operations`` decides whether to *show*
+    one. They were two separate literals until a review caught it, and the record side
+    tested only ``linked`` — so a ``creating`` card moved into an excluded column wrote a
+    ``trello.parked`` record while never being shown as parked anywhere.
+
+    Worse, the record was **unpaired**: once that card resumed to ``linked``, the release
+    guard suppressed the matching ``trello.released``, leaving a park with no exit in a log
+    whose whole job is reconstruction.
+    """
+    import json
+
+    config = with_ignore_lists(board_config, "Icebox")
+    card = make_card("card-1", list_id="list-inbox", body="in https://github.com/jantman/demo")
+    boundaries = make_board_boundaries(audit, cards=[card], board=board())
+    status = intake.check_board(boundaries=boundaries, audit=audit, config=config)
+    row_id = track(conn, audit, card, state=state, repo_key="jantman/demo")
+
+    parked = make_card("card-1", list_id="list-ice", body=card.body)
+    intake._refresh_tracked_card(
+        conn,
+        audit=audit,
+        row=db.get_card_by_id(conn, row_id),
+        card=parked,
+        status=status,
+        dry_run=False,
+    )
+
+    # The move is still recorded on the row — the column is a cache of the board's truth,
+    # and suppressing *that* would make the next transition undetectable.
+    assert db.get_card_by_id(conn, row_id).current_list_id == "list-ice"
+
+    audit.close()
+    records = [
+        json.loads(line)
+        for path in layout.log_dir.glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert not [r for r in records if r["action"] in ("trello.parked", "trello.released")], (
+        f"a {state} card is never shown as parked, so it must never be recorded as parked"
+    )
+
+
+def test_the_record_and_the_derivation_read_the_same_set():
+    """Asserted directly, because the drift this guards against is not visible from either
+    call site on its own."""
+    from robot_army import operations
+
+    assert operations.NEVER_PARKED is NEVER_PARKED
+    assert {CardState.LINKED, CardState.CREATING, CardState.DROPPED} == NEVER_PARKED

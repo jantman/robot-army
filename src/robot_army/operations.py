@@ -48,7 +48,7 @@ from robot_army import (
 )
 from robot_army.audit import AuditLog
 from robot_army.boundaries import BoundaryError, HostHandle, TransportError
-from robot_army.cardstates import CardState
+from robot_army.cardstates import NEVER_PARKED, CardState
 from robot_army.config import Config
 from robot_army.effects import Boundaries, EffectLevel, wire
 from robot_army.migrations import SCHEMA_VERSION
@@ -1724,12 +1724,6 @@ def purge_simulated(ctx: Context, *, assume_yes: bool = False, confirm: Any = in
 # -- cards (milestone 003) --------------------------------------------------
 
 
-#: States for which the ignore list is not consulted at all (milestone 006, FR-013).
-#: ``linked`` is past intake; ``creating`` has a recorded intent that recovery must still
-#: run against; ``dropped`` is terminal and the ignore list is not a route back.
-_NEVER_PARKED = frozenset({CardState.LINKED, CardState.CREATING, CardState.DROPPED})
-
-
 def card_is_parked(card: Any, config: Any) -> bool:
     """Is this tracked card sitting in a column the author excluded? (data-model.md)
 
@@ -1746,7 +1740,7 @@ def card_is_parked(card: Any, config: Any) -> bool:
     we do not have.
     """
     trello = getattr(config, "trello", None)
-    if trello is None or not trello.ignore_lists or card.state in _NEVER_PARKED:
+    if trello is None or not trello.ignore_lists or card.state in NEVER_PARKED:
         return False
     return bool(card.current_list_name) and card.current_list_name in trello.ignore_lists
 

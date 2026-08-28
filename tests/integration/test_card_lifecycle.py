@@ -16,6 +16,7 @@ import dataclasses
 
 from tests.conftest import (
     make_board_boundaries,
+    make_board_info,
     make_card,
     seed_item,
     seed_session,
@@ -346,15 +347,35 @@ def test_parking_a_linked_card_keeps_its_mapping_and_writes_no_record(
     does not produce a park record either — a linked card is not parked, it is finished."""
     import json
 
-    boundaries = board(conn, board_config, audit, [card_named()])
+    # The board must actually *have* the excluded column. An earlier version of this test
+    # did not give it one, so `check_board` failed its own precondition, `run_cycle`
+    # returned on `status.ok is False`, and every assertion below passed because the second
+    # cycle did nothing at all — the test would have passed with the exclusion deleted.
+    lists = {"In Progress": DOING, "Done": DONE, "Inbox": INBOX, "Icebox": "list-ice"}
+    boundaries = make_board_boundaries(
+        audit, cards=[card_named()], board=make_board_info(lists=lists)
+    )
+    status = intake.check_board(boundaries=boundaries, audit=audit, config=board_config)
+    intake.run_cycle(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=board_config,
+        status=status,
+        dry_run=False,
+    )
     card_row = db.list_cards(conn)[0]
     assert card_row.state is CardState.LINKED
     config = _ignoring(board_config, "Icebox")
 
     move_on_board(boundaries, "card-1", "list-ice")
     status = intake.check_board(boundaries=boundaries, audit=audit, config=config)
+    assert status.ok, "the second cycle must really run, or this test asserts nothing"
     intake.run_cycle(
         conn, boundaries=boundaries, audit=audit, config=config, status=status, dry_run=False
+    )
+    assert db.list_cards(conn)[0].current_list_id == "list-ice", (
+        "the refresh must have seen the move, or the guard under test was never reached"
     )
 
     row = db.list_cards(conn)[0]

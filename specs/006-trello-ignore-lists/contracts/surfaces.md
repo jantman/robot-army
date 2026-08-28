@@ -61,8 +61,17 @@ are both in hand, and written **in the same transaction as the column update** �
 
 | Event | Condition | Record |
 |---|---|---|
-| park | old not ignored → new ignored, card not `linked` | `trello.parked` — `{"card_id", "list_id", "list_name", "from_list_id", "state"}` |
-| release | old ignored → new not ignored | `trello.released` — `{"card_id", "list_id", "from_list_id", "state"}` |
+| park | old not ignored → new ignored, `state not in NEVER_PARKED` | `trello.parked` — `{"card_id", "list_id", "list_name", "from_list_id", "state"}` |
+| release | old ignored → new not ignored, `state not in NEVER_PARKED` | `trello.released` — `{"card_id", "list_id", "from_list_id", "state"}` |
+
+**Both conditions read `cardstates.NEVER_PARKED`, the same set the listings derive parkedness from,
+and this is load-bearing rather than tidy.** The two sides were separate literals until review caught
+them disagreeing: the record side tested only `linked`, so a `creating` card moved into an excluded
+column wrote a `trello.parked` record while nothing ever showed it as parked — and once it resumed to
+`linked`, the release guard suppressed the matching `trello.released`, leaving a park with no exit in
+a log whose whole job is reconstruction. The set lives in `cardstates.py` because `operations`
+imports `intake`, so it cannot live in `operations`, and a second copy in `intake` is exactly how the
+two drifted.
 
 One record per transition, never one per poll. A card that sits parked for a month produces one
 `trello.parked` record, and the answer to "why did this card stop being evaluated?" is in the log

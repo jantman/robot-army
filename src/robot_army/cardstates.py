@@ -65,6 +65,24 @@ CARD_TRANSITIONS: frozenset[tuple[CardState, CardState]] = frozenset(
 
 TERMINAL_CARD_STATES: frozenset[CardState] = frozenset({CardState.LINKED, CardState.DROPPED})
 
+#: States for which milestone 006's ignore list is not consulted at all.
+#:
+#: ``linked`` is past intake (FR-013) — and it is what makes listing the in-progress or
+#: done column harmless rather than contradictory, since by the time the daemon puts a card
+#: in either it is already linked. ``creating`` has a recorded intent that R6's recovery
+#: must still run against, so parking must not cancel it. ``dropped`` is terminal and the
+#: ignore list is not a route back from it (FR-012).
+#:
+#: It lives **here** rather than beside either of its two callers because both of them need
+#: it and they cannot share it any other way: ``operations`` imports ``intake``, so the set
+#: cannot live in ``operations``, and a second copy in ``intake`` is exactly how the two
+#: drift — which they did, and a review caught it. ``intake`` decides whether to *record* a
+#: park; ``operations`` decides whether to *show* one; disagreeing produced a record for a
+#: card that was never shown as parked, and a park with no matching release.
+NEVER_PARKED: frozenset[CardState] = frozenset(
+    {CardState.LINKED, CardState.CREATING, CardState.DROPPED}
+)
+
 #: Card state → the timestamp column that state stamps, where one exists. ``creating``
 #: stamps ``intent_at`` because that timestamp *is* the intent: R6's recovery bounds its
 #: issue listing by it, so it must be written by the same statement that records the state.

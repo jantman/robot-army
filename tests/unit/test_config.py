@@ -400,10 +400,54 @@ def test_ignore_lists_is_a_recognised_key(repo_clone, layout, tmp_path):
     assert config.trello.ignore_lists == ("Icebox",)
 
 
-def test_the_credential_sweep_still_covers_ignore_lists(repo_clone, layout, tmp_path):
-    """Principle II, and free: the sweep runs over every string value in ``[trello]``, so
-    a secret pasted into a *new* key is caught without the sweep being told about it. The
-    assertion is that the new key did not arrive as a list the sweep skips silently."""
+def test_the_credential_sweep_reaches_inside_ignore_lists(repo_clone, layout, tmp_path):
+    """Principle II, and **not** free — which is the point.
+
+    The sweep was written when every value in ``[trello]`` was a plain string, so it tested
+    ``isinstance(value, str)`` and stopped. ``ignore_lists`` is the section's first list,
+    and it therefore arrived as a hole the choke point was blind to rather than as a key it
+    covered. A token pasted into it would have passed validation in silence, in a public
+    repository.
+
+    This asserts the property against the *new* key rather than re-testing ``label``: an
+    earlier version of this test put the token in ``label``, which exercised the mechanism
+    and proved nothing about the gap it claimed to close.
+    """
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            trello=trello_section(
+                ignore_lists=["Icebox", "0123456789abcdef0123456789abcdef"]
+            ),
+        )
+    assert any(
+        "ignore_lists appears to contain a literal credential" in p
+        for p in caught.value.problems
+    )
+
+
+def test_a_credential_in_ignore_lists_is_reported_once_per_key(repo_clone, layout, tmp_path):
+    """Two secrets in one list is one problem about that key, not two — the message names
+    the key, and repeating it would say the same thing twice."""
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            trello=trello_section(
+                ignore_lists=[
+                    "0123456789abcdef0123456789abcdef",
+                    "fedcba9876543210fedcba9876543210",
+                ]
+            ),
+        )
+    assert sum("ignore_lists appears" in p for p in caught.value.problems) == 1
+
+
+def test_the_credential_sweep_still_covers_plain_string_keys(repo_clone, layout, tmp_path):
+    """The pre-existing half, kept so the list change cannot regress it."""
     with pytest.raises(ConfigError) as caught:
         build(
             repo_clone,

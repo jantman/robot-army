@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from robot_army import db, health, notifications, repos
 from robot_army.boundaries import BoardInfo, BoundaryError, TransportError
-from robot_army.cardstates import CardState, transition_card, utcnow
+from robot_army.cardstates import NEVER_PARKED, CardState, transition_card, utcnow
 from robot_army.models import PollState
 
 if TYPE_CHECKING:
@@ -1751,9 +1751,12 @@ def _refresh_tracked_card(
         changed["current_list_id"] = card.list_id
         changed["current_list_name"] = _list_name(card.list_id, status)
         was, now = _is_ignored(row.current_list_id, status), _is_ignored(card.list_id, status)
-        # A linked card is never parked (FR-013), so it never produces either record —
-        # including when *we* move it into a column the author happens to have excluded.
-        if was != now and row.state is not CardState.LINKED:
+        # The **same** set the listings derive parkedness from, so a record can never be
+        # written for a card nothing will show as parked. Testing only ``LINKED`` here — as
+        # this did until a review caught it — let a `creating` card write a park record it
+        # would never show, and then suppress the matching release once it resumed to
+        # `linked`: an unpaired record, which is worse than none.
+        if was != now and row.state not in NEVER_PARKED:
             crossing = now
     if not changed:
         return

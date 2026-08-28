@@ -37,7 +37,7 @@ because a board that quietly polls the wrong thing looks healthy:
 | No empty entry | `[trello] ignore_lists contains an empty column name` |
 | Duplicates are accepted and collapsed | — (`dict.fromkeys`, as `[notifications] events` already does) |
 | `ignore_lists` is a **recognised** key | it joins `_SECTION_KEYS["trello"]`, so writing it is not itself an unknown-key error |
-| A value that looks like a literal credential | the existing `[trello]` sweep already covers every string value in the section |
+| A value that looks like a literal credential | the `[trello]` sweep, **extended** to look inside lists — it tested `isinstance(value, str)` and stopped, so this section's first list-valued key arrived as a hole in the choke point rather than a key it covered. One problem per key, however many elements carry a secret |
 
 The loader makes no network call, so **existence on the board is not checked here**.
 

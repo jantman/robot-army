@@ -968,7 +968,11 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
         base_ref = repo.base_branch or ctx.config.worker.base_branch
         try:
             current = dispatch.compute_fingerprint(ctx.boundaries, str(repo.path), base_ref)
-        except BoundaryError:
+        except (BoundaryError, OSError):
+            # ``OSError`` is the clone that is no longer there: git is invoked with the
+            # clone as its working directory, and a missing directory fails before git
+            # runs at all. Listing a moved clone is exactly when this verb is being read,
+            # so it must produce a row saying so rather than a traceback.
             current = {}
         approved = record.fingerprint if record else {}
         fingerprint_state = "matches" if current == approved else "CHANGED"

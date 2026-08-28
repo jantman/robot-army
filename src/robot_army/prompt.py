@@ -9,6 +9,10 @@ That file is read from the worktree, not from git: unlike the committed settings
 fingerprint (which is a security boundary and must reflect what a fresh worktree will
 honour), this is just prose for the session, and reading it from the prepared worktree is
 what the session itself would see.
+
+Milestone 007 adds one more optional section between those two: ``speckit.GUIDANCE``, when
+the worktree is a Spec Kit project. Same reasoning about position, one rung down — the
+repository's own instructions still frame everything, including that block.
 """
 
 from __future__ import annotations
@@ -60,8 +64,20 @@ def compose(
     repo_key: str,
     branch: str,
     instructions: str | None = None,
+    speckit_block: str | None = None,
 ) -> str:
-    """Build the prompt argument. Deterministic, so the same issue produces the same text."""
+    """Build the prompt argument. Deterministic, so the same issue produces the same text.
+
+    ``speckit_block`` is milestone 007's fixed guidance, present only when the worktree was
+    detected as a Spec Kit project and the repository is not opted out. It goes **after** a
+    repository's own instructions and **before** the issue: after, because position is how
+    this function already encodes precedence and the repository's own words must outrank a
+    generic paragraph; before, because an issue body can be 60,000 characters and guidance
+    that follows one is guidance the session reads last.
+
+    With it ``None`` the output is byte-identical to what this produced before the parameter
+    existed (FR-010), which ``tests/unit/test_speckit_prompt.py`` holds to a golden string.
+    """
     body = issue.body.strip()
     if len(body) > MAX_BODY_CHARS:
         body = (
@@ -72,6 +88,9 @@ def compose(
     sections: list[str] = []
     if instructions:
         sections.append(instructions.strip())
+        sections.append("---")
+    if speckit_block:
+        sections.append(speckit_block.strip())
         sections.append("---")
 
     labels = ", ".join(issue.labels) if issue.labels else "(none)"

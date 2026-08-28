@@ -545,7 +545,20 @@ def active_view(ctx: operations.Context, *, include_simulated: bool = False) -> 
             _empty("Nothing is running.")
             if not rows
             else table(
-                ["item", "repo", "issue", "title", "session", "started", "elapsed", "checkout"],
+                [
+                    "item",
+                    "repo",
+                    "issue",
+                    "title",
+                    "session",
+                    # Milestone 007. The reason this page exists is to answer "what is
+                    # running" from a phone, and a session five minutes into specify and one
+                    # three hours into implement are the same row without it.
+                    "spec-kit",
+                    "started",
+                    "elapsed",
+                    "checkout",
+                ],
                 [
                     [
                         item_link(row),
@@ -553,6 +566,7 @@ def active_view(ctx: operations.Context, *, include_simulated: bool = False) -> 
                         issue_link(row),
                         row["title"],
                         span(row["session_state"] or "—"),
+                        _speckit_badge(row),
                         when(row["started_at"]),
                         human_age(row["elapsed_seconds"]),
                         join(
@@ -1159,6 +1173,26 @@ def _cleanup_cell(item: dict[str, Any]) -> Any:
     return span(label, class_="outcome-error" if state != "done" else None)
 
 
+def _speckit_cell(item: dict[str, Any]) -> Any:
+    """How far a Spec Kit run has got, in one cell (milestone 007).
+
+    ``—`` means there is nothing to say, which covers both "not a Spec Kit repository" and
+    "a session that judged this issue did not warrant the lifecycle". The second is a
+    correct outcome rather than a stall (FR-016), so it must not be rendered as a warning.
+    """
+    rung = item.get("speckit_phase")
+    if not rung:
+        return span("—", class_="quiet")
+    directory = item.get("speckit_feature_dir") or ""
+    return join([rung, " ", span(directory, class_="mono")])
+
+
+def _speckit_badge(row: dict[str, Any]) -> Any:
+    """The same fact, compressed for a listing row where most rows have nothing to say."""
+    rung = row.get("speckit_phase")
+    return span(rung, class_="mono") if rung else span("—", class_="quiet")
+
+
 def item_view(
     ctx: operations.Context, item_id: int, *, include_simulated: bool = False
 ) -> View:
@@ -1218,6 +1252,8 @@ def item_view(
                             "dd",
                             _cleanup_cell(item),
                         ),
+                        tag("dt", "spec-kit"),
+                        tag("dd", _speckit_cell(item)),
                     ]
                 ),
                 class_="kv",

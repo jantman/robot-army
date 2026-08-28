@@ -1119,3 +1119,83 @@ def seed_session(
             (state, pid, exit_code, signal, row_id),
         )
     return row_id
+
+
+# -- spec kit worktrees (milestone 007) -------------------------------------
+
+
+def make_speckit_tree(
+    root: Path,
+    *,
+    scaffolding: bool = True,
+    commands: str | None = "skills",
+    features: dict[str, list[str]] | None = None,
+) -> Path:
+    """Build a directory that looks like a Spec Kit checkout, in parts.
+
+    Built rather than checked in, for the same reason ``write_proc`` is: the shapes that
+    matter here are *combinations* — scaffolding without commands, commands in the older
+    form, a feature directory with a spec but no plan — and a static fixture per
+    combination is a directory tree nobody reads and everybody forgets to update.
+
+    ``commands`` is ``"skills"``, ``"commands"``, ``"mixed"``, ``"partial"``, or ``None``.
+    ``features`` maps a feature directory name to the artifact filenames inside it, so
+    ``{"006-old": ["spec.md", "plan.md", "tasks.md"]}`` builds a finished-looking feature.
+    A ``tasks.md`` is written with unticked boxes unless the name is ``tasks-done.md``,
+    which writes a ticked one under the real filename.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    if scaffolding:
+        (root / ".specify" / "templates").mkdir(parents=True, exist_ok=True)
+        (root / ".specify" / "templates" / "spec-template.md").write_text(
+            "# Feature Specification: [FEATURE NAME]\n", encoding="utf-8"
+        )
+        (root / ".specify" / "memory").mkdir(parents=True, exist_ok=True)
+        (root / ".specify" / "memory" / "constitution.md").write_text(
+            "# Constitution\n", encoding="utf-8"
+        )
+
+    def write_skill(name: str) -> None:
+        path = root / ".claude" / "skills" / f"speckit-{name}" / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# speckit-{name}\n", encoding="utf-8")
+
+    def write_command(name: str) -> None:
+        path = root / ".claude" / "commands" / f"speckit.{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# speckit.{name}\n", encoding="utf-8")
+
+    if commands == "skills":
+        for name in ("specify", "plan", "tasks", "implement"):
+            write_skill(name)
+    elif commands == "commands":
+        for name in ("specify", "plan", "tasks", "implement"):
+            write_command(name)
+    elif commands == "mixed":
+        write_skill("specify")
+        write_skill("plan")
+        write_command("tasks")
+        write_command("implement")
+    elif commands == "partial":
+        write_skill("specify")
+        write_skill("plan")
+
+    for name, artifacts in (features or {}).items():
+        directory = root / "specs" / name
+        directory.mkdir(parents=True, exist_ok=True)
+        for artifact in artifacts:
+            if artifact == "tasks-done.md":
+                (directory / "tasks.md").write_text(
+                    "- [X] T001 done\n- [ ] T002 not done\n", encoding="utf-8"
+                )
+            elif artifact == "tasks.md":
+                (directory / "tasks.md").write_text("- [ ] T001 not done\n", encoding="utf-8")
+            else:
+                (directory / artifact).write_text(f"# {artifact}\n", encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def speckit_tree(tmp_path: Path) -> Path:
+    """A minimal, complete Spec Kit checkout with no features yet."""
+    return make_speckit_tree(tmp_path / "speckit-repo")

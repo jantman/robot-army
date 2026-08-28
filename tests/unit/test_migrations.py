@@ -9,6 +9,7 @@ import pytest
 from robot_army import db, migrations
 from robot_army.cardstates import CardState
 from robot_army.migrations import SCHEMA_VERSION, current_version, migrate
+from robot_army.states import WorkItemState
 
 EXPECTED_TABLES = {
     "repos",
@@ -506,7 +507,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 6
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 7
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -720,6 +721,115 @@ def test_migrate_is_idempotent_on_an_already_migrated_database(tmp_path):
 def test_migration_006_adds_no_table_and_no_index(tmp_path):
     conn = db.connect(tmp_path / "state.db")
     _run_only_005(conn)
+    before = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
+    }
+
+    migrate(conn)
+
+    after = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
+    }
+    assert after == before
+    conn.close()
+
+
+# -- migration 007 (milestone 007) ------------------------------------------
+
+
+def _run_only_006(conn: sqlite3.Connection) -> None:
+    """Bring a database to exactly the 006-era schema, as one in the field would be."""
+    conn.execute("BEGIN")
+    for step in migrations.MIGRATIONS[:6]:
+        step(conn)
+    conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+
+
+def test_migration_007_runs_on_a_006_era_database(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_006(conn)
+    assert current_version(conn) == 6
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (6, SCHEMA_VERSION)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
+    assert {
+        "speckit_baseline",
+        "speckit_phase",
+        "speckit_feature_dir",
+        "speckit_phase_at",
+    } <= columns
+    conn.close()
+
+
+def test_a_pre_007_item_reads_back_with_a_null_baseline(tmp_path):
+    """NULL, not ``[]``. Without a baseline nothing can be attributed to this item, so it
+    reports no phase at all — which is a different statement from "a Spec Kit worktree that
+    had no features yet", and the two must not collapse into one value.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_006(conn)
+    conn.execute(
+        """
+        INSERT INTO repos (repo_key, onboarded_at, fingerprint_approved_at)
+        VALUES ('demo', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO work_items (source, source_id, source_url, repo_key, issue_number,
+                                title, body, labels, state, dry_run, worktree_path,
+                                discovered_at, updated_at)
+        VALUES ('github', 'demo#1', 'https://github.example/1', 'demo', 1, 'Old', '', '[]',
+                'active', 0, '/tmp/wt', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+        """
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    row = db.get_work_item(conn, 1)
+    assert row is not None
+    assert row.speckit_baseline is None
+    assert row.speckit_phase is None
+    # The columns it did have are untouched — a migration that adds must not disturb.
+    assert row.worktree_path == "/tmp/wt"
+    assert row.state is WorkItemState.ACTIVE
+    conn.close()
+
+
+def test_a_killed_migration_007_leaves_user_version_at_six_and_re_runs(tmp_path, monkeypatch):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_006(conn)
+
+    def _explode(connection: sqlite3.Connection) -> None:
+        migrations._migration_007(connection)
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:6], _explode))
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+
+    assert current_version(conn) == 6
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
+    assert "speckit_phase" not in columns
+
+    monkeypatch.undo()
+    start, end = migrate(conn)
+
+    assert (start, end) == (6, SCHEMA_VERSION)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
+    assert "speckit_phase" in columns
+    conn.close()
+
+
+def test_migration_007_adds_no_table_and_no_index(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_006(conn)
     before = {
         row["name"]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")

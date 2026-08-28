@@ -283,6 +283,44 @@ secret because it is three lowercase strings with no room for one. The refusal p
 to the same rule, including the unparseable-URL refusal, which deliberately does **not** echo
 the URL back even though that is the case where doing so would feel most helpful.
 
+## The milestone 007 actions
+
+Two new actions, both cheap, and one of them writes far less often than you would expect.
+
+| Action | When | Notable detail |
+|---|---|---|
+| `speckit.detect` | Once per dispatch, before the prompt is composed | `detected`, the `reason` verbatim, the command `form` found (`skills`, `commands`, `mixed`), whether the guidance was `enabled`, and `suppressed_by` naming the setting when it was turned off |
+| `speckit.phase` | A lifecycle phase **changes** | `from`, `to`, and the `feature_dir` it was read from — plus `previous_feature_dir` when the directory itself changed |
+
+The `suppressed_by` field is the one worth knowing about. "This repository has no Spec Kit"
+and "this repository has Spec Kit and I turned the guidance off" produce the same behaviour
+and must not produce the same record, or a deliberately quiet repository reads as a broken
+one.
+
+`speckit.phase` carries no evidence from the session, because none is solicited. Spec Kit's
+extension hooks are instructions an agent chooses to follow rather than callbacks, so a
+report that never arrives is indistinguishable from a phase not yet reached; everything here
+is read from files in the worktree instead. The argument, and the three conditions that would
+make hooks worth revisiting, are in
+[the 007 spec](../specs/007-speckit-extensions/spec.md#out-of-scope).
+
+### Phase observation writes nothing when nothing changed
+
+One record per **transition**, not per reconciliation pass — the same shape of rule as
+`dispatch.at_capacity` above, and a documented summarisation rather than an exception.
+
+With a 60-second reconciliation cycle and sessions that run for hours, a record per pass
+would be some thousands of lines a day saying a phase did not change, burying the handful
+that say it did. Everything about the progression is still recorded: every transition, with
+its time, its rungs, and the directory it came from. The pass summary in `reconcile.pass`
+carries `speckit_phase_changes`, so a cycle in which nothing moved is still accounted for.
+
+An item that reports no phase at all is a legitimate resting state, not a fault — the prompt
+leaves the judgement of whether an issue warrants the lifecycle to the session, and a session
+that decides a typo fix does not need four phases produces exactly this. `robot-army show`
+explains the one case where silence is otherwise mysterious: a Spec Kit worktree whose
+baseline was never recorded, which can never report a phase and says so.
+
 ## What is deliberately not logged
 
 Principle III permits gaps only when they are named and justified in the feature plan. The
@@ -299,6 +337,8 @@ the log knows what its silence means:
 | Individual board **reads** made within a poll cycle — the freshness re-read before a move, and the comment fetch on the recovery path | Same reasoning as the GitHub one, and the same limit: they change no state outside the process, and the cycle *is* logged with what it evaluated and what it decided about each card. Every board **write** is an intent/outcome pair, without exception |
 | A **notification never attempted** because the process died between a state transition and the send | The state change itself is fully recorded, so nothing the system *did* is unreconstructable. What is lost is the knowledge that I was not told. Closing it would need a durable outbound queue with its own retry and persistence, which is more machinery than an optional stretch feature is worth — the gap is named here rather than hidden |
 | A **passing** dispatch-time clone re-verification | The worktree-creation record that follows on the same item milliseconds later already implies it passed, so a record here would be one line per dispatch answering a question the next line answers anyway. Every **failure** is logged, and the two that mean the machine changed under an approval also raise an anomaly. See the milestone 005 section above |
+| A reconciliation pass in which **no lifecycle phase changed** | Same disproportion as the heartbeat: a 60-second cycle against work that moves every few hours. Every transition is recorded individually, and the pass summary counts the changes, so nothing about the progression is unreconstructable. See the milestone 007 section above |
+| The individual **file reads** behind Spec Kit detection and phase observation | Four `stat` calls per dispatch and a handful per active item per cycle. They change no state outside the process, and the *decision* they support is logged — logging each read would bury it |
 | **Read-only web requests** — every `GET` the interface serves | They change no state outside the process, so Principle III's own scope does not reach them. The exception is written down because the *volume* makes the omission visible: a page auto-refreshing every 10 seconds issues a `GET` every 10 seconds, and logging those would bury the record this project exists to keep readable. Nothing a `GET` does is unreconstructable — the data it read is in the database and in this log. **Every `POST` is logged**, without exception |
 
 ## Silent failure is forbidden

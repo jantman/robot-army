@@ -304,6 +304,36 @@ ALTER TABLE cards ADD COLUMN current_list_name TEXT;
 """
 
 
+SCHEMA_007_SQL = """
+-- How far a Spec Kit run has got, and what makes that answerable (milestone 007).
+--
+-- speckit_baseline is the load-bearing one, and the trap it exists for is worth stating.
+-- A fresh worktree of a repository that uses Spec Kit contains every feature it has ever
+-- shipped: six directories here, each with a spec, a plan, and a tasks.md full of ticked
+-- boxes. Deriving a phase from "what artifacts exist" would therefore report `implement`
+-- the instant a worktree was created, on every item, forever. So the set of feature
+-- directory names present *at creation* is recorded, and only a directory absent from it
+-- counts as this item's work. /speckit-specify always creates a new one, so "not here
+-- before" means "this session's feature" with no heuristics and no timestamps.
+--
+-- NULL means no baseline was recorded — a row predating this migration, or one prepared
+-- before it shipped. It is not the same as '[]', which means a Spec Kit worktree that had
+-- no features yet. A NULL baseline reports no phase at all and says why, rather than
+-- deriving one late and silently classifying the session's own directory as pre-existing.
+--
+-- speckit_phase is a cache whose only job is transition detection: "did this change since
+-- I last looked" is unanswerable without the previous value, and FR-014 wants one record
+-- per transition rather than one per reconciliation cycle. The worktree stays the source
+-- of truth and every cycle re-derives from it. The one place the column outlives its
+-- source is after cleanup removes the worktree, where it becomes the item's last known
+-- stage — which is history, correctly, and is why observation never clears it.
+ALTER TABLE work_items ADD COLUMN speckit_baseline    TEXT;
+ALTER TABLE work_items ADD COLUMN speckit_phase       TEXT;
+ALTER TABLE work_items ADD COLUMN speckit_feature_dir TEXT;
+ALTER TABLE work_items ADD COLUMN speckit_phase_at    TEXT;
+"""
+
+
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
         conn.execute(statement)
@@ -334,6 +364,11 @@ def _migration_006(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_007(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_007_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -342,6 +377,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_004,
     _migration_005,
     _migration_006,
+    _migration_007,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

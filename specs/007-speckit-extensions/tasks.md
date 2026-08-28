@@ -38,8 +38,8 @@ Single project: `src/robot_army/` and `tests/` at the repository root, per
 **Purpose**: the empty shapes everything else fills in. No project initialisation is needed — this is
 an established package with its dependencies already resolved.
 
-- [ ] T001 Create `src/robot_army/speckit.py` with the module docstring, the frozen `Detection` and `Phase` dataclasses from [data-model.md](data-model.md), and the constants `LIFECYCLE = ("specify", "plan", "tasks", "implement")`, `SKILL_PATH`, `COMMAND_PATH`, `SCAFFOLD_PATHS`, and `RUNGS` — declarations only, no logic
-- [ ] T002 [P] Add a `speckit_worktree` fixture factory to `tests/conftest.py` that builds a throwaway directory with switchable parts: scaffolding present/absent, lifecycle commands in `skills` / `commands` / mixed / partial form, and an arbitrary set of `specs/<name>/` directories with chosen artifacts inside
+- [X] T001 Create `src/robot_army/speckit.py` with the module docstring, the frozen `Detection` and `Phase` dataclasses from [data-model.md](data-model.md), and the constants `LIFECYCLE = ("specify", "plan", "tasks", "implement")`, `SKILL_PATH`, `COMMAND_PATH`, `SCAFFOLD_PATHS`, and `RUNGS` — declarations only, no logic
+- [X] T002 [P] Add a `speckit_worktree` fixture factory to `tests/conftest.py` that builds a throwaway directory with switchable parts: scaffolding present/absent, lifecycle commands in `skills` / `commands` / mixed / partial form, and an arbitrary set of `specs/<name>/` directories with chosen artifacts inside
 
 ---
 
@@ -52,11 +52,11 @@ resolution two of them display.
 block (US1), gates observation (US2, per [contracts/detection.md](contracts/detection.md) §4), and is
 the entire content of the listing column (US3).
 
-- [ ] T003 Implement `detect(root)` in `src/robot_army/speckit.py` per [contracts/detection.md](contracts/detection.md) §1 — both halves required, `form` reported as `skills` / `commands` / `mixed`, every failure path returning a `Detection` with a log-ready `reason` and never raising
-- [ ] T004 [P] Write `tests/unit/test_speckit_detect.py` covering one case per row of the outcomes table: both halves present in each form and mixed, scaffolding without commands, commands without scaffolding, a partial command set naming which are missing, a `.specify` that is a file rather than a directory, an unreadable directory, and a nonexistent path
-- [ ] T005 Add the `[speckit]` section to `src/robot_army/config.py` per [contracts/config.md](contracts/config.md): `SpecKitConfig` with `enabled: bool = True`, parsing with unknown-key rejection matching the other sections, and `Config.speckit` wired into `parse()`
-- [ ] T006 Add `speckit: bool | None = None` to `RepoConfig` in `src/robot_army/config.py`, parse it in the `[repos.*]` handling, and implement `Config.speckit_enabled_for(key) -> tuple[bool, str | None]` returning the answer and the setting that produced it, following the shape of `permission_mode_for`
-- [ ] T007 [P] Write `tests/unit/test_speckit_config.py` covering the absent section defaulting to enabled, `enabled = false`, a per-repo `speckit = false` over a global true, a per-repo `speckit = true` over a global false, an unknown key in `[speckit]` raising `ConfigError`, and the provenance string returned in each case
+- [X] T003 Implement `detect(root)` in `src/robot_army/speckit.py` per [contracts/detection.md](contracts/detection.md) §1 — both halves required, `form` reported as `skills` / `commands` / `mixed`, every failure path returning a `Detection` with a log-ready `reason` and never raising
+- [X] T004 [P] Write `tests/unit/test_speckit_detect.py` covering one case per row of the outcomes table: both halves present in each form and mixed, scaffolding without commands, commands without scaffolding, a partial command set naming which are missing, a `.specify` that is a file rather than a directory, an unreadable directory, and a nonexistent path
+- [X] T005 Add the `[speckit]` section to `src/robot_army/config.py` per [contracts/config.md](contracts/config.md): `SpecKitConfig` with `enabled: bool = True`, parsing with unknown-key rejection matching the other sections, and `Config.speckit` wired into `parse()`
+- [X] T006 Add `speckit: bool | None = None` to `RepoConfig` in `src/robot_army/config.py`, parse it in the `[repos.*]` handling, and implement `Config.speckit_enabled_for(key) -> tuple[bool, str | None]` returning the answer and the setting that produced it, following the shape of `permission_mode_for`
+- [X] T007 [P] Write `tests/unit/test_speckit_config.py` covering the absent section defaulting to enabled, `enabled = false`, a per-repo `speckit = false` over a global true, a per-repo `speckit = true` over a global false, an unknown key in `[speckit]` raising `ConfigError`, and the provenance string returned in each case
 
 **Checkpoint**: `detect()` answers correctly for every shape of repository on this machine, and the
 configuration says whether a given repository wants the behaviour.
@@ -72,14 +72,14 @@ file edit anywhere.
 and confirm the prompt carries the block; dispatch one into a plain repository and confirm the prompt
 is byte-identical to the pre-milestone golden string.
 
-- [ ] T008 [US1] Capture the current output of `prompt.compose()` for a fixture issue as a golden string in `tests/unit/test_speckit_prompt.py`, taken **before** T009 changes anything, so FR-010's byte-identity has a reference that predates the edit
-- [ ] T009 [US1] Add the `GUIDANCE` constant to `src/robot_army/speckit.py` with the exact text from [contracts/prompt.md](contracts/prompt.md) — fixed text, no interpolation of any kind
-- [ ] T010 [US1] Add an optional `speckit_block: str | None = None` parameter to `compose()` in `src/robot_army/prompt.py`, inserting it as its own `---`-separated section between the repository instructions and the issue block, and leaving the output byte-identical when it is `None`
-- [ ] T011 [US1] In `build_launch_plan()` in `src/robot_army/dispatch.py`, call `speckit.detect(worktree_path)` and `config.speckit_enabled_for(repo_key)`, pass the block to `compose()` only when detected and enabled, and write one `speckit.detect` audit record carrying `detected`, `reason`, `form`, `enabled`, `suppressed_by`, and `path` per [contracts/config.md](contracts/config.md)
-- [ ] T012 [US1] Wrap the detection call in `dispatch.py` so that no exception can escape into a dispatch (FR-005): any failure is recorded as a detection miss with its error text, and the launch proceeds with the unmodified prompt
-- [ ] T013 [P] [US1] Extend `tests/unit/test_speckit_prompt.py`: the block sits between repository instructions and the issue; the block is absent when undetected and the output equals the T008 golden string; the same issue composed twice is identical; a repository with `.claude/robot-army.md` keeps its instructions first
-- [ ] T014 [P] [US1] Write `tests/unit/test_speckit_dispatch_prompt.py` covering the four suppression paths — detected and enabled, detected and globally off, detected and off for this repository, undetected — asserting the prompt content and the audit record's `enabled` / `suppressed_by` fields for each
-- [ ] T015 [P] [US1] Add a test to `tests/unit/test_speckit_dispatch_prompt.py` that a detection raising `OSError` produces a recorded miss and a normal launch, proving FR-005 by injection rather than by inspection
+- [X] T008 [US1] Capture the current output of `prompt.compose()` for a fixture issue as a golden string in `tests/unit/test_speckit_prompt.py`, taken **before** T009 changes anything, so FR-010's byte-identity has a reference that predates the edit
+- [X] T009 [US1] Add the `GUIDANCE` constant to `src/robot_army/speckit.py` with the exact text from [contracts/prompt.md](contracts/prompt.md) — fixed text, no interpolation of any kind
+- [X] T010 [US1] Add an optional `speckit_block: str | None = None` parameter to `compose()` in `src/robot_army/prompt.py`, inserting it as its own `---`-separated section between the repository instructions and the issue block, and leaving the output byte-identical when it is `None`
+- [X] T011 [US1] In `build_launch_plan()` in `src/robot_army/dispatch.py`, call `speckit.detect(worktree_path)` and `config.speckit_enabled_for(repo_key)`, pass the block to `compose()` only when detected and enabled, and write one `speckit.detect` audit record carrying `detected`, `reason`, `form`, `enabled`, `suppressed_by`, and `path` per [contracts/config.md](contracts/config.md)
+- [X] T012 [US1] Wrap the detection call in `dispatch.py` so that no exception can escape into a dispatch (FR-005): any failure is recorded as a detection miss with its error text, and the launch proceeds with the unmodified prompt
+- [X] T013 [P] [US1] Extend `tests/unit/test_speckit_prompt.py`: the block sits between repository instructions and the issue; the block is absent when undetected and the output equals the T008 golden string; the same issue composed twice is identical; a repository with `.claude/robot-army.md` keeps its instructions first
+- [X] T014 [P] [US1] Write `tests/unit/test_speckit_dispatch_prompt.py` covering the four suppression paths — detected and enabled, detected and globally off, detected and off for this repository, undetected — asserting the prompt content and the audit record's `enabled` / `suppressed_by` fields for each
+- [X] T015 [P] [US1] Add a test to `tests/unit/test_speckit_dispatch_prompt.py` that a detection raising `OSError` produces a recorded miss and a normal launch, proving FR-005 by injection rather than by inspection
 
 **Checkpoint**: US1 is complete and shippable on its own. Sessions in Spec Kit repositories start the
 way the author would have started them, and nothing else in the system has changed.
@@ -95,20 +95,20 @@ derived from files rather than reported by anyone.
 plan, and confirm the item view moves `specify` → `plan` within one reconciliation interval with no
 cooperation from the session.
 
-- [ ] T016 [US2] Add `_migration_007` and `SCHEMA_007_SQL` to `src/robot_army/migrations.py` adding `speckit_baseline`, `speckit_phase`, `speckit_feature_dir`, and `speckit_phase_at` to `work_items`, and append it to the `MIGRATIONS` ladder — appended, never editing an existing migration
-- [ ] T017 [P] [US2] Add the four matching optional fields to `WorkItem` in `src/robot_army/models.py` and to the row mapper in `src/robot_army/db.py`
-- [ ] T018 [P] [US2] Extend `tests/unit/test_migrations.py` with the 006 → 007 upgrade: the columns exist, existing rows read back `NULL` for all four, and re-running `migrate()` is a no-op
-- [ ] T019 [US2] Implement `baseline(root)` in `src/robot_army/speckit.py` per [contracts/detection.md](contracts/detection.md) §3 — sorted immediate subdirectory names of `<root>/specs/`, `()` when absent, never raising
-- [ ] T020 [US2] Implement `observe(root, *, baseline)` in `src/robot_army/speckit.py` per §2 — candidate selection excluding the baseline, the four rungs highest-wins, the documented deterministic tie-break, `tasks.md` unreadable still counting as rung `tasks`, and `None` for every "nothing to say" case
-- [ ] T021 [P] [US2] Write `tests/unit/test_speckit_phase.py`: one case per rung, an empty feature directory, a `tasks.md` with only unticked boxes, one with `- [X]` and one with `- [x]`, a `tasks.md` that is invalid UTF-8, an absent `specs/`, and a `specs/` that is a file
-- [ ] T022 [P] [US2] Write `tests/unit/test_speckit_attribution.py`: six baseline directories full of ticked tasks yielding `None` (the stale-artifact trap), a new directory yielding its rung, work inside a baseline directory yielding `None`, an empty baseline treating every directory as the item's, and two new directories resolving deterministically
-- [ ] T023 [US2] Have `worktree.prepare()` in `src/robot_army/worktree.py` compute the baseline after the worktree exists and return it on `PreparationResult`, then store it as JSON in `dispatch.dispatch_item()` inside the **same transaction** that writes `worktree_path` and `branch`
-- [ ] T024 [US2] Add `record_phase()` to `src/robot_army/speckit.py` implementing the six write rules in [data-model.md](data-model.md): NULL baseline never observes, advance-only within a directory, a directory change recorded with both names, absence never clears, one record per transition, and the audit line flushed before the commit
-- [ ] T025 [US2] Add the observation pass to `reconcile()` in `src/robot_army/reconcile.py` over items in `active` and `awaiting_review` whose worktree exists — gated on `detect()` per [contracts/detection.md](contracts/detection.md) §4 — and add a `speckit_phase_changes` counter to `ReconcileResult.summary()`
-- [ ] T026 [P] [US2] Write `tests/unit/test_speckit_record_phase.py` with one test per write rule, including the two that are easy to get wrong: a removed worktree leaving the recorded phase standing, and a re-derivation of the same rung writing no second record
-- [ ] T027 [US2] Show the phase in `operations.show()` and the status listing in `src/robot_army/operations.py` — the rung, the feature directory, and how long ago — omitting the line entirely when there is no phase rather than printing an empty or unknown one
-- [ ] T028 [US2] Show the phase on the item view and as a badge on the active view in `src/robot_army/web/pages.py`, and include the four fields in the corresponding `.json` payloads
-- [ ] T029 [US2] Write `tests/integration/test_speckit_dispatch.py` driving the whole path: prepare a Spec Kit fixture worktree carrying finished features, dispatch, assert no phase; write `specs/999-x/spec.md`, reconcile, assert `specify` and exactly one record; write `plan.md`, reconcile, assert `plan`; reconcile again unchanged and assert no new record
+- [X] T016 [US2] Add `_migration_007` and `SCHEMA_007_SQL` to `src/robot_army/migrations.py` adding `speckit_baseline`, `speckit_phase`, `speckit_feature_dir`, and `speckit_phase_at` to `work_items`, and append it to the `MIGRATIONS` ladder — appended, never editing an existing migration
+- [X] T017 [P] [US2] Add the four matching optional fields to `WorkItem` in `src/robot_army/models.py` and to the row mapper in `src/robot_army/db.py`
+- [X] T018 [P] [US2] Extend `tests/unit/test_migrations.py` with the 006 → 007 upgrade: the columns exist, existing rows read back `NULL` for all four, and re-running `migrate()` is a no-op
+- [X] T019 [US2] Implement `baseline(root)` in `src/robot_army/speckit.py` per [contracts/detection.md](contracts/detection.md) §3 — sorted immediate subdirectory names of `<root>/specs/`, `()` when absent, never raising
+- [X] T020 [US2] Implement `observe(root, *, baseline)` in `src/robot_army/speckit.py` per §2 — candidate selection excluding the baseline, the four rungs highest-wins, the documented deterministic tie-break, `tasks.md` unreadable still counting as rung `tasks`, and `None` for every "nothing to say" case
+- [X] T021 [P] [US2] Write `tests/unit/test_speckit_phase.py`: one case per rung, an empty feature directory, a `tasks.md` with only unticked boxes, one with `- [X]` and one with `- [x]`, a `tasks.md` that is invalid UTF-8, an absent `specs/`, and a `specs/` that is a file
+- [X] T022 [P] [US2] Write `tests/unit/test_speckit_attribution.py`: six baseline directories full of ticked tasks yielding `None` (the stale-artifact trap), a new directory yielding its rung, work inside a baseline directory yielding `None`, an empty baseline treating every directory as the item's, and two new directories resolving deterministically
+- [X] T023 [US2] Have `worktree.prepare()` in `src/robot_army/worktree.py` compute the baseline after the worktree exists and return it on `PreparationResult`, then store it as JSON in `dispatch.dispatch_item()` inside the **same transaction** that writes `worktree_path` and `branch`
+- [X] T024 [US2] Add `record_phase()` to `src/robot_army/speckit.py` implementing the six write rules in [data-model.md](data-model.md): NULL baseline never observes, advance-only within a directory, a directory change recorded with both names, absence never clears, one record per transition, and the audit line flushed before the commit
+- [X] T025 [US2] Add the observation pass to `reconcile()` in `src/robot_army/reconcile.py` over items in `active` and `awaiting_review` whose worktree exists — gated on `detect()` per [contracts/detection.md](contracts/detection.md) §4 — and add a `speckit_phase_changes` counter to `ReconcileResult.summary()`
+- [X] T026 [P] [US2] Write `tests/unit/test_speckit_record_phase.py` with one test per write rule, including the two that are easy to get wrong: a removed worktree leaving the recorded phase standing, and a re-derivation of the same rung writing no second record
+- [X] T027 [US2] Show the phase in `operations.show()` and the status listing in `src/robot_army/operations.py` — the rung, the feature directory, and how long ago — omitting the line entirely when there is no phase rather than printing an empty or unknown one
+- [X] T028 [US2] Show the phase on the item view and as a badge on the active view in `src/robot_army/web/pages.py`, and include the four fields in the corresponding `.json` payloads
+- [X] T029 [US2] Write `tests/integration/test_speckit_dispatch.py` driving the whole path: prepare a Spec Kit fixture worktree carrying finished features, dispatch, assert no phase; write `specs/999-x/spec.md`, reconcile, assert `specify` and exactly one record; write `plan.md`, reconcile, assert `plan`; reconcile again unchanged and assert no new record
 
 **Checkpoint**: US1 and US2 both work independently. The daemon now says what stage a session is at,
 and it is right about it in a checkout full of finished features.
@@ -123,10 +123,10 @@ labelling anything.
 **Independent Test**: run the listing against a mix of Spec Kit and plain clones, with the machine
 offline, and confirm every row is right.
 
-- [ ] T030 [US3] Add a `spec-kit` column to the table in `operations.repos()` in `src/robot_army/operations.py` reporting `yes`, `no`, `off` (detected but suppressed), or `?` (clone unreadable), running `detect()` against the **primary clone** rather than a worktree
-- [ ] T031 [US3] Add `speckit` to the `repos` JSON payload in `src/robot_army/operations.py` with `detected`, `reason`, and `enabled`, so `/repos.json` and the CLI agree
-- [ ] T032 [P] [US3] Extend `tests/unit/test_repos.py` with one case per column value, including the never-recorded-location row keeping its existing shape with `?` in the new column
-- [ ] T033 [P] [US3] Add a test to `tests/unit/test_repos.py` asserting the listing performs no network call, by running it with the GitHub boundary replaced by one that fails on any use
+- [X] T030 [US3] Add a `spec-kit` column to the table in `operations.repos()` in `src/robot_army/operations.py` reporting `yes`, `no`, `off` (detected but suppressed), or `?` (clone unreadable), running `detect()` against the **primary clone** rather than a worktree
+- [X] T031 [US3] Add `speckit` to the `repos` JSON payload in `src/robot_army/operations.py` with `detected`, `reason`, and `enabled`, so `/repos.json` and the CLI agree
+- [X] T032 [P] [US3] Extend `tests/unit/test_repos.py` with one case per column value, including the never-recorded-location row keeping its existing shape with `?` in the new column
+- [X] T033 [P] [US3] Add a test to `tests/unit/test_repos.py` asserting the listing performs no network call, by running it with the GitHub boundary replaced by one that fails on any use
 
 **Checkpoint**: all three stories are independently functional.
 
@@ -134,14 +134,14 @@ offline, and confirm every row is right.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T034 Write `tests/integration/test_speckit_writes_nothing.py` proving FR-018 and SC-004: snapshot every path under a worktree with its size and content hash, run a full dispatch and a reconciliation pass, and assert the snapshot is identical — including ignored files, which a `git status` check would miss
-- [ ] T035 [P] Document the milestone in `README.md` — what a Spec Kit repository gets, the `[speckit]` section and per-repository override, where the phase appears, and the plain statement that nothing is written into a worktree and no extension file is read or produced
-- [ ] T036 [P] Add the four new columns to `docs/state.md` with their meaning, their nullability, and the rule that absence never clears a recorded phase
-- [ ] T037 [P] Add `speckit.detect` and `speckit.phase` to `docs/logging.md`, together with the Principle III omission this milestone claims: no record for a cycle in which nothing changed, and why
-- [ ] T038 Add the 007 entry to `docs/roadmap.md` — status, what it is, the decision not to use extensions with its reasoning, and an empty "What running it taught" section — and move the "whatever survives contact with reality" parking lot to 008
-- [ ] T039 Run `uv run ruff check` and `uv run ruff format --check` over the changed files and fix what they report
-- [ ] T040 Run the full suite with `uv run pytest` and confirm it passes — the constitution's completion gate
-- [ ] T041 Walk scenarios 1 through 5 of [quickstart.md](quickstart.md) by hand, including the stale-artifact trap in scenario 4, and note anything the fixtures did not predict
+- [X] T034 Write `tests/integration/test_speckit_writes_nothing.py` proving FR-018 and SC-004: snapshot every path under a worktree with its size and content hash, run a full dispatch and a reconciliation pass, and assert the snapshot is identical — including ignored files, which a `git status` check would miss
+- [X] T035 [P] Document the milestone in `README.md` — what a Spec Kit repository gets, the `[speckit]` section and per-repository override, where the phase appears, and the plain statement that nothing is written into a worktree and no extension file is read or produced
+- [X] T036 [P] Add the four new columns to `docs/state.md` with their meaning, their nullability, and the rule that absence never clears a recorded phase
+- [X] T037 [P] Add `speckit.detect` and `speckit.phase` to `docs/logging.md`, together with the Principle III omission this milestone claims: no record for a cycle in which nothing changed, and why
+- [X] T038 Add the 007 entry to `docs/roadmap.md` — status, what it is, the decision not to use extensions with its reasoning, and an empty "What running it taught" section — and move the "whatever survives contact with reality" parking lot to 008
+- [X] T039 Run `uv run ruff check` and `uv run ruff format --check` over the changed files and fix what they report
+- [X] T040 Run the full suite with `uv run pytest` and confirm it passes — the constitution's completion gate
+- [X] T041 Walk scenarios 1 through 5 of [quickstart.md](quickstart.md) by hand, including the stale-artifact trap in scenario 4, and note anything the fixtures did not predict
 
 ---
 

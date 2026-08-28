@@ -36,6 +36,7 @@ from robot_army import (
     procinfo,
     reconcile,
     sessions,
+    speckit,
     spool,
     worktree,
 )
@@ -263,6 +264,10 @@ def status(
     result.say()
 
     if items:
+        # The Spec Kit column appears only when something in this listing has a phase.
+        # Always showing it would add a column that is empty on most rows of most
+        # listings — FR-015's "show nothing" applied to the table as well as the cell.
+        show_speckit = any(i.speckit_phase for i in items)
         rows = [
             [
                 str(i.id),
@@ -270,11 +275,16 @@ def status(
                 i.repo_key,
                 f"#{i.issue_number}",
                 (i.title[:48] + "…") if len(i.title) > 49 else i.title,
+                *([i.speckit_phase or ""] if show_speckit else []),
                 (i.failure_reason or i.blocked_reason or "")[:60],
             ]
             for i in items
         ]
-        for line in _table(rows, ["id", "state", "repo", "issue", "title", "reason"]):
+        headers = ["id", "state", "repo", "issue", "title"]
+        if show_speckit:
+            headers.append("spec-kit")
+        headers.append("reason")
+        for line in _table(rows, headers):
             result.say(line)
         if any(i.dry_run for i in items):
             result.say()
@@ -411,7 +421,80 @@ def _item_dict(item: Any) -> dict[str, Any]:
         "blocked_reason": item.blocked_reason,
         "discovered_at": item.discovered_at,
         "updated_at": item.updated_at,
+        # Milestone 007. ``None`` for everything that is not a Spec Kit run, which is most
+        # of them — an absent phase is a resting state, not a fault, so it is reported as
+        # nothing rather than as "unknown".
+        "speckit_phase": item.speckit_phase,
+        "speckit_feature_dir": item.speckit_feature_dir,
+        "speckit_phase_at": item.speckit_phase_at,
+        "speckit_baseline": item.speckit_baseline,
     }
+
+
+def _speckit_column(ctx: Context, key: str, path: Any) -> tuple[str, dict[str, Any]]:
+    """Whether this clone uses Spec Kit, and whether the behaviour is on for it (FR-021).
+
+    Four values, and the fourth is the point: ``?`` is *the clone could not be read*, which
+    is a different statement from ``no``. A listing that answered "no" for a clone that has
+    moved would be asserting something it has no evidence for.
+
+    ``off`` means detected and suppressed. Milestone 007 switches this on by itself when a
+    repository turns out to use Spec Kit, so the compensation is that the author can see
+    which repositories that is *before* labelling anything — this column is that.
+    """
+    enabled, suppressed_by = ctx.config.speckit_enabled_for(key)
+    try:
+        readable = Path(path).is_dir()
+    except OSError:
+        readable = False
+    if not readable:
+        return "?", {"detected": None, "reason": "clone could not be read", "enabled": enabled}
+
+    detection = speckit.detect(path)
+    if not detection.detected:
+        return "no", {
+            "detected": False,
+            "reason": detection.reason,
+            "enabled": enabled,
+        }
+    cell = "yes" if enabled else "off"
+    detail: dict[str, Any] = {
+        "detected": True,
+        "reason": detection.reason,
+        "form": detection.form,
+        "enabled": enabled,
+    }
+    if not enabled and suppressed_by:
+        detail["suppressed_by"] = suppressed_by
+    return cell, detail
+
+
+def _speckit_lines(item: Any) -> list[str]:
+    """The Spec Kit phase, or an explanation of why there is none (milestone 007).
+
+    Nothing at all for an ordinary item, which is the common case and the requirement
+    (FR-015): an empty or "unknown" phase on every non-Spec-Kit row would be a column that
+    means nothing four times for every once it means something.
+
+    The second branch is where the silence gets explained. An item whose worktree *is* a
+    Spec Kit project but whose baseline is ``NULL`` will never report a phase, and that is
+    correct — but "correct" and "mysterious" are the same thing from the outside, so the
+    reason is stated here, at the point the question is actually asked, rather than logged
+    once per reconciliation cycle for the life of the item.
+    """
+    if item.speckit_phase:
+        since = f" (since {item.speckit_phase_at})" if item.speckit_phase_at else ""
+        return [f"  spec-kit   : {item.speckit_phase} — {item.speckit_feature_dir}{since}"]
+    if (
+        item.speckit_baseline is None
+        and item.worktree_path
+        and speckit.detect(item.worktree_path).detected
+    ):
+        return [
+            "  spec-kit   : detected, but no baseline was recorded for this worktree, "
+            "so no phase is derived"
+        ]
+    return []
 
 
 def _session_dict(session: Any) -> dict[str, Any]:
@@ -491,6 +574,8 @@ def show(ctx: Context, item_id: int) -> Result:
     if item.cleanup_state:
         result.say(f"  cleanup    : {item.cleanup_state} — {item.cleanup_reason or ''}")
         result.say(f"  cleaned at : {item.cleaned_at}")
+    for line in _speckit_lines(item):
+        result.say(line)
 
     result.say()
     result.say("state history:")
@@ -950,7 +1035,7 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
             # have, and four question marks would describe the problem without naming the
             # one command that fixes it. It shouts for the same reason the not-onboarded
             # row below does: both are rows the author has to act on.
-            rows.append([key, "(never recorded)", "NEEDS REAPPROVE", "?", "?", "?"])
+            rows.append([key, "(never recorded)", "NEEDS REAPPROVE", "?", "?", "?", "?"])
             payload.append(
                 {
                     "repo_key": key,
@@ -972,12 +1057,13 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
             # ``OSError`` is the clone that is no longer there: git is invoked with the
             # clone as its working directory, and a missing directory fails before git
             # runs at all. Listing a moved clone is exactly when this verb is being read,
-            # so it must produce a row saying so rather than a traceback.
+            # so it must produce a row saying so rather than a traceback (FR-021).
             current = {}
         approved = record.fingerprint if record else {}
         fingerprint_state = "matches" if current == approved else "CHANGED"
         source = record.path_source if record else None
 
+        speckit_cell, speckit_detail = _speckit_column(ctx, key, repo.path)
         rows.append(
             [
                 key,
@@ -986,6 +1072,7 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
                 "yes" if trusted else "NO",
                 fingerprint_state,
                 str(len(repo.post_create)),
+                speckit_cell,
             ]
         )
         payload.append(
@@ -1003,6 +1090,7 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
                 "approved_fingerprint": approved,
                 "current_fingerprint": current,
                 "post_create_steps": len(repo.post_create),
+                "speckit": speckit_detail,
             }
         )
 
@@ -1010,7 +1098,7 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
     for key in unonboarded:
         section = ctx.config.repos[key]
         where = str(section.path) if section.path else "(derived)"
-        rows.append([key, where, "NOT ONBOARDED", "-", "-", "-"])
+        rows.append([key, where, "NOT ONBOARDED", "-", "-", "-", "-"])
         payload.append(
             {
                 "repo_key": key,
@@ -1026,7 +1114,8 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
     if not rows:
         return result.say("no repositories are onboarded — run `robot-army onboard owner/name`")
     for line in _table(
-        rows, ["repo", "clone path", "path source", "trusted", "fingerprint", "steps"]
+        rows,
+        ["repo", "clone path", "path source", "trusted", "fingerprint", "steps", "spec-kit"],
     ):
         result.say(line)
     return result

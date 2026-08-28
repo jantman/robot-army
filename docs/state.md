@@ -275,6 +275,48 @@ sqlite3 -header -column ~/.local/state/robot-army/state.db \
   'SELECT id, state, cleanup_state, cleanup_reason FROM work_items WHERE cleanup_state IS NOT NULL'
 ```
 
+### `work_items` spec-kit columns — how far a Spec Kit run has got
+
+Added by migration 007. Four nullable columns, no table, no state machine: a phase is not a
+state and `WORK_ITEM_TRANSITIONS` gains no entries, deliberately — nothing decides anything
+on these (FR-016), they only display.
+
+| Column | Meaning |
+|---|---|
+| `speckit_baseline` | JSON array of the feature directory names present in the worktree **when it was created**. `NULL` means none was recorded |
+| `speckit_phase` | `NULL` \| `specify` \| `plan` \| `tasks` \| `implement` — the last rung derived |
+| `speckit_feature_dir` | The worktree-relative directory it was read from, e.g. `specs/007-speckit-extensions` |
+| `speckit_phase_at` | When the transition was recorded |
+
+**`speckit_baseline` is the one that earns its place.** A fresh worktree of a repository that
+uses Spec Kit contains every feature it has ever shipped — in this repository, six
+directories, each with a spec, a plan, and a `tasks.md` full of ticked boxes. Deriving a
+phase from "which artifacts exist" would therefore report `implement` the instant a worktree
+was created, on every item, forever. Recording what was there at the start makes "a directory
+that was not here before" mean "this session's feature", with no heuristics and no
+timestamps, because `/speckit-specify` always creates a new one.
+
+`NULL` and `[]` are different answers and must not be conflated. `[]` is a Spec Kit worktree
+with no features yet, so every directory that appears belongs to this item. `NULL` is *no
+baseline was recorded* — a row predating the migration, or a preparation that died before its
+transaction committed — and such an item never reports a phase at all. `robot-army show` says
+so in as many words rather than leaving the silence to be puzzled over.
+
+**Observation never clears these columns.** A worktree removed by milestone 004's cleanup, a
+deleted artifact, an unreadable directory: all of them leave the last recorded phase
+standing. It is history at that point, and the log has no way to restore what clearing would
+delete.
+
+The phase is a **cache whose only job is transition detection** — "did this change since I
+last looked" is unanswerable without the previous value. The worktree stays the source of
+truth and every reconciliation pass re-derives from it, so a daemon that was down for hours
+reports the right phase on the next pass without having watched a single intermediate step.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  'SELECT id, state, speckit_phase, speckit_feature_dir FROM work_items WHERE speckit_phase IS NOT NULL'
+```
+
 ### The board's poll bookkeeping lives in `poll_state`
 
 Under the synthetic key `trello:board:<board_id>`. `poll_state` has no foreign key and no
@@ -370,6 +412,9 @@ summary:
 | After writing a request marker, before the daemon read it | The marker persists and is consumed on the next tick or the next start |
 | After the daemon unlinked a marker, before running the job | The forced flag is lost and the job runs on its ordinary interval. Accepted: the cost is one interval, and unlinking *after* would risk running it twice |
 | Web process killed mid-request, before the transaction committed | Rolled back. The browser sees a dropped connection and the item page tells the truth on reload |
+| Between the worktree existing and its spec-kit baseline being recorded | Cannot happen: the baseline commits in the same transaction as `worktree_path` and `branch`, so a kill before it redoes the whole preparation |
+| After a `speckit.phase` line was written, before its row committed | The next pass re-derives the same phase from the same files and records it again. A duplicated line at worst, never a change with no record of it |
+| Mid-observation | Nothing is written until the derivation completes. The next pass re-reads the same worktree |
 | Web process killed while a worker thread was dispatching | The item is left mid-dispatch and reconciliation resolves it — the same path any interrupted dispatch takes. This is not a new way to produce that condition |
 | After a capacity snapshot, before the dispatch it authorised | Nothing written. The next pass takes a fresh snapshot; a snapshot is never stored, so it cannot be stale |
 | Between two dispatches in one pass | Earlier items dispatched, later ones still `ready`. The next pass re-observes and re-plans — `select_and_dispatch` holds no cross-pass state |

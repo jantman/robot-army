@@ -84,6 +84,17 @@ class WorkItem:
     cleanup_state: str | None = None
     cleanup_reason: str | None = None
     cleaned_at: str | None = None
+    #: The feature directories present in the worktree when it was created, as a JSON
+    #: array (milestone 007). ``NULL`` means none was recorded, which is not ``"[]"``:
+    #: without a baseline nothing can be attributed to this item, so no phase is derived
+    #: at all and the reason is recorded once.
+    speckit_baseline: str | None = None
+    #: The last derived rung — ``specify``, ``plan``, ``tasks`` or ``implement`` — the
+    #: directory it came from, and when it changed. Advisory: nothing decides anything on
+    #: these (FR-016), and absence is a legitimate resting state rather than a fault.
+    speckit_phase: str | None = None
+    speckit_feature_dir: str | None = None
+    speckit_phase_at: str | None = None
 
     @property
     def label_list(self) -> list[str]:

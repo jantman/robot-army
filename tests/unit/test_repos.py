@@ -456,3 +456,148 @@ def test_neither_set_still_produces_no_steps_at_all(repo_clone, layout, tmp_path
     onboard_row(conn, "jantman/demo", repo_clone)
 
     assert repos.resolve(conn, config, "jantman/demo").post_create == ()
+
+
+# -- the spec-kit column (milestone 007, user story 3) ----------------------
+#
+# The reason this column exists: milestone 007 switches the prompt guidance on by itself
+# when a repository turns out to use Spec Kit, so the compensation is that the author can
+# see which repositories that is *before* labelling anything.
+
+
+def _speckit_ctx(conn, audit, config):
+    from tests.conftest import make_boundaries
+
+    from robot_army import operations
+    from robot_army.effects import EffectLevel
+
+    return operations.Context(
+        config=config,
+        conn=conn,
+        audit=audit,
+        boundaries=make_boundaries(audit),
+        effect_level=EffectLevel.LIVE,
+    )
+
+
+def _speckit_rows(conn, audit, config):
+    from robot_army import operations
+
+    result = operations.repos(_speckit_ctx(conn, audit, config))
+    return {entry["repo_key"]: entry for entry in result.data["repos"]}, result
+
+
+SPECKIT_FILES = {
+    ".specify/templates/spec-template.md": "# Feature Specification\n",
+    **{
+        f".claude/skills/speckit-{name}/SKILL.md": f"# speckit-{name}\n"
+        for name in ("specify", "plan", "tasks", "implement")
+    },
+}
+
+
+def test_a_speckit_clone_reports_yes(conn, audit, config, tmp_path):
+    from tests.conftest import onboard_repo
+
+    clone = make_repo(tmp_path / "clones" / "sk", files=SPECKIT_FILES)
+    onboard_repo(conn, "jantman/sk", clone)
+
+    rows, result = _speckit_rows(conn, audit, config)
+
+    assert rows["jantman/sk"]["speckit"]["detected"] is True
+    assert rows["jantman/sk"]["speckit"]["form"] == "skills"
+    assert "spec-kit" in "\n".join(result.lines)
+
+
+def test_a_plain_clone_reports_no_with_a_reason(conn, audit, config, repo_clone):
+    from tests.conftest import onboard_repo
+
+    onboard_repo(conn, "jantman/plain", repo_clone)
+
+    rows, _ = _speckit_rows(conn, audit, config)
+
+    assert rows["jantman/plain"]["speckit"]["detected"] is False
+    assert "no spec kit scaffolding" in rows["jantman/plain"]["speckit"]["reason"]
+
+
+def test_a_suppressed_repository_reports_detected_and_off(conn, audit, tmp_path, layout):
+    """`off` is detected-and-turned-off, which is a third thing from `yes` and `no`."""
+    from tests.conftest import config_dict, onboard_repo
+
+    from robot_army.config import parse
+
+    clone = make_repo(tmp_path / "clones" / "demo", files=SPECKIT_FILES)
+    monkey_token()
+    config = parse(
+        config_dict(
+            clone,
+            layout,
+            tmp_path / "worktrees",
+            repos={"demo": {"path": str(clone), "base_branch": "main", "speckit": False}},
+        ),
+        tmp_path / "config.toml",
+    )
+    onboard_repo(conn, "demo", clone)
+
+    rows, result = _speckit_rows(conn, audit, config)
+
+    assert rows["demo"]["speckit"]["detected"] is True
+    assert rows["demo"]["speckit"]["enabled"] is False
+    assert rows["demo"]["speckit"]["suppressed_by"] == '[repos."demo"] speckit'
+    assert "off" in "\n".join(result.lines)
+
+
+def test_a_missing_clone_reports_unknown_rather_than_no(conn, audit, config, tmp_path):
+    """A clone that has moved is not evidence that Spec Kit is absent, and the listing
+    must not assert something it cannot see."""
+    from tests.conftest import onboard_repo
+
+    onboard_repo(conn, "jantman/gone", tmp_path / "clones" / "vanished")
+
+    rows, _ = _speckit_rows(conn, audit, config)
+
+    assert rows["jantman/gone"]["speckit"]["detected"] is None
+    assert "could not be read" in rows["jantman/gone"]["speckit"]["reason"]
+
+
+def test_the_listing_makes_no_network_call(conn, audit, config, tmp_path):
+    """SC-008. The answer must be available with the machine offline, which is when the
+    author is most likely to be looking at a phone rather than a terminal."""
+    from tests.conftest import onboard_repo
+
+    from robot_army import operations
+    from robot_army.effects import Boundaries, EffectLevel
+
+    class Explodes:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"the repos listing must not touch the network ({name})")
+
+    clone = make_repo(tmp_path / "clones" / "sk", files=SPECKIT_FILES)
+    onboard_repo(conn, "jantman/sk", clone)
+
+    from robot_army.boundaries.git import GitVersionControl
+
+    boundaries = Boundaries(
+        level=EffectLevel.LIVE,
+        issue_reader=Explodes(),
+        issue_writer=Explodes(),
+        card_reader=None,
+        card_writer=None,
+        version_control=GitVersionControl(audit),
+        hook_runner=None,
+        session_host=None,
+        display=None,
+        notifier=None,
+    )
+    ctx = operations.Context(
+        config=config,
+        conn=conn,
+        audit=audit,
+        boundaries=boundaries,
+        effect_level=EffectLevel.LIVE,
+    )
+
+    result = operations.repos(ctx)
+
+    rows = {entry["repo_key"]: entry for entry in result.data["repos"]}
+    assert rows["jantman/sk"]["speckit"]["detected"] is True

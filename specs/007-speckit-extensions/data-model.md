@@ -60,8 +60,15 @@ all the same instruction to the caller — *leave what is recorded alone*.
 These are the whole state model, and they are stated as rules rather than as a transition table
 because the ladder is ordered and the interesting cases are the ones that refuse to move.
 
-1. **`NULL` baseline ⇒ never observe.** No phase is derived, no column is written, and the reason is
-   recorded once per item rather than once per cycle.
+1. **`NULL` baseline ⇒ never observe.** No phase is derived and no column is written.
+
+   *Built differently from the first draft of this rule, and the change is worth recording.*
+   The draft said the reason was "recorded once per item"; doing that needs somewhere to
+   remember that it had been logged, which is a persistent column for a log line. Principle I
+   settles that. Instead the silence is explained where the question is actually asked:
+   `robot-army show` says "detected, but no baseline was recorded for this worktree, so no
+   phase is derived" for exactly this case, computed at render time from four `stat` calls.
+   Nothing is logged per cycle, and nothing is logged per item either.
 2. **Advance only, within a feature directory.** If the derived rung is at or below the stored rung
    for the same `speckit_feature_dir`, nothing is written and nothing is logged. A ladder that can
    descend would turn an ordinary artifact edit into a spurious transition.

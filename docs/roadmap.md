@@ -208,15 +208,77 @@ instead of leaning on the activity-baseline short circuit. CI cannot settle it, 
 can it prove that a real board with two same-named columns behaves as the constructed
 `BoardInfo` fixture assumes.
 
-## 007 — Whatever survives contact with reality
+## 007 — Spec Kit Awareness (`specs/007-speckit-extensions/`)
+
+**Status:** implemented
+
+Not from the planning document. [Issue #9](https://github.com/jantman/robot-army/issues/9),
+which asks a question rather than describing a feature: spec-kit has an extensions mechanism,
+more than half my work uses spec-kit, so should robot-army populate extensions to monitor
+and/or drive the process.
+
+**The answer is no, and that is most of the milestone.** A spec-kit hook is read and executed
+by the *agent* as part of following its own command instructions. Nothing in spec-kit calls
+out to anything; there is no daemon-side event; a hook can only name a command that exists in
+that repository's integration. So a hook is a report the session chose to make, and an absent
+report means either "not there yet" or "did not bother" with nothing to tell them apart. A
+design whose failure mode is silence is the one this project has twice gone out of its way to
+avoid.
+
+The filesystem is not that. Spec Kit writes `spec.md`, `plan.md` and `tasks.md` at documented
+paths, and reading them needs no cooperation, no injection, and no trust in the session.
+Nearly the same question, and only one of the two mechanisms can be wrong about it. The three
+conditions that would make hooks worth revisiting are written down in the spec's Out of Scope
+section rather than left as an omission — a deferral with no stated trigger is how a decision
+gets re-litigated from scratch a year later.
+
+What ships instead is two layers. **Tell the session**: detect spec-kit from the worktree's
+own contents and put the lifecycle in the prompt, which stops me writing the same
+`.claude/robot-army.md` into every spec-kit repository — 005's lesson repeating verbatim.
+**Watch the files**: derive which stage a running session reached, so `/active` stops showing
+a session five minutes into specify and one three hours into implement as the same row.
+
+Three decisions were taken during specification. The prompt states the convention for when
+the lifecycle applies and **the session judges**, because a second label puts the decision at
+the moment I am already labelling and a size heuristic is the daemon guessing at something
+the session reading the issue knows better; the cost is that SC-001 is a rate measured over
+the live round rather than an assertion, and the spec says so. Detection switches the
+behaviour **on by itself**, with a global and per-repository kill switch, because
+per-repository opt-in reintroduces exactly the step 005 spent a milestone removing — and user
+story 3, the `repos` listing column, exists as the price of that rather than as a nicety. And
+**nothing is written into a worktree at all**, which is a requirement (FR-018) with a test
+that hashes the whole tree rather than a habit.
+
+The load-bearing design problem was attribution. A fresh worktree of this repository contains
+six finished features, each with a `tasks.md` full of ticked boxes, so a phase derived from
+"which artifacts exist" reports `implement` the instant the worktree exists — confidently
+wrong on every row. Modification times cannot separate them, because `git worktree add`
+stamps every checked-out file with the creation time. `git status` answers correctly until
+the session commits its spec. So the set of feature directories present at creation is
+recorded on the item, and `/speckit-specify` always creating a new one makes "not here
+before" mean "this session's feature".
+
+Two measurements removed mechanisms that would otherwise have looked obvious.
+`.specify/feature.json` is **gitignored** — machine-local state, absent from a fresh worktree
+— so nothing can depend on it. And no `git` subprocess is invoked anywhere, because
+`git status` can refresh `.git/index` and not having the argument is better than winning it
+with `--no-optional-locks`.
+
+### What running it taught
+
+*To be filled in after the live round.* The number to watch is SC-001: how often a session in
+a spec-kit repository actually starts with the lifecycle, given that FR-008 hands it the
+judgement. CI cannot settle that one, by construction.
+
+## 008 — Whatever survives contact with reality
 
 **Status:** not specified
 
 Planning doc M5. Parked items from §16 that are still genuinely open — kitty control
 socket hardening, multi-machine dispatch, scheduled/proactive work — land here or get dropped.
 
-Moved from the 006 slot, which 006 claimed for the same reason 005 claimed its own: a
-milestone with a shape displaces a parking lot without one.
+Moved from the 007 slot, which 007 claimed for the same reason 006 and 005 claimed theirs: a
+milestone with a shape displaces a parking lot without one. Three times now.
 
 ---
 

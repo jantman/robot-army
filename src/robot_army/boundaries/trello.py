@@ -285,6 +285,7 @@ class TrelloCardReader:
         members = self._request("GET", f"{path}/members", params={"fields": "id"}).json()
         labels = self._request("GET", f"{path}/labels", params={"fields": "name", "limit": 1000})
         lists = self._request("GET", f"{path}/lists", params={"fields": "name", "filter": "open"})
+        list_payload = lists.json()
 
         info = BoardInfo(
             board_id=board_id,
@@ -298,7 +299,11 @@ class TrelloCardReader:
                 for item in labels.json()
                 if item.get("name")
             },
-            lists={str(item.get("name")): str(item.get("id")) for item in lists.json()},
+            lists={str(item.get("name")): str(item.get("id")) for item in list_payload},
+            # The inverse, from the same payload. Keyed by id because ids are unique and
+            # names are not: two columns called "Icebox" collapse in ``lists`` and would
+            # leave one of them quietly still intake (milestone 006, FR-019b).
+            lists_by_id={str(item.get("id")): str(item.get("name")) for item in list_payload},
         )
         self._audit.record(
             "trello.board.check",

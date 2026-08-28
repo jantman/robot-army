@@ -15,23 +15,21 @@ Two properties carry the design weight here:
 from __future__ import annotations
 
 import pytest
-from tests.conftest import FakeCardReader, make_board_boundaries, make_card
+from tests.conftest import (
+    FakeCardReader,
+    make_board_boundaries,
+    make_board_info,
+    make_card,
+    with_ignore_lists,
+)
 
 from robot_army import db, intake
 from robot_army.boundaries import BoardInfo, TransportError
 
 
 def board(**overrides) -> BoardInfo:
-    defaults = {
-        "board_id": "board-1",
-        "name": "Intake",
-        "permission_level": "private",
-        "member_ids": ("member-1",),
-        "labels": {"AI-task": "label-ai"},
-        "lists": {"In Progress": "list-doing", "Done": "list-done"},
-    }
-    defaults.update(overrides)
-    return BoardInfo(**defaults)
+    overrides.setdefault("lists", {"In Progress": "list-doing", "Done": "list-done"})
+    return make_board_info(**overrides)
 
 
 def check(board_config, audit, **overrides):
@@ -313,3 +311,132 @@ def test_doctor_reports_extra_members_without_failing(board_config, audit, conn,
     members = next(c for c in result.data["checks"] if c["name"] == "board: board members")
     assert members["ok"] is True
     assert "board: board members" not in result.data["failures"]
+
+
+# -- ignored columns (milestone 006, T049-T052) -----------------------------
+
+ICEBOX_LISTS = {
+    "Inbox": "list-inbox",
+    "Icebox": "list-ice",
+    "In Progress": "list-doing",
+    "Done": "list-done",
+}
+
+
+def ignored_checks(status):
+    return [c for c in status.checks if c.name == "ignored list exists"]
+
+
+def test_a_configured_ignored_column_that_exists_passes_and_is_named(board_config, audit):
+    config = with_ignore_lists(board_config, "Icebox")
+    boundaries = make_board_boundaries(audit, board=board(lists=ICEBOX_LISTS))
+    status = intake.check_board(boundaries=boundaries, audit=audit, config=config)
+
+    assert status.ok
+    checks = ignored_checks(status)
+    assert len(checks) == 1
+    assert "'Icebox' found" in checks[0].detail
+    assert status.ignored_list_ids == frozenset({"list-ice"})
+
+
+def test_a_missing_ignored_column_fails_and_lists_what_the_board_has(board_config, audit):
+    """FR-017. Naming what is missing is half of it; listing what exists is the half that
+    turns "the column is missing" into "the column is missing, and here is the one you
+    renamed"."""
+    config = with_ignore_lists(board_config, "Icebox", "Blocked")
+    boundaries = make_board_boundaries(audit, board=board(lists=ICEBOX_LISTS))
+    status = intake.check_board(boundaries=boundaries, audit=audit, config=config)
+
+    assert not status.ok
+    failed = [c for c in ignored_checks(status) if not c.ok]
+    assert len(failed) == 1
+    assert "'Blocked'" in failed[0].detail
+    assert "Icebox" in failed[0].detail and "In Progress" in failed[0].detail
+
+
+def test_a_case_mismatch_fails_rather_than_matching(board_config, audit):
+    """FR-019. Exact match, including case — the same rule the tag and lifecycle columns
+    already use. A near-miss is *reported*, which is what makes exactness the friendly
+    choice here rather than the strict one."""
+    config = with_ignore_lists(board_config, "icebox")
+    boundaries = make_board_boundaries(audit, board=board(lists=ICEBOX_LISTS))
+    status = intake.check_board(boundaries=boundaries, audit=audit, config=config)
+
+    assert not status.ok
+    assert status.ignored_list_ids == frozenset()
+    assert "'icebox'" in ignored_checks(status)[0].detail
+
+
+def test_a_failing_ignored_column_refuses_ingestion_only(board_config, audit, conn):
+    """FR-018, and the half most likely to regress unnoticed. An unrelated board
+    misconfiguration must not take down dispatch of issues the author wrote themselves."""
+    config = with_ignore_lists(board_config, "Blocked")
+    boundaries = make_board_boundaries(
+        audit, cards=[make_card("card-1")], board=board(lists=ICEBOX_LISTS)
+    )
+    status = intake.check_board(boundaries=boundaries, audit=audit, config=config)
+
+    outcome = intake.poll_board(
+        conn, boundaries=boundaries, audit=audit, config=config, status=status, dry_run=False
+    )
+
+    assert outcome.skipped_reason == "board preconditions failed"
+    assert outcome.found == 0
+    assert db.list_cards(conn) == []
+    # Nothing about the board was even asked, let alone written to.
+    assert boundaries.card_reader.poll_calls == []
+    assert boundaries.card_writer.comments == []
+
+
+def test_no_ignored_columns_appends_no_checks(board_config, audit):
+    """FR-002 at the check layer: the board section reports exactly what milestone 003
+    reported, so an unconfigured installation cannot fail a check that did not exist."""
+    boundaries = make_board_boundaries(audit, board=board(lists=ICEBOX_LISTS))
+    status = intake.check_board(boundaries=boundaries, audit=audit, config=board_config)
+
+    assert ignored_checks(status) == []
+    assert status.ok
+
+
+def test_the_startup_record_names_the_ignored_columns(board_config, audit, layout):
+    """FR-022. The poll's aggregate count says *how many* were excluded; this says *by
+    what*. Neither alone reconstructs the decision."""
+    import json
+
+    config = with_ignore_lists(board_config, "Icebox")
+    boundaries = make_board_boundaries(audit, board=board(lists=ICEBOX_LISTS))
+    intake.check_board(boundaries=boundaries, audit=audit, config=config)
+    audit.close()
+
+    records = [
+        json.loads(line)
+        for path in layout.log_dir.glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    check = next(r for r in records if r["action"] == "trello.board.check" and "checks" in r["detail"])
+    assert check["detail"]["ignored_lists"] == ["Icebox"]
+
+
+def test_both_columns_of_a_duplicated_name_are_excluded(board_config, audit):
+    """FR-019b, and the reason ``lists_by_id`` exists.
+
+    ``lists`` is name-keyed and collapses the two, so resolving through it would leave one
+    of them quietly still intake — an exclusion the author configured and did not get.
+    """
+    config = with_ignore_lists(board_config, "Icebox")
+    boundaries = make_board_boundaries(
+        audit,
+        board=make_board_info(
+            lists={"Icebox": "list-ice-2", "In Progress": "list-doing", "Done": "list-done"},
+            lists_by_id={
+                "list-ice-1": "Icebox",
+                "list-ice-2": "Icebox",
+                "list-doing": "In Progress",
+                "list-done": "Done",
+            },
+        ),
+    )
+    status = intake.check_board(boundaries=boundaries, audit=audit, config=config)
+
+    assert status.ok
+    assert status.ignored_list_ids == frozenset({"list-ice-1", "list-ice-2"})

@@ -219,6 +219,7 @@ board_id         = "5f3a..."        # required when the section is present
 label            = "AI-task"        # the tag that marks a card as work
 in_progress_list = "In Progress"
 done_list        = "Done"
+ignore_lists     = ["Icebox"]       # columns whose cards are NOT intake; empty by default
 poll_seconds     = 300              # slower than GitHub's 60, deliberately
 
 key_env          = "TRELLO_API_KEY"     # the NAME of a variable, never the value
@@ -228,7 +229,7 @@ token_env        = "TRELLO_API_TOKEN"   # or key_file / token_file, mode 0600
 ```bash
 export TRELLO_API_KEY=...     # https://trello.com/power-ups/admin
 export TRELLO_API_TOKEN=...
-uv run robot-army doctor      # now checks the board too — all six must be green
+uv run robot-army doctor      # now checks the board too — every check must be green
 uv run robot-army cards       # what is on the board and what became of it
 ```
 
@@ -242,10 +243,36 @@ uv run robot-army cards       # what is on the board and what became of it
   doing nothing.
 - Both lifecycle lists exist. A missing one is otherwise discovered halfway through a
   lifecycle, after the issue already exists.
+- Every column named in `ignore_lists` exists. This one refuses for a reason worth stating:
+  a warning would leave intake silently widened back to what it was, the excluded column
+  would start filing issues, and nothing would look broken.
 
 The board's **member list is recorded and never gated on**. Who else may see my own private
 board is my decision, and a second member can at most cause an unlabelled issue to be filed —
 only I can cause one to run.
+
+### Parking a card
+
+`ignore_lists` names columns whose cards are **not** intake. A tagged card sitting in one
+produces no issue, no comment and no move. Drag it out and it is picked up on the next poll —
+no re-tag, no rescan, no restart.
+
+That reversibility is the whole point. Before this, the only way to stop a tagged card being
+filed was to remove the tag: a one-way answer about what the card *is*, to a question that is
+almost always about *when*. Columns are where I already say when. So an icebox column is a
+parking space, and parking spaces have to work in both directions.
+
+It gates **intake only**. A card that already has an issue is untouched in either direction —
+its mapping, its session and its remaining board moves all continue — which is also why
+listing `in_progress_list` or `done_list` here is harmless rather than contradictory: by the
+time the daemon puts a card in either, that card is already linked.
+
+A parked card shows as `parked in 'Icebox'` in `robot-army cards` and on `/cards`, *alongside*
+whatever else it is rather than instead of it: a card can be awaiting clarification and parked
+at once, which is exactly what writing a vague card and shelving it produces. The poll record
+counts them (`{"tagged": 140, "ignored": 100, ...}`) and logs one line when a card is parked
+and one when it is released — not one per card per cycle, which on a full icebox would be the
+majority of the log saying nothing happened.
 
 ### When a card doesn't say enough
 

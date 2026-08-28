@@ -500,6 +500,8 @@ def insert_card(
     dry_run: bool,
     last_activity: str | None = None,
     origin_list_id: str | None = None,
+    current_list_id: str | None = None,
+    current_list_name: str | None = None,
 ) -> int | None:
     """Insert a ``discovered`` row, or return ``None`` if this card is already tracked.
 
@@ -511,14 +513,19 @@ def insert_card(
     ``origin_list_id`` is captured here, at first sighting, because this is the only moment
     the card is guaranteed to be where the author left it. Learning it later would record
     a list *we* put it in as the place it came from.
+
+    ``current_list_id`` starts as the same value and diverges from it the moment the card
+    moves — the poll refreshes one and never the other (milestone 006). Seeding it here
+    rather than leaving it NULL until the second poll means a card is never briefly
+    unanswerable about where it is.
     """
     now = utcnow()
     cursor = conn.execute(
         """
         INSERT OR IGNORE INTO cards
             (board_id, card_id, card_url, title, body, state, dry_run, last_activity,
-             origin_list_id, first_seen_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             origin_list_id, current_list_id, current_list_name, first_seen_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             board_id,
@@ -530,6 +537,8 @@ def insert_card(
             int(dry_run),
             last_activity,
             origin_list_id,
+            current_list_id,
+            current_list_name,
             now,
             now,
         ),

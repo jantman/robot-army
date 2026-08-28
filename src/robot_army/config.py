@@ -177,6 +177,23 @@ class TrelloConfig:
     label: str = "AI-task"
     in_progress_list: str = "In Progress"
     done_list: str = "Done"
+    #: Board column *names* whose cards are not intake (milestone 006, FR-001).
+    #:
+    #: Empty by default, which is what makes an unconfigured installation behaviourally
+    #: identical to milestone 003: the ids resolve to an empty frozenset and every
+    #: comparison against it is false, so the exclusion is inert rather than merely
+    #: skipped at a call site.
+    #:
+    #: It gates **intake only**. A card that already has a recorded issue is never
+    #: affected in either direction — which is also what makes listing
+    #: ``in_progress_list`` or ``done_list`` here a harmless no-op rather than a
+    #: contradiction the loader has to reject: by the time the daemon puts a card in
+    #: either, the card is ``linked``.
+    #:
+    #: A tuple, ordered as written, because ``doctor``'s report and the failure messages
+    #: read back in the author's own order — a set would reorder a report of a file they
+    #: are looking at while reading it.
+    ignore_lists: tuple[str, ...] = ()
     poll_seconds: int = 300
     timeout_seconds: int = 20
     max_retries: int = 4
@@ -450,6 +467,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "label",
         "in_progress_list",
         "done_list",
+        "ignore_lists",
         "poll_seconds",
         "timeout_seconds",
         "max_retries",
@@ -948,6 +966,25 @@ def _parse_trello(section: Any, problems: list[str]) -> TrelloConfig | None:
             return default
         return value
 
+    def _names(key: str) -> tuple[str, ...]:
+        """A list of column names, deduplicated, in the order the author wrote them.
+
+        ``dict.fromkeys`` rather than a set for the ordering ``TrelloConfig`` explains,
+        and the same call ``[notifications] events`` already uses — one convention for
+        "a list of names, written once each" rather than two.
+        """
+        value = section.get(key, [])
+        if not isinstance(value, list) or any(not isinstance(name, str) for name in value):
+            problems.append(f"[trello] {key} must be a list of strings, got {value!r}")
+            return ()
+        if any(not name for name in value):
+            # Not stripped and not skipped: an empty entry cannot match a board column,
+            # so accepting it would mean the author configured an exclusion that silently
+            # excludes nothing — the exact failure the startup check exists to catch.
+            problems.append(f"[trello] {key} contains an empty column name")
+            return ()
+        return tuple(dict.fromkeys(value))
+
     board_id = _text("board_id", "")
     if not board_id.strip():
         problems.append(
@@ -957,13 +994,23 @@ def _parse_trello(section: Any, problems: list[str]) -> TrelloConfig | None:
 
     # The same shape [github] uses: the *name* of the variable goes in the file, never
     # the value. The repository is public (Principle V).
-    for key, value in section.items():
-        if isinstance(value, str) and _looks_like_token(value):
+    #
+    # A list's *elements* are swept too, not only plain string values. The sweep predates
+    # any list-valued key in this section, so it only ever looked at strings — and when
+    # ``ignore_lists`` arrived it became a hole the choke point was blind to rather than a
+    # key it covered. A review caught it. Anything added here that can hold a string must
+    # be reachable from this loop, or the guard silently stops guarding.
+    for key, raw in section.items():
+        values = raw if isinstance(raw, list) else [raw]
+        for value in values:
+            if not (isinstance(value, str) and _looks_like_token(value)):
+                continue
             problems.append(
                 f"[trello] {key} appears to contain a literal credential. Credentials must "
                 "come from key_env/token_env or a mode-0600 key_file/token_file, never this "
                 "file — the repository is public"
             )
+            break  # one problem per key, however many elements carry a secret
 
     files = {
         f"{what}_file": _trello_credential(section, what, problems) for what in ("key", "token")
@@ -974,6 +1021,7 @@ def _parse_trello(section: Any, problems: list[str]) -> TrelloConfig | None:
         label=_text("label", "AI-task"),
         in_progress_list=_text("in_progress_list", "In Progress"),
         done_list=_text("done_list", "Done"),
+        ignore_lists=_names("ignore_lists"),
         poll_seconds=_number("poll_seconds", 300, minimum=1),
         timeout_seconds=_number("timeout_seconds", 20, minimum=1),
         max_retries=_number("max_retries", 4, minimum=0),

@@ -191,8 +191,23 @@ a duplicate issue gets created.
 | `origin_list_id` | Where the card was before we ever touched it |
 | `placed_list_id` | Where we last put it |
 | `pending_move_to` | Where we were *about* to put it |
+| `current_list_id`, `current_list_name` | Where it is **now**, refreshed every poll (migration 006) |
 | `comment_posted_at` | When the marker comment was posted |
 | `intent_at` | When creation was attempted — the bound on crash recovery |
+
+**Four list columns, because they answer four different questions.** Three of them are about
+the past — where the card started, where we put it, where we were about to put it — and only
+`current_list_id` is about the present. Milestone 006 needed the present one: a tagged card in
+a column named by `[trello] ignore_lists` is not intake, and `robot-army cards` has to be able
+to say so with the board unreachable. `NULL` means *tracked before migration 006 and not yet
+re-polled*, which is treated as not parked.
+
+The **name** is stored beside the id because its two consumers cannot share one
+representation. The intake gate runs inside the poll, where the board's id-to-name map is in
+hand, and wants an id: an equality check that is duplicate-safe (Trello permits two columns of
+the same name) and survives a rename mid-run. The listing commands run where the board is not
+available at all and can only compare against the names in the configuration. Both values are
+written by the same statement from the same poll, so they cannot disagree.
 
 **The `§11` invariant is two unique indexes, not a rule the create path follows.**
 `idx_cards_identity` is unique on `(board_id, card_id, dry_run)`, and the partial

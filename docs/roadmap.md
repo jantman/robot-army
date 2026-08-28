@@ -159,12 +159,64 @@ the five real wrong-location clones being refused, a clone moving out from under
 request count being one against an account with 252 repositories rather than against a fake with
 three.
 
-## 006 — Whatever survives contact with reality
+## 006 — Trello Column Ignore List (`specs/006-trello-ignore-lists/`)
+
+**Status:** implemented
+
+Not from the planning document. [Issue #3](https://github.com/jantman/robot-army/issues/3),
+filed from using 003. Milestone 003's intake rule is *a tagged card is intake*, and position
+on the board is no part of it — but the tag is something I set once and the column is
+something I change constantly, because moving cards between columns is what a board is for.
+The first time a tagged card ends up somewhere I do not want it acted on, my only option is
+to remove the tag: a destructive, one-way answer about what the card *is*, to a question that
+is nearly always about *when*.
+
+So intake becomes: a tagged card, in a column I have not excluded. `[trello] ignore_lists`
+holds the column names, empty by default.
+
+**Parking is reversible where untagging is not**, and that asymmetry is the milestone. A
+parking space you cannot drive out of is a scrapyard, and the bug would be the worst kind
+here — I do something reasonable, nothing happens, and I have no reason to suspect the system
+rather than myself.
+
+Making that true turned out to be the whole design problem. `_reconcile_board_contents` drops
+every tracked card absent from the poll listing, and `dropped` is terminal: `CARD_TRANSITIONS`
+gives it no exit. So the obvious implementation — filter ignored cards out of what the reader
+returns — would have made parking an already-tracked card destroy it permanently and
+silently. Ignored cards therefore stay in the listing, the exclusion happens in two guards
+over one predicate, and **parked is derived rather than stored**: tracked, not linked, current
+column in the ignored set. No new card state, so `cardstates.py` is untouched.
+
+Two things the code forced that the plan had not anticipated. `BoardInfo.lists` is name-keyed,
+so two board columns of the same name collapse and one would have quietly stayed intake;
+`lists_by_id` fixes it by the shape of the data, from the same response, with no extra
+request. And the listing commands must answer "is this parked?" with the board unreachable,
+which the id alone cannot do — so `cards` stores the column's **name** beside its id, one for
+each consumer, written by the same statement.
+
+The gate's position inside `evaluate_card` is a contract rather than a style choice, and
+`contracts/surfaces.md` states it as a table: each neighbour is fixed by a different
+requirement, so a reordering breaks exactly one and nothing else notices. There is a test per
+row.
+
+### What running it taught
+
+*To be filled in after the live round.* One item is design-relevant rather than merely
+confirmatory, and is the first thing to check: whether dragging a card between columns moves
+Trello's `dateLastActivity`. If it does not, the release path has to force one re-evaluation
+instead of leaning on the activity-baseline short circuit. CI cannot settle it, and neither
+can it prove that a real board with two same-named columns behaves as the constructed
+`BoardInfo` fixture assumes.
+
+## 007 — Whatever survives contact with reality
 
 **Status:** not specified
 
 Planning doc M5. Parked items from §16 that are still genuinely open — kitty control
 socket hardening, multi-machine dispatch, scheduled/proactive work — land here or get dropped.
+
+Moved from the 006 slot, which 006 claimed for the same reason 005 claimed its own: a
+milestone with a shape displaces a parking lot without one.
 
 ---
 

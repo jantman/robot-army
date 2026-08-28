@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from robot_army import db, health, notifications, repos
 from robot_army.boundaries import BoardInfo, BoundaryError, TransportError
-from robot_army.cardstates import CardState, transition_card, utcnow
+from robot_army.cardstates import NEVER_PARKED, CardState, transition_card, utcnow
 from robot_army.models import PollState
 
 if TYPE_CHECKING:
@@ -66,6 +66,16 @@ class BoardStatus:
     label_id: str | None = None
     in_progress_list_id: str | None = None
     done_list_id: str | None = None
+    #: The ids of the columns whose cards are not intake (milestone 006, FR-001).
+    #:
+    #: Ids rather than names, for R11's reason applied unchanged: the per-card comparison
+    #: becomes an equality check that is cheap and that survives a column being renamed
+    #: mid-run rather than half-matching.
+    #:
+    #: Empty when ``[trello]`` is absent, when ``ignore_lists`` is empty, and on every
+    #: early return from an unreachable board — which is what makes FR-002 hold
+    #: structurally rather than by a guard somebody has to remember to write.
+    ignored_list_ids: frozenset[str] = frozenset()
 
     @property
     def ok(self) -> bool:
@@ -75,6 +85,41 @@ class BoardStatus:
     @property
     def failures(self) -> list[BoardCheck]:
         return [c for c in self.checks if not c.ok and not c.informational]
+
+
+def _is_ignored(list_id: str | None, status: BoardStatus) -> bool:
+    """Is this card sitting in a column the author excluded from intake? (FR-003)
+
+    **The single definition of ignored.** Two call sites consult it — ``poll_board``, to
+    decide whether a card becomes a row at all, and ``evaluate_card``, to decide whether an
+    existing row is acted on — because those are different questions and neither subsumes
+    the other. One predicate is what keeps them from drifting apart.
+
+    A missing or empty ``list_id`` is **not** ignored. Trello does not produce a card
+    without a column, so this is the shape of a value we failed to read rather than a card
+    the author parked — and the safe direction for a value we do not have is milestone
+    003's behaviour.
+    """
+    return bool(list_id) and list_id in status.ignored_list_ids
+
+
+def _list_name(list_id: str | None, status: BoardStatus) -> str | None:
+    """A column id resolved back to the name the author wrote, where we know it."""
+    if not list_id or status.info is None:
+        return None
+    return status.info.lists_by_id.get(list_id)
+
+
+def _parked_reason(list_id: str | None, status: BoardStatus) -> str:
+    """``parked in 'Icebox'`` — the column's *name*, not its 24-hex id.
+
+    The id is what the comparison uses and the name is what the author wrote, so the
+    listing has to say the name back or the reason is unreadable to the person it is for.
+    Falls back to the id if the board verdict carries no board information, which happens
+    only when a caller supplies no status at all.
+    """
+    name = _list_name(list_id, status)
+    return f"parked in {name!r}" if name else f"parked in list {list_id}"
 
 
 def check_board(
@@ -161,6 +206,13 @@ def check_board(
     checks.append(_present("tag", trello.label, info.labels, "label"))
     checks.append(_present("in-progress list", trello.in_progress_list, info.lists, "list"))
     checks.append(_present("done list", trello.done_list, info.lists, "list"))
+    # One check per configured name, in the order the author wrote them, so the report
+    # reads back in the order of the file they are looking at while reading it. A missing
+    # one is the failure that otherwise hides: intake silently widens back to milestone
+    # 003's, the excluded column files issues, and nothing looks broken (FR-016, FR-017).
+    checks.extend(
+        _present("ignored list", name, info.lists, "list") for name in trello.ignore_lists
+    )
 
     status = BoardStatus(
         checks=tuple(checks),
@@ -168,6 +220,14 @@ def check_board(
         label_id=info.labels.get(trello.label),
         in_progress_list_id=info.lists.get(trello.in_progress_list),
         done_list_id=info.lists.get(trello.done_list),
+        # Resolved from the **inverse** map, so that two board columns sharing a
+        # configured name both land in the set. ``info.lists`` is name-keyed and would
+        # have collapsed them, leaving one of them quietly still intake (FR-019b).
+        ignored_list_ids=frozenset(
+            list_id
+            for list_id, name in info.lists_by_id.items()
+            if name in trello.ignore_lists
+        ),
     )
     audit.record(
         "trello.board.check",
@@ -179,6 +239,9 @@ def check_board(
                 {"name": c.name, "ok": c.ok, "detail": c.detail, "informational": c.informational}
                 for c in status.checks
             ],
+            # The other half of the reconstruction standard the poll's aggregate count
+            # relies on: which columns were being ignored, without re-reading the file.
+            "ignored_lists": list(trello.ignore_lists),
             "ingestion": "enabled" if status.ok else "disabled",
         },
     )
@@ -265,6 +328,13 @@ class PollOutcome:
     evaluated: int = 0
     issues_created: int = 0
     held: int = 0
+    #: Tagged cards this cycle sitting in a column the author excluded (FR-021).
+    #:
+    #: Counted once, in ``poll_board``, over the polled listing — whether or not the card
+    #: is tracked. Distinct from ``found`` and ``created`` because "nothing is intake
+    #: because you excluded everything" and "nothing is tagged" are different facts, and a
+    #: single number would conflate them.
+    ignored: int = 0
     dropped: int = 0
     recovered: int = 0
     failed: int = 0
@@ -326,7 +396,19 @@ def poll_board(
         return _record_board_failure(conn, audit, trello=trello, state=state, error=exc)
 
     created = 0
+    ignored = 0
     for card in cards:
+        if _is_ignored(card.list_id, status):
+            # Not tracked, and that is what makes FR-006 true *structurally* rather than by
+            # a filter every listing has to remember: `robot-army cards` and the web page
+            # read rows, and an ignored card has no row to read. It also keeps the table
+            # proportional to work rather than to the board — an icebox of two hundred
+            # cards costs nothing.
+            #
+            # A card already tracked when it was parked keeps its row. It is handled in
+            # `evaluate_card`, which is the other half of the guard.
+            ignored += 1
+            continue
         with db.transaction(conn):
             row_id = db.insert_card(
                 conn,
@@ -341,6 +423,10 @@ def poll_board(
                 # where the author left it. Learning it later would record a list *we* put
                 # it in as the place it came from (FR-029).
                 origin_list_id=card.list_id,
+                # Diverges from origin the moment the card moves: the poll refreshes this
+                # one and never that one (milestone 006).
+                current_list_id=card.list_id,
+                current_list_name=_list_name(card.list_id, status),
             )
             if row_id is None:
                 continue
@@ -379,11 +465,27 @@ def poll_board(
         outcome="ok",
         entity_type="board",
         entity_id=trello.board_id,
-        detail={"tagged": len(cards), "newly_tracked": created},
+        # `ignored` is the *whole* record for a card in an excluded column: no per-card
+        # record is written for one. That is the Principle III exception the plan
+        # enumerates, extending the one this aggregate already takes and on the same
+        # grounds — the read changes no state outside this process, and a record per
+        # ignored card per cycle would say the same thing every five minutes forever,
+        # burying the records that matter. These three numbers plus `ignored_lists` in the
+        # startup record reconstruct the decision without re-reading the board.
+        detail={"tagged": len(cards), "ignored": ignored, "newly_tracked": created},
         dry_run=dry_run,
     )
+    # `cards` carries **every** polled card, ignored ones included, and a later edit must
+    # not "tidy" that. `_reconcile_board_contents` drops every tracked card absent from
+    # this collection, and `dropped` is terminal — `CARD_TRANSITIONS` gives it no exit. So
+    # filtering ignored cards out here would make parking an already-tracked card destroy
+    # it permanently, and un-parking would do nothing, silently, forever.
     return PollOutcome(
-        board_id=trello.board_id, found=len(cards), created=created, cards=tuple(cards)
+        board_id=trello.board_id,
+        found=len(cards),
+        created=created,
+        ignored=ignored,
+        cards=tuple(cards),
     )
 
 
@@ -693,6 +795,7 @@ def evaluate_card(
     config: Config,
     card_row_id: int,
     dry_run: bool,
+    status: BoardStatus | None = None,
     board_card: Any = None,
     forced: bool = False,
 ) -> Verdict:
@@ -732,14 +835,49 @@ def evaluate_card(
             conn, boundaries=boundaries, audit=audit, config=config, card=card, dry_run=dry_run
         )
 
-    # (3) The database-loss path: no mapping, but our marker may be on the card.
+    # (3) The other half of milestone 006's guard: a card that was tracked before it was
+    # parked, or parked before this configuration existed. **The position of this check is
+    # a contract, not a style choice** (contracts/surfaces.md). Each neighbour is fixed by
+    # a different requirement, so a reordering breaks exactly one of them and nothing else
+    # notices:
+    #
+    #   after `linked`      FR-013 — a card with a recorded issue is never ignored, in
+    #                       either direction. It is also what makes FR-015 free: by the
+    #                       time we put a card in the in-progress or done column it is
+    #                       already linked, so listing either as ignored is a no-op rather
+    #                       than a contradiction the loader would have to reject.
+    #   after `dropped`     FR-012 — the ignore list is not a route back from a terminal
+    #                       state.
+    #   after `creating`    an issue may already exist and R6's recovery must still run
+    #                       against the recorded intent. Parking a card mid-creation must
+    #                       not cancel it, or the one-issue invariant becomes "one issue
+    #                       unless you dragged the card at the wrong moment".
+    #   before the marker   `_restore_from_marker` reads the card's comments — a board
+    #     restore           request per card per cycle, and an ignored card should cost
+    #                       nothing. Deferring it cannot create a duplicate, because
+    #                       nothing downstream of this gate creates anything.
+    #   before resolution   FR-005 — exclusion is decided before resolvability, so an
+    #                       ignored card is never recorded as needs_info nor commented on.
+    #
+    # ``status`` defaults to a verdict with an empty ignored set, so a caller that has no
+    # board verdict in hand behaves exactly as milestone 003 did rather than raising.
+    status = status or BoardStatus(checks=())
+    current_list_id = getattr(board_card, "list_id", None) or card.current_list_id
+    if _is_ignored(current_list_id, status):
+        return Verdict(
+            card.card_id,
+            "ignored",
+            reason=_parked_reason(current_list_id, status),
+        )
+
+    # (4) The database-loss path: no mapping, but our marker may be on the card.
     restored = _restore_from_marker(
         conn, boundaries=boundaries, audit=audit, config=config, card=card, dry_run=dry_run
     )
     if restored is not None:
         return restored
 
-    # A held card is re-evaluated only when the author has actually touched it (FR-023),
+    # (5) A held card is re-evaluated only when the author has actually touched it (FR-023),
     # and "touched" is the board's own activity stamp differing from our stored baseline.
     # Without this the system would re-resolve every held card every poll forever — and,
     # far worse, R9's trap would be live: **our own comment changes that stamp**, so a
@@ -1370,6 +1508,11 @@ _VERDICT_COUNTER: dict[str, str] = {
     "held_and_commented": "held",
     "dropped": "dropped",
     "create_failed": "failed",
+    # "ignored" is deliberately **absent**. `poll_board` already counts every tagged card
+    # sitting in an excluded column, over the polled listing, whether or not it is tracked
+    # — so counting the verdict here as well would report the same card twice in one cycle
+    # and make the poll record unreconstructible. The verdict exists to end the evaluation
+    # and to name the reason in the listing, not to be tallied.
 }
 
 
@@ -1393,6 +1536,12 @@ def run_cycle(
     is what ``robot-army rescan`` asks for. Ordinary passes leave held cards alone until
     their activity stamp moves, because re-resolving unchanged text every five minutes
     forever is work that cannot produce a different answer.
+
+    ``forced`` does **not** override milestone 006's ignored gate, and that is deliberate:
+    the gate sits above the ``forced`` short circuit in ``evaluate_card``, so a rescan of a
+    parked card returns ``ignored``. Rescan exists to re-resolve a card the author has
+    edited; making it a way to act on a card the author deliberately excluded would give
+    the ignore list an exception nobody asked for.
     """
     # Recovery first, at the head of every cycle. A row left in ``creating`` may already
     # have an issue, and evaluating it as new before resolving that is exactly how the
@@ -1421,7 +1570,7 @@ def run_cycle(
 
     present = {card.card_id: card for card in outcome.cards}
     dropped = _reconcile_board_contents(
-        conn, audit=audit, config=config, present=present, dry_run=dry_run
+        conn, audit=audit, config=config, status=status, present=present, dry_run=dry_run
     )
 
     for card in db.list_cards(conn, include_simulated=True, board_id=trello.board_id):
@@ -1437,6 +1586,7 @@ def run_cycle(
                 config=config,
                 card_row_id=card.id,
                 dry_run=dry_run,
+                status=status,
                 board_card=present.get(card.card_id),
                 forced=forced,
             )
@@ -1461,6 +1611,7 @@ def run_cycle(
         board_id=outcome.board_id,
         found=outcome.found,
         created=outcome.created,
+        ignored=outcome.ignored,
         evaluated=evaluated,
         issues_created=counts.get("issues_created", 0),
         held=counts.get("held", 0),
@@ -1479,6 +1630,7 @@ def _reconcile_board_contents(
     *,
     audit: AuditLog,
     config: Config,
+    status: BoardStatus,
     present: dict[str, Any],
     dry_run: bool,
 ) -> int:
@@ -1505,7 +1657,7 @@ def _reconcile_board_contents(
         if card is None:
             dropped += _leave_board(conn, audit, row=row, dry_run=dry_run)
             continue
-        _refresh_tracked_card(conn, row=row, card=card)
+        _refresh_tracked_card(conn, audit=audit, row=row, card=card, status=status, dry_run=dry_run)
     return dropped
 
 
@@ -1563,13 +1715,28 @@ def _leave_board(
     return 1
 
 
-def _refresh_tracked_card(conn: sqlite3.Connection, *, row: Any, card: Any) -> None:
+def _refresh_tracked_card(
+    conn: sqlite3.Connection,
+    *,
+    audit: AuditLog,
+    row: Any,
+    card: Any,
+    status: BoardStatus,
+    dry_run: bool,
+) -> None:
     """Carry the board's current title, body and list onto the tracked row.
 
     The activity baseline is **not** refreshed here, and that omission is the whole of
     FR-023: the difference between the stored baseline and the board's current stamp is
     what tells the next evaluation that the author edited the card. Overwriting it during
     a poll would erase the signal before anything could act on it.
+
+    ``current_list_id`` *is* refreshed, and crossing the ignored set in either direction is
+    milestone 006's park and release. Both records go in the **same transaction** as the
+    column change, the discipline ``transition_card`` already follows, so a crash cannot
+    produce one without the other. One record per transition, never one per poll: a card
+    parked for a month is logged once, where the answer to "why did this stop being
+    evaluated?" is findable.
     """
     changed: dict[str, Any] = {}
     if card.title != row.title:
@@ -1578,10 +1745,38 @@ def _refresh_tracked_card(conn: sqlite3.Connection, *, row: Any, card: Any) -> N
         changed["body"] = card.body
     if card.list_id and card.list_id != row.placed_list_id and row.origin_list_id is None:
         changed["origin_list_id"] = card.list_id
+
+    crossing = None
+    if card.list_id and card.list_id != row.current_list_id:
+        changed["current_list_id"] = card.list_id
+        changed["current_list_name"] = _list_name(card.list_id, status)
+        was, now = _is_ignored(row.current_list_id, status), _is_ignored(card.list_id, status)
+        # The **same** set the listings derive parkedness from, so a record can never be
+        # written for a card nothing will show as parked. Testing only ``LINKED`` here — as
+        # this did until a review caught it — let a `creating` card write a park record it
+        # would never show, and then suppress the matching release once it resumed to
+        # `linked`: an unpaired record, which is worse than none.
+        if was != now and row.state not in NEVER_PARKED:
+            crossing = now
     if not changed:
         return
     with db.transaction(conn):
         db.update_card_columns(conn, row.id, **changed)
+        if crossing is not None:
+            audit.record(
+                "trello.parked" if crossing else "trello.released",
+                outcome="ok",
+                entity_type="card",
+                entity_id=row.card_id,
+                target=row.card_id,
+                detail={
+                    "list_id": card.list_id,
+                    "list_name": _list_name(card.list_id, status),
+                    "from_list_id": row.current_list_id,
+                    "state": str(row.state),
+                },
+                dry_run=dry_run,
+            )
 
 
 # -- the card's lifecycle on the board (US3, FR-027 through FR-031) ---------
@@ -1732,6 +1927,12 @@ def _move_card_for_issue(
     remember_origin: bool = False,
 ) -> Verdict | None:
     """Move the card an issue came from, if it came from one.
+
+    **Nothing here consults the ignore list, and nothing here should** (FR-014). A card
+    reached by this path has a recorded issue, so it is past intake and milestone 006 does
+    not apply to it — which is what makes listing the in-progress or done column as
+    ignored a harmless no-op. A move *into* an excluded column is ordinary and expected:
+    it is the daemon reporting on work, not the board offering it.
 
     **The order of these two lookups is a cost decision.** The card lookup is one indexed
     local query; resolving a list name is a board round trip. Both of these entry points

@@ -13,7 +13,14 @@ Three properties, each of which is a requirement rather than a behaviour:
 
 from __future__ import annotations
 
-from tests.conftest import FakeCardReader, make_board_boundaries, make_card, onboard_repo
+from tests.conftest import (
+    FakeCardReader,
+    make_board_boundaries,
+    make_board_info,
+    make_card,
+    onboard_repo,
+    with_ignore_lists,
+)
 
 from robot_army import db, health, intake
 from robot_army.boundaries import TransportError
@@ -272,16 +279,14 @@ def test_a_simulated_poll_marks_its_rows_and_leaves_the_live_slot_free(
 
 
 def test_the_board_job_is_skipped_when_preconditions_failed(board_config, audit, conn, layout):
-    from robot_army.boundaries import BoardInfo
+    from tests.conftest import make_board_info
 
     boundaries = make_board_boundaries(
         audit,
         cards=[make_card()],
-        board=BoardInfo(
-            board_id="board-1",
-            name="Intake",
+        board=make_board_info(
             permission_level="public",
-            labels={"AI-task": "label-ai"},
+            member_ids=(),
             lists={"In Progress": "a", "Done": "b"},
         ),
     )
@@ -366,3 +371,69 @@ def test_a_rescan_re_evaluates_a_held_card_the_ordinary_pass_would_skip(
     control.request_job(layout, "rescan")
     daemon.tick()
     assert db.list_cards(conn)[0].repo_key == "jantman/newrepo"
+
+
+# -- the poll record's three numbers (milestone 006, T027) ------------------
+
+
+def _ignoring_board(audit, cards):
+    """A board with an ``Icebox`` column, and a poll over it."""
+    return make_board_boundaries(
+        audit,
+        cards=cards,
+        board=make_board_info(
+            lists={
+                "Inbox": "list-inbox",
+                "Icebox": "list-ice",
+                "In Progress": "list-doing",
+                "Done": "list-done",
+            }
+        ),
+    )
+
+
+def test_the_poll_record_carries_tagged_ignored_and_tracked_separately(
+    conn, board_config, audit, layout
+):
+    """FR-021. Three numbers, because the aggregate is the *whole* record for an ignored
+    card — no per-card record is written — so it has to be enough to reconstruct from."""
+    import json
+
+    config = with_ignore_lists(board_config, "Icebox")
+    boundaries = _ignoring_board(
+        audit,
+        [
+            make_card("card-1", list_id="list-inbox"),
+            make_card("card-2", list_id="list-ice"),
+            make_card("card-3", list_id="list-ice"),
+        ],
+    )
+    outcome = poll(conn, config, audit, boundaries)
+
+    assert (outcome.found, outcome.ignored, outcome.created) == (3, 2, 1)
+    audit.close()
+    records = [
+        json.loads(line)
+        for path in layout.log_dir.glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    poll_record = next(r for r in records if r["action"] == "trello.poll")
+    assert poll_record["detail"] == {"tagged": 3, "ignored": 2, "newly_tracked": 1}
+
+
+def test_a_wholly_ignored_board_is_not_a_failure(conn, board_config, audit):
+    """"Nothing is intake because you excluded everything" and "I could not ask" are
+    different facts, and the outcome must not let them look alike."""
+    config = with_ignore_lists(board_config, "Icebox")
+    boundaries = _ignoring_board(
+        audit,
+        [make_card("card-1", list_id="list-ice"), make_card("card-2", list_id="list-ice")],
+    )
+
+    outcome = poll(conn, config, audit, boundaries)
+
+    assert outcome.found == 2
+    assert outcome.ignored == 2
+    assert outcome.created == 0
+    assert outcome.error is None
+    assert outcome.skipped_reason is None

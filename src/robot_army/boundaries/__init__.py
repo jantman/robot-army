@@ -77,6 +77,13 @@ class BoardInfo:
     ``labels`` and ``lists`` map name to id, because resolving the configured names once at
     startup makes the per-card filter an id comparison — cheaper, and immune to a label
     being renamed mid-run.
+
+    ``lists_by_id`` is the **inverse** of ``lists``, and it exists because a name-keyed map
+    cannot answer milestone 006's FR-019b. Trello permits two columns with the same name,
+    and ``lists`` collapses them to one entry — so a configured exclusion would silently
+    miss one of them. List ids are unique, so ``id -> name`` preserves both by
+    construction rather than by a rule somebody has to remember. It is built from the same
+    response ``lists`` is built from; there is no extra request.
     """
 
     board_id: str
@@ -85,6 +92,7 @@ class BoardInfo:
     member_ids: tuple[str, ...] = ()
     labels: dict[str, str] = field(default_factory=dict)
     lists: dict[str, str] = field(default_factory=dict)
+    lists_by_id: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

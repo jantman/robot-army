@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -358,6 +359,40 @@ class RecordingWriter:
         )
 
 
+def with_ignore_lists(config: Config, *names: str) -> Config:
+    """``board_config`` with milestone 006's ``[trello] ignore_lists`` set.
+
+    A ``replace`` rather than a second fixture: the only thing that varies is one field,
+    and a parallel fixture would drift from ``board_config`` the moment either changes.
+    """
+    return replace(config, trello=replace(config.trello, ignore_lists=tuple(names)))
+
+
+def make_board_info(**overrides) -> BoardInfo:
+    """A board whose two list maps agree.
+
+    ``lists_by_id`` is derived from ``lists`` unless a test overrides it explicitly. That
+    default is the honest one for every ordinary board, and the override is what the
+    duplicate-name case needs: two columns called the same thing collapse in ``lists`` and
+    must not collapse in ``lists_by_id`` (FR-019b). Constructing ``BoardInfo`` directly in
+    a test risks the two disagreeing, which would let the test pass against a board shape
+    the API cannot produce.
+    """
+    defaults = {
+        "board_id": "board-1",
+        "name": "Intake",
+        "permission_level": "private",
+        "member_ids": ("member-1",),
+        "labels": {"AI-task": "label-ai"},
+        "lists": {"In Progress": "list-doing", "Done": "list-done", "Inbox": "list-inbox"},
+    }
+    defaults.update(overrides)
+    defaults.setdefault(
+        "lists_by_id", {list_id: name for name, list_id in defaults["lists"].items()}
+    )
+    return BoardInfo(**defaults)
+
+
 class FakeCardReader:
     """A board whose answers the test controls.
 
@@ -377,14 +412,7 @@ class FakeCardReader:
         comments: dict[str, list[str]] | None = None,
     ) -> None:
         self.cards = cards or []
-        self.board = board or BoardInfo(
-            board_id="board-1",
-            name="Intake",
-            permission_level="private",
-            member_ids=("member-1",),
-            labels={"AI-task": "label-ai"},
-            lists={"In Progress": "list-doing", "Done": "list-done", "Inbox": "list-inbox"},
-        )
+        self.board = board or make_board_info()
         self.comments = comments or {}
         self.poll_calls: list[tuple[str, str]] = []
         self.comment_calls: list[str] = []

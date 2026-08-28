@@ -993,7 +993,17 @@ def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
         )
 
     rows = payload["cards"]
-    held = [row for row in rows if row["state"] == str(CardState.NEEDS_INFO)]
+    # "Held" and "parked" are two different conditions and a card can be both at once —
+    # awaiting clarification *and* sitting in a column the author excluded. `held` is the
+    # state's own word, already used in CARD_STATE_HELP above; `parked` is milestone 006's.
+    # A parked card is deliberately **not** counted as outstanding: it is not waiting on
+    # the author, it is where the author put it (FR-006, FR-009).
+    held = [
+        row
+        for row in rows
+        if row["state"] == str(CardState.NEEDS_INFO) and not row.get("parked")
+    ]
+    parked = [row for row in rows if row.get("parked")]
     body = join(
         [
             h(1, f"cards ({len(rows)})"),
@@ -1003,6 +1013,13 @@ def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
                 "the card and it is picked up automatically, or rescan to force a look now.",
                 class_="meta",
             ),
+            p(
+                f"{len(parked)} parked: tagged, but in a column you excluded from intake. "
+                "Move one out and it is picked up on the next poll — nothing else to do.",
+                class_="meta",
+            )
+            if parked
+            else Markup(""),
             _empty("Nothing on the board yet.")
             if not rows
             else join(
@@ -1017,7 +1034,11 @@ def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
             ),
         ]
     )
-    return View(title="cards", data={**payload, "needs_info": len(held)}, body=body)
+    return View(
+        title="cards",
+        data={**payload, "needs_info": len(held), "parked": len(parked)},
+        body=body,
+    )
 
 
 def _cards_table(
@@ -1036,7 +1057,7 @@ def _cards_table(
                 ),
                 row["repo_key"] or "—",
                 _card_issue_cell(row),
-                row["reason"] or "—",
+                _card_reason_cell(row),
                 human_age(row["age_seconds"]),
                 rescan_control(row["card_id"], include_simulated=include_simulated)
                 if rescannable
@@ -1045,6 +1066,23 @@ def _cards_table(
             for row in rows
         ],
     )
+
+
+def _card_reason_cell(row: dict[str, Any]) -> Markup:
+    """Why the card is where it is — parked, its state's own reason, or both.
+
+    Never "held" for a parked card: ``CARD_STATE_HELP`` already renders ``needs_info`` as
+    "held", and one word for two unrelated conditions is how the author reads one as the
+    other.
+    """
+    parts = []
+    if row.get("parked"):
+        parts.append(span(f"parked in {row['parked_list']!r}", class_="mono"))
+    if row["reason"]:
+        parts.append(span(row["reason"]))
+    if not parts:
+        return span("—")
+    return join([parts[0]] if len(parts) == 1 else [parts[0], " — ", parts[1]])
 
 
 def _card_issue_cell(row: dict[str, Any]) -> Markup:

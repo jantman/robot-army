@@ -161,6 +161,17 @@ def _mark(item: Any) -> str:
     return " [simulated]" if getattr(item, "dry_run", False) else ""
 
 
+def _withheld_note(count: int) -> str:
+    """What a listing says about the simulated rows it matched and did not show.
+
+    One definition rather than four copies of the same user-facing sentence: research.md
+    R3 rejected a helper parameterised by noun, flag and placement, and this is not that —
+    it is the message itself, and four hand-written copies of it are how the count and the
+    flag name drift apart.
+    """
+    return f"{count} simulated rows withheld — pass --include-simulated to show them"
+
+
 def _table(rows: list[list[str]], headers: list[str]) -> Iterator[str]:
     widths = [len(h) for h in headers]
     for row in rows:
@@ -173,6 +184,40 @@ def _table(rows: list[list[str]], headers: list[str]) -> Iterator[str]:
 
 
 # -- status -----------------------------------------------------------------
+
+
+def _say_queue(result: Result, queue: list[Any]) -> None:
+    """The queue table: a position and one reason per row.
+
+    One reason, not several: two shown at once is how a surface stops being read (R9).
+    Extracted from ``status`` in milestone 008 — adding the withheld disclosure and the
+    simulated marking pushed that function past the complexity ceiling, and the queue is
+    the section with the least to say to the rest of it.
+    """
+    if not queue:
+        return
+    result.say(f"queue ({len(queue)} eligible) — in dispatch order:")
+    rows = [
+        [
+            str(entry.position),
+            # FR-057 applies here too, and did not used to: the queue includes simulated
+            # rows by design, and showed them indistinguishable from real ones. A reader
+            # who stops at the first table — the most likely reader — had nothing on
+            # screen telling them what these were.
+            str(entry.item.id) + ("*" if entry.item.dry_run else ""),
+            entry.item.repo_key,
+            f"#{entry.item.issue_number}",
+            str(entry.hold) if entry.hold else "ready to dispatch",
+            entry.detail[:64],
+        ]
+        for entry in queue
+    ]
+    for line in _table(rows, ["#", "item", "repo", "issue", "hold", "why"]):
+        result.say(line)
+    if any(entry.item.dry_run for entry in queue):
+        result.say()
+        result.say("* = simulated (dry-run) row")
+    result.say()
 
 
 def status(
@@ -206,6 +251,23 @@ def status(
     )
     queue = ordering_mod.plan(ctx.conn, config=ctx.config, capacity=snap)
 
+    # How many rows this invocation matched and did not show. Milestone 008: the queue
+    # above includes simulated rows because they occupy capacity, while the counts and the
+    # listing exclude them because FR-056 makes that the default. Both are right; printing
+    # them side by side with nothing said about the gap is what produced a command that
+    # denied the rows it had just listed.
+    #
+    # Two numbers rather than one, because the two sections ask different questions:
+    # ``count_work_items_by_state`` has never honoured --state or --repo, and the listing
+    # always has. One figure would be wrong in whichever section it did not belong to as
+    # soon as a filter was in play.
+    withheld_counts = 0 if include_simulated else db.count_simulated_work_items(ctx.conn)
+    withheld_items = (
+        0
+        if include_simulated
+        else db.count_simulated_work_items(ctx.conn, states=states, repo_key=repo)
+    )
+
     result.data = {
         "effect_level": str(ctx.effect_level),
         "health": report.to_dict(),
@@ -218,6 +280,10 @@ def status(
         "dispatch_paused_by": control_state.paused_by,
         "capacity": _capacity_dict(snap, ctx.config.dispatch.order),
         "queue": [_queue_dict(entry) for entry in queue],
+        # Keyed to the two sections it explains, and always present: a consumer must never
+        # have to tell "nothing was withheld" apart from "this build does not report it",
+        # which is the absent-versus-zero ambiguity this milestone removes from the text.
+        "withheld_simulated": {"counts": withheld_counts, "items": withheld_items},
     }
 
     result.say(f"effect level : {ctx.effect_level}")
@@ -237,28 +303,18 @@ def status(
     result.say(f"database     : {ctx.layout.db_path} (schema {SCHEMA_VERSION})")
     result.say()
 
-    # The queue, with a position and one reason per row. One reason, not several: two shown
-    # at once is how a surface stops being read (R9).
-    if queue:
-        result.say(f"queue ({len(queue)} eligible) — in dispatch order:")
-        rows = [
-            [
-                str(entry.position),
-                str(entry.item.id),
-                entry.item.repo_key,
-                f"#{entry.item.issue_number}",
-                str(entry.hold) if entry.hold else "ready to dispatch",
-                entry.detail[:64],
-            ]
-            for entry in queue
-        ]
-        for line in _table(rows, ["#", "item", "repo", "issue", "hold", "why"]):
-            result.say(line)
-        result.say()
+    _say_queue(result, queue)
     if counts:
         result.say("counts by state:")
         for name in sorted(counts):
             result.say(f"  {name:<16} {counts[name]}")
+        if withheld_counts:
+            result.say(f"  {_withheld_note(withheld_counts)}")
+    elif withheld_counts:
+        # Not "no work items yet": the ``yet`` describes a system that has not started
+        # producing work, which is the wrong thing to say when the rows exist and are
+        # being withheld from this view on purpose.
+        result.say(f"no work items ({_withheld_note(withheld_counts)})")
     else:
         result.say("no work items yet")
     result.say()
@@ -289,6 +345,13 @@ def status(
         if any(i.dry_run for i in items):
             result.say()
             result.say("* = simulated (dry-run) row")
+        # Whenever anything was withheld, not only when the listing came out empty: two
+        # visible rows beneath a six-row queue is the same contradiction, only quieter.
+        if withheld_items:
+            result.say()
+            result.say(_withheld_note(withheld_items))
+    elif withheld_items:
+        result.say(f"no matching work items ({_withheld_note(withheld_items)})")
     else:
         result.say("no matching work items")
 
@@ -1177,6 +1240,19 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
     result = Result()
     rows: list[list[str]] = []
     payload: list[dict[str, Any]] = []
+    # Counted from the rows rather than from SQL: which work items appear here is decided
+    # partly in Python — those carrying a ``worktree_path`` — and a query that re-stated
+    # that predicate would put the same rule in two places. Nothing is inspected on disk
+    # for a withheld row; only counted.
+    withheld = (
+        0
+        if include_simulated
+        else sum(
+            1
+            for item in db.list_work_items(ctx.conn, include_simulated=True)
+            if item.worktree_path and item.dry_run
+        )
+    )
     for item in db.list_work_items(ctx.conn, include_simulated=include_simulated):
         if not item.worktree_path:
             continue
@@ -1223,9 +1299,14 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
         )
     result.data = {"worktrees": payload}
     if not rows:
+        if withheld:
+            return result.say(f"no worktrees visible ({_withheld_note(withheld)})")
         return result.say("no worktrees recorded")
     for line in _table(rows, ["item", "path", "branch", "condition", "size", "cleanup"]):
         result.say(line)
+    if withheld:
+        result.say()
+        result.say(_withheld_note(withheld))
     return result
 
 
@@ -1948,6 +2029,7 @@ def cards(
 
     states = [CardState(state)] if state else None
     rows = db.list_cards(ctx.conn, include_simulated=include_simulated, states=states)
+    withheld = 0 if include_simulated else db.count_simulated_cards(ctx.conn, states=states)
     links = _card_work_items(ctx, rows)
     payload = [
         _card_dict(
@@ -1967,7 +2049,12 @@ def cards(
         }
     )
     if not payload:
-        result.say("no cards tracked yet")
+        # "Nothing is tracked" and "everything tracked was withheld from you" are
+        # different facts, and the second one used to be reported as the first.
+        if withheld:
+            result.say(f"no cards visible ({_withheld_note(withheld)})")
+        else:
+            result.say("no cards tracked yet")
         return result
 
     table_rows = [
@@ -1989,6 +2076,9 @@ def cards(
         table_rows, ["card", "title", "state", "repository", "issue", "in state", "reason"]
     ):
         result.say(line)
+    if withheld:
+        result.say()
+        result.say(_withheld_note(withheld))
     return result
 
 

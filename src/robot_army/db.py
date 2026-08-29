@@ -179,15 +179,18 @@ def find_work_item(
     return from_row(WorkItem, row) if row else None
 
 
-def list_work_items(
-    conn: sqlite3.Connection,
-    *,
-    include_simulated: bool = False,
-    states: Sequence[WorkItemState] | None = None,
-    repo_key: str | None = None,
-    limit: int | None = None,
-) -> list[WorkItem]:
-    sql = "SELECT * FROM work_items WHERE 1=1" + _scope(include_simulated)  # noqa: S608
+def _work_item_filters(
+    states: Sequence[WorkItemState] | None, repo_key: str | None
+) -> tuple[str, list[Any]]:
+    """The ``states``/``repo_key`` clauses shared by the listing and its withheld count.
+
+    Extracted rather than written twice because milestone 008 requires the number of
+    withheld simulated rows to equal *exactly* the rows ``--include-simulated`` would
+    reveal. Two hand-written copies of the same predicate would make that equality a claim
+    maintained by hand; one construction makes it structural, the way ``_scope`` already
+    does for ``dry_run``.
+    """
+    sql = ""
     params: list[Any] = []
     if states:
         placeholders = ",".join("?" * len(states))
@@ -196,11 +199,49 @@ def list_work_items(
     if repo_key:
         sql += " AND repo_key = ?"
         params.append(repo_key)
+    return sql, params
+
+
+def list_work_items(
+    conn: sqlite3.Connection,
+    *,
+    include_simulated: bool = False,
+    states: Sequence[WorkItemState] | None = None,
+    repo_key: str | None = None,
+    limit: int | None = None,
+) -> list[WorkItem]:
+    filters, params = _work_item_filters(states, repo_key)
+    sql = (
+        "SELECT * FROM work_items WHERE 1=1"  # noqa: S608
+        + _scope(include_simulated)
+        + filters
+    )
     sql += " ORDER BY id"
     if limit is not None:
         sql += " LIMIT ?"
         params.append(limit)
     return _rows(conn.execute(sql, params), WorkItem)
+
+
+def count_simulated_work_items(
+    conn: sqlite3.Connection,
+    *,
+    states: Sequence[WorkItemState] | None = None,
+    repo_key: str | None = None,
+) -> int:
+    """How many simulated work items a listing under these filters is *not* showing.
+
+    Deliberately carries no ``include_simulated`` parameter — counting withheld rows *is*
+    the simulated-only question, and ``include_simulated=False`` here would be nonsense.
+    It is therefore not one of ``test_db_scope``'s listing accessors, and must not be added
+    to that list.
+
+    A ``COUNT(*)`` rather than a second full fetch to subtract from: the caller wants a
+    number, not the rows, and this one runs on every ``status`` render including the web's.
+    """
+    filters, params = _work_item_filters(states, repo_key)
+    sql = "SELECT COUNT(*) AS n FROM work_items WHERE dry_run = 1" + filters  # noqa: S608
+    return int(conn.execute(sql, params).fetchone()["n"])
 
 
 def count_work_items_by_state(
@@ -469,14 +510,15 @@ def find_card_by_issue(
     return from_row(Card, row) if row else None
 
 
-def list_cards(
-    conn: sqlite3.Connection,
-    *,
-    include_simulated: bool = False,
-    states: Sequence[CardState] | None = None,
-    board_id: str | None = None,
-) -> list[Card]:
-    sql = "SELECT * FROM cards WHERE 1=1" + _scope(include_simulated)  # noqa: S608
+def _card_filters(
+    states: Sequence[CardState] | None, board_id: str | None
+) -> tuple[str, list[Any]]:
+    """The ``states``/``board_id`` clauses shared by the card listing and its count.
+
+    Extracted for the same reason as ``_work_item_filters``: the withheld count has to be
+    the rows ``--include-simulated`` would reveal, and one construction makes that so.
+    """
+    sql = ""
     params: list[Any] = []
     if states:
         placeholders = ",".join("?" * len(states))
@@ -485,6 +527,38 @@ def list_cards(
     if board_id:
         sql += " AND board_id = ?"
         params.append(board_id)
+    return sql, params
+
+
+def count_simulated_cards(
+    conn: sqlite3.Connection,
+    *,
+    states: Sequence[CardState] | None = None,
+    board_id: str | None = None,
+) -> int:
+    """How many simulated cards a listing under these filters is *not* showing.
+
+    Like ``count_simulated_work_items``, it carries no ``include_simulated`` parameter and
+    is not one of ``test_db_scope``'s listing accessors.
+    """
+    filters, params = _card_filters(states, board_id)
+    sql = "SELECT COUNT(*) AS n FROM cards WHERE dry_run = 1" + filters  # noqa: S608
+    return int(conn.execute(sql, params).fetchone()["n"])
+
+
+def list_cards(
+    conn: sqlite3.Connection,
+    *,
+    include_simulated: bool = False,
+    states: Sequence[CardState] | None = None,
+    board_id: str | None = None,
+) -> list[Card]:
+    filters, params = _card_filters(states, board_id)
+    sql = (
+        "SELECT * FROM cards WHERE 1=1"  # noqa: S608
+        + _scope(include_simulated)
+        + filters
+    )
     sql += " ORDER BY id"
     return _rows(conn.execute(sql, params), Card)
 

@@ -23,8 +23,14 @@ deprecation cycle, no compatibility shim, no consumer outside this repository.
   enumerated Principle III exception, justified in plan.md.
 - **Simulated rows are excluded unless `?include_simulated=1`** (FR-019). When included, every
   simulated row carries a visible marker in HTML and `"simulated": true` in JSON.
+  **Superseded by milestone 009** — see
+  [009's contract](../../009-web-non-live-visibility/contracts/web-visibility.md). Below `live`
+  they are now shown by default and `?include_simulated=` overrides in both directions; at
+  `live` the rule above still holds. The marker is unchanged.
 - **Every response carries chrome**: effect level, daemon liveness and its age, pause state, anomaly
-  count, and the render time (FR-016, FR-017, FR-018).
+  count, and the render time (FR-016, FR-017, FR-018). **Milestone 009 adds** a persistent
+  banner and an alarm-styled level pill on every response below `live`, and a withheld-row
+  disclosure on any view showing fewer rows than it matched.
 - **No response contains a secret** (FR-020).
 - **Cache-Control: no-store** on everything except `/static/*`, which is immutable.
 
@@ -76,7 +82,9 @@ existing `operations.parse_duration`), `?outcome=ok|error|pending`, and `?cursor
 next page. The active filter is always rendered, and `skipped_lines` reports records that could not
 be parsed (FR-044).
 
-Every view accepts `?include_simulated=1`.
+Every view accepts `?include_simulated=1`, and since 009 `?include_simulated=0` as well —
+see [009's contract](../../009-web-non-live-visibility/contracts/web-visibility.md) for the
+resolution table and the values each spelling accepts.
 
 ---
 

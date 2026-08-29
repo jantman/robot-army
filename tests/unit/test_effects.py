@@ -432,3 +432,26 @@ def test_there_is_no_simulated_card_reader_anywhere():
     names = sorted(name for name in dir(trello) if "Simulated" in name)
     assert names == ["SimulatedCardWriter"], names
     assert not hasattr(trello, "SimulatedCardReader")
+
+
+def test_every_boundary_that_can_be_simulated_has_a_consequence_to_state():
+    """Milestone 009's drift guard.
+
+    The non-live banner derives *which* consequences to state from ``REAL_AT``, so a
+    boundary that gains a simulated level without gaining a phrase would silently drop out
+    of the banner — the page would still look emphatic while quietly omitting something that
+    is not really happening. Failing here is cheaper than discovering that on a screenshot.
+    """
+    from robot_army.effects import REAL_AT, SIMULATED_CONSEQUENCES, EffectLevel
+
+    can_be_simulated = {
+        name for name, levels in REAL_AT.items() if set(levels) != set(EffectLevel)
+    }
+    assert set(SIMULATED_CONSEQUENCES) == can_be_simulated
+
+
+def test_no_consequence_is_stated_at_live():
+    """FR-014 falls out of the derivation rather than out of a branch."""
+    from robot_army.effects import EffectLevel, consequences
+
+    assert consequences(EffectLevel.LIVE) == []

@@ -203,10 +203,20 @@ def banner(key: str | None, reason: str | None = None) -> Markup:
     return div(*children, class_=f"banner {level}")
 
 
+def _visibility_suffix(chrome: dict[str, Any]) -> str:
+    """The query every internal link carries so a stated preference survives it (FR-003).
+
+    Stated in both directions and never omitted: once the default varies by effect level,
+    an absent parameter means "use the default" and can no longer stand in for false.
+    """
+    return f"?include_simulated={'1' if chrome.get('include_simulated') else '0'}"
+
+
 def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     """The facts FR-016 through FR-018 require on **every** view, not on a status page."""
     daemon = chrome.get("daemon") or {}
     running = bool(daemon.get("running"))
+    suffix = _visibility_suffix(chrome)
     age = daemon.get("heartbeat_age_seconds")
     if running:
         state = f"daemon running (pid {daemon.get('pid') or '?'})"
@@ -220,8 +230,21 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     if running and activity:
         state += f", {activity}"
 
+    # The level pill carries the alarm below ``live`` and nothing at all at ``live`` (009
+    # FR-016, FR-017). The polarity is deliberate and settled: ``live`` is the state the
+    # operator expects and the one the system is meant to run in, so decorating it would
+    # train them to ignore the one place the level is shown. Every level below it is a
+    # testing configuration, and that is the surprising state.
+    #
+    # The word is in the text as well as in the colour, so a monochrome screenshot, a
+    # colour-blind reader, and `curl | grep` all still carry the signal.
+    level = str(chrome.get("effective_level") or chrome.get("effect_level") or "unknown")
+    simulated = level != "live"
     pills: list[Any] = [
-        span(f"effect level: {chrome.get('effect_level')}", class_="pill level"),
+        span(
+            f"effect level: {level}" + (" — simulated" if simulated else ""),
+            class_="pill level " + ("simulated" if simulated else "live"),
+        ),
         span(state, class_="pill " + ("ok" if running and daemon.get("healthy") else "warn")),
     ]
     # The capacity pill (milestone 004). On every view rather than on the queue alone,
@@ -232,7 +255,11 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     if capacity:
         if not capacity.get("observable", True):
             pills.append(
-                a("/queue", f"capacity UNOBSERVABLE — {capacity.get('reason')}", class_="pill warn")
+                a(
+                    "/queue" + suffix,
+                    f"capacity UNOBSERVABLE — {capacity.get('reason')}",
+                    class_="pill warn",
+                )
             )
         else:
             total = int(capacity.get("total") or 0)
@@ -245,7 +272,7 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
                 label += " — degraded"
             pills.append(
                 a(
-                    "/queue",
+                    "/queue" + suffix,
                     label,
                     class_="pill " + ("warn" if cap and total >= cap else "quiet"),
                 )
@@ -255,7 +282,7 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     anomalies = int(chrome.get("anomaly_count") or 0)
     pills.append(
         a(
-            "/anomalies",
+            "/anomalies" + suffix,
             f"{anomalies} anomal{'y' if anomalies == 1 else 'ies'}",
             class_="pill " + ("warn" if anomalies else "quiet"),
         )
@@ -266,10 +293,22 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
         # A link, not a label: the pause is visible from every view, so the control that
         # lifts it has to be reachable from every view too.
         pills.append(
-            a("/queue", f"DISPATCH PAUSED since {since} (by {by})", class_="pill warn")
+            a("/queue" + suffix, f"DISPATCH PAUSED since {since} (by {by})", class_="pill warn")
         )
-    if chrome.get("include_simulated"):
-        pills.append(span("simulated rows included", class_="pill quiet"))
+    # A link in both states, and present in both (009 R9). The issue this milestone answers
+    # did not report that the override was missing — it reported that "nothing on the page
+    # suggests the parameter exists". A label that appears only once the parameter has been
+    # found is no answer to that, and below `live`, where rows are now shown by default,
+    # nothing would otherwise point at the hidden view at all.
+    included = bool(chrome.get("include_simulated"))
+    path = chrome.get("path") or "/active"
+    pills.append(
+        a(
+            f"{path}?include_simulated={'0' if included else '1'}",
+            "simulated rows included" if included else "simulated rows hidden",
+            class_="pill quiet",
+        )
+    )
 
     notices: list[Any] = []
     if not running:
@@ -284,6 +323,29 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     mismatch = chrome.get("effect_mismatch")
     if mismatch:
         notices.append(div(mismatch, class_="banner error"))
+    # The third member of the family the two above belong to: conditions under which what
+    # you are reading does not mean what it appears to mean. This one is the broadest, since
+    # it changes the meaning of *every* value on the page rather than one of them — an item
+    # shown as `linked` against issue #900001 is linked to nothing at all.
+    #
+    # Nothing is said when the level cannot be read. That state already has a banner, two
+    # lines above, which says more than this one could; a page carrying one account of a
+    # situation beats a page carrying two.
+    consequences = chrome.get("simulated_consequences") or []
+    if consequences:
+        notices.append(
+            div(
+                f"This instance is set up for testing, not real work. At effect level "
+                f"{level}, nothing on this page happened:",
+                ul(consequences),
+                div(
+                    "The rows are real rows describing actions that were planned and not "
+                    "performed. Nothing here reached GitHub, Trello, or a terminal.",
+                    class_="reason",
+                ),
+                class_="banner error",
+            )
+        )
     return Markup(str(div(*pills, class_="chrome")) + "".join(str(n) for n in notices))
 
 
@@ -302,8 +364,12 @@ def page(
     ``data-refresh`` and ``data-path`` are read by ``app.js``; with scripting off the page
     is still correct, merely static until reloaded (R2).
     """
+    # The nav carries the visibility preference too (009 FR-003). It is the most likely way
+    # an operator leaves a page, and until 009 it was the one link on the page that dropped
+    # their choice — hide the simulated rows, tap "cards", and they are back.
+    suffix = _visibility_suffix(chrome)
     nav = join(
-        a(href, label, class_="current" if path.startswith(href) else None)
+        a(href + suffix, label, class_="current" if path.startswith(href) else None)
         for href, label in NAV
     )
     rendered_at = chrome.get("rendered_at", "")
@@ -328,7 +394,7 @@ def page(
                     "body",
                     tag(
                         "header",
-                        a("/active", "robot-army", class_="brand"),
+                        a("/active" + suffix, "robot-army", class_="brand"),
                         tag("nav", nav),
                     ),
                     tag(
@@ -414,6 +480,14 @@ h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
   text-decoration: none; color: var(--text);
 }
 .pill.warn { border-color: var(--warn); color: var(--warn); }
+/* The level pill had no rule at all until 009, so the one thing on the page that said
+   nothing here is real rendered in the same weight as `order: oldest-first`. The error
+   colour rather than warn because warn is already spent on capacity and on a paused
+   dispatch, and neither of those outranks "none of this happened". */
+.pill.level.simulated {
+  border-color: var(--error); color: var(--error); font-weight: 700;
+}
+.pill.level.live { color: var(--muted); }
 .pill.ok { border-color: var(--ok); color: var(--ok); }
 .pill.quiet { color: var(--muted); }
 .banner {

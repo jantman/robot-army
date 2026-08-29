@@ -135,7 +135,7 @@ def test_a_get_on_a_write_route_is_405_with_allow(live_server):
 def test_the_root_redirects(live_server):
     status, headers, _body = fetch(f"{live_server}/")
     assert status == 303
-    assert headers["Location"] == "/active"
+    assert headers["Location"] == "/active?include_simulated=0"
 
 
 # -- T040: the confirm-then-post round trip ---------------------------------
@@ -154,7 +154,7 @@ def test_confirm_then_post_advances_the_item(live_server, conn):
 
     status, headers, _body = fetch(f"{live_server}/item/{item_id}/abandon", data={})
     assert status == 303
-    assert headers["Location"] == f"/item/{item_id}?msg=abandoned"
+    assert headers["Location"] == f"/item/{item_id}?msg=abandoned&include_simulated=0"
 
     assert db.get_work_item(conn, item_id).state is WorkItemState.ABANDONED
 

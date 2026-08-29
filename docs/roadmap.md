@@ -305,21 +305,82 @@ tracked or recorded while withholding rows — and say what they withheld too. T
 interface has the loud half and is [issue #14](https://github.com/jantman/robot-army/issues/14):
 below `live` it renders as an empty system with a neutral pill, which is harder to notice than
 a contradiction. This milestone puts the count into the payload the web already consumes and
-stops there.
+stops there — 009 is where the web reads it.
 
 ### What running it taught
 
 *To be filled in after the live round.*
 
-## 009 — Whatever survives contact with reality
+## 009 — The web says what it is (`specs/009-web-non-live-visibility/`)
+
+**Status:** implemented
+
+Not from the planning document.
+[Issue #14](https://github.com/jantman/robot-army/issues/14), found in the same 001–007 human
+verification round as #13 and with the same daemon at `effect_level = "plan"`. Two defects,
+and the reason they were reported together is that neither is worth much alone: the interface
+**hid** everything the daemon had done below `live`, and it **said** almost nothing about
+being in a non-live mode. Four views rendered "Nothing is running", "Nothing is ready",
+"Nothing on the board yet" over a database holding four work items and fifteen tracked cards,
+and the only thing on the page saying otherwise was `effect level: plan` in a pill with **no
+CSS rule at all** — drawn in the same weight as `order: oldest-first`, and less prominently
+than the capacity pill beside it.
+
+Together they made the interface read as a working system that had found no work, which is
+also exactly what a broken daemon looks like. And `plan` is where a first run starts, so this
+was not an edge case: it was the first impression the interface made.
+
+**The polarity was settled before any code was written**, in the issue thread: the alarm goes
+on non-live and `live` stays calm. `live` is the state the system is meant to run in and the
+one the operator expects; decorating it would train them to ignore the one place the level is
+shown. Every level below it is a testing configuration, and that is the surprising state.
+
+Three findings from reading the source made the change smaller than the issue implied, and
+each is recorded with its rejected alternative in `research.md`:
+
+* **The simulated-row badge was already built and already styled.** The `*` suffix the issue
+  describes is 008's terminal convention; the web has rendered a bold word-badge since 002.
+  What was missing was a test asserting *coverage*, and it passed the moment it was written.
+  The genuinely unstyled class was the level pill, which is the half the issue named second.
+* **Preserving an explicit "hide" across navigation** looked like it needed a three-valued
+  preference threaded through fifteen `pages.*` signatures. Having every generated link state
+  the value in both directions does the same job in two lines: once the default varies by
+  level, an omitted parameter means "use the default" and can no longer stand in for false.
+* **The existing web suite runs at `live`** (`tests/conftest.py`), the one level where no
+  default changed — so 2,455 lines of it became free regression coverage for "nothing changed
+  at `live`" instead of tests to rewrite. Exactly four existing assertions needed touching,
+  every one of them a generated URL.
+
+Two things the issue did not ask for. The banner's consequences are **derived from
+`REAL_AT`** rather than written out per level, so it states seven things at `plan`, five at
+`local`, three at `no-remote` and nothing at `live` — and cannot drift from what the
+boundaries actually do, because a boundary that gains a simulated level without gaining a
+phrase fails the suite. And one **effective level** drives both the banner and the pill,
+defined as the more simulated of this interface's level and the running daemon's: neither
+alone is honest, since the rows on the page were written at the daemon's level while the next
+action would run at ours. Without it, a `live` interface in front of a `plan` daemon renders
+a calm pill above a table of issue numbers that do not exist.
+
+Writing the tests found two links the implementation had missed — the nav bar and every
+`item` link in a table — which were dropping the preference on the most likely way out of a
+page. That is the second time in two milestones that the test written to prove a rule found
+the place the rule was not applied.
+
+### What running it taught
+
+*To be filled in after the live round.* The thing to watch is whether the banner stays read
+rather than becoming wallpaper, since it is on every page below `live` and `plan` is where
+first runs live.
+
+## 010 — Whatever survives contact with reality
 
 **Status:** not specified
 
 Planning doc M5. Parked items from §16 that are still genuinely open — kitty control
 socket hardening, multi-machine dispatch, scheduled/proactive work — land here or get dropped.
 
-Moved from the 008 slot, which 008 claimed for the same reason 007, 006 and 005 claimed
-theirs: a milestone with a shape displaces a parking lot without one. Four times now.
+Moved from the 009 slot, which 009 claimed for the same reason 008, 007, 006 and 005 claimed
+theirs: a milestone with a shape displaces a parking lot without one. Five times now.
 
 ---
 

@@ -295,7 +295,9 @@ def test_the_paused_pill_links_to_where_the_control_lives(web, conn):
     web.post_json("/dispatch/pause")
     for path in ("/active", "/interrupted", "/anomalies", "/log"):
         body = web.get(path).text
-        assert 'href="/queue" class="pill warn">DISPATCH PAUSED' in body, path
+        # The href carries the visibility preference since 009, like every internal link.
+        assert 'class="pill warn">DISPATCH PAUSED' in body, path
+        assert 'href="/queue?include_simulated=' in body, path
 
 
 def test_a_pending_job_request_is_reported_on_the_control(web, layout):

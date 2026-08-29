@@ -30,7 +30,10 @@ def test_the_route_table_covers_every_documented_view(web):
 def test_root_redirects_to_active(web):
     response = web.get("/")
     assert response.status == 303
-    assert response.headers["Location"] == "/active"
+    # The visibility preference is stated on every generated URL since 009, in both
+    # directions: omission now means "use the level's default" and can no longer stand in
+    # for false.
+    assert response.headers["Location"] == "/active?include_simulated=0"
 
 
 def test_root_redirect_carries_include_simulated(web):
@@ -196,11 +199,13 @@ def test_parse_request_strips_the_json_suffix_and_trailing_slash():
 
 
 def test_include_simulated_is_read_from_query_and_form():
-    assert parse_request("GET", "/queue?include_simulated=1", {}).include_simulated
-    assert not parse_request("GET", "/queue", {}).include_simulated
-    assert parse_request(
-        "POST", "/poll", {}, b"include_simulated=yes"
-    ).include_simulated
+    """Three-valued since 009: said yes, said no, and said nothing are all distinct."""
+    assert parse_request("GET", "/queue?include_simulated=1", {}).simulated_preference is True
+    assert parse_request("GET", "/queue?include_simulated=0", {}).simulated_preference is False
+    assert parse_request("GET", "/queue", {}).simulated_preference is None
+    assert (
+        parse_request("POST", "/poll", {}, b"include_simulated=yes").simulated_preference is True
+    )
 
 
 # -- DNS rebinding -----------------------------------------------------------

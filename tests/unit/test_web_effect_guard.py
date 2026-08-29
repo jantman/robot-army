@@ -205,3 +205,67 @@ def _web_records(layout):
                 if record.get("component") == "web":
                     records.append(record)
     return records
+
+
+# -- milestone 009: which level the *display* is driven by -------------------
+
+
+def _effective(web, level: str) -> str | None:
+    """The rule under test, called directly rather than through a rendered page."""
+    from robot_army.effects import EffectLevel
+    from robot_army.web.server import WebApp, effective_level
+
+    app = WebApp(web.app.config, effect_level=EffectLevel(level))
+    ctx = app.context()
+    try:
+        result = effective_level(ctx)
+        return str(result) if result else None
+    finally:
+        ctx.close()
+
+
+def test_agreement_gives_that_level(web, layout, running_daemon):
+    beat(layout, effect_level="plan")
+    assert _effective(web, "plan") == "plan"
+
+
+def test_the_more_simulated_of_the_two_wins_whichever_way_round(web, layout, running_daemon):
+    """FR-018. Neither level alone is the honest answer, so the rule takes the worse one.
+
+    The rows on the page were written by the daemon at the daemon's level; an action taken
+    next would run at this interface's. A rule favouring either would let the page be calm
+    about a half that is not.
+    """
+    beat(layout, effect_level="plan")
+    assert _effective(web, "live") == "plan"
+    beat(layout, effect_level="live")
+    assert _effective(web, "plan") == "plan"
+
+
+def test_no_daemon_means_our_own_level_stands_alone(web, layout):
+    """Refusing to trust the configured level because a dead process left a heartbeat would
+    be the same surprise in the other direction — what ``effect_mismatch`` already says."""
+    beat(layout, effect_level="plan")
+    assert _effective(web, "live") == "live"
+
+
+def test_an_unreadable_heartbeat_from_a_live_daemon_is_unknown(web, layout, running_daemon):
+    layout.heartbeat_path.unlink(missing_ok=True)
+    assert _effective(web, "live") is None
+
+
+def test_a_heartbeat_naming_a_level_this_build_lacks_is_unknown(web, layout, running_daemon):
+    """Failing closed, exactly as an absent heartbeat does."""
+    beat(layout, effect_level="hyperspace")
+    assert _effective(web, "live") is None
+
+
+def test_the_level_order_is_least_to_most_consequential():
+    """The comparison in ``effective_level`` is the enum's own declaration order.
+
+    Pinned because nothing else would notice a reordering, and a reordering would silently
+    invert the rule — making the interface calm in exactly the case it exists to flag.
+    """
+    from robot_army.effects import EffectLevel
+
+    assert [str(level) for level in EffectLevel] == ["plan", "local", "no-remote", "live"]

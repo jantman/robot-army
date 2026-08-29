@@ -32,8 +32,8 @@ Single Python package at the repository root: `src/robot_army/`, `tests/unit/`,
 
 **Purpose**: establish the baseline this feature's "nothing changed at `live`" claim rests on.
 
-- [ ] T001 Record the green baseline: run `uv run pytest` from the repository root and confirm the suite passes before any edit, so a later failure is attributable to this feature
-- [ ] T002 [P] Read [contracts/web-visibility.md](contracts/web-visibility.md) end to end and confirm it does not contradict `specs/002-web-ui/contracts/http-api.md` beyond the two rules it explicitly supersedes
+- [X] T001 Record the green baseline: run `uv run pytest` from the repository root and confirm the suite passes before any edit, so a later failure is attributable to this feature
+- [X] T002 [P] Read [contracts/web-visibility.md](contracts/web-visibility.md) end to end and confirm it does not contradict `specs/002-web-ui/contracts/http-api.md` beyond the two rules it explicitly supersedes
 
 ---
 
@@ -44,14 +44,14 @@ default; US2 needs the effective level for the banner and the pill.
 
 **⚠️ CRITICAL**: no user story work can begin until this phase is complete.
 
-- [ ] T003 Add a `FALSEY` frozenset (`0`, `false`, `no`, `off`) beside the existing `TRUTHY` in `src/robot_army/web/server.py`
-- [ ] T004 Replace the `Request.include_simulated` property with `Request.simulated_preference -> bool | None` in `src/robot_army/web/server.py`, returning `True` for `TRUTHY`, `False` for `FALSEY`, and `None` for absent, empty or unrecognised values (FR-004); update its docstring to cite this feature rather than 001's FR-019
-- [ ] T005 [P] Add `pages.effective_level(ctx, report, *, running) -> EffectLevel | None` in `src/robot_army/web/pages.py`, beside `effect_mismatch` and reusing its three-state reading of the lock and heartbeat: the more simulated of `ctx.effect_level` and the daemon's level by `list(EffectLevel).index`, the configured level alone when no daemon holds the lock, and `None` when a daemon holds the lock but no heartbeat can be read (research [R4](research.md))
-- [ ] T006 Add `effective_level` (the string, or `"unknown"`) and `simulated_preference` to the payload returned by `pages.chrome` in `src/robot_army/web/pages.py`, computed once per request from the same `report`/`running` values `effect_mismatch` already receives, so the banner and the pill cannot re-derive them differently (FR-018)
-- [ ] T007 Pass `request.simulated_preference` into `pages.chrome` from `handle` in `src/robot_army/web/server.py` (line ~1081), replacing the current `include_simulated=request.include_simulated` argument with both the resolved value and the stated preference
-- [ ] T008 [P] Add `tests/unit/test_web_simulated_default.py` with the preference-parsing matrix: each `TRUTHY` spelling → `True`, each `FALSEY` spelling → `False`, and absent/empty/`"treu"` → `None` with a `200` rather than a `400`
-- [ ] T009 [P] Add to `tests/unit/test_web_effect_guard.py` a test of the effective-level rule across its four states — agreement, disagreement in each direction, no daemon, and daemon-with-unreadable-heartbeat — asserting the more-simulated value wins and that `unknown` emits no second banner
-- [ ] T010 [P] Add to `tests/unit/test_web_effect_guard.py` a test pinning `list(EffectLevel)` to the order `plan, local, no-remote, live`, so a future reordering of the enum cannot silently invert the comparison in T005
+- [X] T003 Add a `FALSEY` frozenset (`0`, `false`, `no`, `off`) beside the existing `TRUTHY` in `src/robot_army/web/server.py`
+- [X] T004 Replace the `Request.include_simulated` property with `Request.simulated_preference -> bool | None` in `src/robot_army/web/server.py`, returning `True` for `TRUTHY`, `False` for `FALSEY`, and `None` for absent, empty or unrecognised values (FR-004); update its docstring to cite this feature rather than 001's FR-019
+- [X] T005 [P] Add `pages.effective_level(ctx, report, *, running) -> EffectLevel | None` in `src/robot_army/web/pages.py`, beside `effect_mismatch` and reusing its three-state reading of the lock and heartbeat: the more simulated of `ctx.effect_level` and the daemon's level by `list(EffectLevel).index`, the configured level alone when no daemon holds the lock, and `None` when a daemon holds the lock but no heartbeat can be read (research [R4](research.md))
+- [X] T006 Add `effective_level` (the string, or `"unknown"`) and `simulated_preference` to the payload returned by `pages.chrome` in `src/robot_army/web/pages.py`, computed once per request from the same `report`/`running` values `effect_mismatch` already receives, so the banner and the pill cannot re-derive them differently (FR-018)
+- [X] T007 Pass `request.simulated_preference` into `pages.chrome` from `handle` in `src/robot_army/web/server.py` (line ~1081), replacing the current `include_simulated=request.include_simulated` argument with both the resolved value and the stated preference
+- [X] T008 [P] Add `tests/unit/test_web_simulated_default.py` with the preference-parsing matrix: each `TRUTHY` spelling → `True`, each `FALSEY` spelling → `False`, and absent/empty/`"treu"` → `None` with a `200` rather than a `400`
+- [X] T009 [P] Add to `tests/unit/test_web_effect_guard.py` a test of the effective-level rule across its four states — agreement, disagreement in each direction, no daemon, and daemon-with-unreadable-heartbeat — asserting the more-simulated value wins and that `unknown` emits no second banner
+- [X] T010 [P] Add to `tests/unit/test_web_effect_guard.py` a test pinning `list(EffectLevel)` to the order `plan, local, no-remote, live`, so a future reordering of the enum cannot silently invert the comparison in T005
 
 **Checkpoint**: `chrome()` carries one effective level and one stated preference. Nothing yet
 reads them.
@@ -70,27 +70,27 @@ and confirm every row appears and no view claims emptiness. Then request one vie
 
 ### Implementation for User Story 1
 
-- [ ] T011 [US1] Add `include_simulated_for(request, ctx) -> bool` to `src/robot_army/web/server.py`: return the stated preference when it is not `None`, otherwise `True` unless the effective level is `live` (the resolution table in [data-model.md](data-model.md))
-- [ ] T012 [US1] Replace every remaining `request.include_simulated` read in `src/robot_army/web/server.py` with `include_simulated_for(request, ctx)` — the eight `view_*` handlers (lines ~591–652), `view_root`, and the two sites inside `_perform`/`html_query`
-- [ ] T013 [US1] Change `html_query` in `src/robot_army/web/server.py` to always emit `include_simulated=1` or `include_simulated=0` rather than omitting the parameter when false (research [R3](research.md)), so a stated preference survives the `303` after a `POST`
-- [ ] T014 [US1] Change `pages._query` in `src/robot_army/web/pages.py` the same way, and change the three `html.hidden("include_simulated", "1") if include_simulated else None` call sites (in `action_control`, `dispatch_controls`, `rescan_control`) to always emit the field with `"1"` or `"0"`
-- [ ] T015 [US1] Record both values in the audit detail in `_perform` in `src/robot_army/web/server.py`: keep `include_simulated` as the resolved value and add `simulated_preference`, so a record can be read back without knowing which level was in force
-- [ ] T016 [US1] Change `pages._items` in `src/robot_army/web/pages.py` to return the rows **and** `data["withheld_simulated"]["items"]` from the same `operations.status` call, and update its four call sites (`active_view` line ~528, `queue_view` line ~606, and the two in `interrupted_view` lines ~873/879) to bind both
-- [ ] T017 [US1] Add `withheld_simulated` to the payload of `operations.cards` in `src/robot_army/operations.py` — the `withheld` count it already computes at line ~2032, which today reaches only the text lines and not `data`
-- [ ] T018 [US1] Add `pages.withheld_note(count, *, path, include_simulated) -> Markup` in `src/robot_army/web/pages.py`: empty markup when the count is zero, otherwise `N simulated rows hidden` with a link to the same path carrying the flipped preference (FR-006, FR-009)
-- [ ] T019 [US1] Render the withheld note in `active_view`, `queue_view`, `interrupted_view` and `cards_view` in `src/robot_army/web/pages.py`, once per view beneath its tables; for `interrupted_view` sum the two state-filtered counts, which is exactly the set the link would reveal (FR-007)
-- [ ] T020 [US1] Change the empty-state text in those four views (`_empty` calls at lines ~545, 671, 694, 714, 897, 903, 1037 in `src/robot_army/web/pages.py`) so that when rows are withheld it says nothing is *shown* rather than that nothing *exists*, and carries the count and the link (FR-008)
-- [ ] T021 [US1] Turn the `simulated rows included` pill in `_chrome_bar` in `src/robot_army/web/html.py` (line ~271) into a link rendered in **both** states — `simulated rows included` linking to `include_simulated=0`, `simulated rows hidden` linking to `include_simulated=1` — keeping `pill quiet` in both (research [R9](research.md)); it needs the request path, so add it to the chrome payload in `pages.chrome`
+- [X] T011 [US1] Add `include_simulated_for(request, ctx) -> bool` to `src/robot_army/web/server.py`: return the stated preference when it is not `None`, otherwise `True` unless the effective level is `live` (the resolution table in [data-model.md](data-model.md))
+- [X] T012 [US1] Replace every remaining `request.include_simulated` read in `src/robot_army/web/server.py` with `include_simulated_for(request, ctx)` — the eight `view_*` handlers (lines ~591–652), `view_root`, and the two sites inside `_perform`/`html_query`
+- [X] T013 [US1] Change `html_query` in `src/robot_army/web/server.py` to always emit `include_simulated=1` or `include_simulated=0` rather than omitting the parameter when false (research [R3](research.md)), so a stated preference survives the `303` after a `POST`
+- [X] T014 [US1] Change `pages._query` in `src/robot_army/web/pages.py` the same way, and change the three `html.hidden("include_simulated", "1") if include_simulated else None` call sites (in `action_control`, `dispatch_controls`, `rescan_control`) to always emit the field with `"1"` or `"0"`
+- [X] T015 [US1] Record both values in the audit detail in `_perform` in `src/robot_army/web/server.py`: keep `include_simulated` as the resolved value and add `simulated_preference`, so a record can be read back without knowing which level was in force
+- [X] T016 [US1] Change `pages._items` in `src/robot_army/web/pages.py` to return the rows **and** `data["withheld_simulated"]["items"]` from the same `operations.status` call, and update its four call sites (`active_view` line ~528, `queue_view` line ~606, and the two in `interrupted_view` lines ~873/879) to bind both
+- [X] T017 [US1] Add `withheld_simulated` to the payload of `operations.cards` in `src/robot_army/operations.py` — the `withheld` count it already computes at line ~2032, which today reaches only the text lines and not `data`
+- [X] T018 [US1] Add `pages.withheld_note(count, *, path, include_simulated) -> Markup` in `src/robot_army/web/pages.py`: empty markup when the count is zero, otherwise `N simulated rows hidden` with a link to the same path carrying the flipped preference (FR-006, FR-009)
+- [X] T019 [US1] Render the withheld note in `active_view`, `queue_view`, `interrupted_view` and `cards_view` in `src/robot_army/web/pages.py`, once per view beneath its tables; for `interrupted_view` sum the two state-filtered counts, which is exactly the set the link would reveal (FR-007)
+- [X] T020 [US1] Change the empty-state text in those four views (`_empty` calls at lines ~545, 671, 694, 714, 897, 903, 1037 in `src/robot_army/web/pages.py`) so that when rows are withheld it says nothing is *shown* rather than that nothing *exists*, and carries the count and the link (FR-008)
+- [X] T021 [US1] Turn the `simulated rows included` pill in `_chrome_bar` in `src/robot_army/web/html.py` (line ~271) into a link rendered in **both** states — `simulated rows included` linking to `include_simulated=0`, `simulated rows hidden` linking to `include_simulated=1` — keeping `pill quiet` in both (research [R9](research.md)); it needs the request path, so add it to the chrome payload in `pages.chrome`
 
 ### Tests for User Story 1
 
-- [ ] T022 [P] [US1] Extend `tests/unit/test_web_simulated_default.py` with the resolution matrix from [data-model.md](data-model.md): (stated `True`/`False`/unstated) × (`plan`, `local`, `no-remote`, `live`, unknown), asserting the resolved value and that `live`-with-no-preference is unchanged from today
-- [ ] T023 [P] [US1] Add to `tests/unit/test_web_simulated_default.py` a link round-trip test: request a view with `include_simulated=0` below `live`, extract every generated `href` and hidden form field, and assert each carries `include_simulated=0` — the FR-003 regression that omission used to hide
-- [ ] T024 [P] [US1] Add a level-parameterised web harness to `tests/conftest.py` (a fixture taking an effect level, leaving the existing `web` fixture at `live` untouched per research [R10](research.md))
-- [ ] T025 [US1] Add to `tests/unit/test_web_views.py` a per-view withheld-disclosure test covering the four cases in the contract's disclosure table: nothing withheld with rows, nothing withheld with no rows, rows withheld with rows visible, rows withheld with none visible — asserting no view ever claims absence while withholding
-- [ ] T026 [P] [US1] Add to `tests/unit/test_web_views.py` a test that `operations.cards`'s payload carries `withheld_simulated` and that it equals the number `--include-simulated` reveals under the same state filter
-- [ ] T027 [US1] Fix the existing assertions that break by design: any test in `tests/unit/test_web_actions.py`, `test_web_routing.py` or `test_web_views.py` asserting on a generated URL that previously omitted `include_simulated` now expects `include_simulated=0` (research [R10](research.md)); re-run `uv run pytest tests/unit/` and confirm every remaining failure is one of these
-- [ ] T028 [P] [US1] Add to `tests/unit/test_ordering.py` or `tests/unit/test_capacity.py` an assertion that the dispatch selection is identical for the same database regardless of the web's resolved visibility (SC-008, FR-005) — or, if the existing tests already establish this by never consulting the web, note that in a comment rather than adding a redundant test
+- [X] T022 [P] [US1] Extend `tests/unit/test_web_simulated_default.py` with the resolution matrix from [data-model.md](data-model.md): (stated `True`/`False`/unstated) × (`plan`, `local`, `no-remote`, `live`, unknown), asserting the resolved value and that `live`-with-no-preference is unchanged from today
+- [X] T023 [P] [US1] Add to `tests/unit/test_web_simulated_default.py` a link round-trip test: request a view with `include_simulated=0` below `live`, extract every generated `href` and hidden form field, and assert each carries `include_simulated=0` — the FR-003 regression that omission used to hide
+- [X] T024 [P] [US1] Add a level-parameterised web harness to `tests/conftest.py` (a fixture taking an effect level, leaving the existing `web` fixture at `live` untouched per research [R10](research.md))
+- [X] T025 [US1] Add to `tests/unit/test_web_views.py` a per-view withheld-disclosure test covering the four cases in the contract's disclosure table: nothing withheld with rows, nothing withheld with no rows, rows withheld with rows visible, rows withheld with none visible — asserting no view ever claims absence while withholding
+- [X] T026 [P] [US1] Add to `tests/unit/test_web_views.py` a test that `operations.cards`'s payload carries `withheld_simulated` and that it equals the number `--include-simulated` reveals under the same state filter
+- [X] T027 [US1] Fix the existing assertions that break by design: any test in `tests/unit/test_web_actions.py`, `test_web_routing.py` or `test_web_views.py` asserting on a generated URL that previously omitted `include_simulated` now expects `include_simulated=0` (research [R10](research.md)); re-run `uv run pytest tests/unit/` and confirm every remaining failure is one of these
+- [X] T028 [P] [US1] Add to `tests/unit/test_ordering.py` or `tests/unit/test_capacity.py` an assertion that the dispatch selection is identical for the same database regardless of the web's resolved visibility (SC-008, FR-005) — or, if the existing tests already establish this by never consulting the web, note that in a comment rather than adding a redundant test
 
 **Checkpoint**: below `live` the four views show their rows unprompted, a hidden view says what
 it is hiding and offers the way back, and the choice survives every click. US1 is complete and
@@ -109,20 +109,20 @@ and that the pill takes alarm styling below `live` only.
 
 ### Implementation for User Story 2
 
-- [ ] T029 [P] [US2] Add `SIMULATED_CONSEQUENCES: dict[str, str]` to `src/robot_army/effects.py` beside `REAL_AT`, one operator-facing phrase per boundary name, using the wording fixed in [data-model.md](data-model.md) — including the `issue_writer` phrase that names both the unwritten comment and the invented issue number
-- [ ] T030 [US2] Add `consequences(level) -> list[str]` to `src/robot_army/effects.py`, returning the phrases whose boundary is not real at that level, in `SIMULATED_CONSEQUENCES` declaration order; empty at `live` by construction, which is what makes FR-014 fall out of the derivation rather than out of a branch
-- [ ] T031 [US2] Emit the non-live banner from `_chrome_bar` in `src/robot_army/web/html.py`, in the `notices` list beside the daemon-not-running and mismatch banners and with the same `banner error` class, whenever `chrome["effective_level"]` is below `live`; naming the level and listing `effects.consequences(...)` (FR-010 through FR-013, FR-015)
-- [ ] T032 [US2] Suppress only the *second* banner when the effective level is `unknown` in `src/robot_army/web/html.py`: the existing `EFFECT LEVEL UNKNOWN` mismatch banner carries the explanation, so the page shows one account of the situation rather than two
-- [ ] T033 [US2] Style the level pill in `_chrome_bar` in `src/robot_army/web/html.py`: class `pill level simulated` with the text suffixed `— simulated` below `live` and when unknown, class `pill level live` at `live` (FR-016, FR-017), so the signal survives a monochrome screenshot
-- [ ] T034 [US2] Add the two CSS rules to the stylesheet in `src/robot_army/web/html.py` (beside `.pill.warn` at line ~416): `.pill.level.simulated` taking `var(--error)` for border and text plus a bolder weight, and `.pill.level.live` taking the muted treatment — the error colour rather than warn because warn is already spent on capacity and on a paused dispatch (research [R7](research.md))
+- [X] T029 [P] [US2] Add `SIMULATED_CONSEQUENCES: dict[str, str]` to `src/robot_army/effects.py` beside `REAL_AT`, one operator-facing phrase per boundary name, using the wording fixed in [data-model.md](data-model.md) — including the `issue_writer` phrase that names both the unwritten comment and the invented issue number
+- [X] T030 [US2] Add `consequences(level) -> list[str]` to `src/robot_army/effects.py`, returning the phrases whose boundary is not real at that level, in `SIMULATED_CONSEQUENCES` declaration order; empty at `live` by construction, which is what makes FR-014 fall out of the derivation rather than out of a branch
+- [X] T031 [US2] Emit the non-live banner from `_chrome_bar` in `src/robot_army/web/html.py`, in the `notices` list beside the daemon-not-running and mismatch banners and with the same `banner error` class, whenever `chrome["effective_level"]` is below `live`; naming the level and listing `effects.consequences(...)` (FR-010 through FR-013, FR-015)
+- [X] T032 [US2] Suppress only the *second* banner when the effective level is `unknown` in `src/robot_army/web/html.py`: the existing `EFFECT LEVEL UNKNOWN` mismatch banner carries the explanation, so the page shows one account of the situation rather than two
+- [X] T033 [US2] Style the level pill in `_chrome_bar` in `src/robot_army/web/html.py`: class `pill level simulated` with the text suffixed `— simulated` below `live` and when unknown, class `pill level live` at `live` (FR-016, FR-017), so the signal survives a monochrome screenshot
+- [X] T034 [US2] Add the two CSS rules to the stylesheet in `src/robot_army/web/html.py` (beside `.pill.warn` at line ~416): `.pill.level.simulated` taking `var(--error)` for border and text plus a bolder weight, and `.pill.level.live` taking the muted treatment — the error colour rather than warn because warn is already spent on capacity and on a paused dispatch (research [R7](research.md))
 
 ### Tests for User Story 2
 
-- [ ] T035 [P] [US2] Add `tests/unit/test_web_non_live_banner.py` asserting the banner is present on every view at `plan`, `local` and `no-remote` and absent from every view at `live`, using the level-parameterised harness from T024
-- [ ] T036 [P] [US2] Add to `tests/unit/test_web_non_live_banner.py` a test that the stated consequences differ per level and that each names only boundaries genuinely simulated at that level, driven from `effects.REAL_AT` rather than from a hardcoded expected string (FR-013)
-- [ ] T037 [P] [US2] Add to `tests/unit/test_effects.py` the drift guard: `set(SIMULATED_CONSEQUENCES) == set(REAL_AT)`, so a boundary added to one table without the other fails the suite
-- [ ] T038 [P] [US2] Add to `tests/unit/test_web_render.py` a test that `.pill.level.simulated` and `.pill.level.live` both have rules in the served stylesheet — the defect this story exists to fix was an unstyled class, and nothing today would catch its return
-- [ ] T039 [US2] Add to `tests/unit/test_web_non_live_banner.py` a test that the non-live banner, the daemon-not-running banner, the mismatch banner and a `?msg=` action banner all render together and none suppresses another (FR-015)
+- [X] T035 [P] [US2] Add `tests/unit/test_web_non_live_banner.py` asserting the banner is present on every view at `plan`, `local` and `no-remote` and absent from every view at `live`, using the level-parameterised harness from T024
+- [X] T036 [P] [US2] Add to `tests/unit/test_web_non_live_banner.py` a test that the stated consequences differ per level and that each names only boundaries genuinely simulated at that level, driven from `effects.REAL_AT` rather than from a hardcoded expected string (FR-013)
+- [X] T037 [P] [US2] Add to `tests/unit/test_effects.py` the drift guard: `set(SIMULATED_CONSEQUENCES) == set(REAL_AT)`, so a boundary added to one table without the other fails the suite
+- [X] T038 [P] [US2] Add to `tests/unit/test_web_render.py` a test that `.pill.level.simulated` and `.pill.level.live` both have rules in the served stylesheet — the defect this story exists to fix was an unstyled class, and nothing today would catch its return
+- [X] T039 [US2] Add to `tests/unit/test_web_non_live_banner.py` a test that the non-live banner, the daemon-not-running banner, the mismatch banner and a `?msg=` action banner all render together and none suppresses another (FR-015)
 
 **Checkpoint**: no page below `live` can be mistaken for a live one, at a glance or on close
 reading. US1 and US2 together are the shippable unit.
@@ -143,9 +143,9 @@ simulated one is distinguishable without close reading.
 > missing is coverage — nothing pins that every row-bearing view calls `mark_simulated`. So
 > this phase is tests plus one gap fix, not a rendering change.
 
-- [ ] T040 [P] [US3] Add to `tests/unit/test_web_render.py` a test that walks each row-bearing view (`/active`, `/queue`, `/interrupted`, `/cards`, `/item/{id}`, the confirm views, `/log`) with one simulated row present and asserts the `sim` badge is rendered — the FR-019 coverage that would catch a table added later without it
-- [ ] T041 [US3] Fix any view the T040 test finds unmarked, in `src/robot_army/web/pages.py`, by routing its row title or identifier through the existing `mark_simulated`; if every view already passes, record that in the test's docstring rather than changing rendering for its own sake
-- [ ] T042 [P] [US3] Add to `tests/unit/test_web_render.py` a mixed-table test: one real and one simulated row in the same view, asserting the badge appears exactly once and against the right row (FR-020)
+- [X] T040 [P] [US3] Add to `tests/unit/test_web_render.py` a test that walks each row-bearing view (`/active`, `/queue`, `/interrupted`, `/cards`, `/item/{id}`, the confirm views, `/log`) with one simulated row present and asserts the `sim` badge is rendered — the FR-019 coverage that would catch a table added later without it
+- [X] T041 [US3] Fix any view the T040 test finds unmarked, in `src/robot_army/web/pages.py`, by routing its row title or identifier through the existing `mark_simulated`; if every view already passes, record that in the test's docstring rather than changing rendering for its own sake
+- [X] T042 [P] [US3] Add to `tests/unit/test_web_render.py` a mixed-table test: one real and one simulated row in the same view, asserting the badge appears exactly once and against the right row (FR-020)
 
 **Checkpoint**: all three stories functional and independently verified.
 
@@ -153,12 +153,12 @@ simulated one is distinguishable without close reading.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T043 Run the full suite: `uv run pytest` from the repository root, confirming the constitution's completion gate
-- [ ] T044 Work through [quickstart.md](quickstart.md) end to end against a throwaway state directory, including reading scenarios 3–6 with eyes rather than `grep` — the feature is about what a page looks like
-- [ ] T045 [P] Update `docs/roadmap.md`: give this milestone the `009` slot with a short account of the two compounding defects and what running at `plan` taught, and move the "whatever survives contact with reality" parking lot to `010` — the fifth time a milestone with a shape has displaced one without
-- [ ] T046 [P] Update `specs/002-web-ui/contracts/http-api.md` to point at [contracts/web-visibility.md](contracts/web-visibility.md) for the two universal rules this feature supersedes, so a reader of the older contract is not left with a statement that is no longer true
-- [ ] T047 [P] Note in `docs/roadmap.md`'s 008 entry that its "the web interface has the loud half and is issue #14 … this milestone puts the count into the payload the web already consumes and stops there" is now discharged by 009
-- [ ] T048 Self-review against `.specify/memory/constitution.md`, confirming in particular that no new action went unlogged and that nothing this feature added persists state
+- [X] T043 Run the full suite: `uv run pytest` from the repository root, confirming the constitution's completion gate
+- [X] T044 Work through [quickstart.md](quickstart.md) end to end against a throwaway state directory, including reading scenarios 3–6 with eyes rather than `grep` — the feature is about what a page looks like
+- [X] T045 [P] Update `docs/roadmap.md`: give this milestone the `009` slot with a short account of the two compounding defects and what running at `plan` taught, and move the "whatever survives contact with reality" parking lot to `010` — the fifth time a milestone with a shape has displaced one without
+- [X] T046 [P] Update `specs/002-web-ui/contracts/http-api.md` to point at [contracts/web-visibility.md](contracts/web-visibility.md) for the two universal rules this feature supersedes, so a reader of the older contract is not left with a statement that is no longer true
+- [X] T047 [P] Note in `docs/roadmap.md`'s 008 entry that its "the web interface has the loud half and is issue #14 … this milestone puts the count into the payload the web already consumes and stops there" is now discharged by 009
+- [X] T048 Self-review against `.specify/memory/constitution.md`, confirming in particular that no new action went unlogged and that nothing this feature added persists state
 
 ---
 
@@ -264,3 +264,36 @@ that can follow, and Phase 6 closes the milestone.
 - T041 may legitimately be a no-op — research [R6](research.md) expects it to be. Recording
   "already correct, here is the test that pins it" is the honest outcome, not a failure to find
   work
+
+---
+
+## Implementation notes (filled in during `/speckit-implement`)
+
+Five departures from the plan, all recorded rather than quietly absorbed.
+
+1. **T011 moved into Phase 2.** `handle` cannot build the chrome without the resolver, so
+   "foundational" and "US1's core" turned out to be the same task. The phase boundary was
+   drawn in the wrong place; the work was not.
+2. **T005 moved from `pages.py` to `server.py`.** `tests/unit/test_effects.py` enforces that
+   only modules which *resolve* an effect level may name `EffectLevel` — the FR-053 guard —
+   and `web/server.py` is already exempt while `web/pages.py` is not. The plan put
+   `effective_level` in the wrong file and the existing suite said so on the first run.
+   `chrome()` now receives the level and the consequence list as plain strings, which also
+   keeps `html.py` free of any product import.
+3. **Two link gaps the plan did not anticipate**, both found by T023 rather than by reading:
+   the nav bar and the brand link carried no query at all, and `item_link` — on every row of
+   three views — dropped the preference. Both are now threaded, along with the chrome's
+   `/queue` and `/anomalies` pills and the log's "clear" link. This is the second milestone
+   running in which the test written to prove a rule found the place the rule was not applied.
+4. **T041 was a no-op**, as research [R6](research.md) predicted. The badge coverage test
+   passed the moment it was written; no view needed fixing. Recorded here rather than
+   presented as work.
+5. **Four existing assertions needed updating, not the two files predicted.** All four are
+   generated URLs (T027's category): `test_web_routing`, `test_web_end_to_end` (×2),
+   `test_web_log`, `test_pause`. Two further existing tests needed a different fix — they
+   asserted the *word* "simulated" was absent from a page, which 009 makes meaningless since a
+   page withholding rows now says so. They assert on the badge markup instead, which is what
+   FR-019 actually requires.
+
+**Test count**: 1414 → 1521 (+107). Full suite and `ruff check` both green; both quickstart
+halves walked against a live server at all four effect levels.

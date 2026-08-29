@@ -1157,3 +1157,41 @@ def test_every_way_out_of_onboarding_leaves_exactly_one_outcome_record(
         per_repo.setdefault(record["entity_id"], []).append(record["outcome"])
     assert sorted(per_repo) == sorted(exits), "every exit is accounted for, none twice"
     assert all(len(outcomes) == 1 for outcomes in per_repo.values()), per_repo
+
+
+def test_a_machine_readable_run_yields_one_document_on_every_exit_path(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """FR-012, end to end rather than at the parser.
+
+    `--json` passes ``out=None``, so the approval screen stays in ``lines`` — where
+    ``render(as_json=True)`` drops it. The document must parse on every way out, including
+    the ones that exit non-zero, and must contain none of the prose a person would read."""
+    trust = trust_file(
+        tmp_path,
+        clone_with_origin(repo_root / "yes", "git@github.com:jantman/yes.git"),
+        clone_with_origin(repo_root / "no", "git@github.com:jantman/no.git"),
+        clone_with_origin(repo_root / "stop", "git@github.com:jantman/stop.git"),
+    )
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    runs = {
+        "approved": operations.onboard(
+            ctx, "jantman/yes", confirm=lambda _: "y", trust_file=trust
+        ),
+        "declined": operations.onboard(
+            ctx, "jantman/no", confirm=lambda _: "n", trust_file=trust
+        ),
+        "interrupted": onboard_raising(
+            ctx, "jantman/stop", trust=trust, error=KeyboardInterrupt()
+        ),
+        "refused": operations.onboard(ctx, "jantman/never-cloned"),
+    }
+
+    for name, result in runs.items():
+        document = result.render(as_json=True)
+        payload = json.loads(document)  # parses at all — that is the claim
+        assert payload["repo_key"].startswith("jantman/"), name
+        assert "clone path   :" not in document, f"{name}: no approval screen in the document"
+        assert "aborted" not in document and "interrupted" not in document, name

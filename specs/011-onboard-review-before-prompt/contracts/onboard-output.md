@@ -51,6 +51,10 @@ still visible and answerable.
 `--json` output is a single document on stdout on every path. That is the testable form of
 FR-012.
 
+`onboard` gains the `--json` flag in this milestone. It did not have one before, so the two
+rules above described a mode no invocation could reach — caught in review on #19, where the
+suppression branch in `cli._dispatch` was correctly written and permanently unreachable.
+
 ## Exits
 
 | Exit | Screen | Outcome | Code | Audit `cause` |

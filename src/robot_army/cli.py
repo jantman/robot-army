@@ -237,6 +237,12 @@ def build_parser() -> argparse.ArgumentParser:
             "pause",
             "unpause",
             "attach",
+            # `onboard` is here because 011 gave it a machine-readable mode to be correct
+            # about: its prompt writes to stderr and its approval screen is suppressed so
+            # that stdout carries one parseable document (FR-012). Without the flag that
+            # was a contract describing a mode no command could enter. A prompting command
+            # with `--json` is not novel — `purge-simulated` above has been one all along.
+            "onboard",
         ):
             action.add_argument(
                 "--json", action="store_true", help="machine-readable output on stdout"

@@ -569,3 +569,25 @@ def test_the_other_prompts_keep_their_wording_and_their_stdout_stream(
     assert asked[0].endswith("? [y/N] ")
     assert result.code == EXIT_FAILED and result.lines == ["aborted"]
     assert captured.err == "", "this prompt did not move; only onboarding's did"
+
+
+def test_onboard_accepts_json_because_011_describes_what_it_does_in_that_mode():
+    """The gap review caught on #19. `cli._dispatch` suppressed onboarding's approval
+    screen "in --json mode", `_ask` moved the prompt to stderr to keep that document
+    parseable, and contracts/onboard-output.md described both — while `onboard` had no
+    `--json` flag at all, so the branch was unreachable and the mode unenterable.
+
+    Asserting the *rendered document* elsewhere could never have caught it: every such
+    test used a command that already had the flag. This one asks the parser."""
+    assert build_parser().parse_args(["onboard", "some/repo", "--json"]).json is True
+    assert build_parser().parse_args(["onboard", "some/repo"]).json is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["onboard", "some/repo"], ["purge-simulated"], ["pause"], ["attach", "1"]],
+)
+def test_every_command_that_can_prompt_can_also_be_asked_for_json(command):
+    """Guards the guard. A command that prompts and cannot produce a document is a
+    command whose prompt stream nobody has had to think about."""
+    assert build_parser().parse_args([*command, "--json"]).json is True

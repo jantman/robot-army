@@ -347,16 +347,31 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     # situation beats a page carrying two.
     consequences = chrome.get("simulated_consequences") or []
     if consequences:
+        # The prose around the list is derived too, not only the list. ``plan`` is the one
+        # level at which *nothing* happened, and saying so is the strongest true statement
+        # available — but repeating it at ``local``, where branches and commits are really
+        # created, or at ``no-remote``, where a real session runs in a real terminal, would
+        # be the "single message reused below live" that FR-013 forbids. Getting the list
+        # right and leaving the sentences around it fixed is the same defect, quieter.
+        total = bool(chrome.get("all_effects_simulated"))
+        opening = (
+            "nothing on this page really happened"
+            if total
+            else "parts of what these rows describe did not really happen"
+        )
+        tail = (
+            "The rows are real rows describing work the daemon planned and did not carry "
+            "out. Nothing here reached your repositories, GitHub, Trello, or a terminal."
+            if total
+            else "The rows are real rows. Everything listed above was skipped; anything "
+            "not listed was really carried out."
+        )
         notices.append(
             div(
                 f"This instance is set up for testing, not real work. At effect level "
-                f"{level}, nothing on this page happened:",
+                f"{level}, {opening}:",
                 ul(consequences),
-                div(
-                    "The rows are real rows describing actions that were planned and not "
-                    "performed. Nothing here reached GitHub, Trello, or a terminal.",
-                    class_="reason",
-                ),
+                div(tail, class_="reason"),
                 class_="banner error",
             )
         )

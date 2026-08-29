@@ -199,6 +199,7 @@ def chrome(
     path: str = "",
     effective_level: str | None = None,
     simulated_consequences: list[str] | None = None,
+    all_effects_simulated: bool = False,
 ) -> dict[str, Any]:
     """The facts every view carries. Assembled once per request.
 
@@ -244,6 +245,10 @@ def chrome(
         # ``live``, which is what makes "no banner at live" a fact about the data rather than
         # a branch in the renderer.
         "simulated_consequences": list(simulated_consequences or []),
+        # Whether *every* boundary that can be simulated is, which is true only at ``plan``.
+        # The banner's own prose turns on it, so it is derived beside the list rather than
+        # inferred from the list's length by a renderer that cannot know the total.
+        "all_effects_simulated": bool(all_effects_simulated),
         "dispatch_paused": pause.paused,
         "dispatch_paused_at": pause.paused_at,
         "dispatch_paused_by": pause.paused_by,

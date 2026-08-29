@@ -328,5 +328,25 @@ for it, because every test had one section holding rows or none at all. The mixe
 section full, its sibling empty and withholding — is the one a rule written at the wrong
 granularity gets wrong, and the one nobody thought to write.
 
-**Test count**: 1414 → 1527 (+113), including the four regressions above. Full suite and `ruff check` both green; both quickstart
+### A fifth, from the second review round
+
+**The banner's prose was not derived, only its list.** The `<ul>` came from `REAL_AT` and was
+right at every level; the sentences wrapped around it were fixed strings, and they said
+"nothing on this page happened", "planned and not performed" and "nothing here reached
+GitHub, Trello, or a terminal" at every level below `live`. At `local` branches and commits
+are genuinely created; at `no-remote` a real session runs in a real terminal. Two of those
+three sentences were false at two of the three levels.
+
+This is FR-013's own failure mode — one message reused below `live` — surviving inside the
+change that exists to prevent it, because the derivation stopped at the list. The framing now
+turns on whether every simulatable boundary is simulated, which is true only at `plan`, so
+`plan` keeps the strongest true statement and the other two levels get an accurate one that
+also tells the operator what *was* carried out.
+
+The existing test asserted the fixed sentence was present at all three levels, which is
+exactly the assertion that made the bug invisible. Replaced with one asserting the framing
+differs by level, plus a mechanical one over the whole rendered banner: no phrase from
+`SIMULATED_CONSEQUENCES` may appear at a level where that boundary is real.
+
+**Test count**: 1414 → 1529 (+115), including the five regressions above. Full suite and `ruff check` both green; both quickstart
 halves walked against a live server at all four effect levels.

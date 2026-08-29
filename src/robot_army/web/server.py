@@ -1227,6 +1227,10 @@ def handle(app: WebApp, request: Request) -> Response:
             path=request.path if request.method in GET else _referring_view(request, "/active"),
             effective_level=str(level) if level else "unknown",
             simulated_consequences=effects.consequences(level) if level else [],
+            all_effects_simulated=(
+                level is not None
+                and len(effects.consequences(level)) == len(effects.SIMULATED_CONSEQUENCES)
+            ),
         )
         try:
             outcome = route.handler(

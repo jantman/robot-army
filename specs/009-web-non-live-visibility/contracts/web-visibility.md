@@ -84,8 +84,20 @@ Rendered on **every** view — including `/log`, `/anomalies` and refusal pages 
 - Same slot, weight and `banner error` styling as the existing `DAEMON NOT RUNNING` and
   `EFFECT LEVEL MISMATCH` banners.
 - Names the effective level.
-- States, in operator terms, what did not really happen at that level. The list is derived from
-  `effects.REAL_AT`, so it is level-specific:
+- States, in operator terms, what did not really happen at that level. **The whole banner is
+  derived from `effects.REAL_AT`, not only its list** — the sentences around it turn on whether
+  *every* simulatable boundary is simulated, which is true only at `plan`:
+
+| Effective level | Framing |
+|---|---|
+| `plan` | "nothing on this page really happened", closing "Nothing here reached your repositories, GitHub, Trello, or a terminal." |
+| `local`, `no-remote` | "parts of what these rows describe did not really happen", closing "Everything listed above was skipped; anything not listed was really carried out." |
+
+  Fixed prose would be false wherever the level performs some effects for real: at `local`
+  branches and commits are genuinely created, and at `no-remote` a real session runs in a real
+  terminal. A banner that overstates is a banner that stops being read.
+
+  The list itself:
 
 | Effective level | Stated consequences |
 |---|---|

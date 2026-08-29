@@ -55,6 +55,45 @@ def test_the_banner_states_exactly_the_consequences_that_hold(web_at, conn, leve
         assert (phrase in body) is simulated_here, (level, name)
 
 
+def test_the_prose_around_the_list_is_derived_too(web_at, conn) -> None:
+    """FR-013 applies to the whole banner, not only to its bullet list.
+
+    Getting the list right and leaving the sentences around it fixed is the same defect one
+    layer quieter: at ``local`` branches and commits are really created, and at ``no-remote``
+    a real session runs in a real terminal, so "nothing on this page happened" and "nothing
+    reached a terminal" were both false — stated confidently, on every page, in the banner
+    whose entire job is to be believed.
+    """
+    absolute = "nothing on this page really happened"
+    partial = "parts of what these rows describe did not really happen"
+
+    plan = web_at("plan").get("/active").text
+    assert absolute in plan
+    assert "Nothing here reached your repositories, GitHub, Trello, or a terminal." in plan
+
+    for level in ("local", "no-remote"):
+        body = web_at(level).get("/active").text
+        assert absolute not in body, f"{level} claims nothing happened"
+        assert partial in body
+        assert "anything not listed was really carried out" in body
+
+
+def test_no_banner_claims_absence_of_an_effect_that_is_real(web_at, conn) -> None:
+    """The mechanical form of the same rule, so a reworded banner cannot reintroduce it.
+
+    Every phrase in the table is a statement that something did *not* happen. A level at
+    which that boundary is real must not carry the phrase — which the bullet list already
+    guarantees, and which this asserts of the rendered page as a whole, prose included.
+    """
+    for level in BELOW_LIVE:
+        body = web_at(level).get("/active").text
+        banner = body[body.index("This instance is set up") :]
+        banner = banner[: banner.index("</div></div>")]
+        for name, phrase in SIMULATED_CONSEQUENCES.items():
+            if EffectLevel(level) in REAL_AT[name]:
+                assert phrase not in banner, (level, name)
+
+
 def test_the_consequences_shrink_as_the_level_rises(web_at, conn) -> None:
     """A single message reused below ``live`` would pass every test above but this one."""
     counts = [len(consequences(EffectLevel(level))) for level in (*BELOW_LIVE, "live")]

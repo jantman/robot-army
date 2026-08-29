@@ -2046,6 +2046,11 @@ def cards(
             "board_id": ctx.config.trello.board_id,
             "cards": payload,
             "include_simulated": include_simulated,
+            # Always present, never absent, so a consumer never has to tell "nothing was
+            # withheld" apart from "this build does not report it" -- the ambiguity 008
+            # removed from ``status``'s payload and left standing in this one. The web
+            # interface reads it; so does ``cards --json``.
+            "withheld_simulated": withheld,
         }
     )
     if not payload:

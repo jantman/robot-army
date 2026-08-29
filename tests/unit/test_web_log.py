@@ -269,7 +269,9 @@ def test_a_non_github_url_in_a_record_is_never_linked(web, layout):
 def test_a_work_item_record_links_to_its_page(web, layout, conn):
     item_id = seed_item(conn, state="ready")
     write_log(layout, TODAY, [record(0, entity_id=item_id)])
-    assert f'href="/item/{item_id}"' in web.get("/log").text
+    # Since 009 every internal link states the visibility preference, so the href is
+    # prefix-matched rather than compared whole.
+    assert f'href="/item/{item_id}?' in web.get("/log").text
 
 
 def test_a_web_component_record_renders_as_such(web, conn, layout):

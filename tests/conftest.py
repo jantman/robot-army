@@ -974,6 +974,54 @@ class WebHarness:
 
 
 @pytest.fixture
+def web_at(config: Config, conn: Any, layout: Layout, monkeypatch: Any) -> Any:
+    """:fixture:`web`, but at an effect level of the test's choosing (milestone 009).
+
+    The base configuration is ``live`` (see :func:`config_dict`), which is deliberate and
+    load-bearing: it is the one level at which 009 changed no default, so every web test
+    written before it keeps testing exactly what it tested. Anything exercising the
+    *changed* behaviour asks for a level explicitly, here.
+
+    Returns a factory rather than a harness because a single test wants to compare levels —
+    the banner at ``plan`` against its absence at ``live`` is one assertion about one rule,
+    not two tests that might drift apart.
+    """
+    from robot_army import operations
+    from robot_army.web.server import WebApp
+
+    reader = FakeIssueReader()
+    display = StubDisplay()
+    host = StubSessionHost()
+    shared: dict[str, Any] = {}
+
+    def fake_wire(level: Any, cfg: Any, audit_log: Any) -> Any:
+        from robot_army.boundaries.git import GitVersionControl
+
+        if "vcs" not in shared:
+            shared["vcs"] = GitVersionControl(audit_log)
+        return make_boundaries(
+            audit_log,
+            level=level,
+            reader=reader,
+            display=display,
+            host=host,
+            vcs=shared["vcs"],
+        )
+
+    monkeypatch.setattr(operations, "wire", fake_wire)
+    operations.clear_resume_signal_cache()
+
+    def build(level: str) -> WebHarness:
+        from robot_army.effects import EffectLevel
+
+        app = WebApp(config, effect_level=EffectLevel(level))
+        return WebHarness(app, reader=reader, display=display, host=host, vcs=None)
+
+    yield build
+    operations.clear_resume_signal_cache()
+
+
+@pytest.fixture
 def web(config: Config, conn: Any, layout: Layout, monkeypatch: Any) -> WebHarness:
     """A web app whose per-request contexts get stubbed boundaries.
 

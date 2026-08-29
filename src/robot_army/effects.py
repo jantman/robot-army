@@ -66,6 +66,47 @@ class EffectLevel(StrEnum):
         return self is not EffectLevel.LIVE
 
 
+#: What each boundary *not* really doing something means, said to the person reading the
+#: screen rather than to the person who wrote the wiring. Keyed by the same names as
+#: :data:`REAL_AT`, so :func:`consequences` can derive which of these hold at a given level
+#: instead of four hand-written paragraphs drifting out of step with the table above them.
+#:
+#: Only boundaries that are simulated *somewhere* appear. A boundary real at every level —
+#: the two readers — has no consequence to state at any level, and a phrase that can never
+#: render is dead data. ``test_effects`` asserts the two sets agree, so a boundary that
+#: gains a simulated level without gaining a phrase fails the suite rather than rendering a
+#: banner that quietly omits it.
+#:
+#: Order is the order they are read out in, worst-understood first: what the system would
+#: have *done* on this machine, then what it would have done to the world outside it.
+SIMULATED_CONSEQUENCES: dict[str, str] = {
+    "session_host": "no session is really launched",
+    "version_control": "no branch, commit or worktree is really created",
+    "hook_runner": "no hook really runs",
+    "display": "no terminal window really opens",
+    "issue_writer": (
+        "no issue or comment is really written, and the issue numbers shown are invented"
+    ),
+    "card_writer": "no card really moves on the board",
+    "notifier": "no notification is really sent",
+}
+
+
+def consequences(level: EffectLevel) -> list[str]:
+    """What is *not* really happening at ``level``, in operator terms.
+
+    Derived from :data:`REAL_AT` rather than written out per level, so it cannot drift from
+    what the boundaries actually do. Empty at ``live`` by construction — which is why "no
+    banner at ``live``" falls out of the derivation instead of out of a branch someone has
+    to remember not to delete.
+    """
+    return [
+        phrase
+        for name, phrase in SIMULATED_CONSEQUENCES.items()
+        if level not in REAL_AT[name]
+    ]
+
+
 #: Boundary name → the set of levels at which its **real** implementation is selected.
 #: Written as data rather than as branches so the test can assert the whole table.
 REAL_AT: dict[str, frozenset[EffectLevel]] = {

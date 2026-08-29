@@ -166,33 +166,58 @@ def card_link(card: dict[str, Any] | None, *, label: str | None = None) -> Marku
     return a(url, text, rel="noreferrer noopener")
 
 
-def item_link(item: dict[str, Any]) -> Markup:
+def item_link(item: dict[str, Any], *, include_simulated: bool = False) -> Markup:
     return join(
-        [a(f"/item/{item['id']}", f"item {item['id']}"), " ", mark_simulated(item.get("simulated"))]
+        [
+            a(f"/item/{item['id']}{_query(include_simulated)}", f"item {item['id']}"),
+            " ",
+            mark_simulated(item.get("simulated")),
+        ]
     )
 
 
 def _query(include_simulated: bool, **extra: Any) -> str:
+    """The query string every generated link carries.
+
+    ``include_simulated`` is always stated, in both directions (009 FR-003). See
+    :func:`robot_army.web.server.html_query` for why omission can no longer stand in for
+    false now that the default varies by effect level.
+    """
     parts = [f"{k}={v}" for k, v in extra.items() if v not in (None, "")]
-    if include_simulated:
-        parts.append("include_simulated=1")
-    return ("?" + "&".join(parts)) if parts else ""
+    parts.append(f"include_simulated={'1' if include_simulated else '0'}")
+    return "?" + "&".join(parts)
 
 
 # -- chrome (FR-016 through FR-019) -----------------------------------------
 
 
-def chrome(ctx: operations.Context, *, include_simulated: bool = False) -> dict[str, Any]:
+def chrome(
+    ctx: operations.Context,
+    *,
+    include_simulated: bool = False,
+    simulated_preference: bool | None = None,
+    path: str = "",
+    effective_level: str | None = None,
+    simulated_consequences: list[str] | None = None,
+    all_effects_simulated: bool = False,
+) -> dict[str, Any]:
     """The facts every view carries. Assembled once per request.
 
     ``daemon.running`` false is the FR-005 case: read views render normally, the chrome
     says so prominently, and controls that need the daemon refuse.
+
+    ``effective_level`` is computed here and **only** here (009 FR-018). The banner and the
+    level pill both read it out of this payload rather than each deriving it, which is what
+    makes "the two cannot disagree" structural rather than a matter of remembering.
     """
     report = health.check(
         ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
     )
     beat = report.heartbeat or {}
     running = daemon_mod.is_locked(ctx.layout.lock_path)
+    # Defaulting to our own configured level keeps a direct caller — a test, or a future
+    # second entry point — from silently rendering a page with no level at all.
+    effective_level = effective_level or str(ctx.effect_level)
     pause = db.get_dispatch_control(ctx.conn)
     anomalies = db.list_anomalies(ctx.conn)
 
@@ -210,6 +235,20 @@ def chrome(ctx: operations.Context, *, include_simulated: bool = False) -> dict[
             "effect_level": beat.get("effect_level"),
         },
         "effect_mismatch": effect_mismatch(ctx, report, running=running),
+        # Resolved by the server, which is where this process's effect level is decided
+        # (FR-053 keeps the level enum out of every module that does not decide one). The
+        # string "unknown" means a daemon is running whose level could not be read — a
+        # consumer must be able to tell "we could not tell" from "we did not say".
+        "effective_level": effective_level,
+        # Resolved alongside the level and for the same reason: deriving them needs the level
+        # enum, which FR-053 keeps out of every module that does not decide a level. Empty at
+        # ``live``, which is what makes "no banner at live" a fact about the data rather than
+        # a branch in the renderer.
+        "simulated_consequences": list(simulated_consequences or []),
+        # Whether *every* boundary that can be simulated is, which is true only at ``plan``.
+        # The banner's own prose turns on it, so it is derived beside the list rather than
+        # inferred from the list's length by a renderer that cannot know the total.
+        "all_effects_simulated": bool(all_effects_simulated),
         "dispatch_paused": pause.paused,
         "dispatch_paused_at": pause.paused_at,
         "dispatch_paused_by": pause.paused_by,
@@ -220,6 +259,13 @@ def chrome(ctx: operations.Context, *, include_simulated: bool = False) -> dict[
             capacity_mod.snapshot(ctx.conn, config=ctx.config), ctx.config.dispatch.order
         ),
         "include_simulated": include_simulated,
+        # What the operator *said*, beside what the interface *decided*. A reader of the
+        # payload can tell a deliberate choice from a default without knowing the level.
+        "simulated_preference": simulated_preference,
+        # The path is chrome because the visibility toggle is chrome: it has to send the
+        # reader back to the view they are on, and the chrome bar is the only thing rendered
+        # on every view.
+        "path": path,
         "pending_job_requests": control.pending(ctx.layout),
         "rendered_at": datetime.now(UTC).strftime(STAMP),
         "refresh_seconds": ctx.config.web.refresh_seconds,
@@ -422,7 +468,7 @@ def action_control(item_id: int, name: str, *, include_simulated: bool = False) 
         )
     return form(
         f"/item/{item_id}/{name}",
-        html.hidden("include_simulated", "1") if include_simulated else None,
+        html.hidden("include_simulated", "1" if include_simulated else "0"),
         button(spec.label, class_="danger" if spec.danger else None),
     )
 
@@ -455,7 +501,7 @@ def dispatch_controls(chrome: dict[str, Any], *, include_simulated: bool = False
     def control(action: str, label: str, note: str, **attributes: Any) -> Markup:
         return form(
             action,
-            html.hidden("include_simulated", "1") if include_simulated else None,
+            html.hidden("include_simulated", "1" if include_simulated else "0"),
             button(label, **attributes),
             span(note, class_="meta"),
         )
@@ -503,11 +549,16 @@ def dispatch_controls(chrome: dict[str, Any], *, include_simulated: bool = False
 
 def _items(
     ctx: operations.Context, *, include_simulated: bool, state: str | None = None
-) -> list[dict[str, Any]]:
-    """Rows through ``operations.status``, so field names match ``_item_dict`` exactly."""
-    return operations.status(
-        ctx, state=state, include_simulated=include_simulated
-    ).data["items"]
+) -> tuple[list[dict[str, Any]], int]:
+    """Rows through ``operations.status``, so field names match ``_item_dict`` exactly.
+
+    Returns the rows **and** how many matching rows were withheld. The count comes from the
+    same call, under the same filters, as the listing it accompanies — milestone 008's
+    discipline, and the reason the number this interface prints is the number the link would
+    actually reveal (009 FR-007) rather than merely close to it.
+    """
+    data = operations.status(ctx, state=state, include_simulated=include_simulated).data
+    return data["items"], int(data["withheld_simulated"]["items"])
 
 
 def _session_for(ctx: operations.Context, item_id: int) -> dict[str, Any] | None:
@@ -519,13 +570,80 @@ def _empty(text: str) -> Markup:
     return p(text, class_="empty")
 
 
+def _visible(
+    rows: list[dict[str, Any]], *, include_simulated: bool
+) -> tuple[list[dict[str, Any]], int]:
+    """What a section shows, and how many of its rows it is withholding.
+
+    Counted from the rows the section itself holds rather than from a database-wide total,
+    because a view renders some states and not others: ``/queue`` shows ready, dispatching
+    and blocked, so a count of *every* simulated work item would name ``active``, ``done``
+    and ``abandoned`` rows that clicking "show them" could never surface. FR-007 asks for the
+    number the link reveals, and a number that is merely close replaces one contradiction
+    with a subtler one — 008's own words about the count it introduced.
+    """
+    if include_simulated:
+        return rows, 0
+    shown = [row for row in rows if not row.get("simulated")]
+    return shown, len(rows) - len(shown)
+
+
+def _reveal(path: str, *, include_simulated: bool) -> Markup:
+    """A link to this same view with the visibility preference flipped."""
+    label = "hide them" if include_simulated else "show them"
+    return a(path + _query(not include_simulated), label)
+
+
+def withheld_note(count: int, *, path: str, include_simulated: bool) -> Markup:
+    """"N simulated rows hidden — show them", or nothing at all (009 FR-006, FR-009).
+
+    Rendered beneath a table that is showing fewer rows than it matched. Absent entirely when
+    the count is zero, so a page with nothing to disclose says nothing — the alternative is a
+    permanent "0 rows hidden" that trains the reader to skip the line that matters.
+
+    A view discloses each withheld row exactly once. A section that rendered nothing carries
+    its own count in place of its empty text (:func:`_nothing`); this note carries the rows
+    withheld from the sections that *did* render. The two sets are disjoint and together they
+    are the whole, so no page states a number twice and none leaves one out.
+    """
+    if not count:
+        return Markup("")
+    plural = "row" if count == 1 else "rows"
+    return p(
+        f"{count} simulated {plural} hidden — ",
+        _reveal(path, include_simulated=include_simulated),
+        class_="withheld",
+    )
+
+
+def _nothing(text: str, count: int, *, path: str, include_simulated: bool) -> Markup:
+    """The empty state, which must never claim absence while withholding (009 FR-008).
+
+    "Nothing is ready." and "everything ready is being hidden from you" are different facts,
+    and reporting the second as the first is the whole defect this milestone exists to
+    remove — one notch quieter than the version the issue reported, but the same one.
+    """
+    if not count:
+        return _empty(text)
+    plural = "row" if count == 1 else "rows"
+    return p(
+        f"Nothing to show here. {count} simulated {plural} {'is' if count == 1 else 'are'} "
+        "hidden — ",
+        _reveal(path, include_simulated=include_simulated),
+        class_="empty",
+    )
+
+
 # -- /active (FR-011) -------------------------------------------------------
 
 
 def active_view(ctx: operations.Context, *, include_simulated: bool = False) -> View:
     """What is running, and for how long."""
     rows: list[dict[str, Any]] = []
-    for item in _items(ctx, include_simulated=include_simulated, state=str(WorkItemState.ACTIVE)):
+    items, withheld = _items(
+        ctx, include_simulated=include_simulated, state=str(WorkItemState.ACTIVE)
+    )
+    for item in items:
         session = _session_for(ctx, item["id"])
         started = (session or {}).get("started_at") or item.get("updated_at")
         rows.append(
@@ -542,7 +660,9 @@ def active_view(ctx: operations.Context, *, include_simulated: bool = False) -> 
     body = join(
         [
             h(1, "active"),
-            _empty("Nothing is running.")
+            _nothing(
+                "Nothing is running.", withheld, path="/active", include_simulated=include_simulated
+            )
             if not rows
             else table(
                 [
@@ -561,7 +681,7 @@ def active_view(ctx: operations.Context, *, include_simulated: bool = False) -> 
                 ],
                 [
                     [
-                        item_link(row),
+                        item_link(row, include_simulated=include_simulated),
                         row["repo_key"],
                         issue_link(row),
                         row["title"],
@@ -580,9 +700,16 @@ def active_view(ctx: operations.Context, *, include_simulated: bool = False) -> 
                     for row in rows
                 ],
             ),
+            withheld_note(
+                withheld if rows else 0, path="/active", include_simulated=include_simulated
+            ),
         ]
     )
-    return View(title="active", data={"items": rows, "count": len(rows)}, body=body)
+    return View(
+        title="active",
+        data={"items": rows, "count": len(rows), "withheld_simulated": withheld},
+        body=body,
+    )
 
 
 # -- /queue (FR-012, FR-013) ------------------------------------------------
@@ -603,7 +730,10 @@ def queue_view(
     matched what the dispatcher happened to do — true when it was written, and false the
     moment an ordering mode existed. There is nothing left to assert.
     """
-    all_items = _items(ctx, include_simulated=include_simulated)
+    # Always assembled whole, then filtered per section below. The dispatcher plans
+    # simulated rows regardless because they occupy slots, so partitioning first and hiding
+    # second is both the cheaper query and the only way to count what each section withheld.
+    all_items, _ = _items(ctx, include_simulated=True)
     max_age = ctx.config.daemon.dispatching_max_age_seconds
 
     snap = capacity_mod.snapshot(ctx.conn, config=ctx.config)
@@ -619,7 +749,8 @@ def queue_view(
         }
         for entry in plan
         # A simulated row is planned regardless, because it occupies a slot; whether it is
-        # *shown* is the viewer's filter, exactly as it is everywhere else.
+        # *shown* is the viewer's filter, applied below. Positions come from the plan either
+        # way, so hiding a row never renumbers the ones around it.
         if entry.item.id in by_id
     ]
 
@@ -647,6 +778,13 @@ def queue_view(
                 }
             )
 
+    ready, withheld_ready = _visible(ready, include_simulated=include_simulated)
+    dispatching, withheld_dispatching = _visible(dispatching, include_simulated=include_simulated)
+    blocked, withheld_blocked = _visible(blocked, include_simulated=include_simulated)
+    # Only the states this page renders. A database-wide count would name ``active``,
+    # ``done`` and ``abandoned`` rows that "show them" could never surface here.
+    withheld = withheld_ready + withheld_dispatching + withheld_blocked
+
     # The chrome is already assembled once per request; reuse it rather than re-reading
     # the same three facts to decide which control to render.
     current = chrome_payload if chrome_payload is not None else chrome(
@@ -668,14 +806,19 @@ def queue_view(
             *pause_note,
             dispatch_controls(current, include_simulated=include_simulated),
             h(2, f"ready ({len(ready)}) — in dispatch order"),
-            _empty("Nothing is ready.")
+            _nothing(
+                "Nothing is ready.",
+                withheld_ready,
+                path="/queue",
+                include_simulated=include_simulated,
+            )
             if not ready
             else table(
                 ["#", "item", "repo", "issue", "title", "status", "ready since"],
                 [
                     [
                         row["position"],
-                        item_link(row),
+                        item_link(row, include_simulated=include_simulated),
                         row["repo_key"],
                         issue_link(row),
                         row["title"],
@@ -691,13 +834,18 @@ def queue_view(
                 ],
             ),
             h(2, f"dispatching ({len(dispatching)})"),
-            _empty("Nothing is being prepared.")
+            _nothing(
+                "Nothing is being prepared.",
+                withheld_dispatching,
+                path="/queue",
+                include_simulated=include_simulated,
+            )
             if not dispatching
             else table(
                 ["item", "repo", "issue", "title", "age", "limit"],
                 [
                     [
-                        item_link(row),
+                        item_link(row, include_simulated=include_simulated),
                         row["repo_key"],
                         issue_link(row),
                         row["title"],
@@ -711,13 +859,18 @@ def queue_view(
                 ],
             ),
             h(2, f"blocked ({len(blocked)})"),
-            _empty("Nothing is blocked.")
+            _nothing(
+                "Nothing is blocked.",
+                withheld_blocked,
+                path="/queue",
+                include_simulated=include_simulated,
+            )
             if not blocked
             else table(
                 ["item", "state", "repo", "issue", "reason", ""],
                 [
                     [
-                        item_link(row),
+                        item_link(row, include_simulated=include_simulated),
                         row["state"],
                         row["repo_key"],
                         issue_link(row),
@@ -735,6 +888,15 @@ def queue_view(
                     for row in blocked
                 ],
             ),
+            # The rows withheld from sections that rendered something; the empty sections
+            # above have already accounted for their own.
+            withheld_note(
+                (withheld_ready if ready else 0)
+                + (withheld_dispatching if dispatching else 0)
+                + (withheld_blocked if blocked else 0),
+                path="/queue",
+                include_simulated=include_simulated,
+            ),
         ]
     )
     return View(
@@ -750,6 +912,7 @@ def queue_view(
             },
             "dispatching_max_age_seconds": max_age,
             "capacity": operations._capacity_dict(snap, ctx.config.dispatch.order),
+            "withheld_simulated": withheld,
         },
         body=body,
     )
@@ -835,7 +998,7 @@ def _interrupted_card(
             )
         )
     return div(
-        h(3, join([item_link(row), " — ", row["title"]])),
+        h(3, join([item_link(row, include_simulated=include_simulated), " — ", row["title"]])),
         p(
             join(
                 [
@@ -868,18 +1031,21 @@ def interrupted_view(ctx: operations.Context, *, include_simulated: bool = False
     way to reach one would be to type its id into the address bar. A control that exists
     but cannot be navigated to is a gap, not a scope boundary.
     """
-    interrupted = [
-        _signal_row(ctx, item)
-        for item in _items(
-            ctx, include_simulated=include_simulated, state=str(WorkItemState.INTERRUPTED)
-        )
-    ]
-    awaiting = [
-        _signal_row(ctx, item)
-        for item in _items(
-            ctx, include_simulated=include_simulated, state=str(WorkItemState.AWAITING_REVIEW)
-        )
-    ]
+    interrupted_items, _ = _items(
+        ctx, include_simulated=True, state=str(WorkItemState.INTERRUPTED)
+    )
+    interrupted, withheld_interrupted = _visible(
+        interrupted_items, include_simulated=include_simulated
+    )
+    interrupted = [_signal_row(ctx, item) for item in interrupted]
+    awaiting_items, _ = _items(
+        ctx, include_simulated=True, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    awaiting, withheld_awaiting = _visible(awaiting_items, include_simulated=include_simulated)
+    awaiting = [_signal_row(ctx, item) for item in awaiting]
+    # Per section, because this view renders two states and each has its own empty text to
+    # be honest in (009 FR-007, FR-008).
+    withheld = withheld_interrupted + withheld_awaiting
 
     def cards(rows: list[dict[str, Any]]) -> Markup:
         return join(
@@ -894,13 +1060,33 @@ def interrupted_view(ctx: operations.Context, *, include_simulated: bool = False
     body = join(
         [
             h(1, "interrupted"),
-            _empty("Nothing is interrupted.") if not interrupted else cards(interrupted),
+            _nothing(
+                "Nothing is interrupted.",
+                withheld_interrupted,
+                path="/interrupted",
+                include_simulated=include_simulated,
+            )
+            if not interrupted
+            else cards(interrupted),
             h(2, f"awaiting review ({len(awaiting)})"),
             p(
                 "Sessions that exited cleanly. The same three decisions apply.",
                 class_="meta",
             ),
-            _empty("Nothing is awaiting review.") if not awaiting else cards(awaiting),
+            _nothing(
+                "Nothing is awaiting review.",
+                withheld_awaiting,
+                path="/interrupted",
+                include_simulated=include_simulated,
+            )
+            if not awaiting
+            else cards(awaiting),
+            withheld_note(
+                (withheld_interrupted if interrupted else 0)
+                + (withheld_awaiting if awaiting else 0),
+                path="/interrupted",
+                include_simulated=include_simulated,
+            ),
         ]
     )
     return View(
@@ -909,6 +1095,7 @@ def interrupted_view(ctx: operations.Context, *, include_simulated: bool = False
             "items": interrupted,
             "awaiting_review": awaiting,
             "counts": {"interrupted": len(interrupted), "awaiting_review": len(awaiting)},
+            "withheld_simulated": withheld,
         },
         body=body,
     )
@@ -950,7 +1137,7 @@ def anomalies_view(ctx: operations.Context, *, include_simulated: bool = False) 
                     div(
                         form(
                             f"/anomalies/{row['id']}/acknowledge",
-                            html.hidden("include_simulated", "1") if include_simulated else None,
+                            html.hidden("include_simulated", "1" if include_simulated else "0"),
                             button("acknowledge"),
                         ),
                         class_="actions",
@@ -1007,6 +1194,7 @@ def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
         )
 
     rows = payload["cards"]
+    withheld = int(payload.get("withheld_simulated") or 0)
     # "Held" and "parked" are two different conditions and a card can be both at once —
     # awaiting clarification *and* sitting in a column the author excluded. `held` is the
     # state's own word, already used in CARD_STATE_HELP above; `parked` is milestone 006's.
@@ -1034,7 +1222,12 @@ def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
             )
             if parked
             else Markup(""),
-            _empty("Nothing on the board yet.")
+            _nothing(
+                "Nothing on the board yet.",
+                withheld,
+                path="/cards",
+                include_simulated=include_simulated,
+            )
             if not rows
             else join(
                 [
@@ -1045,6 +1238,9 @@ def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
                     h(2, "every tracked card"),
                     _cards_table(rows, include_simulated=include_simulated, rescannable=False),
                 ]
+            ),
+            withheld_note(
+                withheld if rows else 0, path="/cards", include_simulated=include_simulated
             ),
         ]
     )
@@ -1070,7 +1266,7 @@ def _cards_table(
                     class_="mono",
                 ),
                 row["repo_key"] or "—",
-                _card_issue_cell(row),
+                _card_issue_cell(row, include_simulated=include_simulated),
                 _card_reason_cell(row),
                 human_age(row["age_seconds"]),
                 rescan_control(row["card_id"], include_simulated=include_simulated)
@@ -1099,7 +1295,7 @@ def _card_reason_cell(row: dict[str, Any]) -> Markup:
     return join([parts[0]] if len(parts) == 1 else [parts[0], " — ", parts[1]])
 
 
-def _card_issue_cell(row: dict[str, Any]) -> Markup:
+def _card_issue_cell(row: dict[str, Any], *, include_simulated: bool = False) -> Markup:
     """The issue a card produced, and the work item it became, where each exists."""
     if row["issue_number"] is None:
         return span("—")
@@ -1111,7 +1307,16 @@ def _card_issue_cell(row: dict[str, Any]) -> Markup:
     )
     if not row.get("work_item_id"):
         return issue
-    return join([issue, " · ", a(f"/item/{row['work_item_id']}", f"item {row['work_item_id']}")])
+    return join(
+        [
+            issue,
+            " · ",
+            a(
+                f"/item/{row['work_item_id']}{_query(include_simulated)}",
+                f"item {row['work_item_id']}",
+            ),
+        ]
+    )
 
 
 def rescan_control(card_id: str, *, include_simulated: bool = False) -> Markup:
@@ -1144,7 +1349,7 @@ def card_confirm_view(
             div(
                 form(
                     f"/card/{card_id}/rescan",
-                    html.hidden("include_simulated", "1") if include_simulated else None,
+                    html.hidden("include_simulated", "1" if include_simulated else "0"),
                     button("rescan"),
                 ),
                 a(f"/cards{_query(include_simulated)}", "cancel"),
@@ -1341,7 +1546,7 @@ def confirm_view(
             [
                 h(1, f"{action} item {item_id}?"),
                 div(reason, class_="banner error"),
-                p(a(f"/item/{item_id}", "open the item")),
+                p(a(f"/item/{item_id}{_query(include_simulated)}", "open the item")),
                 action_bar(item_id, legal, include_simulated=include_simulated),
             ]
         )
@@ -1369,13 +1574,17 @@ def confirm_view(
             ),
             form(
                 f"/item/{item_id}/{action}",
-                html.hidden("include_simulated", "1") if include_simulated else None,
+                html.hidden("include_simulated", "1" if include_simulated else "0"),
                 div(
                     button(
                         f"yes, {spec.label}",
                         class_="danger" if spec.danger else "primary",
                     ),
-                    a(f"/item/{item_id}", "no, go back", class_="action"),
+                    a(
+                        f"/item/{item_id}{_query(include_simulated)}",
+                        "no, go back",
+                        class_="action",
+                    ),
                     class_="actions",
                 ),
             ),
@@ -1387,13 +1596,13 @@ def confirm_view(
 # -- /log (FR-042, FR-043, FR-044) ------------------------------------------
 
 
-def _record_target(record: dict[str, Any]) -> Markup:
+def _record_target(record: dict[str, Any], *, include_simulated: bool = False) -> Markup:
     """The record's subject, as a link where it names something followable."""
     parts: list[Any] = []
     entity_type = record.get("entity_type")
     entity_id = record.get("entity_id")
     if entity_type == "work_item" and entity_id is not None:
-        parts.append(a(f"/item/{entity_id}", f"item {entity_id}"))
+        parts.append(a(f"/item/{entity_id}{_query(include_simulated)}", f"item {entity_id}"))
     elif entity_type:
         parts.append(span(f"{entity_type}:{entity_id}"))
     target = record.get("target")
@@ -1483,9 +1692,9 @@ def log_view(
             ),
             name="outcome",
         ),
-        html.hidden("include_simulated", "1") if include_simulated else None,
+        html.hidden("include_simulated", "1" if include_simulated else "0"),
         button("filter"),
-        a("/log", "clear", class_="action"),
+        a(f"/log{_query(include_simulated)}", "clear", class_="action"),
         class_="filters",
     )
     filter_form = form("/log", controls, method="get")
@@ -1539,7 +1748,7 @@ def log_view(
                         " ",
                         mark_simulated(record.get("simulated") or record.get("dry_run")),
                     ),
-                    div(_record_target(record), class_="meta"),
+                    div(_record_target(record, include_simulated=include_simulated), class_="meta"),
                     div(_record_detail(record.get("detail")), class_="detail"),
                     class_="record",
                 )

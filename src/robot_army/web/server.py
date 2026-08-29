@@ -41,7 +41,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from robot_army import daemon as daemon_mod
-from robot_army import db, operations
+from robot_army import db, effects, health, operations
 from robot_army.config import Config
 from robot_army.effects import EffectLevel
 from robot_army.migrations import SCHEMA_VERSION
@@ -62,6 +62,10 @@ from robot_army.web.pages import ITEM_ACTIONS, View
 MAX_BODY_BYTES = 64 * 1024
 
 TRUTHY = frozenset({"1", "true", "yes", "on"})
+#: Its twin, and the reason there is one: since 009 the visibility default varies by effect
+#: level, so "the operator said no" and "the operator said nothing" are different facts and
+#: an omitted parameter can no longer stand in for a false one.
+FALSEY = frozenset({"0", "false", "no", "off"})
 
 
 # -- request and response ---------------------------------------------------
@@ -81,9 +85,27 @@ class Request:
         return values[0] if values else default
 
     @property
-    def include_simulated(self) -> bool:
-        """FR-019: excluded by default; including them is an explicit act."""
-        return (self.first("include_simulated") or "").lower() in TRUTHY
+    def simulated_preference(self) -> bool | None:
+        """What the operator *said* about simulated rows, or ``None`` if they said nothing.
+
+        Three-valued rather than boolean (009 FR-002, FR-004). Until 009 the default was
+        false at every effect level, so an absent parameter and an explicit ``0`` meant the
+        same thing and one boolean sufficed. Now the default depends on the effect level —
+        below ``live`` every row is a simulated row, so hiding them renders an empty page —
+        and the two must be told apart: without that, an operator who deliberately hid the
+        rows would have them reappear on their next click.
+
+        An unrecognised value folds into "unstated" rather than into false, and never into a
+        ``400``. This parameter is typed by hand from a phone, which is exactly the situation
+        in which a typo should not produce an error page — and below ``live`` the forgiving
+        direction is also the useful one: ``?include_simulated=treu`` shows the rows.
+        """
+        stated = (self.first("include_simulated") or "").lower()
+        if stated in TRUTHY:
+            return True
+        if stated in FALSEY:
+            return False
+        return None
 
     @property
     def referer(self) -> str | None:
@@ -412,6 +434,101 @@ def _report(result: operations.Result, *, extra: dict[str, Any] | None = None) -
     return {**(extra or {}), **result.data}
 
 
+# -- which level is in force (009 FR-018) -----------------------------------
+
+#: ``None`` means "a daemon is running whose level cannot be read", which is a real answer
+#: rather than an absent one — so "not supplied" needs a sentinel of its own.
+_UNSET = object()
+
+
+#: ``EffectLevel`` declares its members least-to-most consequential, so the declaration order
+#: *is* the ordering :func:`effective_level` needs and no second table has to be kept in step
+#: with it. ``test_web_effect_guard`` pins the order so a future reordering of the enum cannot
+#: silently invert the comparison.
+_LEVEL_ORDER: tuple[EffectLevel, ...] = tuple(EffectLevel)
+
+
+def effective_level(
+    ctx: Context, report: Any = None, *, running: bool | None = None
+) -> EffectLevel | None:
+    """The one level that drives the non-live banner, the level pill, and the row default.
+
+    Two levels can be in force at once and they can disagree: this interface's own
+    (``ctx.effect_level``) and the running daemon's. :func:`effect_mismatch` exists because
+    of that, and refuses mutations while they differ. But for the *display* question the two
+    answer different halves — the rows on the page were written by the daemon at the daemon's
+    level, while an action taken next would run at this interface's — so neither alone is the
+    honest answer.
+
+    **The more simulated of the two wins** (009 FR-018). That is the only rule under which the
+    page cannot claim to be real about either half: an interface configured for ``live`` in
+    front of a ``plan`` daemon would otherwise render a calm pill above a table of invented
+    issue numbers, which is precisely the reading milestone 009 exists to remove.
+
+    Returns ``None`` — meaning *unknown*, treated as most simulated — when a daemon holds the
+    lock but no heartbeat can be read. The existing ``EFFECT LEVEL UNKNOWN`` banner already
+    explains that state, so the caller renders no second banner for it and only the pill
+    changes; one account of a situation beats two competing ones.
+    """
+    if report is None:
+        report = health.check(
+            ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+        )
+    if running is None:
+        running = daemon_mod.is_locked(ctx.layout.lock_path)
+    ours = ctx.effect_level
+    if not running:
+        # Nothing to disagree with. Refusing to trust the configured level on the strength of
+        # a heartbeat left by a dead process would be the same surprise in the other
+        # direction — the reasoning ``effect_mismatch`` already records.
+        return ours
+    if not report.heartbeat:
+        return None
+    raw = report.heartbeat.get("effect_level")
+    try:
+        theirs = EffectLevel(str(raw))
+    except ValueError:
+        # A heartbeat naming a level this build does not have is not a level we can reason
+        # about, and failing closed here matches what ``effect_mismatch`` does with one it
+        # cannot read at all.
+        return None
+    return min(ours, theirs, key=_LEVEL_ORDER.index)
+
+
+
+# -- what this request shows (009 FR-001, FR-002) ---------------------------
+
+
+def include_simulated_for(
+    request: Request, ctx: Context, *, level: EffectLevel | Any | None = _UNSET
+) -> bool:
+    """Does this request show simulated rows?
+
+    The one place the two facts meet. ``Request`` is parsed from the wire before any database
+    handle exists, so it cannot know the effect level; ``pages.*`` takes a boolean and should
+    keep taking one, so the views stay pure functions of their arguments. The edge is where
+    both are in hand.
+
+    A stated preference wins outright. With nothing stated, the effective level decides: below
+    ``live`` — or when it cannot be read — the simulated rows *are* the contents, so hiding
+    them renders an empty page describing a system that has found no work, which is also
+    exactly what a broken daemon looks like. At ``live`` they are leftovers from earlier
+    testing and stay hidden, unchanged from 001's FR-019.
+
+    The terminal keeps excluding them at every level. A flag is typed deliberately and stays
+    visible in the scrollback; a phone has no other way to ask.
+
+    ``level`` is accepted so the read path can resolve it once and hand it to both this and
+    the chrome; ``None`` is a meaningful value there (a daemon whose level cannot be read),
+    which is why the sentinel for "not supplied" is not ``None``.
+    """
+    stated = request.simulated_preference
+    if stated is not None:
+        return stated
+    level = effective_level(ctx) if level is _UNSET else level
+    return level is not EffectLevel.LIVE
+
+
 # -- the action wrapper (FR-038, FR-039, FR-040) ----------------------------
 
 
@@ -441,7 +558,12 @@ def _perform(
         detail={
             "route": request.path,
             "form": {k: v for k, v in request.form.items() if k != "include_simulated"},
-            "include_simulated": request.include_simulated,
+            # Both halves. ``include_simulated`` is what the request was *served* with;
+            # ``simulated_preference`` is what the operator *asked for*, or ``None`` if they
+            # asked for nothing. Recording only the first would leave a record that cannot be
+            # read back without knowing which effect level was in force at the time.
+            "include_simulated": include_simulated_for(request, ctx),
+            "simulated_preference": request.simulated_preference,
             "origin": request.headers.get("origin"),
             "sec_fetch_site": request.headers.get("sec-fetch-site"),
         },
@@ -451,14 +573,25 @@ def _perform(
         check_same_origin(request)
         data = body(outcome)
         outcome.update({k: v for k, v in data.items() if k not in outcome})
-    target = location + html_query(request, msg=message)
+    target = location + html_query(request, ctx, msg=message)
     return Redirect(location=target, data={"ok": True, "message": message, **data})
 
 
-def html_query(request: Request, **extra: Any) -> str:
+def html_query(request: Request, ctx: Context, **extra: Any) -> str:
+    """The query string a redirect carries forward.
+
+    Always states ``include_simulated``, in both directions (009 FR-003). Omitting it when
+    false was correct while false was also the default — omission and ``0`` meant the same
+    thing. Now that the default varies by level, omission means "use the default" and can no
+    longer stand in for ``0``: an operator who deliberately hid the rows would get them back
+    on the ``303`` after their next action.
+
+    Derived here rather than handed in because the action path reaches this from inside six
+    handler bodies, and re-reading two small files to build one redirect target is cheaper
+    than a keyword threaded through all of them.
+    """
     parts = [f"{k}={v}" for k, v in extra.items() if v not in (None, "")]
-    if request.include_simulated:
-        parts.append("include_simulated=1")
+    parts.append(f"include_simulated={'1' if include_simulated_for(request, ctx) else '0'}")
     return ("?" + "&".join(parts)) if parts else ""
 
 
@@ -584,11 +717,11 @@ def _referring_view(request: Request, fallback: str) -> str:
 
 
 def view_root(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> Redirect:
-    return Redirect(location="/active" + html_query(request), data={"ok": True})
+    return Redirect(location="/active" + html_query(request, ctx), data={"ok": True})
 
 
 def view_active(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
-    return pages.active_view(ctx, include_simulated=request.include_simulated)
+    return pages.active_view(ctx, include_simulated=params["include_simulated"])
 
 
 def view_queue(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
@@ -596,38 +729,38 @@ def view_queue(app: WebApp, ctx: Context, request: Request, params: dict[str, An
     # rest of the page does, rather than re-reading the pause a second time.
     return pages.queue_view(
         ctx,
-        include_simulated=request.include_simulated,
+        include_simulated=params["include_simulated"],
         chrome_payload=params.get("chrome"),
     )
 
 
 def view_interrupted(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
-    return pages.interrupted_view(ctx, include_simulated=request.include_simulated)
+    return pages.interrupted_view(ctx, include_simulated=params["include_simulated"])
 
 
 def view_cards(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
-    return pages.cards_view(ctx, include_simulated=request.include_simulated)
+    return pages.cards_view(ctx, include_simulated=params["include_simulated"])
 
 
 def view_card_confirm(
     app: WebApp, ctx: Context, request: Request, params: dict[str, Any]
 ) -> View:
     return pages.card_confirm_view(
-        ctx, params["card_id"], include_simulated=request.include_simulated
+        ctx, params["card_id"], include_simulated=params["include_simulated"]
     )
 
 
 def view_anomalies(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
-    return pages.anomalies_view(ctx, include_simulated=request.include_simulated)
+    return pages.anomalies_view(ctx, include_simulated=params["include_simulated"])
 
 
 def view_item(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
-    return pages.item_view(ctx, params["id"], include_simulated=request.include_simulated)
+    return pages.item_view(ctx, params["id"], include_simulated=params["include_simulated"])
 
 
 def view_confirm(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
     return pages.confirm_view(
-        ctx, params["id"], params["action"], include_simulated=request.include_simulated
+        ctx, params["id"], params["action"], include_simulated=params["include_simulated"]
     )
 
 
@@ -649,7 +782,7 @@ def view_log(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]
         since=request.first("since") or None,
         outcome=request.first("outcome") or None,
         cursor=request.first("cursor") or None,
-        include_simulated=request.include_simulated,
+        include_simulated=params["include_simulated"],
     )
 
 
@@ -1078,9 +1211,34 @@ def handle(app: WebApp, request: Request) -> Response:
         )
 
     try:
-        chrome = pages.chrome(ctx, include_simulated=request.include_simulated)
+        # Resolved once, here, and handed to both the chrome and the handler. Deriving it
+        # twice would read the heartbeat and the lock twice and could — across a daemon
+        # starting mid-request — answer differently in the two halves of one page.
+        level = effective_level(ctx)
+        include_simulated = include_simulated_for(request, ctx, level=level)
+        chrome = pages.chrome(
+            ctx,
+            include_simulated=include_simulated,
+            simulated_preference=request.simulated_preference,
+            # A GET-able path, because the chrome's visibility toggle links to it — and a
+            # refused POST renders this same chrome. Pointing the toggle at
+            # ``/item/5/abandon`` would offer the reader a link that answers 405, which is
+            # reachable any time an action is illegal rather than only in some edge case.
+            path=request.path if request.method in GET else _referring_view(request, "/active"),
+            effective_level=str(level) if level else "unknown",
+            simulated_consequences=effects.consequences(level) if level else [],
+            all_effects_simulated=(
+                level is not None
+                and len(effects.consequences(level)) == len(effects.SIMULATED_CONSEQUENCES)
+            ),
+        )
         try:
-            outcome = route.handler(app, ctx, request, {**params, "chrome": chrome})
+            outcome = route.handler(
+                app,
+                ctx,
+                request,
+                {**params, "chrome": chrome, "include_simulated": include_simulated},
+            )
         except Refusal as refusal:
             view = pages.refusal_view(
                 reason=refusal.reason,

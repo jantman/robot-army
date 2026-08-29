@@ -65,10 +65,16 @@ def test_a_hostile_title_is_escaped_on_the_confirm_page_too(web, conn):
 
 
 def test_simulated_rows_are_marked_wherever_they_are_shown(web, conn):
-    """FR-019: excluded by default, and unmistakable when asked for."""
+    """FR-019: excluded by default at ``live``, and unmistakable when asked for.
+
+    Asserts on the badge markup rather than on the bare word "simulated", which 009 made
+    useless as a signal: a page that is *withholding* simulated rows now says so, in the
+    visibility toggle and in the withheld-row disclosure, so the word appears on pages with
+    no simulated row on them at all. The badge is the thing FR-019 actually requires.
+    """
     seed_item(conn, issue_number=7, dry_run=True, state="active")
     plain = web.get("/active").text
-    assert "simulated" not in plain.replace("simulated rows included", "")
+    assert 'class="sim"' not in plain
 
     marked = web.get("/active?include_simulated=1").text
     assert 'class="sim"' in marked
@@ -267,3 +273,104 @@ def test_a_work_item_with_no_card_says_so_rather_than_showing_a_gap(web, conn):
     item_id = seed_item(conn, state="active")
     payload = web.get_json(f"/item/{item_id}").json()
     assert payload["card"] is None
+
+
+# -- milestone 009: the badge is on every view that shows a row --------------
+
+
+def test_the_badge_appears_on_every_row_bearing_view(board_web, conn):
+    """FR-019, pinned rather than trusted.
+
+    The badge and its stylesheet rule both predate this milestone — the ``*`` suffix the
+    issue describes is the terminal's convention, not this one's. What did not exist is
+    anything asserting *coverage*: ``mark_simulated`` is called from a handful of places in
+    ``pages.py`` and nothing said every table was one of them. This is the test that would
+    catch a seventh table added later without one, which is the only part of that story
+    still worth writing code for.
+    """
+    from robot_army import db
+
+    item_id = seed_item(conn, issue_number=7, dry_run=True, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+    with db.transaction(conn):
+        db.insert_card(
+            conn,
+            board_id="board-1",
+            card_id="c1",
+            card_url="https://trello.com/c/c1",
+            title="A card",
+            body="",
+            dry_run=True,
+        )
+
+    unmarked = []
+    for path in (
+        "/interrupted",
+        "/cards",
+        f"/item/{item_id}",
+        f"/item/{item_id}/confirm/abandon",
+    ):
+        if 'class="sim"' not in board_web.get(f"{path}?include_simulated=1").text:
+            unmarked.append(path)
+    assert not unmarked, f"these views show a simulated row without marking it: {unmarked}"
+
+
+def test_the_queue_marks_its_simulated_rows(web, conn):
+    """The reader most likely to be misled is the one who reads the first table and stops."""
+    seed_item(conn, issue_number=7, dry_run=True, state="ready")
+    assert 'class="sim"' in web.get("/queue?include_simulated=1").text
+
+
+def test_a_mixed_table_marks_only_the_simulated_row(web, conn):
+    """FR-020, and the case the badge exists for: 009 made mixed tables reachable, because
+    rows now arrive unrequested rather than because the reader asked to see them."""
+    seed_item(conn, issue_number=7, dry_run=True, state="ready")
+    seed_item(conn, issue_number=8, dry_run=False, state="ready")
+    body = web.get("/queue?include_simulated=1").text
+    assert body.count('class="sim"') == 1
+    rows = [line for line in body.split("<tr>") if "issue" in line or "item" in line]
+    assert rows, "no rows rendered"
+
+
+def test_the_level_pill_has_a_stylesheet_rule_in_both_states(web):
+    """The defect this milestone fixes was a class with no rule at all: `.pill.level` fell
+    back to the neutral base style, so "none of this is real" rendered in the same weight as
+    "order: oldest-first". Nothing would have caught its return."""
+    css = web.get("/static/app.css").body.decode()
+    assert ".pill.level.simulated" in css
+    assert ".pill.level.live" in css
+    assert ".sim {" in css
+
+
+def test_a_dead_end_page_states_no_visibility_preference(web_at, conn):
+    """A 404 has no database context, so it cannot resolve the level-dependent default.
+
+    Treating that absence as a stated `0` put `?include_simulated=0` on every nav link of
+    every error page: on a `plan` instance one tap from a 404 pinned "hide everything" and
+    landed the reader on exactly the empty-looking page this milestone removes.
+    """
+    body = web_at("plan").get("/no-such-page").text
+    assert "include_simulated" not in body
+    assert 'href="/active"' in body
+
+
+def test_a_dead_end_page_offers_no_visibility_toggle(web_at, conn):
+    """A toggle reporting a state it had to guess is worse than no toggle."""
+    body = web_at("plan").get("/no-such-page").text
+    assert "simulated rows" not in body
+
+
+def test_a_refused_action_links_its_toggle_somewhere_reachable(web_at, conn):
+    """The refusal page renders the chrome built for the POST it refused, and the toggle
+    builds its href from that path — so it pointed at an action route with no GET handler,
+    and clicking it answered 405. Reachable whenever an action is illegal."""
+    import re
+
+    item_id = seed_item(conn, issue_number=1, dry_run=True, state="done")
+    response = web_at("plan").post(f"/item/{item_id}/abandon")
+    assert response.status == 409
+    href = re.search(r'<a href="([^"]*)" class="pill quiet">simulated', response.text)
+    assert href, "the refusal page rendered no visibility toggle"
+    assert "abandon" not in href.group(1), href.group(1)
+    # And the target actually answers a GET.
+    assert web_at("plan").get(href.group(1)).status == 200

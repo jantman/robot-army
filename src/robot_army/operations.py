@@ -15,13 +15,14 @@ import base64
 import json
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from robot_army import audit as audit_mod
 from robot_army import capacity as capacity_mod
@@ -73,6 +74,32 @@ class Result:
 
     def say(self, text: str = "") -> Result:
         self.lines.append(text)
+        return self
+
+    def flush_to(self, stream: TextIO | None) -> Result:
+        """Write everything said so far to ``stream``, then **forget it**.
+
+        The forgetting is the point, not an optimisation. An operation that shows the
+        maintainer something and then asks them about it has to write before it blocks
+        (011 FR-001) — but every path out of that question returns ``lines`` to the CLI,
+        which prints them again. Clearing here is what makes "printed exactly once"
+        (FR-006) a property of the code rather than a rule five exit paths have to
+        remember. There is exactly one caller for that reason; a second flush point would
+        quietly reintroduce the doubling.
+
+        ``flush=True`` rather than trusting the buffer: the difference is invisible on a
+        terminal and is the whole behaviour when output is redirected to a file or a pipe,
+        which is where the maintainer is watching the run from another shell (FR-005).
+
+        A ``None`` stream writes nothing and keeps the lines, which is both the pre-011
+        behaviour every direct caller still gets and what ``--json`` passes, since a
+        machine-readable document must carry no human-readable text (FR-012).
+        """
+        if stream is None:
+            return self
+        if self.lines:
+            print("\n".join(self.lines), file=stream, flush=True)
+        self.lines.clear()
         return self
 
     def render(self, *, as_json: bool) -> str:
@@ -912,20 +939,44 @@ def _refuse_onboarding(
     )
 
 
+def _ask(prompt: str) -> str:
+    """Put a question to the maintainer on **stderr**, and read their answer.
+
+    ``input(prompt)`` writes its prompt to stdout, which is where a ``--json`` run's
+    document lives — so the question would land inside the JSON and stop it parsing
+    (FR-012). stderr is where a question belongs regardless: it is not the command's
+    output, and an interactive terminal shows both streams anyway.
+
+    Only ``onboard`` uses this. ``cancel``, ``purge_simulated`` and ``worktree_remove``
+    each ask a self-contained question with nothing composed above it, so none of them has
+    a screen to protect; they keep ``input`` and their stdout prompts (FR-014).
+    """
+    print(prompt, end="", file=sys.stderr, flush=True)
+    return input()
+
+
 def onboard(
     ctx: Context,
     repo_key: str,
     *,
     reapprove: bool = False,
     assume_yes: bool = False,
-    confirm: Any = input,
+    confirm: Any = _ask,
     trust_file: Path | None = None,
+    out: TextIO | None = None,
 ) -> Result:
     """The deliberate per-repository trust step (FR-001).
 
     Prints the primary clone path, the worker's trust status, and the **full contents** of
     any committed settings *as they exist at the base branch tip* — because that is what a
     dispatched session will honour (FR-004, M0 F9), not whatever is in a working tree.
+
+    ``out`` is where the approval screen is written **before** the prompt blocks (011
+    FR-001). ``None`` means *do not write it here*, which is both the pre-011 behaviour —
+    the whole screen reaching the caller in ``lines`` and being printed after the answer,
+    which is issue #17 — and what a ``--json`` run passes, because a machine-readable
+    document must carry no human-readable text (FR-012). The CLI supplies the stream; a
+    caller that wants to read the screen rather than watch it arrive leaves it unset.
     """
     result = Result()
     section = ctx.config.repos.get(repo_key)
@@ -1008,6 +1059,15 @@ def onboard(
             result.say(f"      current : {after}")
         result.say()
 
+    # THE flush point, and the only one. Everything above is the approval screen —
+    # *which repository, where, verified how, trusted or not, and what it will honour
+    # without asking* — and everything below is the outcome of deciding about it. Writing
+    # here is what makes the screen arrive before the question rather than after the
+    # answer (FR-001, issue #17); the clearing inside ``flush_to`` is what keeps any of
+    # the five exits below from printing it a second time (FR-006). Adding a second call
+    # anywhere in this function reintroduces the doubling.
+    result.flush_to(out)
+
     if existing is not None and not reapprove and existing.fingerprint == fingerprint:
         result.say("already onboarded and the fingerprint is unchanged; nothing to do")
         return result
@@ -1016,6 +1076,11 @@ def onboard(
         # --yes refuses to skip when committed settings are present and unapproved.
         # Skipping the prompt is a convenience; skipping the *review* is the hazard.
         _record_onboard_outcome(ctx, repo_key, "unapproved_committed_settings", resolved)
+        # The splice below is still live, and carries the screen exactly once either way:
+        # with a stream, ``flush_to`` already wrote it and emptied ``lines``, so this adds
+        # only the refusal; with ``out=None`` nothing has been written yet and the screen
+        # rides along to the caller as it always did. The same reading applies to the
+        # abort return further down (FR-006).
         return Result(
             code=EXIT_PRECONDITION,
             lines=[
@@ -1028,9 +1093,39 @@ def onboard(
         )
 
     if not assume_yes:
-        answer = confirm(
-            f"Approve {repo_key} for dispatch, recording this fingerprint? [y/N] "
-        )
+        try:
+            answer = confirm(
+                f"Approve {repo_key} for dispatch, recording this fingerprint? [y/N] "
+            )
+        except KeyboardInterrupt:
+            # Ctrl-C used to propagate to ``cli.main``, which printed "interrupted" and
+            # exited 1 — before this function had opened any audit action, so the log held
+            # no trace that onboarding was attempted. contracts/onboarding.md requires
+            # every non-zero exit to be recorded and Principle III requires the log alone
+            # to answer what was attempted. The gap was safe only while nobody reached
+            # this prompt informed enough to walk away from it; now that the screen
+            # arrives first, giving up here is the expected second answer (FR-011).
+            #
+            # The code and the message are deliberately today's. What changes is the
+            # record, and only the record.
+            _record_onboard_outcome(ctx, repo_key, "interrupted_at_prompt", resolved)
+            return Result(
+                code=EXIT_FAILED, lines=[*result.lines, "interrupted"], data=result.data
+            )
+        except EOFError:
+            # ``onboard some/repo < /dev/null``. Nothing caught this either, so it was a
+            # traceback rather than a result. An absent answer is not an approval, so it
+            # exits like the decline it effectively is — with its own cause, because
+            # "input ran out" and "I said no" are different things to find in a log.
+            _record_onboard_outcome(ctx, repo_key, "no_answer_available", resolved)
+            return Result(
+                code=EXIT_CHECK_FAILED,
+                lines=[
+                    *result.lines,
+                    "no answer available: input ended before the prompt was answered",
+                ],
+                data=result.data,
+            )
         if str(answer).strip().lower() not in ("y", "yes"):
             # Exit 4, distinct from the 3 every refusal uses (contracts/onboarding.md):
             # "I decided not to" and "the system would not let me" are different results,

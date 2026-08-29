@@ -11,10 +11,12 @@ import json
 from pathlib import Path
 
 import pytest
-from tests.conftest import config_dict, monkey_token, seed_item
+from tests.conftest import config_dict, make_boundaries, monkey_token, seed_item
 
 from robot_army import operations
 from robot_army.cli import build_parser, main
+from robot_army.config import load as load_config
+from robot_army.effects import EffectLevel
 from robot_army.operations import (
     EXIT_CHECK_FAILED,
     EXIT_FAILED,
@@ -479,3 +481,91 @@ def test_a_valid_state_filter_is_still_accepted(config_file, verb, state):
     """Guards the guard: a `choices=` list that omitted a real state would refuse valid
     usage, which is the other way to get this wrong."""
     assert run_cli([verb, "--state", state], config_file) in (EXIT_OK, EXIT_PRECONDITION)
+
+
+# -- milestone 011: the machine-readable stream, and who prompts where ------
+
+
+def test_json_output_reaches_stdout_even_when_the_command_failed(config_file, capsys):
+    """011 FR-012. ``--json``'s help says "machine-readable output on stdout"; it used to
+    mean that only when the exit code was 0, sending a failing run's document to stderr.
+
+    That is now the stream `onboard`'s prompt writes to, so a declined `--json` run would
+    have put the question and the document together and neither would have parsed."""
+    assert run_cli(["show", "9999", "--json"], config_file) != EXIT_OK
+    captured = capsys.readouterr()
+
+    document = json.loads(captured.out)  # parses at all — that is the claim
+    assert isinstance(document, dict)
+    assert captured.err == "", "nothing human-readable alongside it"
+
+
+def test_human_readable_failures_still_go_to_stderr(config_file, capsys):
+    """The other half of the same change: only the machine-readable stream moved."""
+    assert run_cli(["show", "9999"], config_file) != EXIT_OK
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert "9999" in captured.err
+
+
+def test_onboarding_asks_its_question_on_stderr(capsys, monkeypatch):
+    """011 FR-012 again, at the source. ``input(prompt)`` writes the prompt to stdout,
+    where a ``--json`` document lives. The question is not the command's output."""
+    monkeypatch.setattr("builtins.input", lambda: "y")
+
+    answer = operations._ask("Approve jantman/demo for dispatch? [y/N] ")
+    captured = capsys.readouterr()
+
+    assert answer == "y"
+    assert captured.out == "", "nothing on the machine-readable stream"
+    assert captured.err == "Approve jantman/demo for dispatch? [y/N] "
+
+
+def test_onboard_prompts_through_that_helper_and_its_neighbours_do_not():
+    """011 FR-014. Onboarding is the only command with a screen above its question, so it
+    is the only one whose prompt moved. `cancel`, `purge-simulated` and
+    `worktree remove --force` each ask something self-contained and are left alone —
+    an asymmetry that is cheaper than changing three commands to fix one."""
+    import inspect
+
+    defaults = {
+        name: inspect.signature(getattr(operations, name)).parameters["confirm"].default
+        for name in ("onboard", "cancel", "purge_simulated", "worktree_remove")
+    }
+
+    assert defaults["onboard"] is operations._ask
+    assert defaults["cancel"] is input
+    assert defaults["purge_simulated"] is input
+    assert defaults["worktree_remove"] is input
+
+
+def ctx_over(conn, audit, config_file):
+    """A context over the fixture database, for the operations that prompt."""
+    return operations.Context(
+        config=load_config(config_file),
+        conn=conn,
+        audit=audit,
+        boundaries=make_boundaries(audit),
+        effect_level=EffectLevel.LIVE,
+    )
+
+
+def test_the_other_prompts_keep_their_wording_and_their_stdout_stream(
+    conn, audit, config_file, capsys
+):
+    """FR-014 concretely. Nothing in the suite pinned these strings before, so nothing
+    would have noticed if the stderr change had been applied across the board."""
+    seed_item(conn, dry_run=True)
+    asked: list[str] = []
+
+    result = operations.purge_simulated(
+        ctx_over(conn, audit, config_file),
+        confirm=lambda prompt: asked.append(prompt) or "n",
+    )
+    captured = capsys.readouterr()
+
+    assert asked and asked[0].startswith("Delete 1 simulated work item(s)")
+    assert asked[0].endswith("? [y/N] ")
+    assert result.code == EXIT_FAILED and result.lines == ["aborted"]
+    assert captured.err == "", "this prompt did not move; only onboarding's did"

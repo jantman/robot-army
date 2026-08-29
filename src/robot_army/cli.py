@@ -292,8 +292,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if result is None:
         return EXIT_OK
-    stream = sys.stdout if result.code == EXIT_OK else sys.stderr
-    text = result.render(as_json=bool(getattr(args, "json", False)))
+    as_json = bool(getattr(args, "json", False))
+    # A machine-readable document goes to stdout whatever the exit code. That is what
+    # `--json`'s own help text above already promises, and after 011 it is also what keeps
+    # the document off the stream `onboard`'s prompt now writes to — a declined `--json`
+    # run would otherwise put the question and the document on stderr together and neither
+    # would parse (FR-012). Human-readable output keeps the split it has always had: an
+    # outcome that failed belongs on stderr.
+    stream = sys.stdout if as_json or result.code == EXIT_OK else sys.stderr
+    text = result.render(as_json=as_json)
     if text:
         print(text, file=stream)
     return result.code
@@ -391,7 +398,15 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "abandon": lambda: operations.abandon(ctx, args.item_id),
         "retry": lambda: operations.retry(ctx, args.item_id),
         "onboard": lambda: operations.onboard(
-            ctx, args.repo_key, reapprove=args.reapprove, assume_yes=args.yes
+            ctx,
+            args.repo_key,
+            reapprove=args.reapprove,
+            assume_yes=args.yes,
+            # The approval screen goes out before the prompt blocks (011 FR-001) — but
+            # never into a machine-readable run, whose stdout must parse as one document
+            # (FR-012). `None` there is not "skip the screen": it is the pre-011 route,
+            # where the lines reach `main` and `render(as_json=True)` drops them.
+            out=None if bool(getattr(args, "json", False)) else sys.stdout,
         ),
         "purge-simulated": lambda: operations.purge_simulated(ctx, assume_yes=args.yes),
         "pause": lambda: operations.pause_dispatch(ctx, by="cli"),

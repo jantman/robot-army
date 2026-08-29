@@ -426,15 +426,54 @@ rewriting values inside free-form JSON would make the page disagree with the fil
 
 *To be filled in after the live round.*
 
-## 011 — Whatever survives contact with reality
+## 011 — Read before you approve (`specs/011-onboard-review-before-prompt/`)
+
+**Status:** implemented
+
+Not from the planning document. Issue #17. `robot-army onboard jantman/some-repo` printed one
+thing and then blocked: `Approve jantman/some-repo for dispatch? [y/N]`. The repository slug is
+the one fact the maintainer already had — they typed it. The clone path, whether it was derived
+or configured, the origin it verified against, the base ref, the trust verdict, and the full
+text of committed settings a dispatched session will honour without asking all arrived *after*
+the answer. The screen designed to inform the decision was printed as a receipt for a decision
+already made.
+
+**The screen was never missing, and that is the interesting part.** `onboard` composed it above
+the prompt, under a comment saying it did so deliberately, and 005's own contract specified that
+order. The defect was a layer down: `Result.say()` only appended to a list, and `cli.main`
+rendered that list after the command returned. Intent stated three times over and silently
+discarded by the output mechanism — which is also why no test caught it, since every onboarding
+test read `result.lines` after the call, where "before the prompt" and "after the prompt" are
+indistinguishable.
+
+**One flush point, and the clearing is the design.** `Result.flush_to` writes what has been said
+to a caller-supplied stream and forgets it; `onboard` calls it once, at the boundary between
+screen and outcome. Five exit paths each splice `result.lines` into their return, so writing
+early without forgetting would have printed every screen twice. Forgetting makes "exactly once"
+a property of the code rather than a rule five paths have to remember.
+
+Two things followed from the maintainer finally reaching that prompt informed. Ctrl-C became an
+ordinary way to leave, and it exited 1 having written nothing — the audit action opens after the
+prompt — against both 005's contract and Principle III. Beside it, `onboard some/repo < /dev/null`
+was an uncaught `EOFError` and a traceback. Both are recorded now, and every terminating path
+through `onboard` leaves exactly one outcome record. Asking a question also writes the question
+somewhere: onboarding's prompt moved to stderr, which forced `--json` documents onto stdout
+unconditionally — what the flag's own help text always promised, and what keeps a declined
+`--json` run from putting the question and the document on the same stream.
+
+### What running it taught
+
+*To be filled in after the live round.*
+
+## 012 — Whatever survives contact with reality
 
 **Status:** not specified
 
 Planning doc M5. Parked items from §16 that are still genuinely open — kitty control
 socket hardening, multi-machine dispatch, scheduled/proactive work — land here or get dropped.
 
-Moved from the 010 slot, which 010 claimed for the same reason 009, 008, 007, 006 and 005
-claimed theirs: a milestone with a shape displaces a parking lot without one. Six times now.
+Moved from the 011 slot, which 011 claimed for the same reason 010, 009, 008, 007, 006 and 005
+claimed theirs: a milestone with a shape displaces a parking lot without one. Seven times now.
 
 ---
 

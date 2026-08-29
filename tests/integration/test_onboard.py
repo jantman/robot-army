@@ -13,6 +13,7 @@ answer them the way the test expected.
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 from pathlib import Path
@@ -716,3 +717,443 @@ def test_an_unreachable_source_system_is_a_refusal_not_a_traceback(
         if r["action"] == "repo.onboard" and r.get("detail", {}).get("refused")
     ]
     assert causes == ["source_unreachable"]
+
+
+# -- milestone 011: the screen arrives before the question ------------------
+#
+# Issue #17. The approval screen was always composed above the prompt — the code says so
+# and contracts/onboarding.md specifies it — but `Result.say()` only appended to a list
+# that `cli.main` printed after the command returned, so the process blocked for input
+# with the whole screen still in memory.
+#
+# None of the tests above could have caught that. They all read `result.lines` after the
+# call, where "before the prompt" and "after the prompt" are indistinguishable. The tests
+# below are the shape that can: they observe the destination **from inside the prompt**,
+# at the instant the run demanded an answer.
+
+
+class Watcher:
+    """A ``confirm`` that records what the maintainer could already have read.
+
+    ``seen`` is the destination's contents at the moment input was demanded. Asserting on
+    it rather than on the final output is the whole point: a screen that arrives second
+    still "appears somewhere", which is exactly the reading that let this ship.
+    """
+
+    def __init__(self, answer: str = "y", *, read=None):
+        self.answer = answer
+        self._read = read
+        self.prompt: str | None = None
+        self.seen: str | None = None
+        self.calls = 0
+
+    def __call__(self, prompt: str) -> str:
+        self.calls += 1
+        self.prompt = prompt
+        self.seen = self._read()
+        return self.answer
+
+
+def watched_onboard(ctx, key, *, trust, answer="y", stream=None, read=None, **kwargs):
+    """Run onboarding with a real destination and a prompt that snapshots it."""
+    stream = io.StringIO() if stream is None else stream
+    watcher = Watcher(answer, read=read or (lambda: stream.getvalue()))
+    result = operations.onboard(
+        ctx, key, confirm=watcher, trust_file=trust, out=stream, **kwargs
+    )
+    return result, watcher, stream
+
+
+SETTINGS = '{"permissions": {"allow": ["Bash(rm:*)"]}}'
+
+
+def test_the_whole_screen_is_readable_before_the_prompt_blocks(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US1 acceptance 1 and 2; FR-001, FR-002, FR-003. The issue itself.
+
+    Every fact the question is about — which repository, where, verified how, against
+    which base ref, trusted or not, and what it will honour without asking — had reached
+    the maintainer before they were asked to approve it."""
+    clone = make_repo(
+        repo_root / "demo",
+        files={".claude/settings.json": SETTINGS},
+        origin="git@github.com:jantman/demo.git",
+    )
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    result, watcher, _ = watched_onboard(
+        ctx, "jantman/demo", trust=trust_file(tmp_path, clone)
+    )
+
+    assert result.code == EXIT_OK
+    assert watcher.calls == 1
+    seen = watcher.seen
+    assert "repository   : jantman/demo" in seen
+    assert f"clone path   : {clone}   (derived from [paths] repo_root)" in seen
+    assert "verified     : github.com/jantman/demo via origin" in seen
+    assert "base ref     : main" in seen
+    assert "trust        : accepted" in seen
+    assert "committed tool-permission settings at the base ref:" in seen
+    assert "  --- .claude/settings.json ---" in seen
+    assert SETTINGS in seen, "the full text, not merely that a file exists"
+    assert "jantman/demo" in watcher.prompt, "the prompt still names what it asks about"
+
+
+def test_a_clone_with_no_committed_settings_says_so_before_the_prompt(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US1 acceptance 3. "There are none" is an answer the maintainer needs before
+    approving, not after."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    _, watcher, _ = watched_onboard(ctx, "jantman/demo", trust=trust_file(tmp_path, clone))
+
+    assert "no committed .claude/settings*.json at the base ref" in watcher.seen
+
+
+def test_reapproval_shows_the_recorded_path_its_marker_and_the_diff_first(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US1 acceptance 4; FR-004. Re-approval's extra lines are the ones most likely to
+    change the answer, so they are the ones that least tolerate arriving late."""
+    first = make_repo(
+        repo_root / "demo", origin="git@github.com:jantman/demo.git"
+    )
+    moved = make_repo(
+        tmp_path / "moved",
+        files={".claude/settings.json": SETTINGS},
+        origin="git@github.com:jantman/demo.git",
+    )
+    trust = trust_file(tmp_path, first, moved)
+    boundaries = make_boundaries(audit)
+
+    before = context(build_config(repo_root, layout, tmp_path), conn, audit, boundaries)
+    assert run_onboard(before, "jantman/demo", trust=trust).code == EXIT_OK
+
+    after = context(
+        # A second scratch root: ``build_config`` builds a throwaway fixture clone under
+        # the path it is given, and committing the same tree into it twice fails.
+        build_config(
+            repo_root,
+            layout,
+            tmp_path / "second",
+            repos={"jantman/demo": {"path": str(moved)}},
+        ),
+        conn,
+        audit,
+        boundaries,
+    )
+    result, watcher, _ = watched_onboard(
+        after, "jantman/demo", trust=trust, reapprove=True
+    )
+
+    assert result.code == EXIT_OK
+    seen = watcher.seen
+    assert f"recorded path: {first}   ** CHANGED **" in seen
+    assert "fingerprint diff against the approved version:" in seen
+    assert "approved: (absent)" in seen, "the diff's contents, not only its heading"
+
+
+def test_the_screen_is_flushed_to_a_redirected_destination_not_merely_buffered(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US1 acceptance 6; FR-005. The assertion no terminal session can make.
+
+    Read back through a **fresh handle** while the run is still blocked. A fix that writes
+    without flushing passes every other test in this file and loses the screen for anyone
+    watching a redirected run from another shell."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+    path = tmp_path / "onboard.out"
+
+    with path.open("w", encoding="utf-8") as handle:
+        result, watcher, _ = watched_onboard(
+            ctx,
+            "jantman/demo",
+            trust=trust_file(tmp_path, clone),
+            stream=handle,
+            read=lambda: path.read_text(encoding="utf-8"),
+        )
+
+    assert result.code == EXIT_OK
+    assert f"clone path   : {clone}" in watcher.seen
+    assert "trust        :" in watcher.seen
+
+
+def test_declining_after_reading_costs_a_single_run_and_records_no_approval(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US1 acceptance 5; FR-010. The case issue #17 names: the clone is not where
+    `repo_root` implies. One run now learns that and refuses it — before, learning it at
+    all required either approving unread or declining and running again."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    result, watcher, _ = watched_onboard(
+        ctx, "jantman/demo", trust=trust_file(tmp_path, clone), answer="n"
+    )
+
+    assert result.code == 4
+    assert f"clone path   : {clone}" in watcher.seen
+    assert db.get_repo(conn, "jantman/demo") is None
+
+
+# -- milestone 011, US2: one screen, printed once, on every way out ---------
+#
+# The screen is now written before the prompt, and every exit below still returns
+# `result.lines` to the CLI. If the flush did not also *forget* what it wrote, each of
+# these paths would print the screen twice — and a maintainer scrolling back could not
+# tell a duplicate from a second repository.
+
+MARKER = "clone path   :"
+
+
+def emitted(result, stream) -> str:
+    """Everything the run put in front of the maintainer, in the order they saw it.
+
+    The stream is what arrived before the prompt; `result.lines` is what `cli.main` prints
+    afterwards. Counting across both together is the only way to ask "how many times was
+    this said?" — either half alone would miss a duplicate that spans them."""
+    return stream.getvalue() + "\n".join(result.lines)
+
+
+def test_the_approved_path_emits_the_screen_once_and_one_outcome_line(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US2 acceptance 1; FR-006, FR-007."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    result, _, stream = watched_onboard(
+        ctx, "jantman/demo", trust=trust_file(tmp_path, clone)
+    )
+
+    assert result.code == EXIT_OK
+    assert emitted(result, stream).count(MARKER) == 1
+    assert emitted(result, stream).count("onboarded jantman/demo") == 1
+
+
+def test_the_declined_path_emits_the_screen_once_then_aborts(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US2 acceptance 2; FR-007, FR-008. Exit 4 keeps saying "I decided not to" rather
+    than "the system refused"."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    result, _, stream = watched_onboard(
+        ctx, "jantman/demo", trust=trust_file(tmp_path, clone), answer="n"
+    )
+
+    assert result.code == 4
+    assert emitted(result, stream).count(MARKER) == 1
+    assert result.lines == ["aborted"], "the outcome alone; the screen is already out"
+
+
+def test_the_yes_refusal_emits_the_screen_once_then_the_refusal(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US2 acceptance 3. The path whose whole purpose is that the settings above were
+    read — so printing them twice, or not at all, both defeat it."""
+    clone = make_repo(
+        repo_root / "demo",
+        files={".claude/settings.json": SETTINGS},
+        origin="git@github.com:jantman/demo.git",
+    )
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+    stream = io.StringIO()
+
+    result = operations.onboard(
+        ctx,
+        "jantman/demo",
+        assume_yes=True,
+        trust_file=trust_file(tmp_path, clone),
+        out=stream,
+    )
+
+    assert result.code == EXIT_PRECONDITION
+    assert emitted(result, stream).count(MARKER) == 1
+    assert SETTINGS in stream.getvalue(), "the settings reached the screen before refusing"
+    assert len(result.lines) == 1 and result.lines[0].startswith("refusing --yes:")
+
+
+def test_an_unchanged_repository_emits_the_screen_once_and_never_asks(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US2 acceptance 4. Nothing to decide, so nothing is asked — but the screen still
+    says what is recorded, once."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+    trust = trust_file(tmp_path, clone)
+    assert run_onboard(ctx, "jantman/demo", trust=trust).code == EXIT_OK
+
+    result, watcher, stream = watched_onboard(ctx, "jantman/demo", trust=trust)
+
+    assert result.code == EXIT_OK
+    assert watcher.calls == 0, "an unchanged fingerprint asks nothing"
+    assert emitted(result, stream).count(MARKER) == 1
+    assert result.lines == [
+        "already onboarded and the fingerprint is unchanged; nothing to do"
+    ]
+
+
+def test_a_refusal_before_the_screen_exists_emits_no_screen_at_all(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US2 acceptance 5; FR-009. Resolution failed, so there is nothing to approve and no
+    screen was ever composed — only the refusal, still naming the path, how it was reached
+    and the edit that fixes it."""
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+    stream = io.StringIO()
+
+    result = operations.onboard(ctx, "jantman/never-cloned", out=stream)
+
+    assert result.code == EXIT_PRECONDITION
+    assert stream.getvalue() == ""
+    text = "\n".join(result.lines)
+    assert "no clone at" in text and "repo_root" in text
+    assert MARKER not in text
+
+
+# -- milestone 011, US3: every way out is accountable -----------------------
+#
+# Two exits used to leave the log holding nothing. They were safe to ignore only while
+# nobody reached this prompt informed enough to abandon it; the screen arriving first is
+# exactly what changes that.
+
+
+def onboard_raising(ctx, key, *, trust, error, **kwargs):
+    def refuse(_prompt):
+        raise error
+
+    return operations.onboard(
+        ctx, key, confirm=refuse, trust_file=trust, out=io.StringIO(), **kwargs
+    )
+
+
+def onboard_outcomes(layout) -> list[dict]:
+    """One record per terminating path, in either shape it can take.
+
+    Milestone 005 wrote refusals through ``audit.record`` (kind ``event``, outcome
+    ``error``) and approvals through ``audit.action`` (an ``intent``/``outcome`` pair), so
+    "how did this run end?" has two spellings. Both are answers to it; the invariant is
+    that every run leaves exactly one."""
+    return [
+        r
+        for r in audit_records(layout)
+        if r["action"] == "repo.onboard"
+        and (r["kind"] == "outcome" or r.get("detail", {}).get("refused"))
+    ]
+
+
+def test_interrupting_at_the_prompt_keeps_its_exit_and_gains_a_record(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US3 acceptance 1 and 2; FR-011. Exit 1 and the word `interrupted` are what Ctrl-C
+    produced before, deliberately. What changes is that the log now says it happened."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    result = onboard_raising(
+        ctx,
+        "jantman/demo",
+        trust=trust_file(tmp_path, clone),
+        error=KeyboardInterrupt(),
+    )
+    audit.close()
+
+    assert result.code == 1
+    assert result.lines == ["interrupted"]
+    assert db.get_repo(conn, "jantman/demo") is None
+    detail = onboard_outcomes(layout)[-1]["detail"]
+    assert detail["cause"] == "interrupted_at_prompt"
+    assert detail["clone_path"] == str(clone)
+    assert onboard_outcomes(layout)[-1]["entity_id"] == "jantman/demo"
+
+
+def test_input_ending_before_an_answer_is_a_result_not_a_traceback(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """`robot-army onboard some/repo < /dev/null` used to raise an uncaught EOFError.
+    An absent answer is not an approval, so it exits like the decline it is — with its own
+    cause, because "input ran out" and "I said no" are different findings in a log."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    result = onboard_raising(
+        ctx, "jantman/demo", trust=trust_file(tmp_path, clone), error=EOFError()
+    )
+    audit.close()
+
+    assert result.code == 4
+    assert "no answer available" in "\n".join(result.lines)
+    assert db.get_repo(conn, "jantman/demo") is None
+    assert onboard_outcomes(layout)[-1]["detail"]["cause"] == "no_answer_available"
+
+
+def test_every_way_out_of_onboarding_leaves_exactly_one_outcome_record(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """SC-004, and the invariant this milestone establishes.
+
+    Six exits, six records, one each. Two of them — interruption and end of input — wrote
+    nothing at all before. Kept separate from the eleven-cause refusal taxonomy above:
+    that test asks whether each *refusal* names its cause, this one asks whether any exit
+    can leave without saying anything, which is the Principle III question."""
+    trust = trust_file(
+        tmp_path,
+        clone_with_origin(repo_root / "approve", "git@github.com:jantman/approve.git"),
+        clone_with_origin(repo_root / "decline", "git@github.com:jantman/decline.git"),
+        clone_with_origin(repo_root / "stopped", "git@github.com:jantman/stopped.git"),
+        clone_with_origin(repo_root / "silent", "git@github.com:jantman/silent.git"),
+    )
+    make_repo(
+        repo_root / "unread",
+        files={".claude/settings.json": SETTINGS},
+        origin="git@github.com:jantman/unread.git",
+    )
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    exits = {
+        "jantman/approve": lambda: watched_onboard(
+            ctx, "jantman/approve", trust=trust
+        )[0],
+        "jantman/decline": lambda: watched_onboard(
+            ctx, "jantman/decline", trust=trust, answer="n"
+        )[0],
+        "jantman/stopped": lambda: onboard_raising(
+            ctx, "jantman/stopped", trust=trust, error=KeyboardInterrupt()
+        ),
+        "jantman/silent": lambda: onboard_raising(
+            ctx, "jantman/silent", trust=trust, error=EOFError()
+        ),
+        "jantman/unread": lambda: operations.onboard(
+            ctx, "jantman/unread", assume_yes=True, trust_file=trust, out=io.StringIO()
+        ),
+        "jantman/never-cloned": lambda: operations.onboard(
+            ctx, "jantman/never-cloned", out=io.StringIO()
+        ),
+    }
+    for run in exits.values():
+        run()
+    audit.close()
+
+    per_repo: dict[str, list[str]] = {}
+    for record in onboard_outcomes(layout):
+        per_repo.setdefault(record["entity_id"], []).append(record["outcome"])
+    assert sorted(per_repo) == sorted(exits), "every exit is accounted for, none twice"
+    assert all(len(outcomes) == 1 for outcomes in per_repo.values()), per_repo

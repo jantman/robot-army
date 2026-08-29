@@ -45,6 +45,17 @@ committed tool-permission settings at the base ref:
 supplied the path. FR-011 requires the distinction to be visible: the author needs to know which file
 to edit when it is wrong.
 
+> **This ordering was specified here and not delivered until milestone 011.** `onboard` composed
+> the screen above the prompt exactly as written above, but `Result.say()` only appended to a list
+> that the CLI printed *after* the command returned — so the process blocked for input with the
+> whole screen still in memory, and the maintainer was asked to approve a repository slug they had
+> just typed (issue #17). Nothing in this section was wrong; the output layer discarded it. What
+> the command writes, on which stream, and what each way out of the prompt leaves behind is now
+> governed by
+> [`specs/011-onboard-review-before-prompt/contracts/onboard-output.md`](../../011-onboard-review-before-prompt/contracts/onboard-output.md).
+> Resolution, verification, the refusal taxonomy, and what is recorded on approval remain this
+> contract's.
+
 ## Resolution order
 
 Stops at the first refusal. Everything here is a read; nothing is written until the author approves.

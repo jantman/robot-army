@@ -46,8 +46,8 @@ convenient and wrong.
 **Purpose**: establish the baseline that this feature's central safety claim — "the record did
 not move" — is measured against.
 
-- [ ] T001 Record the green baseline: run `uv run pytest` from the repository root and confirm the suite passes before any edit, so a later failure is attributable to this feature
-- [ ] T002 [P] Confirm [R7](research.md)'s sweep still holds by searching `tests/` for any assertion that a UTC stamp appears in rendered output (`Result.lines` or HTML body); if one has been added since, add it to [contracts/time-display.md](contracts/time-display.md) §3 before changing anything
+- [X] T001 Record the green baseline: run `uv run pytest` from the repository root and confirm the suite passes before any edit, so a later failure is attributable to this feature
+- [X] T002 [P] Confirm [R7](research.md)'s sweep still holds by searching `tests/` for any assertion that a UTC stamp appears in rendered output (`Result.lines` or HTML body); if one has been added since, add it to [contracts/time-display.md](contracts/time-display.md) §3 before changing anything
 
 ---
 
@@ -58,10 +58,10 @@ user stories call `timefmt.local()`, so nothing else can start until this exists
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T003 [P] Add a timezone-pinning fixture to `tests/conftest.py` that sets `TZ`, calls `time.tzset()`, yields, then restores — restoring an *absent* `TZ` as distinct from an empty one, since `TZ=""` means UTC while unset means `/etc/localtime` ([R6](research.md))
-- [ ] T004 [P] Create `src/robot_army/timefmt.py` with `parse_stamp(stamp) -> datetime | None` and `local(stamp) -> str | None` per [contracts/time-display.md](contracts/time-display.md) §1, formatting with `%Y-%m-%d %H:%M:%S %:z` and using `datetime.astimezone()` with no argument
-- [ ] T005 Create `tests/unit/test_timefmt.py` covering every row of the contract's input/output table: the three zone conversions, the unresolvable-zone fallback to `+00:00`, `None`, `""`, a non-timestamp string returned verbatim, and a stamp missing its `Z` (depends on T003, T004)
-- [ ] T006 Add failure-path and edge tests to `tests/unit/test_timefmt.py`: assert `local()` never raises for any string input, assert a January stamp displayed under a summer clock carries January's offset, and assert the DST fold renders `2026-11-01T05:00:00Z` and `2026-11-01T06:00:00Z` as the same wall clock distinguished only by `-04:00` and `-05:00` (depends on T005)
+- [X] T003 [P] Add a timezone-pinning fixture to `tests/conftest.py` that sets `TZ`, calls `time.tzset()`, yields, then restores — restoring an *absent* `TZ` as distinct from an empty one, since `TZ=""` means UTC while unset means `/etc/localtime` ([R6](research.md))
+- [X] T004 [P] Create `src/robot_army/timefmt.py` with `parse_stamp(stamp) -> datetime | None` and `local(stamp) -> str | None` per [contracts/time-display.md](contracts/time-display.md) §1, formatting with `%Y-%m-%d %H:%M:%S %:z` and using `datetime.astimezone()` with no argument
+- [X] T005 Create `tests/unit/test_timefmt.py` covering every row of the contract's input/output table: the three zone conversions, the unresolvable-zone fallback to `+00:00`, `None`, `""`, a non-timestamp string returned verbatim, and a stamp missing its `Z` (depends on T003, T004)
+- [X] T006 Add failure-path and edge tests to `tests/unit/test_timefmt.py`: assert `local()` never raises for any string input, assert a January stamp displayed under a summer clock carries January's offset, and assert the DST fold renders `2026-11-01T05:00:00Z` and `2026-11-01T06:00:00Z` as the same wall clock distinguished only by `-04:00` and `-05:00` (depends on T005)
 
 **Checkpoint**: the conversion exists, is pinned by tests, and both user stories can now proceed
 in parallel.
@@ -80,13 +80,13 @@ clearest possible evidence conversion happened. Quickstart scenario 1.
 **All five implementation tasks touch `src/robot_army/operations.py` and are therefore
 sequential.** Each converts only `Result.lines`; none may touch `Result.data`.
 
-- [ ] T007 [US1] Import `timefmt` in `src/robot_army/operations.py` and convert the two `status` sites — the `PAUSED since` line at line 296 (C1) and the anomaly line at line 364 (C2)
-- [ ] T008 [US1] Convert the four `show` sites in `src/robot_army/operations.py`: the Spec Kit `since` at line 549 (C3), `cleaned at` at line 639 (C4), the history loop at line 646 (C5), and the session row at line 659 (C6) — putting the conversion in the loop at 646, **not** in `_history()`, which also feeds `result.data["history"]` at line 614
-- [ ] T009 [US1] Convert the two `pause` sites in `src/robot_army/operations.py` at lines 1649 (C7) and 1656 (C8)
-- [ ] T010 [US1] Convert the `anomalies` site in `src/robot_army/operations.py` at line 2200 (C9)
-- [ ] T011 [US1] Convert `_format_record` in `src/robot_army/operations.py` at line 2473 (C10), which serves both `log` and `log --follow`; leave `read_log`'s `result.data` holding the raw records
-- [ ] T012 [US1] Create `tests/unit/test_cli_local_time.py` with one test per site C1 through C10, each seeding a known stored instant, running under the pinned-zone fixture, and asserting the local rendering appears in `Result.lines` and the raw `Z` form does not
-- [ ] T013 [US1] Add a test to `tests/unit/test_cli_local_time.py` asserting that a stored stamp of `"not a timestamp"` reaches `show`'s output verbatim and the command still exits zero (FR-015), and that an absent stamp still renders the existing absent-value marker (FR-016)
+- [X] T007 [US1] Import `timefmt` in `src/robot_army/operations.py` and convert the two `status` sites — the `PAUSED since` line at line 296 (C1) and the anomaly line at line 364 (C2)
+- [X] T008 [US1] Convert the four `show` sites in `src/robot_army/operations.py`: the Spec Kit `since` at line 549 (C3), `cleaned at` at line 639 (C4), the history loop at line 646 (C5), and the session row at line 659 (C6) — putting the conversion in the loop at 646, **not** in `_history()`, which also feeds `result.data["history"]` at line 614
+- [X] T009 [US1] Convert the two `pause` sites in `src/robot_army/operations.py` at lines 1649 (C7) and 1656 (C8)
+- [X] T010 [US1] Convert the `anomalies` site in `src/robot_army/operations.py` at line 2200 (C9)
+- [X] T011 [US1] Convert `_format_record` in `src/robot_army/operations.py` at line 2473 (C10), which serves both `log` and `log --follow`; leave `read_log`'s `result.data` holding the raw records
+- [X] T012 [US1] Create `tests/unit/test_cli_local_time.py` with one test per site C1 through C10, each seeding a known stored instant, running under the pinned-zone fixture, and asserting the local rendering appears in `Result.lines` and the raw `Z` form does not
+- [X] T013 [US1] Add a test to `tests/unit/test_cli_local_time.py` asserting that a stored stamp of `"not a timestamp"` reaches `show`'s output verbatim and the command still exits zero (FR-015), and that an absent stamp still renders the existing absent-value marker (FR-016)
 
 **Checkpoint**: the terminal is fully converted and independently testable. This is a shippable
 MVP — the web is untouched and still correct, merely still in UTC.
@@ -102,13 +102,13 @@ labelled, with the relative age beside it unchanged.
 request every view, and confirm no raw `…Z` stamp survives anywhere in the rendered HTML while
 every JSON response still carries `…Z`. Quickstart scenarios 2 and 4.
 
-- [ ] T014 [US2] Delete the private `_parse` from `src/robot_army/web/pages.py` and point `age_seconds` at `timefmt.parse_stamp`, taking the number of stamp-parsing implementations in display code from two to one ([R4](research.md)); no behaviour changes and the existing web suite must still pass
-- [ ] T015 [US2] Convert `when()` in `src/robot_army/web/pages.py` at line 106 (W1) so it renders `2026-08-29 21:31:07 -04:00 (3h 12m ago)`, leaving `human_age` and `age_seconds` computing from the stored UTC value (FR-006); this one edit covers all seven of its call sites (depends on T014, same file)
-- [ ] T016 [US2] Convert the log view's record `ts` in `src/robot_army/web/pages.py` at line 1738 (W2), which is not routed through `when()` because a log record carries no relative age (depends on T015, same file)
-- [ ] T017 [P] [US2] Convert the two `src/robot_army/web/html.py` sites — the `DISPATCH PAUSED since` pill at line 302 (W3) and the `rendered …` footer at line 440 (W4) — reading from the chrome dict but converting **at render**, leaving the dict itself UTC ([R3](research.md)); parallel with T014–T016, different file
-- [ ] T018 [US2] Create `tests/unit/test_web_local_time.py` asserting, under the pinned-zone fixture, that each of W1's seven call sites plus W2, W3 and W4 renders the local form, and that no `T\d\d:\d\d:\d\dZ` pattern survives anywhere in the HTML of `/active`, `/queue`, `/interrupted`, `/anomalies` and `/log`
-- [ ] T019 [US2] Add the R3 trap test to `tests/unit/test_web_local_time.py`: request each view with `Accept: application/json` under a non-UTC zone and assert `rendered_at`, `dispatch_paused_at` and every row's `*_at` still end in `Z` — this is the specific regression T017 could introduce
-- [ ] T020 [P] [US2] Add a test to `tests/unit/test_web_local_time.py` confirming `app.js` is unchanged and still derives its footer age from `Date.now()` at load rather than parsing a rendered stamp, so the format change cannot have broken it
+- [X] T014 [US2] Delete the private `_parse` from `src/robot_army/web/pages.py` and point `age_seconds` at `timefmt.parse_stamp`, taking the number of stamp-parsing implementations in display code from two to one ([R4](research.md)); no behaviour changes and the existing web suite must still pass
+- [X] T015 [US2] Convert `when()` in `src/robot_army/web/pages.py` at line 106 (W1) so it renders `2026-08-29 21:31:07 -04:00 (3h 12m ago)`, leaving `human_age` and `age_seconds` computing from the stored UTC value (FR-006); this one edit covers all seven of its call sites (depends on T014, same file)
+- [X] T016 [US2] Convert the log view's record `ts` in `src/robot_army/web/pages.py` at line 1738 (W2), which is not routed through `when()` because a log record carries no relative age (depends on T015, same file)
+- [X] T017 [P] [US2] Convert the two `src/robot_army/web/html.py` sites — the `DISPATCH PAUSED since` pill at line 302 (W3) and the `rendered …` footer at line 440 (W4) — reading from the chrome dict but converting **at render**, leaving the dict itself UTC ([R3](research.md)); parallel with T014–T016, different file
+- [X] T018 [US2] Create `tests/unit/test_web_local_time.py` asserting, under the pinned-zone fixture, that each of W1's seven call sites plus W2, W3 and W4 renders the local form, and that no `T\d\d:\d\d:\d\dZ` pattern survives anywhere in the HTML of `/active`, `/queue`, `/interrupted`, `/anomalies` and `/log`
+- [X] T019 [US2] Add the R3 trap test to `tests/unit/test_web_local_time.py`: request each view with `Accept: application/json` under a non-UTC zone and assert `rendered_at`, `dispatch_paused_at` and every row's `*_at` still end in `Z` — this is the specific regression T017 could introduce
+- [X] T020 [P] [US2] Add a test to `tests/unit/test_web_local_time.py` confirming `app.js` is unchanged and still derives its footer age from `Date.now()` at load rather than parsing a rendered stamp, so the format change cannot have broken it
 
 **Checkpoint**: both interfaces are converted and agree with each other (quickstart scenario 3,
 SC-008).
@@ -126,11 +126,11 @@ unchanged. Quickstart scenarios 4 and 5.
 **These tasks are almost entirely tests, because the story is a constraint rather than a
 capability.** They are last in priority and first in importance if anything goes wrong.
 
-- [ ] T021 [P] [US3] Create `tests/unit/test_time_record_unchanged.py` asserting that `status`, `show`, `cards`, `worktree list` and `anomalies` produce byte-identical `--json` payloads under `America/New_York`, `Asia/Kolkata` and `UTC` (SC-004)
-- [ ] T022 [US3] Add a test to `tests/unit/test_time_record_unchanged.py` that performs an audited action under `Asia/Kolkata` and asserts the written record's `ts` ends in `Z` and the file is still named for the **UTC** day, not the local one (SC-005, FR-011)
-- [ ] T023 [US3] Add a test to `tests/unit/test_time_record_unchanged.py` asserting no stored value is rewritten: read a row's `*_at` columns, render every view and command that displays them, re-read, and assert the stored values are unchanged (FR-010)
-- [ ] T024 [US3] Audit by inspection that no comparison, ordering, age, staleness threshold, backoff window or capacity decision reads a converted value — check `pages.age_seconds`, `pages.human_age`, `operations._age_seconds`, `health.check`, `poll`'s backoff, `ordering.plan`, `capacity.snapshot`, and every `ORDER BY` — and record the result in a comment in `src/robot_army/timefmt.py` naming `local()` as display-only (FR-013)
-- [ ] T025 [US3] Add a test to `tests/unit/test_time_record_unchanged.py` asserting `--since 30s`, `10m`, `2h` and `1d` keep their existing grammar and meaning under a non-UTC zone (FR-014)
+- [X] T021 [P] [US3] Create `tests/unit/test_time_record_unchanged.py` asserting that `status`, `show`, `cards`, `worktree list` and `anomalies` produce byte-identical `--json` payloads under `America/New_York`, `Asia/Kolkata` and `UTC` (SC-004)
+- [X] T022 [US3] Add a test to `tests/unit/test_time_record_unchanged.py` that performs an audited action under `Asia/Kolkata` and asserts the written record's `ts` ends in `Z` and the file is still named for the **UTC** day, not the local one (SC-005, FR-011)
+- [X] T023 [US3] Add a test to `tests/unit/test_time_record_unchanged.py` asserting no stored value is rewritten: read a row's `*_at` columns, render every view and command that displays them, re-read, and assert the stored values are unchanged (FR-010)
+- [X] T024 [US3] Audit by inspection that no comparison, ordering, age, staleness threshold, backoff window or capacity decision reads a converted value — check `pages.age_seconds`, `pages.human_age`, `operations._age_seconds`, `health.check`, `poll`'s backoff, `ordering.plan`, `capacity.snapshot`, and every `ORDER BY` — and record the result in a comment in `src/robot_army/timefmt.py` naming `local()` as display-only (FR-013)
+- [X] T025 [US3] Add a test to `tests/unit/test_time_record_unchanged.py` asserting `--since 30s`, `10m`, `2h` and `1d` keep their existing grammar and meaning under a non-UTC zone (FR-014)
 
 **Checkpoint**: all three stories are independently functional and the safety claim is
 evidenced.
@@ -139,10 +139,10 @@ evidenced.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T026 [P] Document the split in `docs/logging.md` beside line 59's definition of `ts`: the record is UTC always, what the CLI and web interface print is the host's local time, and the two differ on purpose (FR-018)
-- [ ] T027 [P] Add a `## 010 — Times are read where they are read` section to `docs/roadmap.md` with status and findings, and move the "Whatever survives contact with reality" parking lot to the 011 slot — the sixth time a milestone with a shape has displaced it
-- [ ] T028 Run every scenario in [quickstart.md](quickstart.md) end to end, including scenario 7's DST fold and scenario 8's corrupt stamp, and correct the document wherever the real output differs from what it predicts
-- [ ] T029 Run `uv run pytest` under `TZ=America/New_York`, `TZ=Asia/Kolkata` and `TZ=UTC` and confirm the full suite passes in all three — the suite passing in any zone is itself evidence that no decision depends on the display zone
+- [X] T026 [P] Document the split in `docs/logging.md` beside line 59's definition of `ts`: the record is UTC always, what the CLI and web interface print is the host's local time, and the two differ on purpose (FR-018)
+- [X] T027 [P] Add a `## 010 — Times are read where they are read` section to `docs/roadmap.md` with status and findings, and move the "Whatever survives contact with reality" parking lot to the 011 slot — the sixth time a milestone with a shape has displaced it
+- [X] T028 Run every scenario in [quickstart.md](quickstart.md) end to end, including scenario 7's DST fold and scenario 8's corrupt stamp, and correct the document wherever the real output differs from what it predicts
+- [X] T029 Run `uv run pytest` under `TZ=America/New_York`, `TZ=Asia/Kolkata` and `TZ=UTC` and confirm the full suite passes in all three — the suite passing in any zone is itself evidence that no decision depends on the display zone
 
 ---
 

@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from robot_army import capacity as capacity_mod
-from robot_army import control, db, health, operations
+from robot_army import control, db, health, operations, timefmt
 from robot_army import daemon as daemon_mod
 from robot_army import ordering as ordering_mod
 from robot_army.cardstates import CardState
@@ -61,20 +61,14 @@ class View:
 
 # -- time -------------------------------------------------------------------
 
-STAMP = "%Y-%m-%dT%H:%M:%SZ"
-
-
-def _parse(stamp: str | None) -> datetime | None:
-    if not stamp:
-        return None
-    try:
-        return datetime.strptime(str(stamp), STAMP).replace(tzinfo=UTC)
-    except ValueError:
-        return None
+#: The stored format, re-exported because ``server`` and the tests reach for it here.
+#: :mod:`robot_army.timefmt` owns the definition — milestone 010 collapsed this module's
+#: private copy of the parse into it, so display code has one implementation rather than two.
+STAMP = timefmt.STORED
 
 
 def age_seconds(stamp: str | None, *, now: datetime | None = None) -> int | None:
-    parsed = _parse(stamp)
+    parsed = timefmt.parse_stamp(stamp)
     if parsed is None:
         return None
     return int(((now or datetime.now(UTC)) - parsed).total_seconds())
@@ -83,8 +77,9 @@ def age_seconds(stamp: str | None, *, now: datetime | None = None) -> int | None
 def human_age(seconds: int | None) -> str:
     """Relative age, because that is what makes a stale signal obvious at a glance.
 
-    Absolute UTC is displayed beside it everywhere — the record format is UTC throughout
-    and "3h ago" alone cannot be cross-referenced against the log.
+    An absolute time is displayed beside it everywhere, because "3h ago" alone cannot be
+    cross-referenced against anything. Computed from the stored UTC value and unchanged by
+    milestone 010: an elapsed duration has no timezone, so there is nothing here to convert.
     """
     if seconds is None:
         return "—"
@@ -100,10 +95,17 @@ def human_age(seconds: int | None) -> str:
 
 
 def when(stamp: str | None) -> Markup:
-    """Absolute UTC plus relative age, the pair the Assumptions section settles on."""
+    """Absolute local time plus relative age, the pair the Assumptions section settles on.
+
+    The absolute half is the host's local time as of milestone 010; the relative half is
+    unchanged and still computed from the stored UTC value, because an elapsed duration has
+    no timezone. The pair survives because neither half does the other's job: "3h ago"
+    cannot be cross-referenced against a record, and an absolute time alone does not make a
+    stale signal obvious at a glance.
+    """
     if not stamp:
         return Markup("—")
-    return span(f"{stamp} ({human_age(age_seconds(stamp))} ago)", class_="mono")
+    return span(f"{timefmt.local(stamp)} ({human_age(age_seconds(stamp))} ago)", class_="mono")
 
 
 # -- links ------------------------------------------------------------------
@@ -1735,7 +1737,7 @@ def log_view(
             else join(
                 div(
                     div(
-                        span(record.get("ts", "—"), class_="ts mono"),
+                        span(timefmt.local(record.get("ts")) or "—", class_="ts mono"),
                         " ",
                         span(record.get("component", "—"), class_="mono"),
                         " ",

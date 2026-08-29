@@ -1247,3 +1247,45 @@ def make_speckit_tree(
 def speckit_tree(tmp_path: Path) -> Path:
     """A minimal, complete Spec Kit checkout with no features yet."""
     return make_speckit_tree(tmp_path / "speckit-repo")
+
+
+# -- timezone (milestone 010) ------------------------------------------------
+
+
+@pytest.fixture
+def in_timezone(request: Any) -> Any:
+    """Pin the host timezone for one test, then put it back exactly as it was.
+
+    The local zone is process-global state cached by the C library, and setting
+    ``os.environ["TZ"]`` alone does nothing until ``time.tzset()`` is called — a test that
+    forgets it passes or fails depending on what ran before it, which is the worst
+    available outcome. This makes the call, and it restores an *absent* ``TZ`` as distinct
+    from an empty one: ``TZ=""`` means UTC, while unset means ``/etc/localtime``, so the
+    two are not interchangeable and leaking the wrong one changes what later tests measure.
+
+    Parameterised rather than fixed, because two zones are worth having.
+    ``America/New_York`` observes daylight saving, so the autumn fold is reachable, and its
+    offset is not zero so a test cannot pass by accident on a UTC machine.
+    ``Asia/Kolkata`` is ``+05:30``, which catches anything that assumed whole hours or a
+    four-character offset.
+
+    Usage::
+
+        @pytest.mark.parametrize("in_timezone", ["America/New_York"], indirect=True)
+        def test_something(in_timezone): ...
+    """
+    import time as _time
+
+    zone = getattr(request, "param", "America/New_York")
+    had = "TZ" in os.environ
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = zone
+    _time.tzset()
+    try:
+        yield zone
+    finally:
+        if had:
+            os.environ["TZ"] = before  # type: ignore[assignment]
+        else:
+            os.environ.pop("TZ", None)
+        _time.tzset()

@@ -38,6 +38,7 @@ from robot_army import (
     sessions,
     speckit,
     spool,
+    timefmt,
     worktree,
 )
 from robot_army import (
@@ -293,7 +294,8 @@ def status(
     result.say(
         "dispatch     : "
         + (
-            f"PAUSED since {control_state.paused_at} (by {control_state.paused_by})"
+            f"PAUSED since {timefmt.local(control_state.paused_at)} "
+            f"(by {control_state.paused_by})"
             if control_state.paused
             else "running"
         )
@@ -361,7 +363,8 @@ def status(
         for anomaly in anomalies:
             result.say(
                 f"  [{anomaly.id}] {anomaly.kind} "
-                f"{anomaly.entity_type or ''}:{anomaly.entity_id or ''} @ {anomaly.detected_at}"
+                f"{anomaly.entity_type or ''}:{anomaly.entity_id or ''} "
+                f"@ {timefmt.local(anomaly.detected_at)}"
             )
     return result
 
@@ -546,7 +549,7 @@ def _speckit_lines(item: Any) -> list[str]:
     once per reconciliation cycle for the life of the item.
     """
     if item.speckit_phase:
-        since = f" (since {item.speckit_phase_at})" if item.speckit_phase_at else ""
+        since = f" (since {timefmt.local(item.speckit_phase_at)})" if item.speckit_phase_at else ""
         return [f"  spec-kit   : {item.speckit_phase} — {item.speckit_feature_dir}{since}"]
     if (
         item.speckit_baseline is None
@@ -636,14 +639,17 @@ def show(ctx: Context, item_id: int) -> Result:
     # what makes "why is this 499 MB still here?" answerable without reading anything.
     if item.cleanup_state:
         result.say(f"  cleanup    : {item.cleanup_state} — {item.cleanup_reason or ''}")
-        result.say(f"  cleaned at : {item.cleaned_at}")
+        result.say(f"  cleaned at : {timefmt.local(item.cleaned_at)}")
     for line in _speckit_lines(item):
         result.say(line)
 
     result.say()
     result.say("state history:")
     for when, what in _history(item):
-        result.say(f"  {when}  {what}")
+        # The conversion belongs to this loop, not to ``_history`` — that helper also
+        # feeds ``result.data["history"]``, which ``--json`` renders and which must stay
+        # UTC (FR-012).
+        result.say(f"  {timefmt.local(when)}  {what}")
 
     result.say()
     if attempts:
@@ -656,7 +662,10 @@ def show(ctx: Context, item_id: int) -> Result:
                 f"id={session.session_id} pid={session.pid or '—'} "
                 f"exit={exit_text}{signal_text}"
             )
-            result.say(f"       started {session.started_at} ended {session.ended_at or '—'}")
+            result.say(
+                f"       started {timefmt.local(session.started_at)} "
+                f"ended {timefmt.local(session.ended_at) or '—'}"
+            )
             if session.host_socket:
                 result.say(f"       reattach: dtach -a {session.host_socket}")
     else:
@@ -1646,14 +1655,14 @@ def _set_pause(ctx: Context, *, paused: bool, by: str) -> Result:
         result.say(
             f"dispatch was already {'paused' if paused else 'running'}"
             + (
-                f" — paused at {after.paused_at} by {after.paused_by}"
+                f" — paused at {timefmt.local(after.paused_at)} by {after.paused_by}"
                 if after.paused
                 else ""
             )
         )
         return result
     if paused:
-        result.say(f"dispatch paused at {after.paused_at} by {by}")
+        result.say(f"dispatch paused at {timefmt.local(after.paused_at)} by {by}")
         result.say(
             "The daemon keeps polling, evaluating eligibility, reconciling, and "
             "heartbeating. It starts no new session; eligible items accumulate in ready."
@@ -2197,7 +2206,7 @@ def anomalies(ctx: Context, *, acknowledge: int | None = None, show_all: bool = 
     for anomaly in rows:
         result.say(
             f"[{anomaly.id}] {anomaly.kind}  {anomaly.entity_type or '—'}:"
-            f"{anomaly.entity_id or '—'}  detected {anomaly.detected_at}"
+            f"{anomaly.entity_id or '—'}  detected {timefmt.local(anomaly.detected_at)}"
         )
         for key, value in anomaly.detail_obj.items():
             result.say(f"      {key}: {value}")
@@ -2470,7 +2479,8 @@ def _format_record(record: dict[str, Any]) -> str:
         entity = f" {record['entity_type']}:{record.get('entity_id')}"
     detail = record.get("detail")
     tail = f"  {json.dumps(detail, default=str)}" if detail else ""
-    return f"{record.get('ts')} {marker} {record.get('action')} [{outcome}]{entity}{sim}{tail}"
+    stamp = timefmt.local(record.get("ts"))
+    return f"{stamp} {marker} {record.get('action')} [{outcome}]{entity}{sim}{tail}"
 
 
 def follow_log(ctx: Context) -> Iterator[str]:

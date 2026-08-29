@@ -86,6 +86,16 @@ is not touched.
 | W1 | 106 | `when()` | One funnel for **seven** call sites: 690 (active, `started_at`), 831 (queue, `updated_at`), 1014 (`ended_at`), 1126 (anomalies, `detected_at`), 1471 (item history), 1486–1487 (sessions). One edit covers all seven. |
 | W2 | 1738 | the log view's record `ts` | `span(record.get("ts", "—"), class_="ts mono")` — not routed through `when()` because a log record carries no relative age. |
 
+**One deliberate exception, found while writing the tests**: an audit record's `detail`
+payload is rendered by `_record_detail` (`pages.py:1618`) and by `_format_record`'s
+`json.dumps` tail in the terminal, and it can contain timestamps — a `dispatch.pause`
+record carries `paused_at`. These stay UTC. `detail` is free-form JSON written by whatever
+raised the record, so converting inside it would need a heuristic to decide what is a
+timestamp, would corrupt a field that merely resembled one, and would make the page
+disagree with the file it is quoting. It is the record shown as the record, not a display
+of a time, and it is already unambiguous because it carries `Z`. Both interfaces quote it
+verbatim, so FR-005's "no surface may disagree with another" still holds.
+
 `when()` keeps its shape: absolute beside relative. It becomes
 `2026-08-29 21:31:07 -04:00 (3h 12m ago)`. `human_age` and `age_seconds` are unchanged (FR-006)
 and continue to compute from the stored UTC value.

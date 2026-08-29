@@ -31,9 +31,18 @@ effect_level = "plan"
 state_dir = "REPLACE_ME/state"
 repo_root = "REPLACE_ME/repos"
 worktree_root = "REPLACE_ME/worktrees"
+
+# Not optional: `[github] author` is the FR-007 security boundary and config validation
+# refuses to build a context without it and a token source. Nothing here reaches GitHub, so
+# the token may be a placeholder — but the variable has to exist.
+[github]
+author    = "jantman"
+label     = "robot-army"
+token_env = "RA_QUICKSTART_TOKEN"
 TOML
 sed -i "s|REPLACE_ME|$RA_TMP|g" "$RA_TMP/config.toml"
 mkdir -p "$RA_TMP/state" "$RA_TMP/repos" "$RA_TMP/worktrees"
+export RA_QUICKSTART_TOKEN=not-a-real-token
 
 # Every command below runs in a pinned zone, so the output is the same on any machine.
 ra() { TZ=America/New_York uv run robot-army --config "$RA_TMP/config.toml" "$@"; }
@@ -41,6 +50,9 @@ ra() { TZ=America/New_York uv run robot-army --config "$RA_TMP/config.toml" "$@"
 
 Copy any remaining `[…]` sections from `share/config.example.toml` if a command complains that
 a required key is missing.
+
+**`export RA_TMP`, not just `RA_TMP=`.** The Python blocks below read it from the environment
+of a child process, so a shell variable that was never exported reaches them as a `KeyError`.
 
 ### Seeding instants whose local rendering is known
 
@@ -114,7 +126,13 @@ curl -s "http://127.0.0.1:8420/queue" | grep -c 'T[0-9][0-9]:[0-9][0-9]:[0-9][0-
 ```
 
 **Expected**: the first loop prints local stamps with offsets on every view. The second
-command prints `0` — no raw UTC stamp survives anywhere in the rendered HTML.
+command prints `0` — no raw UTC stamp survives in the rendered HTML.
+
+**One exception, on `/log` only.** An audit record's `detail` payload is quoted verbatim, so
+a record that happens to carry a timestamp — `dispatch.pause` carries `paused_at` — shows a
+raw `…Z` inside its detail block. That is the record shown as the record, not a display of a
+time: rewriting values inside free-form JSON would make the page disagree with the file it is
+quoting. Both interfaces quote it the same way, so they still agree with each other.
 
 Open `/queue` in a browser and confirm the footer reads `rendered 2026-… -04:00` (W4) and the
 `DISPATCH PAUSED since …` pill reads local (W3). Confirm the relative age is still beside each
@@ -136,14 +154,18 @@ The load-bearing scenario. Run the same commands in two very different zones and
 
 ```bash
 for tz in America/New_York Asia/Kolkata UTC; do
-  TZ=$tz uv run robot-army --config "$RA_TMP/config.toml" status --json > "$RA_TMP/status.$tz.json"
+  TZ=$tz uv run robot-army --config "$RA_TMP/config.toml" status --json \
+    > "$RA_TMP/status.${tz//\//_}.json"
 done
-diff "$RA_TMP/status.America/New_York.json" "$RA_TMP/status.Asia/Kolkata.json" && echo "IDENTICAL"
+diff -q "$RA_TMP/status.America_New_York.json" "$RA_TMP/status.Asia_Kolkata.json" \
+  && diff -q "$RA_TMP/status.Asia_Kolkata.json" "$RA_TMP/status.UTC.json" \
+  && echo "IDENTICAL across all three zones"
+
+grep -oE '"[a-z_]*_at": "[^"]*"' "$RA_TMP/status.UTC.json" | sort -u
 ```
 
-*(Use `${tz//\//_}` in the filename if the slash is inconvenient.)*
-
-**Expected**: `IDENTICAL`, and every timestamp in the file still ends in `Z`. Then the web's
+**Expected**: `IDENTICAL across all three zones`, and every timestamp in the file still ends
+in `Z`. Then the web's
 JSON, including the two chrome keys that research [R3](research.md) singles out:
 
 ```bash
@@ -168,13 +190,15 @@ including the record written while the process was running in `Asia/Kolkata`. *(
 ## 6. A machine with no determinable zone
 
 ```bash
-TZ=Bogus/Nowhere uv run robot-army --config "$RA_TMP/config.toml" status
-TZ=Bogus/Nowhere curl -s "http://127.0.0.1:8420/queue" > /dev/null; echo "exit=$?"
+TZ=Bogus/Nowhere uv run robot-army --config "$RA_TMP/config.toml" status; echo "exit=$?"
+TZ=Bogus/Nowhere uv run robot-army --config "$RA_TMP/config.toml" log --since 1h | head -2
+curl -s "http://127.0.0.1:8420/queue" > /dev/null; echo "exit=$?"
 ```
 
-**Expected**: no error, no traceback, no non-zero exit. Times render at `+00:00`, which is the
-honest statement that the zone could not be determined rather than a silent pretence that the
-machine is in UTC. *(SC-006, FR-009)*
+**Expected**: no error, no traceback, no non-zero exit, and the `log` lines begin
+`… +00:00`. That offset is the honest statement that the zone could not be determined rather
+than a silent pretence that the machine is in UTC. `log` rather than `status` because
+`status` prints an absolute time only when something is paused. *(SC-006, FR-009)*
 
 ## 7. The fold — two instants, one wall clock
 

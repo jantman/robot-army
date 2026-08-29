@@ -23,6 +23,8 @@ import html as _html
 from collections.abc import Iterable
 from typing import Any
 
+from robot_army import timefmt
+
 
 class Markup(str):
     """A string that is already HTML and must not be escaped again.
@@ -299,7 +301,10 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
         )
     )
     if chrome.get("dispatch_paused"):
-        since = chrome.get("dispatch_paused_at") or "unknown time"
+        # Converted *here* rather than in the chrome dict, which ``server._render`` merges
+        # into the JSON body: that value is simultaneously a machine-readable field and
+        # something a person reads, and only the second may be local (010 R3).
+        since = timefmt.local(chrome.get("dispatch_paused_at")) or "unknown time"
         by = chrome.get("dispatch_paused_by") or "?"
         # A link, not a label: the pause is visible from every view, so the control that
         # lifts it has to be reachable from every view too.
@@ -401,7 +406,7 @@ def page(
         a(href + suffix, label, class_="current" if path.startswith(href) else None)
         for href, label in NAV
     )
-    rendered_at = chrome.get("rendered_at", "")
+    rendered_at = timefmt.local(chrome.get("rendered_at", "")) or ""
     return (
         "<!DOCTYPE html>\n"
         + str(

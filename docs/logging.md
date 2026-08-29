@@ -67,6 +67,40 @@ against what target, with what result.
 | `dry_run` / `simulated` | Present and `true` only when the record concerns simulated work |
 | `detail` | Everything else, action-specific |
 
+## Recorded in UTC, displayed in local time
+
+**The record is UTC and always will be.** Every `ts` above, every `*_at` column in the
+database, the heartbeat, and every machine-readable response — `robot-army <command> --json`
+and the web interface's JSON — carry `%Y-%m-%dT%H:%M:%SZ`. That is what makes a record
+comparable against another record, against GitHub, and against itself a year later. A log
+whose timestamps depended on where the reader stood could not meet the constitution's
+reconstruction standard, which is why this half does not move.
+
+**What you read is local.** Since milestone 010, every timestamp the CLI prints and every
+timestamp the web interface renders is converted to this machine's timezone and labelled
+with its offset — `2026-08-29 21:31:07 -04:00` for the record `2026-08-30T01:31:07Z`. Note
+that these are the same instant on different calendar days; that is the point of the
+feature, not a bug in it.
+
+The two halves differ **on purpose**, and the difference is easy to mistake for an
+oversight in either direction. Some notes for whoever reads this next:
+
+* The conversion lives in `robot_army.timefmt`, which is the only producer of a displayed
+  timestamp. It is display-only: nothing compares, sorts, stores, or parses back what it
+  returns, and `timefmt.parse_stamp` deliberately refuses to read a displayed value so that
+  a leak into a comparison fails loudly instead of quietly comparing two clocks.
+* The zone is whatever the operating system reports — `TZ` if set, otherwise
+  `/etc/localtime`. There is no configuration key and should not be one: on a single-user
+  machine the setting would have exactly one correct value, which the OS already holds.
+* An offset appears on **every** displayed stamp rather than once per page. At the autumn
+  daylight-saving fold two instants an hour apart render to the same wall clock, and the
+  offset is the only thing that tells them apart.
+* Audit files stay partitioned by **UTC day**, so an evening's activity can land in two
+  files. Reading by day is a record-layer operation and is unaffected.
+* A record's `detail` payload is quoted verbatim in both interfaces, timestamps included.
+  It is the record shown as the record; rewriting values inside free-form JSON would make
+  the display disagree with the file it is quoting.
+
 ## The `web` component
 
 Milestone 002 added a third writer. Records from the web interface carry

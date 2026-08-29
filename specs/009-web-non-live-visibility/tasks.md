@@ -295,5 +295,38 @@ Five departures from the plan, all recorded rather than quietly absorbed.
    page withholding rows now says so. They assert on the badge markup instead, which is what
    FR-019 actually requires.
 
-**Test count**: 1414 → 1521 (+107). Full suite and `ruff check` both green; both quickstart
+### Four defects found in review, after the first push
+
+All four were real, all four are fixed with a regression test each. Two of them share a root
+cause worth naming: **the disclosure rule was written per view, and three of the four views
+have more than one section.**
+
+1. **`/queue` counted rows it never shows.** Its withheld number came from an unfiltered
+   `operations.status`, so it counted `active`, `done`, `abandoned`, `interrupted` and
+   `awaiting_review` rows too. With one ready row and three others it offered to reveal four
+   and revealed one — precisely the "merely close" number 008's plan warns against. The count
+   is now taken from the sections the page actually renders, by partitioning the rows first
+   and hiding them second.
+2. **`/interrupted`'s "awaiting review" section could deny rows that existed.** It used the
+   count-blind empty text while its sibling used the disclosing one, so a page with real
+   interrupted rows and withheld awaiting ones said "Nothing is awaiting review." above a
+   footnote saying rows were hidden. Both sections now disclose their own count, and the
+   foot of the page carries only what the rendered sections withheld — disjoint sets, each
+   row disclosed exactly once.
+3. **Error pages pinned "hide everything".** `_visibility_suffix` read a missing chrome key
+   as a stated `False`, so every nav link on a `404`, `405` or refusal page carried
+   `?include_simulated=0` — and a stated `0` beats the level default. One tap from a `404` on
+   a `plan` instance landed on the empty page this milestone exists to remove. A missing key
+   now states nothing, and those pages render no toggle, because a toggle reporting a state
+   it had to guess is worse than none.
+4. **The toggle on a refusal page pointed at a `POST`-only route.** A refused action renders
+   the chrome built for its own request, so the toggle offered `/item/5/abandon?...`, which
+   answers `405`. The chrome now carries the referring view for any non-`GET` request.
+
+The first two are the more interesting failure: the per-view rule passed every test written
+for it, because every test had one section holding rows or none at all. The mixed case — one
+section full, its sibling empty and withholding — is the one a rule written at the wrong
+granularity gets wrong, and the one nobody thought to write.
+
+**Test count**: 1414 → 1527 (+113), including the four regressions above. Full suite and `ruff check` both green; both quickstart
 halves walked against a live server at all four effect levels.

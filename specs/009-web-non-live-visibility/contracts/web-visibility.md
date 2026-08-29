@@ -126,18 +126,46 @@ both states and is a link:
 
 ## Withheld-row disclosure
 
-Any view withholding rows its own filters matched states the count and links to the same URL
-with the preference flipped.
+Any section withholding rows it matched states the count and links to the same URL with the
+preference flipped. **Per section, not per view**: `/queue` renders ready, dispatching and
+blocked, and `/interrupted` renders two states, so a view-wide number would name rows that
+section's own empty text is denying — and a view-wide *disclosure* leaves a section free to
+claim absence about rows that exist, one notch quieter than the defect this milestone removes.
 
 | Situation | HTML |
 |---|---|
 | nothing withheld, rows present | table only, no note |
 | nothing withheld, no rows | the existing empty text, e.g. `Nothing is ready.` |
-| rows withheld, rows present | table, then `N simulated rows hidden — show them` |
-| rows withheld, no rows | `Nothing is ready to show. N simulated rows are hidden — show them.` |
+| rows withheld, rows present | table, then `N simulated rows hidden — show them` at the foot of the view |
+| rows withheld, no rows | `Nothing to show here. N simulated rows are hidden — show them.` in place of the empty text |
 
-The count is the number the link would reveal, under that view's own filters. It never claims
-absence while withholding (FR-008), and it never appears when the count is zero (FR-009).
+Each withheld row is disclosed **exactly once**: an empty section carries its own count in
+place of its empty text, and the note at the foot of the view carries the rows withheld from
+the sections that did render. The two sets are disjoint and together they are the whole.
+
+Every count is the number the link would actually reveal *on that page*. A count scoped more
+widely than the page renders — every simulated work item, say, on a view that shows three
+states — replaces an obvious contradiction with a subtler one, which is 008's own standard for
+the number it introduced. No section claims absence while withholding (FR-008), and no count
+appears when it is zero (FR-009).
+
+## Pages with no context
+
+The dead-end responses — `404`, `405`, the `Host` refusal, a schema mismatch — are rendered
+without a database context, so they can resolve neither the effective level nor the default it
+implies. They therefore **state no preference at all**: their links carry no
+`include_simulated`, and they render no visibility toggle. The destination applies its own
+default.
+
+Treating that absence as a stated `0` would put `?include_simulated=0` on every link of every
+error page, and a stated `0` beats the level default — so on an instance below `live`, one tap
+from a `404` would pin "hide everything".
+
+## Paths the toggle may point at
+
+The visibility toggle links to the view being rendered. A refused `POST` renders its chrome on
+a refusal page, so the path carried there is the **referring view**, or `/active`, never the
+action route — which has no `GET` handler and would answer `405`.
 
 ---
 

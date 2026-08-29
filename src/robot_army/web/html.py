@@ -208,8 +208,19 @@ def _visibility_suffix(chrome: dict[str, Any]) -> str:
 
     Stated in both directions and never omitted: once the default varies by effect level,
     an absent parameter means "use the default" and can no longer stand in for false.
+
+    **Unless there is nothing to carry.** The dead-end pages — 404, 405, the Host refusal,
+    a schema mismatch — are rendered by ``server._bare``, which has no database context and
+    so cannot resolve a level or a default. Its chrome omits the key entirely, and treating
+    that absence as a stated ``0`` would put ``?include_simulated=0`` on every nav link of
+    an error page: on a ``plan`` instance, one tap from a 404 would pin "hide everything"
+    and land the reader on exactly the empty-looking page this milestone exists to remove.
+    Nothing known, nothing stated, and the destination applies its own default.
     """
-    return f"?include_simulated={'1' if chrome.get('include_simulated') else '0'}"
+    stated = chrome.get("include_simulated")
+    if stated is None:
+        return ""
+    return f"?include_simulated={'1' if stated else '0'}"
 
 
 def _chrome_bar(chrome: dict[str, Any]) -> Markup:
@@ -300,15 +311,18 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     # suggests the parameter exists". A label that appears only once the parameter has been
     # found is no answer to that, and below `live`, where rows are now shown by default,
     # nothing would otherwise point at the hidden view at all.
-    included = bool(chrome.get("include_simulated"))
-    path = chrome.get("path") or "/active"
-    pills.append(
-        a(
-            f"{path}?include_simulated={'0' if included else '1'}",
-            "simulated rows included" if included else "simulated rows hidden",
-            class_="pill quiet",
+    included = chrome.get("include_simulated")
+    if included is not None:
+        # Absent on the dead-end pages, which have no context to resolve a default from —
+        # and a toggle that reports a state it had to guess is worse than no toggle.
+        path = chrome.get("path") or "/active"
+        pills.append(
+            a(
+                f"{path}?include_simulated={'0' if included else '1'}",
+                "simulated rows included" if included else "simulated rows hidden",
+                class_="pill quiet",
+            )
         )
-    )
 
     notices: list[Any] = []
     if not running:

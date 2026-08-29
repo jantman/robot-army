@@ -1220,7 +1220,11 @@ def handle(app: WebApp, request: Request) -> Response:
             ctx,
             include_simulated=include_simulated,
             simulated_preference=request.simulated_preference,
-            path=request.path,
+            # A GET-able path, because the chrome's visibility toggle links to it — and a
+            # refused POST renders this same chrome. Pointing the toggle at
+            # ``/item/5/abandon`` would offer the reader a link that answers 405, which is
+            # reachable any time an action is illegal rather than only in some edge case.
+            path=request.path if request.method in GET else _referring_view(request, "/active"),
             effective_level=str(level) if level else "unknown",
             simulated_consequences=effects.consequences(level) if level else [],
         )

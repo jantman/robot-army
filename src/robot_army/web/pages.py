@@ -565,27 +565,43 @@ def _empty(text: str) -> Markup:
     return p(text, class_="empty")
 
 
+def _visible(
+    rows: list[dict[str, Any]], *, include_simulated: bool
+) -> tuple[list[dict[str, Any]], int]:
+    """What a section shows, and how many of its rows it is withholding.
+
+    Counted from the rows the section itself holds rather than from a database-wide total,
+    because a view renders some states and not others: ``/queue`` shows ready, dispatching
+    and blocked, so a count of *every* simulated work item would name ``active``, ``done``
+    and ``abandoned`` rows that clicking "show them" could never surface. FR-007 asks for the
+    number the link reveals, and a number that is merely close replaces one contradiction
+    with a subtler one — 008's own words about the count it introduced.
+    """
+    if include_simulated:
+        return rows, 0
+    shown = [row for row in rows if not row.get("simulated")]
+    return shown, len(rows) - len(shown)
+
+
 def _reveal(path: str, *, include_simulated: bool) -> Markup:
     """A link to this same view with the visibility preference flipped."""
     label = "hide them" if include_simulated else "show them"
     return a(path + _query(not include_simulated), label)
 
 
-def withheld_note(
-    count: int, *, path: str, include_simulated: bool, when_visible: bool = True
-) -> Markup:
+def withheld_note(count: int, *, path: str, include_simulated: bool) -> Markup:
     """"N simulated rows hidden — show them", or nothing at all (009 FR-006, FR-009).
 
     Rendered beneath a table that is showing fewer rows than it matched. Absent entirely when
     the count is zero, so a page with nothing to disclose says nothing — the alternative is a
     permanent "0 rows hidden" that trains the reader to skip the line that matters.
 
-    ``when_visible`` is the other half of the rule: a view discloses **once**. If it is showing
-    rows, the disclosure sits beneath them; if it is showing none, :func:`_nothing` has already
-    carried it in place of the empty text, and repeating it here would state the same count
-    twice on one page.
+    A view discloses each withheld row exactly once. A section that rendered nothing carries
+    its own count in place of its empty text (:func:`_nothing`); this note carries the rows
+    withheld from the sections that *did* render. The two sets are disjoint and together they
+    are the whole, so no page states a number twice and none leaves one out.
     """
-    if not count or not when_visible:
+    if not count:
         return Markup("")
     plural = "row" if count == 1 else "rows"
     return p(
@@ -680,10 +696,7 @@ def active_view(ctx: operations.Context, *, include_simulated: bool = False) -> 
                 ],
             ),
             withheld_note(
-                withheld,
-                path="/active",
-                include_simulated=include_simulated,
-                when_visible=bool(rows),
+                withheld if rows else 0, path="/active", include_simulated=include_simulated
             ),
         ]
     )
@@ -712,7 +725,10 @@ def queue_view(
     matched what the dispatcher happened to do — true when it was written, and false the
     moment an ordering mode existed. There is nothing left to assert.
     """
-    all_items, withheld = _items(ctx, include_simulated=include_simulated)
+    # Always assembled whole, then filtered per section below. The dispatcher plans
+    # simulated rows regardless because they occupy slots, so partitioning first and hiding
+    # second is both the cheaper query and the only way to count what each section withheld.
+    all_items, _ = _items(ctx, include_simulated=True)
     max_age = ctx.config.daemon.dispatching_max_age_seconds
 
     snap = capacity_mod.snapshot(ctx.conn, config=ctx.config)
@@ -728,7 +744,8 @@ def queue_view(
         }
         for entry in plan
         # A simulated row is planned regardless, because it occupies a slot; whether it is
-        # *shown* is the viewer's filter, exactly as it is everywhere else.
+        # *shown* is the viewer's filter, applied below. Positions come from the plan either
+        # way, so hiding a row never renumbers the ones around it.
         if entry.item.id in by_id
     ]
 
@@ -756,6 +773,13 @@ def queue_view(
                 }
             )
 
+    ready, withheld_ready = _visible(ready, include_simulated=include_simulated)
+    dispatching, withheld_dispatching = _visible(dispatching, include_simulated=include_simulated)
+    blocked, withheld_blocked = _visible(blocked, include_simulated=include_simulated)
+    # Only the states this page renders. A database-wide count would name ``active``,
+    # ``done`` and ``abandoned`` rows that "show them" could never surface here.
+    withheld = withheld_ready + withheld_dispatching + withheld_blocked
+
     # The chrome is already assembled once per request; reuse it rather than re-reading
     # the same three facts to decide which control to render.
     current = chrome_payload if chrome_payload is not None else chrome(
@@ -779,7 +803,7 @@ def queue_view(
             h(2, f"ready ({len(ready)}) — in dispatch order"),
             _nothing(
                 "Nothing is ready.",
-                withheld if not (dispatching or blocked) else 0,
+                withheld_ready,
                 path="/queue",
                 include_simulated=include_simulated,
             )
@@ -805,7 +829,12 @@ def queue_view(
                 ],
             ),
             h(2, f"dispatching ({len(dispatching)})"),
-            _empty("Nothing is being prepared.")
+            _nothing(
+                "Nothing is being prepared.",
+                withheld_dispatching,
+                path="/queue",
+                include_simulated=include_simulated,
+            )
             if not dispatching
             else table(
                 ["item", "repo", "issue", "title", "age", "limit"],
@@ -825,7 +854,12 @@ def queue_view(
                 ],
             ),
             h(2, f"blocked ({len(blocked)})"),
-            _empty("Nothing is blocked.")
+            _nothing(
+                "Nothing is blocked.",
+                withheld_blocked,
+                path="/queue",
+                include_simulated=include_simulated,
+            )
             if not blocked
             else table(
                 ["item", "state", "repo", "issue", "reason", ""],
@@ -849,11 +883,14 @@ def queue_view(
                     for row in blocked
                 ],
             ),
+            # The rows withheld from sections that rendered something; the empty sections
+            # above have already accounted for their own.
             withheld_note(
-                withheld,
+                (withheld_ready if ready else 0)
+                + (withheld_dispatching if dispatching else 0)
+                + (withheld_blocked if blocked else 0),
                 path="/queue",
                 include_simulated=include_simulated,
-                when_visible=bool(ready or dispatching or blocked),
             ),
         ]
     )
@@ -989,17 +1026,20 @@ def interrupted_view(ctx: operations.Context, *, include_simulated: bool = False
     way to reach one would be to type its id into the address bar. A control that exists
     but cannot be navigated to is a gap, not a scope boundary.
     """
-    interrupted_items, withheld_interrupted = _items(
-        ctx, include_simulated=include_simulated, state=str(WorkItemState.INTERRUPTED)
+    interrupted_items, _ = _items(
+        ctx, include_simulated=True, state=str(WorkItemState.INTERRUPTED)
     )
-    interrupted = [_signal_row(ctx, item) for item in interrupted_items]
-    awaiting_items, withheld_awaiting = _items(
-        ctx, include_simulated=include_simulated, state=str(WorkItemState.AWAITING_REVIEW)
+    interrupted, withheld_interrupted = _visible(
+        interrupted_items, include_simulated=include_simulated
     )
-    awaiting = [_signal_row(ctx, item) for item in awaiting_items]
-    # The sum of the two state-filtered counts, which is exactly the set the reveal link
-    # would surface for this view -- not the unfiltered total, which would name rows this
-    # page would still not show (009 FR-007).
+    interrupted = [_signal_row(ctx, item) for item in interrupted]
+    awaiting_items, _ = _items(
+        ctx, include_simulated=True, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    awaiting, withheld_awaiting = _visible(awaiting_items, include_simulated=include_simulated)
+    awaiting = [_signal_row(ctx, item) for item in awaiting]
+    # Per section, because this view renders two states and each has its own empty text to
+    # be honest in (009 FR-007, FR-008).
     withheld = withheld_interrupted + withheld_awaiting
 
     def cards(rows: list[dict[str, Any]]) -> Markup:
@@ -1017,7 +1057,7 @@ def interrupted_view(ctx: operations.Context, *, include_simulated: bool = False
             h(1, "interrupted"),
             _nothing(
                 "Nothing is interrupted.",
-                withheld if not awaiting else 0,
+                withheld_interrupted,
                 path="/interrupted",
                 include_simulated=include_simulated,
             )
@@ -1028,12 +1068,19 @@ def interrupted_view(ctx: operations.Context, *, include_simulated: bool = False
                 "Sessions that exited cleanly. The same three decisions apply.",
                 class_="meta",
             ),
-            _empty("Nothing is awaiting review.") if not awaiting else cards(awaiting),
-            withheld_note(
-                withheld,
+            _nothing(
+                "Nothing is awaiting review.",
+                withheld_awaiting,
                 path="/interrupted",
                 include_simulated=include_simulated,
-                when_visible=bool(interrupted or awaiting),
+            )
+            if not awaiting
+            else cards(awaiting),
+            withheld_note(
+                (withheld_interrupted if interrupted else 0)
+                + (withheld_awaiting if awaiting else 0),
+                path="/interrupted",
+                include_simulated=include_simulated,
             ),
         ]
     )
@@ -1188,10 +1235,7 @@ def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
                 ]
             ),
             withheld_note(
-                withheld,
-                path="/cards",
-                include_simulated=include_simulated,
-                when_visible=bool(rows),
+                withheld if rows else 0, path="/cards", include_simulated=include_simulated
             ),
         ]
     )

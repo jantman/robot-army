@@ -455,15 +455,18 @@ def test_the_disclosure_is_made_once_not_twice(web_at, conn) -> None:
 
 
 def test_the_interrupted_count_is_the_number_the_link_reveals(web_at, conn) -> None:
-    """FR-007. This view lists two states, so its count is the sum of two filtered counts —
-    not the unfiltered total, which would name rows this page would still not show."""
+    """FR-007. Each section states its own count, and the ``ready`` row is in neither.
+
+    A view-wide count would have named that third row, which "show them" could never
+    surface on this page.
+    """
     seed_item(conn, issue_number=26, dry_run=True, state="interrupted")
     seed_item(conn, issue_number=27, dry_run=True, state="awaiting_review")
     seed_item(conn, issue_number=28, dry_run=True, state="ready")
     harness = web_at("plan")
-    assert "2 simulated rows are hidden" in _content(
-        harness.get("/interrupted?include_simulated=0").text
-    )
+    body = _content(harness.get("/interrupted?include_simulated=0").text)
+    assert body.count("1 simulated row is hidden") == 2
+    assert "3 simulated" not in body
     revealed = harness.get_json("/interrupted").json()
     assert len(revealed["items"]) + len(revealed["awaiting_review"]) == 2
 
@@ -489,3 +492,52 @@ def test_the_cards_payload_reports_what_it_withheld(board_web, conn) -> None:
     shown = board_web.get_json("/cards?include_simulated=1").json()
     assert shown["withheld_simulated"] == 0
     assert len(shown["cards"]) == 1
+
+
+def test_the_queue_counts_only_the_states_it_renders(web_at, conn) -> None:
+    """FR-007, and the failure a database-wide count produces.
+
+    ``/queue`` shows ready, dispatching and blocked. A count of every simulated work item
+    also names ``active``, ``done``, ``abandoned``, ``interrupted`` and ``awaiting_review``
+    rows — so the page offered to reveal four and the link revealed one, which is a subtler
+    version of the contradiction 008 removed rather than an improvement on it.
+    """
+    seed_item(conn, issue_number=1, dry_run=True, state="ready")
+    for number, state in ((2, "active"), (3, "done"), (4, "interrupted")):
+        seed_item(conn, issue_number=number, dry_run=True, state=state)
+    harness = web_at("plan")
+
+    hidden = harness.get_json("/queue?include_simulated=0").json()
+    revealed = harness.get_json("/queue").json()
+    surfaced = sum(len(revealed[key]) for key in ("ready", "dispatching", "blocked"))
+    assert hidden["withheld_simulated"] == surfaced == 1
+    assert "1 simulated row is hidden" in _content(
+        harness.get("/queue?include_simulated=0").text
+    )
+
+
+def test_a_section_with_rows_beside_one_without_still_tells_the_truth(web_at, conn) -> None:
+    """FR-008 at the section level, which is where a view-wide rule leaves a hole.
+
+    ``interrupted`` renders real rows while ``awaiting review`` has only withheld ones. A
+    single view-level disclosure is satisfied by the note at the foot of the page — and the
+    "Nothing is awaiting review." above it is still a plain claim of absence about rows that
+    exist.
+    """
+    seed_item(conn, issue_number=1, dry_run=False, state="interrupted")
+    seed_item(conn, issue_number=2, dry_run=True, state="awaiting_review")
+    body = _content(web_at("plan").get("/interrupted?include_simulated=0").text)
+    assert "Nothing is awaiting review." not in body
+    assert "1 simulated row is hidden" in body
+
+
+def test_each_withheld_row_is_disclosed_exactly_once(web_at, conn) -> None:
+    """The two halves of the rule are disjoint and together they are the whole: an empty
+    section carries its own count, and the foot of the page carries the rest."""
+    seed_item(conn, issue_number=1, dry_run=False, state="interrupted")
+    seed_item(conn, issue_number=2, dry_run=True, state="interrupted")
+    seed_item(conn, issue_number=3, dry_run=True, state="awaiting_review")
+    body = _content(web_at("plan").get("/interrupted?include_simulated=0").text)
+    # One beneath the rendered interrupted cards, one in place of the awaiting empty text.
+    assert body.count("1 simulated row") == 2
+    assert "2 simulated" not in body

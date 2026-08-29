@@ -340,3 +340,37 @@ def test_the_level_pill_has_a_stylesheet_rule_in_both_states(web):
     assert ".pill.level.simulated" in css
     assert ".pill.level.live" in css
     assert ".sim {" in css
+
+
+def test_a_dead_end_page_states_no_visibility_preference(web_at, conn):
+    """A 404 has no database context, so it cannot resolve the level-dependent default.
+
+    Treating that absence as a stated `0` put `?include_simulated=0` on every nav link of
+    every error page: on a `plan` instance one tap from a 404 pinned "hide everything" and
+    landed the reader on exactly the empty-looking page this milestone removes.
+    """
+    body = web_at("plan").get("/no-such-page").text
+    assert "include_simulated" not in body
+    assert 'href="/active"' in body
+
+
+def test_a_dead_end_page_offers_no_visibility_toggle(web_at, conn):
+    """A toggle reporting a state it had to guess is worse than no toggle."""
+    body = web_at("plan").get("/no-such-page").text
+    assert "simulated rows" not in body
+
+
+def test_a_refused_action_links_its_toggle_somewhere_reachable(web_at, conn):
+    """The refusal page renders the chrome built for the POST it refused, and the toggle
+    builds its href from that path — so it pointed at an action route with no GET handler,
+    and clicking it answered 405. Reachable whenever an action is illegal."""
+    import re
+
+    item_id = seed_item(conn, issue_number=1, dry_run=True, state="done")
+    response = web_at("plan").post(f"/item/{item_id}/abandon")
+    assert response.status == 409
+    href = re.search(r'<a href="([^"]*)" class="pill quiet">simulated', response.text)
+    assert href, "the refusal page rendered no visibility toggle"
+    assert "abandon" not in href.group(1), href.group(1)
+    # And the target actually answers a GET.
+    assert web_at("plan").get(href.group(1)).status == 200

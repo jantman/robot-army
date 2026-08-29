@@ -372,15 +372,69 @@ the place the rule was not applied.
 rather than becoming wallpaper, since it is on every page below `live` and `plan` is where
 first runs live.
 
-## 010 — Whatever survives contact with reality
+## 010 — Times are read where they are read (`specs/010-local-timezone-display/`)
+
+**Status:** implemented
+
+Not from the planning document. Every timestamp this system stores is UTC, which is correct,
+and every timestamp it *displayed* was that same string handed to a person unchanged, which
+was not. `robot-army status` at half past nine in the evening reported a pause at
+`2026-08-30T01:31:07Z` — tomorrow, on the face of it. The author knows the offset; they
+simply had to apply it, in their head, to every stamp on every screen, with an answer that
+changes twice a year.
+
+**The boundary is the whole feature.** Nothing in the database, the audit files, or any
+machine-readable response differs by a byte; the change lives entirely in the layer that
+turns a stored instant into a line of text. A log whose timestamps depended on where the
+reader stood would not meet Principle III's reconstruction standard, so making the stored or
+`--json` values local would have traded a small daily annoyance for a permanent class of
+ambiguity. `robot_army.timefmt` is the only producer of a displayed timestamp, and
+`parse_stamp` refuses to read one back, so a leak into a comparison fails loudly.
+
+Three ambiguities were settled from evidence rather than guessed at, and two findings from
+running the code made the design smaller than planned:
+
+* **`astimezone()` with no argument does the whole job**, and an unresolvable zone needs no
+  handling: the C library already treats an unknown `TZ` as UTC, so the required fallback
+  renders `+00:00` and says so, obtained by writing nothing. No `zoneinfo`, no `tzdata`, no
+  configuration key — the last forbidden by Principle I, since the setting would have exactly
+  one correct value on a single-user machine.
+* **Neither systemd unit sets `TZ`**, so the daemon, a login shell and the web process
+  already resolve the same `/etc/localtime`. An edge case the spec listed as work turned out
+  to be work already done.
+* **The autumn fold decided the format.** The attractive alternative was stating the zone
+  once per page and printing bare local times, which would have made displayed stamps
+  *shorter* than before. `2026-11-01T05:00:00Z` and `06:00:00Z` both render as `01:00:00`,
+  distinguished only by `-04:00` against `-05:00` — two distinct instants displaying
+  identically for one hour every year, silently, and only ever noticed by someone
+  reconstructing an incident. So the offset goes on every stamp.
+
+The trap was that `server._render` builds its JSON body as `{**view.data, **chrome}`, which
+makes `rendered_at` and `dispatch_paused_at` simultaneously machine-readable fields and
+values a person reads. They stay UTC in the dict and are converted by `html.py` at the moment
+of rendering.
+
+**No existing test changed.** A sweep before starting found no assertion anywhere that a UTC
+stamp appears in rendered output — so the suite was free regression coverage for "the record
+did not move", and equally, nothing in it would have caught a display site left behind. That
+is why the contract enumerates all sixteen sites individually: "every surface" is only
+checkable as a list. Writing the sweep test then found the one site that should *not* be
+converted — a record's `detail` payload, which both interfaces quote verbatim, because
+rewriting values inside free-form JSON would make the page disagree with the file it quotes.
+
+### What running it taught
+
+*To be filled in after the live round.*
+
+## 011 — Whatever survives contact with reality
 
 **Status:** not specified
 
 Planning doc M5. Parked items from §16 that are still genuinely open — kitty control
 socket hardening, multi-machine dispatch, scheduled/proactive work — land here or get dropped.
 
-Moved from the 009 slot, which 009 claimed for the same reason 008, 007, 006 and 005 claimed
-theirs: a milestone with a shape displaces a parking lot without one. Five times now.
+Moved from the 010 slot, which 010 claimed for the same reason 009, 008, 007, 006 and 005
+claimed theirs: a milestone with a shape displaces a parking lot without one. Six times now.
 
 ---
 

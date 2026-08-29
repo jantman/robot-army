@@ -42,6 +42,7 @@ from robot_army import (
     prompt,
     repos,
     sessions,
+    speckit,
     worktree,
 )
 from robot_army.audit import utc_now_iso
@@ -395,11 +396,67 @@ def validate_before_launch(
     return problems
 
 
+def speckit_block(
+    *,
+    config: Config,
+    audit: AuditLog,
+    repo_key: str,
+    item_id: int,
+    worktree_path: str,
+) -> str | None:
+    """The Spec Kit guidance for this dispatch, or ``None`` (milestone 007, FR-005).
+
+    Records the decision either way, with the evidence that produced it and — when the
+    behaviour was suppressed — which setting did it. One record per dispatch: the reads
+    behind it are four ``stat`` calls and logging each of those would bury the decision
+    they support.
+
+    **Nothing here may fail a dispatch.** ``speckit.detect`` already promises not to raise,
+    and this catches anyway: the cost of a bare handler here is one over-broad ``except``,
+    and the cost of being wrong about that promise is a repository that cannot dispatch at
+    all because of a paragraph of prose it was going to be sent.
+    """
+    try:
+        detection = speckit.detect(worktree_path)
+        enabled, suppressed_by = config.speckit_enabled_for(repo_key)
+    except Exception as exc:  # noqa: BLE001 - see the docstring; a miss, never a failure
+        audit.record(
+            "speckit.detect",
+            outcome="error",
+            entity_type="work_item",
+            entity_id=item_id,
+            target=worktree_path,
+            detail={"detected": False, "reason": f"detection failed: {exc}", "enabled": False},
+        )
+        return None
+
+    detail: dict[str, Any] = {
+        "detected": detection.detected,
+        "reason": detection.reason,
+        "enabled": bool(detection.detected and enabled),
+        "path": worktree_path,
+    }
+    if detection.form:
+        detail["form"] = detection.form
+    if detection.detected and not enabled and suppressed_by:
+        detail["suppressed_by"] = suppressed_by
+    audit.record(
+        "speckit.detect",
+        outcome="ok",
+        entity_type="work_item",
+        entity_id=item_id,
+        target=worktree_path,
+        detail=detail,
+    )
+    return speckit.GUIDANCE if (detection.detected and enabled) else None
+
+
 def build_launch_plan(
     *,
     config: Config,
     layout: Layout,
     boundaries: Boundaries,
+    audit: AuditLog,
     repo_key: str,
     item_id: int,
     issue: Issue,
@@ -435,7 +492,20 @@ def build_launch_plan(
     # repositories work well.
 
     instructions = prompt.read_instructions(worktree_path)
-    body = prompt.compose(issue, repo_key=repo_key, branch=branch, instructions=instructions)
+    block = speckit_block(
+        config=config,
+        audit=audit,
+        repo_key=repo_key,
+        item_id=item_id,
+        worktree_path=worktree_path,
+    )
+    body = prompt.compose(
+        issue,
+        repo_key=repo_key,
+        branch=branch,
+        instructions=instructions,
+        speckit_block=block,
+    )
     worker_argv.append(body)
 
     # The wrapper takes its own `--` before the payload. dtach, which precedes it, takes
@@ -565,6 +635,14 @@ def dispatch_item(
                 worktree_path=preparation.worktree_path,
                 branch=preparation.branch,
                 prepare_output=preparation.output or None,
+                # Same transaction as the path it describes, deliberately: a baseline that
+                # committed separately could survive a worktree that did not, and would
+                # then describe a directory that was never created (milestone 007).
+                speckit_baseline=(
+                    json.dumps(list(preparation.speckit_baseline))
+                    if preparation.speckit_baseline is not None
+                    else None
+                ),
             )
         if not preparation.ok:
             _fail(
@@ -599,6 +677,7 @@ def dispatch_item(
         config=config,
         layout=layout,
         boundaries=boundaries,
+        audit=audit,
         repo_key=item.repo_key,
         item_id=item_id,
         issue=issue,

@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import cleanup, db, intake, notifications, repos, sessions
+from robot_army import cleanup, db, intake, notifications, repos, sessions, speckit
 from robot_army.boundaries import BoundaryError, TransportError
 from robot_army.states import (
     SessionState,
@@ -47,6 +47,7 @@ class ReconcileResult:
     prunable: int = 0
     cleaned: int = 0
     retained: int = 0
+    speckit_phase_changes: int = 0
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
@@ -60,6 +61,7 @@ class ReconcileResult:
             "prunable_worktrees": self.prunable,
             "cleaned": self.cleaned,
             "retained": self.retained,
+            "speckit_phase_changes": self.speckit_phase_changes,
             "notes": self.notes,
         }
 
@@ -255,6 +257,9 @@ def reconcile(
         conn, audit=audit, config=config, scan=scan, claimed_pids=claimed_pids
     )
 
+    # -- how far Spec Kit runs have got (milestone 007, FR-012) ------------
+    result.speckit_phase_changes += _observe_speckit(conn, audit=audit)
+
     # -- stale sockets and prunable worktrees (FR-044) ---------------------
     result.stale_sockets += _sweep_sockets(conn, boundaries=boundaries, audit=audit, layout=layout)
     result.prunable += _sweep_worktrees(conn, boundaries=boundaries, audit=audit, config=config)
@@ -265,6 +270,34 @@ def reconcile(
         detail={**result.summary(), **sessions.summarise(scan, config.worktree_root)},
     )
     return result
+
+
+def _observe_speckit(conn: sqlite3.Connection, *, audit: AuditLog) -> int:
+    """Re-derive each running item's lifecycle phase from its worktree.
+
+    Here rather than in the poll loop because this module's stated job is making recorded
+    state match physical reality, and a phase read from files is exactly that — it has
+    nothing to do with GitHub's clock or GitHub's availability.
+
+    ``awaiting_review`` is included so the last stage a session reached is observed *after*
+    it exits, rather than frozen at whatever the final cycle happened to catch. Terminal
+    states are not observed at all: by then the recorded phase is history.
+
+    **No record is written for a cycle in which nothing changed.** That is the omission the
+    plan enumerates under Principle III: with a 60-second cycle and sessions that run for
+    hours, the alternative is a log in which almost every line says a phase did not change,
+    and every transition is still recorded with its time. The count below is what appears in
+    the pass summary.
+    """
+    changed = 0
+    for item in db.list_work_items(
+        conn,
+        include_simulated=True,
+        states=[WorkItemState.ACTIVE, WorkItemState.AWAITING_REVIEW],
+    ):
+        if speckit.record_phase(conn, audit, item) is not None:
+            changed += 1
+    return changed
 
 
 def _cleanup_worktrees(

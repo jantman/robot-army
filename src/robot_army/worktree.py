@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from robot_army import speckit
 from robot_army.boundaries import BoundaryError, HookResult, VersionControl, WorktreeHandle
 from robot_army.prompt import branch_name, worktree_dir
 
@@ -31,6 +32,13 @@ class PreparationResult:
     output: str = ""
     failure_reason: str | None = None
     env: dict[str, str] | None = None
+    #: The Spec Kit feature directories present the moment the worktree was checked out
+    #: (milestone 007). ``None`` on every failure path, because a worktree that was never
+    #: finished has no baseline worth recording. Taken here rather than at first
+    #: observation for the reason data-model.md gives: by the time anything observes, the
+    #: session may already have created its own directory, and a baseline computed then
+    #: would classify it as pre-existing.
+    speckit_baseline: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +167,11 @@ def prepare(
                 ),
             )
 
+        # Immediately after checkout and *before* the preparation steps run: this must
+        # describe the repository as committed, not as a `uv sync` left it.
+        speckit_baseline = speckit.baseline(handle.path)
+        outcome["speckit_baseline"] = list(speckit_baseline)
+
         env = resolve_env(repo)
         if env:
             outcome["env_keys"] = sorted(env)
@@ -184,7 +197,11 @@ def prepare(
             )
 
         return PreparationResult(
-            ok=True, worktree_path=handle.path, branch=handle.branch, env=env
+            ok=True,
+            worktree_path=handle.path,
+            branch=handle.branch,
+            env=env,
+            speckit_baseline=speckit_baseline,
         )
 
 

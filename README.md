@@ -303,6 +303,74 @@ rebuilds the mapping from it rather than filing a second one. The one gap left o
 between creating the issue and recording it *combined with* losing the database, and it is
 written down in [docs/state.md](docs/state.md) rather than pretended away.
 
+## When a repository uses Spec Kit
+
+More than half of my work goes through [spec-kit](https://github.com/github/spec-kit), and
+before this the only way to tell a dispatched session so was to write it by hand into that
+repository's `.claude/robot-army.md` — one file edit per repository, for something the
+repository's own contents already state.
+
+Now the daemon notices. If the prepared worktree has `.specify/` **and** the four lifecycle
+commands the session would actually run, the prompt gains a fixed paragraph: here is the
+lifecycle, the issue is the input to `/speckit-specify`, and here is when the lifecycle is
+worth using and when it is not. Nothing was edited in the repository to get that, and every
+Spec Kit repository I own gets it from the moment it is installed there.
+
+```toml
+[speckit]
+enabled = true          # the default; omit the section for the same effect
+
+[repos."jantman/some-repo"]
+speckit = false         # ...except here
+```
+
+**The judgement stays the session's.** The paragraph says which kinds of change warrant four
+phases and which do not, and then says plainly that nothing checks. A typo fix that skips the
+lifecycle is a correct outcome, not a stall — it produces an item with no phase, and nothing
+anywhere treats that as a failure.
+
+### Seeing how far it has got
+
+`/active` used to show a session five minutes into `/speckit-specify` and one three hours
+into `/speckit-implement` as the same row. Now it shows the stage, and so do
+`robot-army status` and `robot-army show`:
+
+```bash
+uv run robot-army show 42
+#   spec-kit   : plan — specs/007-speckit-extensions (since 2026-08-28T14:02:11Z)
+```
+
+This is read from the files in the worktree — the feature directory Spec Kit writes, and the
+ticked boxes in its `tasks.md` — so it needs no cooperation from the session and is equally
+true of one that ignored every instruction it was given.
+
+The part that took the design work: a fresh worktree of a repository like this one contains
+**every feature it has ever shipped**, each with a `tasks.md` full of ticked boxes. So the
+set of feature directories present when the worktree is created is recorded, and only a
+directory that appears afterwards counts as this item's work. Without that, every item would
+report `implement` the instant its worktree existed.
+
+Which repositories this changes is answerable before I label anything, offline:
+
+```bash
+uv run robot-army repos        # a spec-kit column: yes / no / off / ?
+```
+
+### What it deliberately does not do
+
+**Nothing is written into a worktree, and no `.specify/extensions.yml` is read or produced.**
+
+Spec Kit's extension hooks look like the obvious mechanism here and are not one: a hook is an
+instruction the agent chooses to follow, not a callback — nothing in Spec Kit calls out to
+anything — so a report that never arrives is indistinguishable from a phase not yet reached.
+A design whose failure mode is silence is the one this project has twice gone out of its way
+to avoid. The files answer nearly the same question and cannot decline to be true. The full
+argument, and the three things that would make hooks worth revisiting, are in
+[the 007 spec](specs/007-speckit-extensions/spec.md#out-of-scope).
+
+It also never installs, upgrades, or repairs Spec Kit in a repository. Detection reads; it
+does not fix.
+
 ## How many sessions run at once
 
 The cap counts **every** Claude session running as me, not just the ones the daemon

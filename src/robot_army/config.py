@@ -118,6 +118,10 @@ class RepoConfig:
     #: Zero by default, which makes that mode degrade to oldest-first — the harmless
     #: reading of an unconfigured repository.
     priority: int = 0
+    #: Whether this repository's sessions are told it uses Spec Kit. ``None`` inherits
+    #: ``[speckit] enabled``; the distinction is kept rather than resolved at parse time so
+    #: the record can say *which* setting suppressed a dispatch (milestone 007, FR-011).
+    speckit: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +322,24 @@ class CleanupConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SpecKitConfig:
+    """Whether a dispatched session into a Spec Kit repository is told so (milestone 007).
+
+    On by default, which is the opposite of ``[cleanup] on_issue_close`` and deliberately
+    so: adding a paragraph to a prompt is neither irreversible nor outward-facing, and
+    per-repository opt-in would reintroduce exactly the step milestone 005 spent a
+    milestone removing (spec.md, Assumptions). The listing that says which repositories
+    this changes is the compensation for switching it on by itself.
+
+    It governs the **prompt block only**. Phase observation and the repositories listing
+    are reads that cost nothing and mislead no one, so they keep working when this is off —
+    which is what makes turning it off a safe experiment rather than a trade.
+    """
+
+    enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class WebConfig:
     """``robot-army serve``'s three settings (research.md R13).
 
@@ -344,6 +366,7 @@ class Config:
     dispatch: DispatchConfig
     cleanup: CleanupConfig
     notifications: NotificationsConfig
+    speckit: SpecKitConfig
     repos: dict[str, RepoConfig]
     worktree_root: Path
     #: Where clones live. A repository's default location is ``<repo_root>/<name>`` and
@@ -380,6 +403,23 @@ class Config:
         if repo and repo.base_branch:
             return repo.base_branch
         return self.worker.base_branch
+
+    def speckit_enabled_for(self, key: str) -> tuple[bool, str | None]:
+        """Does this repository get the Spec Kit prompt block, and what decided it?
+
+        Returns the answer **and** its provenance, because two callers need the second
+        half: the audit record must name what suppressed a dispatch (FR-011) and the
+        repositories listing must say the same thing in a column (FR-022). Computing the
+        reason separately at each site is how the two come to disagree.
+
+        ``None`` as the provenance means the default decided it — nothing was written down.
+        """
+        repo = self.repos.get(key)
+        if repo is not None and repo.speckit is not None:
+            return repo.speckit, f'[repos."{key}"] speckit'
+        if not self.speckit.enabled:
+            return False, "[speckit] enabled"
+        return True, None
 
     def effective_repo_cap(self, key: str) -> tuple[int, bool]:
         """How many sessions this repository may run, and whether the author said so.
@@ -418,6 +458,7 @@ _TOP_LEVEL_SECTIONS = {
     "dispatch",
     "cleanup",
     "notifications",
+    "speckit",
     "repos",
 }
 
@@ -425,7 +466,7 @@ _TOP_LEVEL_SECTIONS = {
 #: The rule is the one ``[repos.*]`` established and this file states above: a typo in a
 #: section that exists is a setting that quietly does nothing, which is worse than a
 #: setting that is missing, because it looks applied.
-_STRICT_KEY_SECTIONS = frozenset({"trello", "dispatch", "cleanup", "notifications"})
+_STRICT_KEY_SECTIONS = frozenset({"trello", "dispatch", "cleanup", "notifications", "speckit"})
 
 _KNOWN_KEYS: dict[str, set[str]] = {
     "daemon": {
@@ -459,6 +500,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "dispatch": {"order", "default_repo_max_sessions"},
     "cleanup": {"on_issue_close"},
     "notifications": {"events", "max_per_cycle"},
+    "speckit": {"enabled"},
     # Unknown keys here are an **error**, not the top level's warning, and are handled
     # separately below: a typo in a board section that exists is a board that quietly
     # polls the wrong thing, which is the same class of failure as a typo in [repos.*].
@@ -481,6 +523,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
 
 _REPO_KEYS = {
     "path",
+    "speckit",
     "base_branch",
     "post_create",
     "env",
@@ -736,6 +779,18 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         events=events,
         max_per_cycle=_int("notifications", "max_per_cycle", 5, minimum=1),
     )
+    # -- [speckit] ---------------------------------------------------------
+    speckit_raw = raw.get("speckit", {})
+    for unknown in sorted(set(speckit_raw) - _KNOWN_KEYS["speckit"]):
+        problems.append(f"[speckit] unknown key {unknown!r}")
+    speckit_enabled = speckit_raw.get("enabled", True)
+    if not isinstance(speckit_enabled, bool):
+        problems.append(
+            f"[speckit] enabled must be true or false, got {speckit_enabled!r}"
+        )
+        speckit_enabled = True
+    speckit = SpecKitConfig(enabled=speckit_enabled)
+
     if notifications.events and not health.webhook_url:
         # A warning, not a problem: the intent is legible and the fix is obvious, and
         # refusing to start over a stretch feature would be disproportionate (R17).
@@ -835,6 +890,13 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             )
             priority = 0
 
+        repo_speckit = section.get("speckit")
+        if repo_speckit is not None and not isinstance(repo_speckit, bool):
+            problems.append(
+                f"[repos.{key}] speckit must be true or false, got {repo_speckit!r}"
+            )
+            repo_speckit = None
+
         repos[key] = RepoConfig(
             key=key,
             path=repo_path,
@@ -845,6 +907,7 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             model=str(section["model"]) if section.get("model") else None,
             max_sessions=max_sessions,
             priority=priority,
+            speckit=repo_speckit,
         )
 
     # A cross-field check that is a warning rather than an error, because the maintainer
@@ -899,6 +962,7 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         dispatch=dispatch,
         cleanup=cleanup,
         notifications=notifications,
+        speckit=speckit,
         repos=repos,
         worktree_root=worktree_root,
         repo_root=repo_root,

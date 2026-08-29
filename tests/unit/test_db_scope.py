@@ -131,3 +131,72 @@ def test_state_changes_cannot_bypass_the_transition_gate(conn):
         )
     with pytest.raises(ValueError, match="transition_session"):
         db.update_session_columns(conn, row_id, state="running")
+
+
+# ``count_simulated_work_items`` is deliberately absent from LISTING_ACCESSORS above. It
+# carries no ``include_simulated`` parameter because counting withheld rows *is* the
+# simulated-only question, and asking it for the other scope would be nonsense. Adding it
+# to that list would fail the structural assertion for the right reason and the wrong
+# purpose — milestone 008.
+
+
+def test_counting_simulated_counts_only_simulated_rows(conn):
+    _seed_both(conn)
+    assert db.count_simulated_work_items(conn) == 1
+
+
+def test_counting_simulated_is_zero_on_an_empty_table(conn):
+    assert db.count_simulated_work_items(conn) == 0
+
+
+def test_counting_simulated_honours_the_same_filters_as_the_listing(conn):
+    live, simulated = _seed_both(conn)
+    other = seed_item(conn, repo_key="other/repo", issue_number=3, dry_run=True)
+    conn.execute(
+        "UPDATE work_items SET state = ? WHERE id IN (?, ?)",
+        (str(WorkItemState.READY), live, simulated),
+    )
+
+    assert db.count_simulated_work_items(conn) == 2
+    assert db.count_simulated_work_items(conn, states=[WorkItemState.READY]) == 1
+    assert db.count_simulated_work_items(conn, repo_key="demo") == 1
+    assert db.count_simulated_work_items(conn, repo_key="other/repo") == 1
+    assert (
+        db.count_simulated_work_items(
+            conn, states=[WorkItemState.READY], repo_key="other/repo"
+        )
+        == 0
+    )
+    assert other  # the row exists; it is simply not READY
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"states": [WorkItemState.READY]},
+        {"states": [WorkItemState.DISCOVERED]},
+        {"repo_key": "demo"},
+        {"repo_key": "other/repo"},
+        {"repo_key": "nobody/nothing"},
+        {"states": [WorkItemState.READY], "repo_key": "demo"},
+    ],
+)
+def test_the_count_equals_what_including_simulated_would_reveal(conn, kwargs):
+    """The invariant the whole of milestone 008 rests on.
+
+    A withheld count that is merely *close* replaces an obvious contradiction with a
+    subtler one, so the number is pinned to the definition that matters: exactly how many
+    more rows the listing would show if the caller passed ``include_simulated``.
+    """
+    live, simulated = _seed_both(conn)
+    seed_item(conn, repo_key="other/repo", issue_number=3, dry_run=True)
+    conn.execute(
+        "UPDATE work_items SET state = ? WHERE id IN (?, ?)",
+        (str(WorkItemState.READY), live, simulated),
+    )
+
+    revealed = len(db.list_work_items(conn, include_simulated=True, **kwargs)) - len(
+        db.list_work_items(conn, **kwargs)
+    )
+    assert db.count_simulated_work_items(conn, **kwargs) == revealed

@@ -49,7 +49,19 @@ dispatching, interrupted, awaiting review, blocked, plus unacknowledged anomalie
 |---|---|
 | `--state STATE` | Filter to one work item state |
 | `--repo KEY` | Filter to one repository |
+| `--include-simulated` | Include rows created below `live` in the counts and the listing |
 | `--json` | Machine-readable |
+
+> **Corrected in milestone 008.** A single invocation of `status` MUST NOT print two
+> statements that cannot both be true. It did: the queue includes simulated rows because
+> they occupy capacity, the counts and the listing exclude them per FR-056, and below
+> `live` the command printed a populated queue above "no work items yet" (issue #13).
+> The rule is now that wherever `status` withholds simulated rows it says how many and
+> names the option that reveals them, scoped to the same filters the visible section used,
+> and that simulated rows are marked wherever they are shown, the queue included.
+> [008's status-output contract](../../008-status-hidden-simulated/contracts/status-output.md)
+> fixes the exact text for every case and the `withheld_simulated` payload field. The same
+> distinction applies to `cards` and `worktree list`.
 
 ## `robot-army show <item-id>`
 

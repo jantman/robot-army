@@ -487,7 +487,10 @@ uv run robot-army purge-simulated
 ```
 
 Simulated rows are excluded from every listing unless you ask for them, and are visibly
-marked when shown.
+marked when shown. Every listing that excludes them also says how many it withheld and how
+to see them — so `status`, `cards` and `worktree list` never report an empty system while
+holding rows back, and `status` in particular never prints a populated queue above a claim
+that there is no work.
 
 ## Where things live
 

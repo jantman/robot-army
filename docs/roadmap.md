@@ -270,15 +270,56 @@ with `--no-optional-locks`.
 a spec-kit repository actually starts with the lifecycle, given that FR-008 hands it the
 judgement. CI cannot settle that one, by construction.
 
-## 008 — Whatever survives contact with reality
+## 008 — Status tells one story (`specs/008-status-hidden-simulated/`)
+
+**Status:** implemented
+
+Not from the planning document.
+[Issue #13](https://github.com/jantman/robot-army/issues/13), found during the 001–007 human
+verification round with the daemon at `effect_level = "plan"`: `robot-army status` printed a
+four-row queue and then "no work items yet" and "no matching work items" in the same output.
+
+**Nothing underneath was broken, and that is the interesting part.** `ordering.plan` includes
+simulated rows because simulated rows occupy capacity, so the queue has to name the item the
+next dispatch would actually select. The counts and the listing exclude them because FR-056
+made exclusion the default and `purge-simulated` exists so they do not accumulate as real
+history. Both halves are right; neither was the thing to change. What was missing is that
+nothing reconciled them at the point of rendering, so the command printed two statements that
+could not both be true and the only recourse was to disbelieve the surface or read the source.
+
+The fix is a number: how many rows this invocation matched and did not show, printed wherever
+the command would otherwise claim absence or undercount. Two numbers, in fact — the counts
+section has never honoured `--state` or `--repo` and the listing always has, so one figure
+would be wrong in whichever section it did not belong to as soon as a filter was in play. It
+comes from a dedicated `COUNT(*)` sharing its filter construction with the listing, because a
+withheld count that is merely *close* replaces an obvious contradiction with a subtler one.
+
+Two things the issue did not ask for. The disclosure fires whenever anything is withheld
+rather than only when the listing came out empty, because two visible rows beneath a six-row
+queue is the same defect one notch quieter. And the queue marks its simulated rows, which it
+never did: FR-057 requires the marking wherever rows are shown, and the reader most likely to
+be misled is the one who reads the first table, gets their answer, and stops.
+
+`cards` and `worktree list` had the quiet half of the same defect — claiming nothing was
+tracked or recorded while withholding rows — and say what they withheld too. The web
+interface has the loud half and is [issue #14](https://github.com/jantman/robot-army/issues/14):
+below `live` it renders as an empty system with a neutral pill, which is harder to notice than
+a contradiction. This milestone puts the count into the payload the web already consumes and
+stops there.
+
+### What running it taught
+
+*To be filled in after the live round.*
+
+## 009 — Whatever survives contact with reality
 
 **Status:** not specified
 
 Planning doc M5. Parked items from §16 that are still genuinely open — kitty control
 socket hardening, multi-machine dispatch, scheduled/proactive work — land here or get dropped.
 
-Moved from the 007 slot, which 007 claimed for the same reason 006 and 005 claimed theirs: a
-milestone with a shape displaces a parking lot without one. Three times now.
+Moved from the 008 slot, which 008 claimed for the same reason 007, 006 and 005 claimed
+theirs: a milestone with a shape displaces a parking lot without one. Four times now.
 
 ---
 

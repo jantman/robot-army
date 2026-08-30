@@ -232,6 +232,30 @@ introducing a second detection method, and reuses an anomaly kind that already e
 III's record is strictly better than before: two conditions that are silent today now leave a
 record. No Complexity Tracking entries are required.
 
+## Superseded in part by issue #34 (recorded 2026-08-30, after the merge)
+
+Issue #34's fix landed on `main` while this branch was being written, and it changed
+`operations.cancel` to verify the process is actually gone and then close the session row
+itself. That is strictly stronger than what this plan proposed for the cancel site — a
+confirmed termination beats a liveness check — so on merge the cancel wiring here was
+**dropped in favour of main's**, along with the `registry_dir`/`proc_root` parameters it
+needed.
+
+What #34 does **not** do, and what this feature therefore still delivers:
+
+- **`abandon` still leaked.** It stops no process, so it cannot use #34's confirmation, and
+  it still needs the rule. Unchanged from this plan.
+- **Nothing reclaimed rows already leaked.** #34 fixed the cancel route going forward and
+  added no sweep, so a database that was leaking before it landed still is — including the
+  maintainer's, per issue #28's own comment.
+- **A live worker under a finished item was still invisible.** `_orphan_sweep` skips any
+  entry whose row is `running`, and #34 did not touch that.
+
+Two tests were dropped as superseded rather than rewritten: the live-worker cancel case,
+which #34 answers better by refusing to settle an unconfirmed stop at all, and a worktree
+assertion already covered elsewhere. The surviving cancel test asserts the *capacity*
+consequence, which `tests/unit/test_cancel.py` does not.
+
 ## Complexity Tracking
 
 None. The Constitution Check passed with no violations.

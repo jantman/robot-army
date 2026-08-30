@@ -301,3 +301,64 @@ def test_the_outcome_does_not_depend_on_the_order_records_are_drained_in(layout,
 
     assert outcomes[0] == outcomes[1]
     assert outcomes[0] == (WorkItemState.AWAITING_REVIEW, SessionState.EXITED_CLEAN)
+
+
+def test_a_cancel_that_loses_the_race_to_the_exit_record_still_succeeds(
+    conn, audit, layout, config
+):
+    """The daemon drains the spool in its own process while a cancel is in flight.
+
+    A worker killed by the cancel's own SIGTERM writes an exit record on its way out; if
+    the daemon applies it before the cancel reaches its settle, the session is already
+    terminal and the item already `interrupted`. Forcing the cancel's transitions on top
+    of that raises `IllegalTransition` — reporting a perfectly successful stop as a
+    failure, and overwriting a decoded signal with "lost". Milestone 013 fixed this exact
+    collision on the launch side; this is the same race at the other end of a session's
+    life (014 research R5).
+    """
+    from tests.conftest import make_boundaries
+
+    from robot_army import operations, spool
+    from robot_army.audit import read_records
+    from robot_army.boundaries import TerminationOutcome
+    from robot_army.effects import EffectLevel
+
+    item_id = active_session(conn, "raced-session")
+    conn.execute(
+        "UPDATE sessions SET pid = ?, proc_start = ?, scope = ?, host_socket = ? "
+        "WHERE session_id = ?",
+        (31337, "998877", "kitty-1-2.scope", "/tmp/raced.sock", "raced-session"),
+    )
+    conn.commit()
+    write_exit_record(layout.spool_dir, session_id="raced-session", exit_code=143, signal=15)
+
+    class DrainsWhileWeWait:
+        """Stands in for the daemon's drain landing during the kill."""
+
+        def terminate(self, handle, scope=None, **kwargs):
+            spool.drain(conn, audit=audit, layout=layout)
+            return TerminationOutcome(confirmed=True, method="process_group_signal")
+
+        def attach_command(self, handle):
+            return ["dtach", "-a", handle.socket_path]
+
+    ctx = operations.Context(
+        config=config,
+        conn=conn,
+        audit=audit,
+        boundaries=make_boundaries(audit, host=DrainsWhileWeWait()),
+        effect_level=EffectLevel.LIVE,
+    )
+    result = operations.cancel(ctx, item_id, force=True)
+
+    assert result.code == operations.EXIT_OK, "the session is gone; that is what was asked for"
+    session = db.get_session(conn, "raced-session")
+    assert session.state is SessionState.EXITED_ERROR
+    assert session.exit_code == 143 and session.signal == 15, (
+        "the record's own account of how it died is more informative than 'lost'"
+    )
+    assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED
+
+    audit.close()
+    text = "\n".join(str(record) for record, _ in read_records(layout.log_dir) if record)
+    assert "IllegalTransition" not in text

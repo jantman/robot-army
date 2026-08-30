@@ -553,7 +553,6 @@ def test_cancelling_a_simulated_session_frees_the_repository_it_was_holding(
     ``running`` forever, the repository stayed at its cap, and the waiting item was held
     with ``repo_cap`` as the reason, which reads exactly like the cap working correctly.
     """
-    registry, proc = machine
     config = capped_at(two_repos, 4)
     running = seed_item(
         conn, repo_key="demo", issue_number=1, state=str(WorkItemState.ACTIVE), dry_run=True
@@ -576,12 +575,7 @@ def test_cancelling_a_simulated_session_frees_the_repository_it_was_holding(
         boundaries=boundaries,
         effect_level=boundaries.level,
     )
-    assert (
-        operations.cancel(
-            ctx, running, force=True, registry_dir=registry, proc_root=proc
-        ).code
-        == 0
-    )
+    assert operations.cancel(ctx, running, force=True).code == 0
 
     # No reconciliation pass runs between the cancel and the dispatch: FR-012's whole
     # point is that the CLI-only rehearsal has nothing sweeping on a timer.

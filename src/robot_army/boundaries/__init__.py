@@ -201,6 +201,36 @@ class HostHandle:
 
 
 @dataclass(frozen=True, slots=True)
+class TerminationOutcome:
+    """What ``SessionHost.terminate`` observed, as distinct from what it was told.
+
+    A stop command's exit status is not evidence of its effect: ``systemctl --user stop``
+    exits 0 for a unit that is already inactive while a process still runs in its cgroup
+    (issue #34), exactly as ``kitty @ launch`` returns 0 for a session that never started
+    (M0 F16). So termination reports an *observation*, not a return code.
+
+    Two invariants, both load-bearing (014 data-model.md):
+
+    1. ``confirmed`` is the only field that may drive a state change. A caller that marks
+       a work item ``interrupted`` on anything else is claiming a worker is stopped while
+       it is still running — and an item in that state is visited by no sweep the system
+       has, so nothing will ever correct it.
+    2. ``method == "none"`` accompanies only ``confirmed=False``. It means there was
+       nothing to confirm against, which is a different fact from a stop that failed.
+
+    ``escalated`` records the issue's exact shape: a rung reported success and the process
+    was still there afterwards. It is kept separate from ``method`` because "the scope
+    stop lied and the signal worked" is the sentence the maintainer needs, and it cannot
+    be reconstructed from the winning method alone.
+    """
+
+    confirmed: bool
+    method: str
+    escalated: bool = False
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class DisplayHandle:
     window_id: int
     title: str = ""
@@ -489,7 +519,31 @@ class SessionHost(Protocol):
 
     def is_alive(self, handle: HostHandle) -> bool: ...
 
-    def terminate(self, handle: HostHandle, scope: str | None = None) -> None: ...
+    def terminate(
+        self,
+        handle: HostHandle,
+        scope: str | None = None,
+        *,
+        expected_start: str | None = None,
+        proc_root: Any = None,
+    ) -> TerminationOutcome:
+        """Stop this session's process tree and **confirm** that it stopped.
+
+        Two rules, from 014 contracts/termination-outcome.md:
+
+        - **T1**: an exit status is never evidence. No implementation may return on the
+          strength of a stop command's return code; every rung is followed by an
+          independent observation of whether the tracked process still exists.
+        - **T7**: ``BoundaryError`` is raised only when there is nothing to try — neither
+          a recorded scope nor a recorded pid. A stop that was tried and did not take is a
+          returned outcome with ``confirmed=False``, because the caller must distinguish
+          "could not try" from "tried and it survived".
+
+        ``expected_start`` is the recorded ``/proc/<pid>/stat`` start time. Passing it is
+        not optional for callers that have one: pid alone is not identity, and a recycled
+        pid reads as a live session to anything that omits it (FR-038).
+        """
+        ...
 
     def attach_command(self, handle: HostHandle) -> list[str]: ...
 

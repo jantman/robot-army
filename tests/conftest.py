@@ -37,6 +37,7 @@ from robot_army.boundaries import (
     HostHandle,
     Issue,
     PollResult,
+    TerminationOutcome,
 )
 from robot_army.config import Config, parse
 from robot_army.effects import Boundaries, EffectLevel
@@ -521,9 +522,12 @@ class StubSessionHost:
     )
 
     def __init__(
-        self, *, confirm: bool = True, on_confirm: Any = None
+        self, *, confirm: bool = True, on_confirm: Any = None, terminate_confirmed: bool = True
     ) -> None:
         self.confirm_result = confirm
+        #: What ``terminate`` reports having observed. ``False`` is the session that
+        #: survived every rung — the case the caller must refuse to settle on (014 K1).
+        self.terminate_confirmed = terminate_confirmed
         #: Called with the session id while ``confirm_session`` is in flight, before it
         #: answers. This is the only seam in the suite for the cross-process race that
         #: milestone 013 fixes: in production the daemon drains the exit spool from its
@@ -563,9 +567,30 @@ class StubSessionHost:
     def is_alive(self, handle: HostHandle) -> bool:
         return handle.socket_path in self.alive
 
-    def terminate(self, handle: HostHandle, scope: str | None = None) -> None:
-        self.alive.discard(handle.socket_path)
+    def terminate(
+        self,
+        handle: HostHandle,
+        scope: str | None = None,
+        *,
+        expected_start: str | None = None,
+        proc_root: Any = None,
+    ) -> TerminationOutcome:
         self.terminated.append((handle.socket_path, scope))
+        if not self.terminate_confirmed:
+            # A surviving session stays in ``alive``: the whole point of the unconfirmed
+            # outcome is that nothing about the world changed.
+            return TerminationOutcome(
+                confirmed=False,
+                method="process_group_signal",
+                escalated=True,
+                detail={"pid": handle.pid, "alive_after": True},
+            )
+        self.alive.discard(handle.socket_path)
+        return TerminationOutcome(
+            confirmed=True,
+            method="systemd_scope" if scope else "process_group_signal",
+            escalated=False,
+        )
 
     def attach_command(self, handle: HostHandle) -> list[str]:
         return ["dtach", "-a", handle.socket_path]

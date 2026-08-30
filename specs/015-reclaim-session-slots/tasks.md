@@ -81,12 +81,12 @@ route out of `active`; US3 covers rows already leaked.
 
 ### Tests for User Story 1
 
-- [X] T006 [US1] Add cancel cases to `tests/unit/test_slot_reclamation.py`: after `operations.cancel` on a simulated `running` session, the session row is `lost` with `ended_at` set, the item is `interrupted`, and `capacity.snapshot` reports the repository below its cap — asserted with **no reconciliation pass run**, which is the whole of FR-012. Confirm they FAIL before T007
+- [X] T006 [US1] (two of these were dropped on merge as superseded by `tests/unit/test_cancel.py`; the capacity assertion survives) Add cancel cases to `tests/unit/test_slot_reclamation.py`: after `operations.cancel` on a simulated `running` session, the session row is `lost` with `ended_at` set, the item is `interrupted`, and `capacity.snapshot` reports the repository below its cap — asserted with **no reconciliation pass run**, which is the whole of FR-012. Confirm they FAIL before T007
 - [X] T007 [P] [US1] Add an integration case to `tests/integration/test_dispatch_capacity.py` for quickstart scenario 1: two simulated items in one repository at a cap of 1, cancel the first, the second becomes dispatchable and its `repo_cap` hold clears
 
 ### Implementation for User Story 1
 
-- [X] T008 [US1] Wire `operations.cancel` in `src/robot_army/operations.py`: add an optional `registry_dir: Path | None = None` parameter following the existing `resume`/`restart` precedent, and call the T003 helper **inside the existing `db.transaction`** that moves the item to `interrupted`, with a reason naming cancellation. The item's own transition must not change (FR-011)
+- [X] T008 [US1] ~~Wire `operations.cancel`~~ **superseded on merge by issue #34**, which closes the row itself after confirming the process is gone — see plan.md. Originally: wire `operations.cancel` in `src/robot_army/operations.py`: add an optional `registry_dir: Path | None = None` parameter following the existing `resume`/`restart` precedent, and call the T003 helper **inside the existing `db.transaction`** that moves the item to `interrupted`, with a reason naming cancellation. The item's own transition must not change (FR-011)
 - [X] T009 [P] [US1] Add a case to `tests/unit/test_web_actions.py` asserting the web cancel action releases the slot too, since `web/server.py` routes it through the same `operations.cancel`; confirm the existing cancel cases in that module still pass unchanged
 
 **Checkpoint**: User Story 1 is fully functional and testable independently. The reported bug is fixed.

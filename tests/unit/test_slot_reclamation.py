@@ -224,63 +224,33 @@ def context(conn, config, audit, boundaries) -> operations.Context:
     )
 
 
-def test_cancel_releases_the_slot_before_it_returns(
-    conn, config, audit, layout, boundaries, registry, proc
-):
-    """FR-012. No reconciliation pass is run anywhere in this test, and none may be: the
-    rehearsal this bug was found in is CLI-only, with nothing sweeping on a timer."""
-    item = seed_item(conn, repo_key=REPO, dry_run=True, state="active")
-    seed_session(conn, item, state="running", dry_run=True, pid=0)
-
-    ctx = context(conn, config, audit, boundaries)
-    result = operations.cancel(ctx, item, force=True, registry_dir=registry)
-    assert result.code == 0
-
-    session = db.latest_session_for_item(conn, item)
-    assert session.state is SessionState.LOST
-    assert session.ended_at is not None
-    assert db.get_work_item(conn, item).state is WorkItemState.INTERRUPTED
-
-    snap = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
-    assert snap.total == 0
-    assert snap.per_repo == {}
-
-    reason = audit_actions(layout, "state.session")[-1]["detail"]["reason"]
-    assert "cancel" in reason.lower()
-
-
-def test_cancel_leaves_a_live_worker_holding_its_slot(
+def test_cancel_releases_the_capacity_slot_it_was_holding(
     conn, config, audit, boundaries, registry, proc
 ):
-    """The process group was signalled, but a reparented worker can survive it. Until it
-    is actually gone the slot is genuinely taken, and saying otherwise would over-dispatch."""
-    item = seed_item(conn, repo_key=REPO, state="active")
-    seed_session(conn, item, state="running", pid=780, session_id="live-cancel")
-    live_worker(registry, proc, config, pid=780, session_id="live-cancel")
+    """The consequence #28 is actually about, which the row's state alone does not show.
 
-    ctx = context(conn, config, audit, boundaries)
-    assert operations.cancel(
-        ctx, item, force=True, registry_dir=registry, proc_root=proc
-    ).code == 0
+    Issue #34 made `cancel` close the row once the process is confirmed gone, and
+    `test_cancel.py` asserts that transition directly. What no test there asserts is what
+    the transition is *for*: the slot the row was occupying comes back. That is the whole
+    of #28, and it is the assertion that would catch a future change closing the row while
+    leaving the count wrong.
 
-    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
-    assert db.get_work_item(conn, item).state is WorkItemState.INTERRUPTED
-    snap = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
-    assert snap.total == 1
-
-
-def test_cancel_does_not_touch_the_worktree_or_the_item_beyond_interrupted(
-    conn, config, audit, boundaries, registry
-):
+    No reconciliation pass is run anywhere in this test, and none may be — the rehearsal
+    this bug was found in is CLI-only, with nothing sweeping on a timer.
+    """
     item = seed_item(conn, repo_key=REPO, dry_run=True, state="active")
-    with db.transaction(conn):
-        db.update_work_item_columns(conn, item, worktree_path="/somewhere/on/disk")
     seed_session(conn, item, state="running", dry_run=True, pid=0)
 
-    ctx = context(conn, config, audit, boundaries)
-    operations.cancel(ctx, item, force=True, registry_dir=registry)
+    before = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
+    assert before.per_repo == {REPO: 1}
 
-    assert db.get_work_item(conn, item).worktree_path == "/somewhere/on/disk"
+    ctx = context(conn, config, audit, boundaries)
+    assert operations.cancel(ctx, item, force=True).code == 0
+
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+    after = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
+    assert after.total == 0
+    assert after.per_repo == {}
 
 
 # -- User Story 2: abandon holds nothing -------------------------------------
@@ -318,9 +288,7 @@ def test_cancel_then_abandon_closes_the_row_once_and_does_not_error(
     seed_session(conn, item, state="running", dry_run=True, pid=0)
     ctx = context(conn, config, audit, boundaries)
 
-    assert operations.cancel(
-        ctx, item, force=True, registry_dir=registry, proc_root=proc
-    ).code == 0
+    assert operations.cancel(ctx, item, force=True).code == 0
     assert operations.abandon(ctx, item, registry_dir=registry, proc_root=proc).code == 0
 
     assert db.get_work_item(conn, item).state is WorkItemState.ABANDONED

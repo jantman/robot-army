@@ -419,6 +419,26 @@ def test_cancel_needs_no_typed_confirmation_because_http_already_confirmed(web, 
     assert web.post_json(f"/item/{item_id}/cancel").status == 303
 
 
+def test_a_cancel_that_cannot_confirm_the_stop_is_a_failure_in_the_web_too(web, conn):
+    """FR-012: the two surfaces are one behaviour, failure included.
+
+    No change to ``server.py`` is needed for this — ``_report`` already refuses any
+    non-``EXIT_OK`` result — which is exactly why it is worth pinning: the property is
+    inherited rather than implemented, and inherited properties are the ones that get
+    broken by accident.
+    """
+    item_id = seed_item(conn, state="active")
+    seed_session(conn, item_id, state="running")
+    web.host.terminate_confirmed = False
+
+    response = web.post_json(f"/item/{item_id}/cancel")
+
+    assert response.status != 303, "a stop that did not happen must not render as 'cancelled'"
+    assert state_of(conn, item_id) == WorkItemState.ACTIVE
+    assert db.latest_session_for_item(conn, item_id).state is SessionState.RUNNING
+    assert "could not confirm" in response.json()["reason"]
+
+
 def test_retry_is_refused_with_the_reason_while_the_block_still_holds(web, conn):
     """FR-022: the refusal names the condition, because that is what has to be fixed."""
     item_id = seed_item(conn, repo_key="ghost", state="failed")

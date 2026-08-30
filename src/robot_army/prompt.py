@@ -13,6 +13,18 @@ what the session itself would see.
 Milestone 007 adds one more optional section between those two: ``speckit.GUIDANCE``, when
 the worktree is a Spec Kit project. Same reasoning about position, one rung down — the
 repository's own instructions still frame everything, including that block.
+
+Milestone 012 adds a fourth section, ``DELIVERY``, immediately above the issue. Two things
+about it are different from every other section here and are the reason it needs explaining:
+
+* **It is unconditional.** No parameter, no configuration key, nothing for a caller to pass.
+  The Spec Kit block is optional because it is wrong for a repository without Spec Kit;
+  this one is right for every repository the daemon dispatches into.
+* **It states its own precedence instead of inheriting it.** Everything else in this file
+  ranks by position, earlier outranking later. That rule gives the wrong answer here: the
+  issue body sits *below* ``DELIVERY`` and is meant to override it, so the block says so in
+  its own last paragraph. It sits below ``speckit.GUIDANCE`` so that block's closing
+  sentence — "the instruction above wins" — still covers exactly what it covered before.
 """
 
 from __future__ import annotations
@@ -28,6 +40,57 @@ INSTRUCTIONS_FILENAME = ".claude/robot-army.md"
 #: well inside ARG_MAX. An issue body larger than this is truncated with a pointer to the
 #: URL, which the session can fetch.
 MAX_BODY_CHARS = 60_000
+
+#: What every session is told about how its work is delivered (milestone 012,
+#: contracts/delivery-block.md).
+#:
+#: Fixed text, and unconditional — unlike ``speckit.GUIDANCE`` it takes no parameter and has
+#: no configuration key, because there is nothing to decide. That block is *wrong* for a
+#: repository without Spec Kit, so something has to choose per dispatch; this one is right for
+#: every repository the daemon dispatches into, so a caller opt-in would be a knob with one
+#: caller that always passes the same constant.
+#:
+#: Three things about the wording are load-bearing, and all three were got wrong in a draft
+#: before being fixed — see ``specs/012-prompt-branch-pr-safety/research.md`` D3 and D6:
+#:
+#: * **The third paragraph is about the mechanism of change, not about side effects.** The
+#:   failure it exists for is a session in a Puppet repository reading "set up and run this
+#:   service" and setting it up by hand. That is not wrong because it touched a machine; it is
+#:   wrong because the repository was the thing that was supposed to do it, and a hand-made
+#:   change is invisible to review and gone at the next real run. Phrasing it as "do not change
+#:   the state of any system" instead — which is where this started — bans the push, the pull
+#:   request, and the test suite, and still does not explain the Puppet case.
+#: * **Nothing needs an exception, because nothing legitimate is prohibited.** An exception
+#:   list would be the tell that the rule was drawn in the wrong place.
+#: * **The override rule is stated rather than implied.** Every other precedence in this file
+#:   is encoded by position, and position says the opposite here: the issue body is *below*
+#:   this text and still outranks it.
+#:
+#: It never says "above" of the branch, either. The branch name appears in the issue section,
+#: which sits below this block — so a direction word pointing up would read perfectly well and
+#: be false.
+DELIVERY = """\
+Unless the issue below explicitly says otherwise, this is how the work is expected to be
+delivered.
+
+Do the work on the feature branch this session was started on, never on the repository's
+default branch. When the work is done, commit it, push that branch to `origin`, and open a
+pull request. Commits sitting on an unpushed branch are not a finished job: the worktree can
+be reclaimed, and unpushed work is the one thing that cannot be recovered from it.
+
+Deliver the work as code and file changes in this repository, arriving as commits and a pull
+request. Where this repository is the mechanism for changing something — configuration
+management, infrastructure as code, deployment or schedule definitions — an issue asking for
+that thing is asking you to write the code that produces it, not to go and do it directly. A
+change made by hand is invisible to review and gone the next time the real tool runs.
+
+This is not a limit on how you work: build, run, test, install dependencies, start things
+locally, read whatever you need to read including live systems, and push your branch and open
+the pull request at the end. It is a limit on one thing — reaching past the repository to
+change a live system, where a change to the repository is what was asked for.
+
+If the issue below explicitly asks for something else — no pull request, a commit straight to
+the default branch, or an action on a system — the issue wins. Nothing here is checked."""
 
 
 def slugify(title: str, *, max_length: int = 40) -> str:
@@ -75,8 +138,11 @@ def compose(
     generic paragraph; before, because an issue body can be 60,000 characters and guidance
     that follows one is guidance the session reads last.
 
-    With it ``None`` the output is byte-identical to what this produced before the parameter
-    existed (FR-010), which ``tests/unit/test_speckit_prompt.py`` holds to a golden string.
+    ``DELIVERY`` follows it and is not optional — see the module docstring. Milestone 007's
+    promise that a ``None`` block reproduces the pre-007 output byte-for-byte was a statement
+    about *that* change and is deliberately superseded by 012: every prompt now carries the
+    delivery block. ``tests/unit/test_speckit_prompt.py`` still holds the whole assembly to a
+    golden string, which is what notices when these sections are reshaped by accident.
     """
     body = issue.body.strip()
     if len(body) > MAX_BODY_CHARS:
@@ -92,6 +158,11 @@ def compose(
     if speckit_block:
         sections.append(speckit_block.strip())
         sections.append("---")
+    # Unconditional, and therefore not a parameter: there is nothing for a caller to decide.
+    # Last of the guidance so it is read closest to the issue it defers to, and so the Spec
+    # Kit block's own "the instruction above wins" keeps meaning what it meant when written.
+    sections.append(DELIVERY)
+    sections.append("---")
 
     labels = ", ".join(issue.labels) if issue.labels else "(none)"
     sections.append(

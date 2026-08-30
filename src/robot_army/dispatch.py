@@ -588,18 +588,39 @@ def dispatch_item(
             skip_gates=skip_gates,
         )
     except Exception as exc:
+        # The item is read *before* the record is written, so the record can say which item
+        # this was and what is about to happen to it. Only ``dispatching`` is settled here:
+        # from anywhere else the transition would itself be illegal, and an exception raised
+        # while handling one would bury the failure that actually matters. An item can
+        # legitimately be past ``dispatching`` when this runs --- notification, the board
+        # update and the transcript check all follow confirmation --- so the note must say
+        # which of the two happened rather than assert a settle that never occurred.
+        item = db.get_work_item(conn, item_id)
+        settling = item is not None and item.state is WorkItemState.DISPATCHING
         audit.error(
             "dispatch.error",
             error=exc,
             entity_type="work_item",
             entity_id=item_id,
-            detail={"note": "an exception escaped the launch; settling the item before re-raising"},
+            detail={
+                "item_state": str(item.state) if item is not None else None,
+                "settling": settling,
+                "note": (
+                    "an exception escaped the launch; the item is being failed before the "
+                    "exception is re-raised (the state.work_item record that follows is the "
+                    "settle itself)"
+                    if settling
+                    else "an exception escaped the launch, but the item is not dispatching "
+                    "and is left as it stands: this ran after the launch had already been "
+                    "confirmed, and nothing here may move an item the state table does not "
+                    "allow to be moved"
+                ),
+            },
+            # Without this a crash while dispatching a simulated item is indistinguishable
+            # in the log from a crash on a real one (FR-055).
+            dry_run=bool(item is not None and item.dry_run),
         )
-        item = db.get_work_item(conn, item_id)
-        # Only ``dispatching`` is settled here. From anywhere else the transition would
-        # itself be illegal, and an exception raised while handling one would bury the
-        # failure that actually matters.
-        if item is not None and item.state is WorkItemState.DISPATCHING:
+        if settling:
             _fail(
                 conn,
                 audit,

@@ -428,7 +428,7 @@ actually happened, and when did we know?*
 
 | Action | When | Notable detail |
 |--------|------|----------------|
-| `dispatch.error` | An exception escaped the launch | The exception, and that the item was settled before it was re-raised. The item is moved out of `dispatching` at that moment rather than being left for the age reaper |
+| `dispatch.error` | An exception escaped the launch | The exception, the item's state at that moment, and `settling` --- whether the item was failed here before the exception was re-raised. A `dispatching` item is settled at that moment rather than being left for the age reaper; an item past confirmation is left alone, because the state table does not allow it to be moved and the session really is running. Carries `dry_run`, so a crash on a simulated item does not read as a crash on a real one |
 | `dispatch.unconfirmed` | **Changed** — as before, when the confirmation window elapses | Gains `session_state` and `outcome`. `outcome` is `lost` when the session recorded nothing, and `already_exited` when it had already reported its own ending from the daemon's process while dispatch was still waiting |
 | `dispatch.confirmed` | **Changed** — as before, on a confirmed launch | Gains `resumed_from` on a resume, naming the session whose context this attempt restored. It is inside `launch_argv` too, but that is the whole nested wrapper argv with the prompt body in it |
 

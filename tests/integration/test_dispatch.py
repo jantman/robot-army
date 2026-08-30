@@ -955,3 +955,82 @@ def test_an_exception_inside_the_launch_settles_the_item_and_re_raises(
     assert item.state is WorkItemState.FAILED, "an escaping exception may not wedge the item"
     assert "kitty fell over" in (item.failure_reason or "")
     assert records_of(layout, audit, "dispatch.error"), "and it must be in the record"
+
+
+def test_a_crash_on_a_simulated_item_is_distinguishable_in_the_log(
+    conn, audit, config, tmp_path, layout
+):
+    """A `dispatch.error` that omits `dry_run` makes a crash while dispatching a simulated
+    item read exactly like a crash on a real one. Every other record in this module carries
+    it; this one must too (FR-055)."""
+
+    class ExplodingDisplay(StubDisplay):
+        def open(self, cwd, argv, title, user_vars, env):
+            raise RuntimeError("kitty fell over mid-launch")
+
+    boundaries = make_boundaries(
+        audit,
+        host=dying_host(conn, audit, 1),
+        display=ExplodingDisplay(),
+        hooks=SubprocessHookRunner(audit),
+    )
+    item_id = seed_item(
+        conn,
+        state=str(WorkItemState.READY),
+        dry_run=True,
+        clone_path=config.repos["demo"].path,
+    )
+
+    with pytest.raises(RuntimeError, match="kitty fell over"):
+        dispatch.dispatch_item(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            layout=layout,
+            item_id=item_id,
+            trust_file=trust_file(tmp_path, config.repos["demo"].path),
+        )
+
+    record = records_of(layout, audit, "dispatch.error")[-1]
+    assert record["dry_run"] is True
+    assert record["detail"]["settling"] is True
+    assert record["detail"]["item_state"] == "dispatching"
+
+
+def test_a_crash_after_confirmation_does_not_claim_a_settle_it_did_not_make(
+    conn, audit, config, tmp_path, layout, monkeypatch
+):
+    """Notification, the board update and the transcript check all run *after* the item
+    reaches `active`. An exception in any of them lands in the same handler, where the item
+    can no longer legally be moved --- so the record must say the item was left alone. An
+    audit trail that claims an outcome nobody produced is worse than one that says nothing."""
+
+    def explode(**kwargs):
+        raise RuntimeError("the notifier fell over after the session was confirmed")
+
+    monkeypatch.setattr(dispatch.notifications, "emit", explode)
+    boundaries = make_boundaries(audit, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config)
+
+    with pytest.raises(RuntimeError, match="the notifier fell over"):
+        dispatch.dispatch_item(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            layout=layout,
+            item_id=item_id,
+            trust_file=trust_file(tmp_path, config.repos["demo"].path),
+        )
+
+    item = db.get_work_item(conn, item_id)
+    assert item is not None
+    assert item.state is WorkItemState.ACTIVE, (
+        "the session really is running; failing the item here would be the false report"
+    )
+
+    record = records_of(layout, audit, "dispatch.error")[-1]
+    assert record["detail"]["settling"] is False
+    assert record["detail"]["item_state"] == "active"
+    assert "left as it stands" in record["detail"]["note"]

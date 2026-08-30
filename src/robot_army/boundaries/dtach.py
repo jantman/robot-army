@@ -26,7 +26,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army.boundaries import BoundaryError, HostCapabilities, HostHandle
+from robot_army import procinfo
+from robot_army.boundaries import (
+    BoundaryError,
+    HostCapabilities,
+    HostHandle,
+    TerminationOutcome,
+)
 from robot_army.sessions import RegistryEntry
 from robot_army.sessions import scan as sessions_scan
 from robot_army.subproc import run
@@ -39,6 +45,14 @@ PROBE_TIMEOUT = 3.0
 TERMINATE_TIMEOUT = 15.0
 #: How often confirmation re-reads the registry while waiting.
 CONFIRM_POLL_INTERVAL = 1.0
+#: How long ``terminate`` waits for a signalled process to actually disappear before it
+#: says it could not confirm. A ``/proc`` read is cheap and local, so this is generous for
+#: what it measures: the gap between a signal being delivered and the kernel reaping the
+#: process. It is a constant rather than a configuration knob because it has one caller and
+#: no second use in hand (Principle I).
+TERMINATE_CONFIRM_TIMEOUT = 5.0
+#: How often that wait re-reads ``/proc``.
+TERMINATE_POLL_INTERVAL = 0.1
 
 
 class DtachHost:
@@ -156,20 +170,78 @@ class DtachHost:
         finally:
             sock.close()
 
-    def terminate(self, handle: HostHandle, scope: str | None = None) -> None:
-        """Stop this session's whole process tree and no other (FR-050).
+    def terminate(
+        self,
+        handle: HostHandle,
+        scope: str | None = None,
+        *,
+        expected_start: str | None = None,
+        proc_root: Path | None = None,
+        sleep: Any = time.sleep,
+        clock: Any = time.monotonic,
+    ) -> TerminationOutcome:
+        """Stop this session's whole process tree and no other (FR-050), and **confirm it**.
 
         The recorded systemd scope is the primary path — kitty places each launched
         window in its own ``kitty-<pid>-<n>.scope``, so stopping the scope kills exactly
         that session's tree. The fallback signals the process group and **logs that the
         degraded path was taken**, because silently doing something weaker is the kind of
         difference that matters later.
+
+        **Every rung is followed by an observation, and no rung returns on its exit
+        status.** This used to read ``if result.ok: return``, and that line is the whole of
+        issue #34: ``systemctl --user stop`` exits 0 in about four milliseconds for a unit
+        that is *already inactive*, killing nothing, while a live process remains in its
+        cgroup. The scope stop therefore "succeeded" in exactly the case that needed the
+        fallback, the fallback below was unreachable, and ``cancel`` reported a stopped
+        session that was still running — scheduled, editing a worktree, spending quota —
+        twenty-six minutes later. Do not restore the early return as an optimisation; the
+        confirmation *is* the feature.
+
+        The project already knew this in the other direction. FR-025 exists because
+        ``kitty @ launch`` returns 0 and a valid window id for a session that never
+        started, so dispatch confirms against the session registry rather than trusting
+        the call. Launching was confirmed; terminating was trusted. This closes that.
         """
         with self._audit.action(
             "session.terminate",
             target=handle.socket_path,
-            detail={"scope": scope, "pid": handle.pid},
+            detail={"scope": scope, "pid": handle.pid, "proc_start": expected_start},
         ) as outcome:
+            rungs: list[dict[str, Any]] = []
+            outcome["rungs"] = rungs
+
+            def settle(result: TerminationOutcome) -> TerminationOutcome:
+                outcome["method"] = result.method
+                outcome["confirmed"] = result.confirmed
+                outcome["escalated"] = result.escalated
+                return result
+
+            def confirm() -> tuple[bool, float]:
+                assert handle.pid is not None  # noqa: S101 - guarded by every call site
+                return _confirm_gone(
+                    handle.pid,
+                    expected_start,
+                    proc_root=proc_root,
+                    timeout=TERMINATE_CONFIRM_TIMEOUT,
+                    sleep=sleep,
+                    clock=clock,
+                )
+
+            # Ask before acting. A session that already died on its own needs no signal,
+            # and a *recycled* pid — one whose start time no longer matches — means our
+            # process is gone and that a stranger now holds its number. Signalling that
+            # stranger is the FR-039 incident this project has already had once.
+            if handle.pid is not None and not procinfo.is_alive(
+                handle.pid, expected_start, root=proc_root
+            ):
+                return settle(
+                    TerminationOutcome(
+                        confirmed=True, method="already_gone", detail={"rungs": rungs}
+                    )
+                )
+
+            escalated = False
             if scope:
                 result = run(
                     ["systemctl", "--user", "stop", scope],
@@ -178,11 +250,43 @@ class DtachHost:
                     action="systemctl.stop",
                     check=False,
                 )
-                outcome["method"] = "systemd_scope"
-                outcome["exit"] = result.returncode
+                rung: dict[str, Any] = {
+                    "method": "systemd_scope",
+                    "exit": result.returncode,
+                    "ok": result.ok,
+                }
+                rungs.append(rung)
+                if not result.ok:
+                    rung["output"] = result.output
+                    outcome["scope_stop_failed"] = result.output
+
+                if handle.pid is None:
+                    # T5/C8: the stop was attempted and there is nothing to confirm it
+                    # against. That is an unconfirmed stop, not a successful one — an exit
+                    # status alone is exactly what this milestone stopped accepting.
+                    rung["alive_after"] = None
+                    return settle(
+                        TerminationOutcome(
+                            confirmed=False,
+                            method="none",
+                            detail={"rungs": rungs, "why": "no pid recorded to confirm against"},
+                        )
+                    )
+
+                gone, waited = confirm()
+                rung["alive_after"] = not gone
+                rung["waited_s"] = waited
+                if gone:
+                    return settle(
+                        TerminationOutcome(
+                            confirmed=True, method="systemd_scope", detail={"rungs": rungs}
+                        )
+                    )
                 if result.ok:
-                    return
-                outcome["scope_stop_failed"] = result.output
+                    # The issue's exact shape, recorded as such: both the reported success
+                    # and the observation that contradicts it (FR-002).
+                    escalated = True
+                    rung["reported_success_but_alive"] = True
 
             if handle.pid is None:
                 outcome["method"] = "none"
@@ -190,13 +294,61 @@ class DtachHost:
                     "cannot terminate: no systemd scope recorded and no pid known"
                 )
 
-            outcome["method"] = "process_group_signal"
+            signal_detail: dict[str, object] = {}
+            _signal_group(handle.pid, signal_detail)
+            gone, waited = confirm()
+            rungs.append(
+                {
+                    "method": "process_group_signal",
+                    **signal_detail,
+                    "alive_after": not gone,
+                    "waited_s": waited,
+                }
+            )
             outcome["degraded"] = True
-            _signal_group(handle.pid, outcome)
+            return settle(
+                TerminationOutcome(
+                    confirmed=gone,
+                    method="process_group_signal",
+                    escalated=escalated,
+                    detail={"rungs": rungs},
+                )
+            )
 
     def attach_command(self, handle: HostHandle) -> list[str]:
         """What the maintainer types to reattach. Printed by ``show``."""
         return [self._dtach, "-a", handle.socket_path]
+
+
+def _confirm_gone(
+    pid: int,
+    expected_start: str | None,
+    *,
+    proc_root: Path | None,
+    timeout: float,
+    sleep: Any,
+    clock: Any,
+) -> tuple[bool, float]:
+    """Poll ``/proc`` until the tracked process is gone, or the bound elapses.
+
+    Returns ``(gone, waited_s)``. The waited time is returned rather than discarded
+    because the record has to answer "how long did confirmation take" without re-running
+    anything (FR-011).
+
+    ``expected_start`` is passed through to ``procinfo.is_alive``, which compares it
+    against ``/proc/<pid>/stat`` field 22. That comparison is the whole guard: a pid whose
+    start time no longer matches belongs to something else, which means *our* process is
+    gone (and that the stranger holding its pid must never be signalled).
+
+    T4: a bound that elapses returns ``False`` — not confirmed — never a success.
+    """
+    started = clock()
+    while True:
+        if not procinfo.is_alive(pid, expected_start, root=proc_root):
+            return True, round(clock() - started, 3)
+        if clock() - started >= timeout:
+            return False, round(clock() - started, 3)
+        sleep(TERMINATE_POLL_INTERVAL)
 
 
 def _signal_group(pid: int, outcome: dict[str, object]) -> None:
@@ -293,14 +445,33 @@ class SimulatedSessionHost:
     def is_alive(self, handle: HostHandle) -> bool:
         return handle.socket_path in self._alive
 
-    def terminate(self, handle: HostHandle, scope: str | None = None) -> None:
+    def terminate(
+        self,
+        handle: HostHandle,
+        scope: str | None = None,
+        *,
+        expected_start: str | None = None,
+        proc_root: Path | None = None,
+    ) -> TerminationOutcome:
+        """Confirmed by construction, and deliberately observing nothing (C10, T8).
+
+        A simulated session has no process. Its pid is ``0`` by construction — see
+        ``confirm_session`` below — so putting it through the real path's ``/proc``
+        observation would find nothing alive to kill and nothing to confirm against, and
+        every simulated cancel would take the *failure* branch. That is exactly the
+        divergence between the simulated and real paths contracts/boundaries.md forbids,
+        and it is the same trap ``confirm_session`` documents at length (FR-014).
+        """
         self._alive.discard(handle.socket_path)
         self._audit.record(
             "session.terminate",
             outcome="ok",
             target=handle.socket_path,
             simulated=True,
-            detail={"scope": scope},
+            detail={"scope": scope, "confirmed": True, "method": "simulated"},
+        )
+        return TerminationOutcome(
+            confirmed=True, method="simulated", escalated=False, detail={"scope": scope}
         )
 
     def attach_command(self, handle: HostHandle) -> list[str]:

@@ -130,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
     anomalies = sub.add_parser("anomalies", help="conditions detected but not resolvable")
     anomalies.add_argument("--acknowledge", type=int, default=None, metavar="ID")
     anomalies.add_argument("--all", action="store_true", help="include acknowledged ones")
+    # Spelled exactly as `log --since` above, because it is the same parser behind it —
+    # "what went wrong in the last hour" is read off these two commands side by side.
+    anomalies.add_argument(
+        "--since", default=None, metavar="DURATION", help="e.g. 30s, 10m, 2h, 1d"
+    )
 
     health = sub.add_parser("health", help="exit 4 if the heartbeat is stale or absent")
     health.add_argument(
@@ -389,7 +394,7 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
             )
         ),
         "anomalies": lambda: operations.anomalies(
-            ctx, acknowledge=args.acknowledge, show_all=args.all
+            ctx, acknowledge=args.acknowledge, show_all=args.all, since=args.since
         ),
         "health": lambda: operations.health_check(
             ctx, max_age=args.max_age, do_notify=args.notify

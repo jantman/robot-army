@@ -2270,47 +2270,11 @@ def rescan(ctx: Context, card_id: str, *, all_needs_info: bool = False) -> Resul
     return result
 
 
-# -- anomalies --------------------------------------------------------------
+# -- durations --------------------------------------------------------------
 
-
-def anomalies(ctx: Context, *, acknowledge: int | None = None, show_all: bool = False) -> Result:
-    result = Result()
-    if acknowledge is not None:
-        with db.transaction(ctx.conn):
-            changed = db.acknowledge_anomaly(ctx.conn, acknowledge)
-        if not changed:
-            return Result(
-                code=EXIT_FAILED,
-                lines=[f"no unacknowledged anomaly with id {acknowledge}"],
-            )
-        ctx.audit.record(
-            "anomaly.acknowledge", outcome="ok", entity_type="anomaly", entity_id=acknowledge
-        )
-        result.say(f"acknowledged anomaly {acknowledge}")
-
-    rows = db.list_anomalies(ctx.conn, unacknowledged_only=not show_all)
-    result.data = {
-        "anomalies": [_anomaly_dict(a) for a in rows],
-        "known_kinds": list(ANOMALY_KINDS),
-    }
-    if not rows:
-        result.say("no outstanding anomalies")
-        result.say()
-        result.say("kinds this system can raise: " + ", ".join(ANOMALY_KINDS))
-        return result
-    for anomaly in rows:
-        result.say(
-            f"[{anomaly.id}] {anomaly.kind}  {anomaly.entity_type or '—'}:"
-            f"{anomaly.entity_id or '—'}  detected {timefmt.local(anomaly.detected_at)}"
-        )
-        for key, value in anomaly.detail_obj.items():
-            result.say(f"      {key}: {value}")
-        result.say()
-    result.say("kinds this system can raise: " + ", ".join(ANOMALY_KINDS))
-    return result
-
-
-# -- log --------------------------------------------------------------------
+# Its own section rather than a corner of the log reader's, because two commands now
+# depend on it: `log --since` and `anomalies --since`. One parser, so "what counts as a
+# duration" cannot have two answers that drift apart (012 FR-002).
 
 
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -2336,6 +2300,105 @@ def parse_duration(text: str) -> timedelta:
             f"{unit!r} units; use e.g. 30s, 10m, 2h, 1d"
         )
     return timedelta(seconds=int(amount) * _DURATION_UNITS[unit])
+
+
+# -- anomalies --------------------------------------------------------------
+
+
+def _within_window(detected_at: str, cutoff: datetime | None) -> bool:
+    """Whether one anomaly's stored detection time falls inside the requested window.
+
+    ``True`` when there is no window, and ``True`` again when the stamp cannot be read.
+    The two cases are unrelated but the answer is the same, and deliberately so: a
+    detected condition must not vanish from a listing because a filter could not judge it
+    (012 FR-010). Silent omission is what Principle III forbids; showing a row the reader
+    did not ask for is the only direction it is defensible to err in.
+
+    This is also why the window is applied here rather than as ``WHERE detected_at >= ?``.
+    The column is TEXT, so SQL would compare a malformed stamp lexicographically and drop
+    it with nothing anywhere in a position to notice (012 research R2).
+    """
+    if cutoff is None:
+        return True
+    try:
+        stamp = datetime.strptime(detected_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return True
+    return stamp >= cutoff
+
+
+def anomalies(
+    ctx: Context,
+    *,
+    acknowledge: int | None = None,
+    show_all: bool = False,
+    since: str | None = None,
+) -> Result:
+    # Parsed first — before the acknowledgement below, not merely before the listing. A
+    # duration the parser refuses must not be the thing that irreversibly marks an anomaly
+    # acknowledged, and every other malformed argument here is already refused by argparse
+    # before any work happens; this puts `--since` on the same footing (012 research R5).
+    #
+    # `if since` rather than `is not None`, matching `read_log` exactly: an empty value
+    # means "no window" in both commands. FR-002 is a claim about the two behaving the
+    # same, which includes this edge.
+    cutoff: datetime | None = None
+    if since:
+        try:
+            cutoff = datetime.now(UTC) - parse_duration(since)
+        except ValueError as exc:
+            return Result(code=EXIT_USAGE, lines=[str(exc)])
+
+    result = Result()
+    if acknowledge is not None:
+        with db.transaction(ctx.conn):
+            changed = db.acknowledge_anomaly(ctx.conn, acknowledge)
+        if not changed:
+            return Result(
+                code=EXIT_FAILED,
+                lines=[f"no unacknowledged anomaly with id {acknowledge}"],
+            )
+        ctx.audit.record(
+            "anomaly.acknowledge", outcome="ok", entity_type="anomaly", entity_id=acknowledge
+        )
+        result.say(f"acknowledged anomaly {acknowledge}")
+
+    # Filtered before `result.data` is built, so the rendered lines and the `--json`
+    # payload are drawn from one list and cannot disagree about the window (012 FR-008).
+    rows = [
+        anomaly
+        for anomaly in db.list_anomalies(ctx.conn, unacknowledged_only=not show_all)
+        if _within_window(anomaly.detected_at, cutoff)
+    ]
+    result.data = {
+        "anomalies": [_anomaly_dict(a) for a in rows],
+        "known_kinds": list(ANOMALY_KINDS),
+    }
+    if not rows:
+        # Two empty listings that mean different things, and saying so is the whole reason
+        # this filter is safe to add. "no outstanding anomalies" is an all-clear; a window
+        # that matched nothing is not one, and a reader who reads it as one has been misled
+        # by the tool into believing nothing is wrong (012 FR-009).
+        if cutoff is not None:
+            result.say(f"no anomalies detected in the last {since}")
+        else:
+            result.say("no outstanding anomalies")
+        result.say()
+        result.say("kinds this system can raise: " + ", ".join(ANOMALY_KINDS))
+        return result
+    for anomaly in rows:
+        result.say(
+            f"[{anomaly.id}] {anomaly.kind}  {anomaly.entity_type or '—'}:"
+            f"{anomaly.entity_id or '—'}  detected {timefmt.local(anomaly.detected_at)}"
+        )
+        for key, value in anomaly.detail_obj.items():
+            result.say(f"      {key}: {value}")
+        result.say()
+    result.say("kinds this system can raise: " + ", ".join(ANOMALY_KINDS))
+    return result
+
+
+# -- log --------------------------------------------------------------------
 
 
 #: A record either matches the active filters, fails them, or cannot be judged. The third

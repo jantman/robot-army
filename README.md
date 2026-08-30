@@ -528,11 +528,12 @@ readable from the browser at `/log`, filtered, newest first, with GitHub links a
 ## When something looks wrong
 
 ```bash
-uv run robot-army status              # counts, listings, outstanding anomalies
-uv run robot-army show <item-id>      # one item's whole history and resume signals
-uv run robot-army anomalies           # things detected but not resolvable
-uv run robot-army repos               # why is nothing happening for this repo
-uv run robot-army doctor              # environment and preconditions
+uv run robot-army status               # counts, listings, outstanding anomalies
+uv run robot-army show <item-id>       # one item's whole history and resume signals
+uv run robot-army anomalies            # things detected but not resolvable
+uv run robot-army anomalies --since 1h # …narrowed to a window: 30s, 10m, 2h, 1d
+uv run robot-army repos                # why is nothing happening for this repo
+uv run robot-army doctor               # environment and preconditions
 ```
 
 Anomalies worth understanding rather than dismissing:

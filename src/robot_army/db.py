@@ -386,6 +386,28 @@ def latest_session_for_item(conn: sqlite3.Connection, item_id: int) -> Session |
     return from_row(Session, row) if row else None
 
 
+def previous_session_for_item(
+    conn: sqlite3.Connection, item_id: int, attempt: int
+) -> Session | None:
+    """The session this attempt replaces, or ``None`` when there is nothing before it.
+
+    The ``attempt < ?`` bound is the entire reason this exists rather than a call to
+    ``latest_session_for_item``. A session row is written **before** its process is
+    launched, so by the time anything downstream asks what came earlier, this attempt's own
+    row is already the latest one — and the honest-looking answer would be that the session
+    supersedes itself.
+
+    ``None`` is a real answer, not a failure: a rebuilt database or pruned history leaves an
+    attempt with no recorded predecessor, and saying so beats inventing one.
+    """
+    row = conn.execute(
+        "SELECT * FROM sessions WHERE work_item_id = ? AND attempt < ? ORDER BY attempt DESC "
+        "LIMIT 1",
+        (item_id, attempt),
+    ).fetchone()
+    return from_row(Session, row) if row else None
+
+
 def list_sessions(
     conn: sqlite3.Connection,
     *,

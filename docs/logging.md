@@ -140,6 +140,19 @@ irreversible or outward-facing actions to be logged *before* execution, so "log 
 {"ts":"…:12Z","kind":"outcome","action":"github.comment","outcome":"ok","action_id":"a1b2","detail":{"comment_url":"https://…"}}
 ```
 
+Those two records say a comment was written; `dispatch.confirmed` says what was in it.
+Since #38 its detail carries `host`, `session_name` and `attempt` beside the `session_id` it
+always carried, plus `resumed_from` or `supersedes` when the attempt replaced an earlier
+session. Every one of those values also appears in the comment on the issue, which is the
+point: the log is on the machine that ran the session, and the issue is the only place a
+reader who is not on that machine can find out which machine it was.
+
+```bash
+jq -r 'select(.action == "dispatch.confirmed")
+       | [.detail.host, .detail.session_name, .detail.session_id, .detail.attempt] | @tsv' \
+  ~/.local/state/robot-army/logs/audit-*.jsonl
+```
+
 The pairing is also the crash signature. **An `intent` with no matching `outcome` means the
 process died mid-action.** Finding them:
 

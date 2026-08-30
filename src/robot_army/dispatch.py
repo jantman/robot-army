@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -697,7 +698,7 @@ def _dispatch_item(
                 config=config,
                 item=item,
             )
-            _comment_failure(boundaries, audit, config, item, str(exc))
+            _comment_failure(boundaries, audit, item, str(exc))
             return False
 
     # -- worktree ----------------------------------------------------------
@@ -746,7 +747,7 @@ def _dispatch_item(
                 item=item,
             )
             _comment_failure(
-                boundaries, audit, config, item, preparation.failure_reason or "preparation failed"
+                boundaries, audit, item, preparation.failure_reason or "preparation failed"
             )
             return False
         worktree_path = preparation.worktree_path
@@ -789,7 +790,7 @@ def _dispatch_item(
     if problems:
         reason = "pre-launch validation failed: " + "; ".join(problems)
         _fail(conn, audit, item_id, reason, boundaries=boundaries, config=config, item=item)
-        _comment_failure(boundaries, audit, config, item, reason)
+        _comment_failure(boundaries, audit, item, reason)
         return False
 
     # The session row is written BEFORE the process exists (FR-020). A process that dies
@@ -825,7 +826,7 @@ def _dispatch_item(
                 reason=reason,
             )
         _fail(conn, audit, item_id, reason, boundaries=boundaries, config=config, item=item)
-        _comment_failure(boundaries, audit, config, item, reason)
+        _comment_failure(boundaries, audit, item, reason)
         return False
 
     with db.transaction(conn):
@@ -909,7 +910,7 @@ def _dispatch_item(
             dry_run=dry_run,
         )
         _fail(conn, audit, item_id, reason, boundaries=boundaries, config=config, item=item)
-        _comment_failure(boundaries, audit, config, item, reason)
+        _comment_failure(boundaries, audit, item, reason)
         return False
 
     # M0 F18: kitty places each launched window in its own scope, so this is the handle
@@ -983,6 +984,19 @@ def _dispatch_item(
             dry_run=dry_run,
         )
 
+    # Which session this attempt replaces, resolved once and used by both the record below
+    # and the comment at the end of this function, so the log and the issue cannot disagree.
+    #
+    # A resume already names what it restored, which is the fact worth reporting. Only a
+    # restart has to look, and it must **not** use `latest_session_for_item`: the session row
+    # for this attempt was inserted before the launch, so that function returns *our own
+    # row* and the comment would say a session supersedes itself.
+    previous_session_id: str | None = resume_session_id
+    if previous_session_id is None and attempt > 1:
+        earlier = db.previous_session_for_item(conn, item_id, attempt)
+        previous_session_id = earlier.session_id if earlier else None
+
+    host = host_name()
     audit.record(
         "dispatch.confirmed",
         outcome="ok",
@@ -990,11 +1004,26 @@ def _dispatch_item(
         entity_id=item_id,
         detail={
             "session_id": session_id,
+            # The two handles the maintainer searches with, and the machine they mean
+            # something on. Recorded because the standard is reconstruction from the log
+            # alone, and "which host" is exactly the question a log cannot answer by
+            # sitting on the host that wrote it (FR-002).
+            "session_name": plan.title,
+            "host": host,
+            "attempt": attempt,
             # Which session's context this attempt restored, or absent when it restored
             # none. It is inside launch_argv too, but that is the whole nested wrapper
             # argv with the prompt body in it, and "what did this resume?" should not
             # cost a parse of that to answer from the log (FR-002).
             **({"resumed_from": resume_session_id} if resume_session_id else {}),
+            # The predecessor a restart replaced without restoring. Distinct from
+            # `resumed_from` because the difference — whether the prior conversation came
+            # with it — is the whole reason to know there was one.
+            **(
+                {"supersedes": previous_session_id}
+                if previous_session_id and not resume_session_id
+                else {}
+            ),
             "pid": entry.pid,
             "scope": scope,
             "window_id": display_handle.window_id,
@@ -1029,7 +1058,20 @@ def _dispatch_item(
                 },
             )
 
-    _comment_dispatch(boundaries, audit, config, item, worktree_path, branch, session_id)
+    # Last, and deliberately: everything above has already established that a session is
+    # really running. A comment saying so is only true because of where this line sits.
+    _comment_dispatch(
+        boundaries,
+        audit,
+        item,
+        session_name=plan.title,
+        session_id=session_id,
+        worktree_path=worktree_path,
+        branch=branch,
+        attempt=attempt,
+        previous_session_id=previous_session_id,
+        resumed=resume_session_id is not None,
+    )
     return True
 
 
@@ -1155,29 +1197,138 @@ def _fail(
         )
 
 
+def host_name() -> str:
+    """This machine, as the kernel names it — or ``unknown`` when it will not say.
+
+    ``os.uname().nodename`` is already what the health signal and every notification
+    publish, so the comment agrees with them rather than inventing a third answer for the
+    same question. Deliberately **not** ``socket.getfqdn()``: that is a network lookup, it
+    can block, and Principle IV forbids the indefinite version of that for a fact the
+    kernel already holds.
+
+    The fallback exists because the two things an empty ``nodename`` would otherwise
+    produce are both worse than saying so — a line reading ``Host:`` with nothing after it,
+    or no line at all — and each leaves the reader believing the system knows something it
+    does not. The word ``unknown`` is itself the record: it reaches the issue *and* the
+    ``dispatch.confirmed`` detail, so a machine that cannot name itself is visible in both
+    places rather than silently absent from one.
+    """
+    try:
+        name = os.uname().nodename
+    except OSError:
+        return "unknown"
+    return name or "unknown"
+
+
+def dispatch_comment_body(
+    *,
+    host: str,
+    session_name: str,
+    session_id: str,
+    branch: str,
+    worktree_path: str,
+    attempt: int = 1,
+    previous_session_id: str | None = None,
+    resumed: bool = False,
+) -> str:
+    """What gets written on the issue when a session is confirmed.
+
+    Pure, and taking facts rather than a database handle, because everything interesting
+    here is a rule about a string: which of two openings, which of three predecessor
+    lines, and what an unknown host renders as. Testing those through a dispatch would mean
+    a worktree, a git binary and a stub host for each case.
+
+    ``attempt`` is what distinguishes the two variants, and it needs no query: the session
+    row's attempt number is already a local at the only call site, assigned by
+    ``db.next_attempt`` before the launch.
+    """
+    opening = (
+        f"🤖 robot-army reassigned this issue to a new session (attempt {attempt})."
+        if attempt > 1
+        # The attempt number is stated for a reassignment and omitted for a first
+        # dispatch: on an issue carrying several of these, the ordering is the fact a
+        # reader needs and comparing UUIDs is not a way to get it.
+        else "🤖 robot-army dispatched a session for this issue."
+    )
+    lines = [
+        f"- Host: `{host}`",
+        f"- Session: `{session_name}`",
+        f"- Session id: `{session_id}`",
+    ]
+    if attempt > 1:
+        lines.append(_predecessor_line(previous_session_id, resumed=resumed))
+    lines += [f"- Branch: `{branch}`", f"- Worktree: `{worktree_path}`"]
+    return opening + "\n\n" + "\n".join(lines) + "\n"
+
+
+def _predecessor_line(previous_session_id: str | None, *, resumed: bool) -> str:
+    """The one line that says what this attempt replaces, and whether it kept anything.
+
+    "Continues" and "supersedes" are not decoration. A resumed session carries the prior
+    conversation and a restarted one does not, and that is the difference between reading
+    the earlier session's transcript for context and reading it for a fact that no longer
+    applies.
+    """
+    if previous_session_id is None:
+        # Reachable when the database was rebuilt or history was pruned. Naming no
+        # predecessor is the honest answer; inventing one would be worse than the silence
+        # this feature exists to end.
+        return "- Supersedes: no earlier session is on record"
+    if resumed:
+        return f"- Continues: `{previous_session_id}` (that session's context was restored)"
+    return (
+        f"- Supersedes: `{previous_session_id}` "
+        "(this session starts without that session's context)"
+    )
+
+
+def failure_comment_body(*, host: str, reason: str) -> str:
+    """The comment for an attempt that never reached a session.
+
+    The host is here for the same reason it is on the dispatch comment, and one more: a
+    failure that happens on one machine and not another is the kind this line makes
+    attributable in a glance. The reason is fenced because it is machine text of unbounded
+    shape — a hook's stderr, an exception, a git error.
+    """
+    return (
+        "🤖 robot-army could not start a session for this issue.\n\n"
+        f"- Host: `{host}`\n\n"
+        f"```\n{reason}\n```\n"
+    )
+
+
 def _comment_dispatch(
     boundaries: Boundaries,
     audit: AuditLog,
-    config: Config,
     item: Any,
+    *,
+    session_name: str,
+    session_id: str,
     worktree_path: str,
     branch: str,
-    session_id: str,
+    attempt: int,
+    previous_session_id: str | None,
+    resumed: bool,
 ) -> None:
-    body = (
-        f"🤖 robot-army dispatched a session for this issue.\n\n"
-        f"- Branch: `{branch}`\n"
-        f"- Worktree: `{worktree_path}`\n"
-        f"- Session: `{session_id}`\n"
+    _safe_comment(
+        boundaries,
+        audit,
+        item,
+        dispatch_comment_body(
+            host=host_name(),
+            session_name=session_name,
+            session_id=session_id,
+            branch=branch,
+            worktree_path=worktree_path,
+            attempt=attempt,
+            previous_session_id=previous_session_id,
+            resumed=resumed,
+        ),
     )
-    _safe_comment(boundaries, audit, item, body)
 
 
-def _comment_failure(
-    boundaries: Boundaries, audit: AuditLog, config: Config, item: Any, reason: str
-) -> None:
-    body = f"🤖 robot-army could not start a session for this issue.\n\n```\n{reason}\n```\n"
-    _safe_comment(boundaries, audit, item, body)
+def _comment_failure(boundaries: Boundaries, audit: AuditLog, item: Any, reason: str) -> None:
+    _safe_comment(boundaries, audit, item, failure_comment_body(host=host_name(), reason=reason))
 
 
 def _safe_comment(boundaries: Boundaries, audit: AuditLog, item: Any, body: str) -> None:

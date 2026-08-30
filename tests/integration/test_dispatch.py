@@ -495,6 +495,14 @@ def test_a_comment_failure_does_not_change_the_items_state(
     text = "\n".join(p.read_text(encoding="utf-8") for p in layout.log_dir.glob("*.jsonl"))
     assert "github is down" in text, "the failure must still be recorded"
 
+    # Not merely "somewhere in the log": under the action a reader would grep for, naming
+    # the item, saying the item is unaffected. Non-fatal and *attributable* are two
+    # different properties and only one of them was asserted before.
+    failed = [r for r in records_of(layout, audit, "github.comment") if r["outcome"] == "error"]
+    assert failed, "the declined exception must surface as a github.comment error record"
+    assert failed[-1]["entity_id"] == item_id
+    assert "unaffected" in failed[-1]["detail"]["note"]
+
 
 def test_the_build_plan_is_deterministic(config, layout, audit):
     boundaries = make_boundaries(audit)
@@ -791,6 +799,13 @@ def test_a_resume_is_a_new_attempt_naming_what_it_restored(
     assert confirmed[0]["detail"].get("resumed_from") is None, (
         "a fresh launch restored nothing and must not claim otherwise"
     )
+    assert confirmed[-1]["detail"]["attempt"] == 2
+
+    # And the issue is told the same thing (#38). Two comments that read identically would
+    # leave a reader unable to say which session came first or what it kept.
+    body = boundaries.issue_writer.comments[-1][2]
+    assert "reassigned this issue to a new session (attempt 2)" in body
+    assert f"- Continues: `{first.session_id}` (that session's context was restored)" in body
 
 
 # -- the confirmation race (milestone 013) ---------------------------------
@@ -1034,3 +1049,195 @@ def test_a_crash_after_confirmation_does_not_claim_a_settle_it_did_not_make(
     assert record["detail"]["settling"] is False
     assert record["detail"]["item_state"] == "active"
     assert "left as it stands" in record["detail"]["note"]
+
+
+# -- what the issue is told (issue #38) -------------------------------------
+#
+# The comment is how an issue, the pull request that closes it and the session logs that
+# explain both are correlated months later. Until #38 it named the branch, the worktree and
+# the session id -- and on a second machine none of those is an address.
+
+
+def test_the_dispatch_comment_names_the_machine_and_both_session_handles(
+    conn, audit, config, tmp_path, layout
+):
+    """FR-001 and FR-002 together: what the issue says, and that the log agrees with it."""
+    writer = RecordingWriter()
+    boundaries = make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config)
+
+    assert dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    session = db.latest_session_for_item(conn, item_id)
+    item = db.get_work_item(conn, item_id)
+    assert session is not None and item is not None
+
+    repo_key, number, body = writer.comments[-1]
+    assert (repo_key, number) == (item.repo_key, item.issue_number)
+    assert f"- Host: `{dispatch.host_name()}`" in body
+    assert "- Session: `ra-demo-42`" in body
+    assert f"- Session id: `{session.session_id}`" in body
+    assert f"- Branch: `{item.branch}`" in body
+    assert f"- Worktree: `{item.worktree_path}`" in body
+
+    # The same three facts in the record, so a comment read on one machine can be matched
+    # against a log read on another. This is the whole of FR-002 and it is why the values
+    # are resolved once at the call site rather than derived twice.
+    detail = records_of(layout, audit, "dispatch.confirmed")[-1]["detail"]
+    assert detail["host"] == dispatch.host_name()
+    assert detail["session_name"] == "ra-demo-42"
+    assert detail["session_id"] == session.session_id
+    assert detail["attempt"] == 1
+
+
+def test_a_blocked_dispatch_says_which_machine_refused(conn, audit, config, tmp_path, layout):
+    """FR-005. A failure that happens on one machine and not another is a real case here:
+    trust is granted per machine, so this is exactly the failure whose host matters."""
+    writer = RecordingWriter()
+    boundaries = make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config)
+
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=tmp_path / "absent.json",
+    )
+
+    body = writer.comments[-1][2]
+    assert "could not start a session" in body
+    assert f"- Host: `{dispatch.host_name()}`" in body
+    assert "trust check failed" in body
+
+    item = db.get_work_item(conn, item_id)
+    assert item is not None and item.state is WorkItemState.FAILED
+    assert "trust check failed" in (item.blocked_reason or "")
+
+
+def test_a_restart_names_the_session_it_supersedes_and_says_it_kept_nothing(
+    conn, audit, config, tmp_path, layout
+):
+    """The case that would catch a session claiming to supersede itself.
+
+    A restart carries no ``resume_session_id``, so the predecessor has to be looked up ---
+    and the session row for *this* attempt already exists by then. Asking
+    ``latest_session_for_item`` would return this very session, and the comment would name
+    it as its own predecessor: confident, wrong, and indistinguishable from correct to
+    anyone reading the issue.
+    """
+    writer = RecordingWriter()
+    boundaries = make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit))
+    trust = trust_file(tmp_path, config.repos["demo"].path)
+    item_id = ready_item(conn, config)
+
+    assert dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust,
+    )
+    first = db.latest_session_for_item(conn, item_id)
+    assert first is not None
+    interrupt(conn, item_id, audit)
+
+    assert dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust,
+    )
+    second = db.latest_session_for_item(conn, item_id)
+    assert second is not None and second.session_id != first.session_id
+
+    body = writer.comments[-1][2]
+    assert "reassigned this issue to a new session (attempt 2)" in body
+    assert f"- Supersedes: `{first.session_id}` " in body
+    assert "starts without that session's context" in body
+    assert second.session_id not in body.split("- Supersedes:")[1].splitlines()[0], (
+        "a session must never be named as its own predecessor"
+    )
+
+    detail = records_of(layout, audit, "dispatch.confirmed")[-1]["detail"]
+    assert detail["supersedes"] == first.session_id
+    assert "resumed_from" not in detail, "a restart restored nothing and must not claim to"
+
+
+def test_an_issue_accumulates_one_comment_per_attempt_and_none_are_edited(
+    conn, audit, config, tmp_path, layout
+):
+    """FR-004. The ordered history is the point; an edited comment would lose it."""
+    writer = RecordingWriter()
+    boundaries = make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit))
+    trust = trust_file(tmp_path, config.repos["demo"].path)
+    item_id = ready_item(conn, config)
+
+    for _ in range(3):
+        assert dispatch.dispatch_item(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            layout=layout,
+            item_id=item_id,
+            trust_file=trust,
+        )
+        interrupt(conn, item_id, audit)
+
+    bodies = [body for _, _, body in writer.comments]
+    assert len(bodies) == 3
+    assert "dispatched a session" in bodies[0]
+    assert "(attempt 2)" in bodies[1]
+    assert "(attempt 3)" in bodies[2]
+    assert len(set(bodies)) == 3, "three attempts must not read as three identical announcements"
+
+
+def test_an_unconfirmed_launch_leaves_no_comment_claiming_a_session(
+    conn, audit, config, tmp_path, layout
+):
+    """FR-006, pinned at the call site rather than trusted to stay there.
+
+    The dispatch comment is the last statement of a dispatch that has already confirmed a
+    session. That position is the only thing making the sentence true, and it is exactly
+    the kind of line a later refactor moves without noticing.
+    """
+    writer = RecordingWriter()
+    boundaries = make_boundaries(
+        audit,
+        writer=writer,
+        host=StubSessionHost(confirm=False),
+        hooks=SubprocessHookRunner(audit),
+    )
+    item_id = ready_item(conn, config)
+
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    bodies = [body for _, _, body in writer.comments]
+    assert bodies, "a failed attempt is still reported"
+    assert all("dispatched a session" not in body for body in bodies)
+    assert all("reassigned this issue" not in body for body in bodies)
+    assert all("could not start a session" in body for body in bodies)

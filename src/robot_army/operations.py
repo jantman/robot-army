@@ -955,6 +955,26 @@ def _ask(prompt: str) -> str:
     return input()
 
 
+def _fingerprint_diff_lines(previous: dict[str, str], current: dict[str, str]) -> list[str]:
+    """The re-approval screen's diff between the approved fingerprint and this one."""
+    lines = ["fingerprint diff against the approved version:"]
+    paths = sorted(set(previous) | set(current))
+    if not paths:
+        # Neither side fingerprinted a file — a repository with no committed
+        # ``.claude/settings*.json`` at either the approved or the current base ref. Say
+        # so: without this line the heading stands alone over blank space and reads as a
+        # diff that failed to render rather than one with nothing in it (issue #25).
+        lines.append("  no settings files on either side; nothing to compare")
+    for path in paths:
+        before = previous.get(path, "(absent)")
+        after = current.get(path, "(absent)")
+        marker = " " if before == after else "*"
+        lines.append(f"  {marker} {path}")
+        lines.append(f"      approved: {before}")
+        lines.append(f"      current : {after}")
+    return lines
+
+
 def onboard(
     ctx: Context,
     repo_key: str,
@@ -1048,15 +1068,7 @@ def onboard(
         result.say()
 
     if reapprove and existing is not None:
-        previous = existing.fingerprint
-        result.say("fingerprint diff against the approved version:")
-        for path in sorted(set(previous) | set(fingerprint)):
-            before = previous.get(path, "(absent)")
-            after = fingerprint.get(path, "(absent)")
-            marker = " " if before == after else "*"
-            result.say(f"  {marker} {path}")
-            result.say(f"      approved: {before}")
-            result.say(f"      current : {after}")
+        result.lines.extend(_fingerprint_diff_lines(existing.fingerprint, fingerprint))
         result.say()
 
     # THE flush point, and the only one. Everything above is the approval screen —

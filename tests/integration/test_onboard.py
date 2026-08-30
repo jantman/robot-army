@@ -858,6 +858,41 @@ def test_reapproval_shows_the_recorded_path_its_marker_and_the_diff_first(
     assert "approved: (absent)" in seen, "the diff's contents, not only its heading"
 
 
+def test_an_empty_fingerprint_diff_says_so_rather_than_printing_a_bare_heading(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """Issue #25. A repository with no committed settings at either ref has an empty
+    diff, and the heading printed over nothing read as a diff that failed to render."""
+    clone = make_repo(repo_root / "demo", origin="git@github.com:jantman/demo.git")
+    trust = trust_file(tmp_path, clone)
+
+    before = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+    assert run_onboard(before, "jantman/demo", trust=trust).code == EXIT_OK
+
+    after = context(
+        build_config(
+            repo_root,
+            layout,
+            tmp_path / "second",
+            repos={"jantman/demo": {"path": str(clone)}},
+        ),
+        conn,
+        audit,
+        make_boundaries(audit),
+    )
+    result, watcher, _ = watched_onboard(
+        after, "jantman/demo", trust=trust, reapprove=True
+    )
+
+    assert result.code == EXIT_OK
+    seen = watcher.seen
+    lines = seen.splitlines()
+    heading = lines.index("fingerprint diff against the approved version:")
+    assert lines[heading + 1] == "  no settings files on either side; nothing to compare", (
+        "the heading must not be followed straight away by blank space"
+    )
+
+
 def test_the_screen_is_flushed_to_a_redirected_destination_not_merely_buffered(
     conn, audit, layout, tmp_path, repo_root
 ):

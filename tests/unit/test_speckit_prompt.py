@@ -1,11 +1,16 @@
-"""The prompt block: where it sits, that it is fixed, and that its absence changes nothing.
+"""The prompt block: where it sits, that it is fixed, and what the whole assembly looks like.
 
-``GOLDEN`` was captured from ``prompt.compose()`` **before** the Spec Kit parameter existed,
-and is written out here as a literal rather than re-derived. FR-010 — the prompt for a
-repository without Spec Kit is byte-identical to the pre-milestone prompt — is the
-requirement most likely to be broken by an innocent refactor of the surrounding sections,
-and a golden string is what notices. Re-deriving it from the same code that changed would
-assert nothing.
+``GOLDEN`` is written out as a literal rather than re-derived from the constants that produce
+it. Re-deriving it from the same code that changed would assert nothing; spelled out, it is
+the only test that notices when the prompt's sections are reshaped by an innocent refactor.
+
+Its value changed once, deliberately. Milestone 007 captured it *before* the Spec Kit
+parameter existed, to hold that milestone's FR-010: a repository without Spec Kit got a
+byte-identical prompt. That was a statement about that change and has been satisfied ever
+since. Milestone 012 then made the delivery block unconditional, so every prompt carries it
+and the pre-007 bytes are gone on purpose — see
+``specs/012-prompt-branch-pr-safety/research.md`` D5. The test is kept rather than deleted
+because what it is actually good for survives the change of expected value.
 """
 
 from __future__ import annotations
@@ -14,6 +19,26 @@ from robot_army import prompt, speckit
 from robot_army.boundaries import Issue
 
 GOLDEN = (
+    "Unless the issue below explicitly says otherwise, this is how the work is expected to be\n"
+    "delivered.\n"
+    "\n"
+    "Do the work on the feature branch this session was started on, never on the repository's\n"
+    "default branch. When the work is done, commit it, push that branch to `origin`, and open a\n"
+    "pull request. Commits sitting on an unpushed branch are not a finished job: the worktree can\n"
+    "be reclaimed, and unpushed work is the one thing that cannot be recovered from it.\n"
+    "\n"
+    "What you produce should be code and file changes in this git repository, arriving as commits\n"
+    "and pull requests. Do not satisfy the issue by changing the state of this machine or any other\n"
+    "system — do not deploy, restart, reconfigure, or edit something in place where the change\n"
+    "belongs in this repository instead. Pushing your branch and opening the pull request are the\n"
+    "exceptions. Running tests, running builds, and installing dependencies inside this worktree\n"
+    "are ordinary parts of doing the work and are not what this restricts.\n"
+    "\n"
+    "If the issue below explicitly asks for something else — no pull request, a commit straight to\n"
+    "the default branch, or an action on a system — the issue wins. Nothing here is checked.\n"
+    "\n"
+    "---\n"
+    "\n"
     "You are working on jantman/robot-army issue #9 in a dedicated git\n"
     "worktree on branch `robot-army/issue-9-speckit-extensions`.\n"
     "\n"
@@ -46,7 +71,8 @@ def compose(**kwargs: object) -> str:
     )
 
 
-def test_without_a_block_the_prompt_is_byte_identical_to_before(self=None) -> None:
+def test_the_whole_assembly_matches_the_golden_string(self=None) -> None:
+    """With no repository instructions and no Spec Kit block, this is the whole prompt."""
     assert compose() == GOLDEN
 
 

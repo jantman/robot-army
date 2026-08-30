@@ -303,6 +303,40 @@ rebuilds the mapping from it rather than filing a second one. The one gap left o
 between creating the issue and recording it *combined with* losing the database, and it is
 written down in [docs/state.md](docs/state.md) rather than pretended away.
 
+## What every session is told
+
+Two things I was writing into issues by hand, or not writing and regretting. Every dispatched
+prompt now carries them, in every repository, with nothing to configure and no file to add:
+
+- **The work ends pushed, with a pull request open.** Stay on the feature branch the worktree
+  was made on, and when the work is done, commit, push to `origin`, and open a PR. Commits on a
+  branch nobody fetched are the one thing `worktree remove` can destroy, which is why the
+  cleanup guards are as paranoid as they are — this is the same problem addressed a step
+  earlier.
+- **The work product is a diff, not a changed machine.** An issue about the health timer is
+  satisfied by editing the unit file in the repo, not by running `systemctl --user edit`. The
+  second is faster, leaves no reviewable record, and no `git revert` undoes it. So the prompt
+  says: don't satisfy the issue by changing the state of this or any other system.
+
+The second one, read literally, forbids the first — pushing a branch *is* changing another
+system's state — so the block names the push and the PR as its exceptions, and says outright
+that running tests, builds, and dependency installs inside the worktree are not what it
+restricts.
+
+**Both are defaults, and the issue outranks them.** "Investigate why the poller stalls and
+report back" wants an answer, not a branch; "delete the stale worktrees" is deliberately an
+action on the machine. An explicit instruction in the issue body wins, and the block says so
+in its own last line — because everything else in that prompt ranks by position, and the issue
+body sits *below* this text. A repository's own `.claude/robot-army.md` still outranks
+everything, unchanged.
+
+Nothing checks any of it. Whether a session actually pushed and opened a PR is a question the
+tools that already answer it still answer:
+
+```bash
+uv run robot-army show <id>       # uncommitted changes? commits on the branch? PR open?
+```
+
 ## When a repository uses Spec Kit
 
 More than half of my work goes through [spec-kit](https://github.com/github/spec-kit), and

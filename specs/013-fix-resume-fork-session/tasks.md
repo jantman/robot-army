@@ -39,7 +39,7 @@ are deliberately few — claiming more would be dishonest about a 30-line change
 
 **Purpose**: Establish the baseline, so any later failure is attributable to this feature.
 
-- [ ] T001 Run `uv run pytest` and `uv run ruff check .` from the repository root and confirm both are green before making any change; record the pass/fail counts for comparison in T019
+- [X] T001 Run `uv run pytest` and `uv run ruff check .` from the repository root and confirm both are green before making any change; record the pass/fail counts for comparison in T019
 
 ---
 
@@ -66,17 +66,17 @@ not failing.
 
 ### Tests for User Story 1
 
-- [ ] T002 [US1] Create `tests/unit/test_launch_shapes.py` with argv-composition tests over `build_launch_plan`: a restoring launch places `--fork-session` alongside `--resume <prior>`, and a non-restoring launch composes a list byte-identical to today's (FR-004). Confirm the restoring case FAILS before T003
-- [ ] T003 [P] [US1] Add an integration test in `tests/integration/test_dispatch.py` asserting a resumed dispatch records a new attempt number distinct from the restored session, and that `dispatch.confirmed` names the session it restored from (FR-002)
+- [X] T002 [US1] Create `tests/unit/test_launch_shapes.py` with argv-composition tests over `build_launch_plan`: a restoring launch places `--fork-session` alongside `--resume <prior>`, and a non-restoring launch composes a list byte-identical to today's (FR-004). Confirm the restoring case FAILS before T003
+- [X] T003 [P] [US1] Add an integration test in `tests/integration/test_dispatch.py` asserting a resumed dispatch records a new attempt number distinct from the restored session, and that `dispatch.confirmed` names the session it restored from (FR-002)
 
 ### Implementation for User Story 1
 
-- [ ] T004 [US1] Append `--fork-session` in the `resume_session_id` branch of `build_launch_plan` in `src/robot_army/dispatch.py` (around line 479), and extend the existing comment to record that this flag is what makes "a new attempt restoring the prior session's context" true, and that the combination without it is rejected before anything runs — cite [contracts/worker-launch-shapes.md](./contracts/worker-launch-shapes.md) G1/G2
-- [ ] T005 [US1] Add `resumed_from` to the `dispatch.confirmed` audit detail in `src/robot_army/dispatch.py` (around line 873) when the launch restored a session, so FR-002 is answerable from the log without parsing a nested `launch_argv` that carries the whole prompt
+- [X] T004 [US1] Append `--fork-session` in the `resume_session_id` branch of `build_launch_plan` in `src/robot_army/dispatch.py` (around line 479), and extend the existing comment to record that this flag is what makes "a new attempt restoring the prior session's context" true, and that the combination without it is rejected before anything runs — cite [contracts/worker-launch-shapes.md](./contracts/worker-launch-shapes.md) G1/G2
+- [X] T005 [US1] Add `resumed_from` to the `dispatch.confirmed` audit detail in `src/robot_army/dispatch.py` (around line 873) when the launch restored a session, so FR-002 is answerable from the log without parsing a nested `launch_argv` that carries the whole prompt
 
 ### Verification for User Story 1
 
-- [ ] T006 [US1] Run `uv run pytest tests/integration/test_dispatch.py tests/integration/test_effect_levels.py tests/unit/test_effects.py` and confirm every pre-existing expectation passes **unedited** — FR-004 means the non-restoring launch did not move
+- [X] T006 [US1] Run `uv run pytest tests/integration/test_dispatch.py tests/integration/test_effect_levels.py tests/unit/test_effects.py` and confirm every pre-existing expectation passes **unedited** — FR-004 means the non-restoring launch did not move
 
 **Checkpoint**: `resume` works on the happy path. Independently demonstrable via
 [quickstart.md](./quickstart.md) step 4.
@@ -99,20 +99,20 @@ exit record. It would be worth doing with US1 already shipped or never shipped a
 
 ### Tests for User Story 2
 
-- [ ] T007 [US2] Extend the simulated session host in `tests/conftest.py` so `confirm_session` can apply a session exit *before* returning `None` — the seam that reproduces the cross-process race, where the daemon drains the spool while dispatch is still waiting
-- [ ] T008 [US2] Add integration tests in `tests/integration/test_dispatch.py` for all four confirmation-elapsed outcomes in [contracts/confirmation-outcome.md](./contracts/confirmation-outcome.md): already `exited_error`, already `exited_clean`, already `lost`, and nothing recorded. Assert the item's resulting state, the failure reason, the **absence** of a `state.session` record in the three terminal cases, and that no `IllegalTransition` appears anywhere in the log
-- [ ] T009 [P] [US2] Add an integration test in `tests/integration/test_dispatch.py` asserting that an exception raised inside the launch leaves the item `failed` and is re-raised rather than swallowed (FR-008, contract C5)
+- [X] T007 [US2] Extend the simulated session host in `tests/conftest.py` so `confirm_session` can apply a session exit *before* returning `None` — the seam that reproduces the cross-process race, where the daemon drains the spool while dispatch is still waiting
+- [X] T008 [US2] Add integration tests in `tests/integration/test_dispatch.py` for all four confirmation-elapsed outcomes in [contracts/confirmation-outcome.md](./contracts/confirmation-outcome.md): already `exited_error`, already `exited_clean`, already `lost`, and nothing recorded. Assert the item's resulting state, the failure reason, the **absence** of a `state.session` record in the three terminal cases, and that no `IllegalTransition` appears anywhere in the log
+- [X] T009 [P] [US2] Add an integration test in `tests/integration/test_dispatch.py` asserting that an exception raised inside the launch leaves the item `failed` and is re-raised rather than swallowed (FR-008, contract C5)
 
 ### Implementation for User Story 2
 
-- [ ] T010 [US2] In the `entry is None` branch of `dispatch_item` in `src/robot_army/dispatch.py` (around lines 757-795), re-read the session row at that moment and branch: a terminal state is not transitioned and its recorded exit becomes the failure reason; a non-terminal state takes today's path verbatim, wording included. `exited_clean` leaves the item to the ordinary end-of-session rules rather than failing it
-- [ ] T011 [US2] In the same branch, call `_detect_session_id_mismatch` only when nothing was recorded — with a recorded exit the question is answered and the probe would hunt a rival session that cannot exist (contract C4)
-- [ ] T012 [US2] Extend the `dispatch.unconfirmed` audit detail in `src/robot_army/dispatch.py` with the session state observed at that moment and which outcome was taken, so the log distinguishes "never appeared" from "already exited" (FR-010)
-- [ ] T013 [US2] Wrap the launch section of `dispatch_item` in `src/robot_army/dispatch.py` so any escaping exception records a new `dispatch.error` with its detail, settles the item via `_fail`, and then **re-raises** — the re-raise is what keeps this from being the catch-all-that-continues Principle III forbids (FR-008)
+- [X] T010 [US2] In the `entry is None` branch of `dispatch_item` in `src/robot_army/dispatch.py` (around lines 757-795), re-read the session row at that moment and branch: a terminal state is not transitioned and its recorded exit becomes the failure reason; a non-terminal state takes today's path verbatim, wording included. `exited_clean` leaves the item to the ordinary end-of-session rules rather than failing it
+- [X] T011 [US2] In the same branch, call `_detect_session_id_mismatch` only when nothing was recorded — with a recorded exit the question is answered and the probe would hunt a rival session that cannot exist (contract C4)
+- [X] T012 [US2] Extend the `dispatch.unconfirmed` audit detail in `src/robot_army/dispatch.py` with the session state observed at that moment and which outcome was taken, so the log distinguishes "never appeared" from "already exited" (FR-010)
+- [X] T013 [US2] Wrap the launch section of `dispatch_item` in `src/robot_army/dispatch.py` so any escaping exception records a new `dispatch.error` with its detail, settles the item via `_fail`, and then **re-raises** — the re-raise is what keeps this from being the catch-all-that-continues Principle III forbids (FR-008)
 
 ### Verification for User Story 2
 
-- [ ] T014 [US2] Confirm `src/robot_army/states.py` is untouched — in particular that no `EXITED_* → LOST` edge was added to `SESSION_TRANSITIONS`, which would make the contradiction legal instead of resolving it and would overwrite a known exit status with "lost" ([research.md](./research.md) R3)
+- [X] T014 [US2] Confirm `src/robot_army/states.py` is untouched — in particular that no `EXITED_* → LOST` edge was added to `SESSION_TRANSITIONS`, which would make the contradiction legal instead of resolving it and would overwrite a known exit status with "lost" ([research.md](./research.md) R3)
 
 **Checkpoint**: no launch failure, of any cause, leaves an item in `dispatching`.
 
@@ -132,13 +132,13 @@ check before T004 is a valid and useful demonstration that it has teeth — it m
 
 ### Implementation for User Story 3
 
-- [ ] T015 [US3] Register a `requires_worker` marker in `pyproject.toml` under `[tool.pytest.ini_options] markers`, alongside the existing `requires_git`, described as "test shells out to the real worker binary"
-- [ ] T016 [US3] Add the real-binary check to `tests/unit/test_launch_shapes.py`: parametrise the 24 shapes (6 permission modes × restoring/not × model set/unset), probe each with `printf '' | <binary> -p <shape flags>`, and assert the expected sentinel from [contracts/worker-launch-shapes.md](./contracts/worker-launch-shapes.md) rather than the exit status, which cannot discriminate. Mark `requires_worker` and `skipif(shutil.which(binary) is None, ...)`, following the `tests/integration/test_spool_recovery.py` precedent. The probe must not dispatch work, create a worktree, or leave a session behind (FR-016)
+- [X] T015 [US3] Register a `requires_worker` marker in `pyproject.toml` under `[tool.pytest.ini_options] markers`, alongside the existing `requires_git`, described as "test shells out to the real worker binary"
+- [X] T016 [US3] Add the real-binary check to `tests/unit/test_launch_shapes.py`: parametrise the 24 shapes (6 permission modes × restoring/not × model set/unset), probe each with `printf '' | <binary> -p <shape flags>`, and assert the expected sentinel from [contracts/worker-launch-shapes.md](./contracts/worker-launch-shapes.md) rather than the exit status, which cannot discriminate. Mark `requires_worker` and `skipif(shutil.which(binary) is None, ...)`, following the `tests/integration/test_spool_recovery.py` precedent. The probe must not dispatch work, create a worktree, or leave a session behind (FR-016)
 
 ### Verification for User Story 3
 
-- [ ] T017 [US3] Prove the check fails when it should: temporarily remove `--fork-session` from `src/robot_army/dispatch.py`, run `uv run pytest -m requires_worker`, confirm it fails naming the shape and the binary's own complaint, then restore. A check that cannot be made to fail proves nothing — which is the entire lesson of this feature
-- [ ] T018 [US3] Prove the skip path: run `PATH=/usr/bin:/bin uv run pytest -m requires_worker -v` and confirm the result is **skipped with a reason**, never passed (FR-015)
+- [X] T017 [US3] Prove the check fails when it should: temporarily remove `--fork-session` from `src/robot_army/dispatch.py`, run `uv run pytest -m requires_worker`, confirm it fails naming the shape and the binary's own complaint, then restore. A check that cannot be made to fail proves nothing — which is the entire lesson of this feature
+- [X] T018 [US3] Prove the skip path: run `PATH=/usr/bin:/bin uv run pytest -m requires_worker -v` and confirm the result is **skipped with a reason**, never passed (FR-015)
 
 **Checkpoint**: all three stories independently functional.
 
@@ -146,10 +146,10 @@ check before T004 is a valid and useful demonstration that it has teeth — it m
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T019 Run `uv run pytest` and `uv run ruff check .` and confirm the whole suite passes — the constitution's bar for a feature being complete — with no pre-existing expectation edited to accommodate this change
-- [ ] T020 [P] Add a short section to `docs/logging.md` documenting the new `dispatch.error` record and the extended `dispatch.unconfirmed` and `dispatch.confirmed` details, following the per-milestone convention already used by "The milestone 004 actions" table
-- [ ] T021 Walk [quickstart.md](./quickstart.md) step 3 by hand against a scratch `XDG_STATE_HOME`: a fast-exiting launch ends `failed` with the exit named, the session keeps `exited_error`, and no `IllegalTransition` appears in `robot-army log`
-- [ ] T022 Walk [quickstart.md](./quickstart.md) step 4 end to end with a real daemon and a genuinely interrupted item — the phone round that found this. Include the case the spec calls out: a resume whose stored conversation is gone must land in `failed` inside the confirmation window, not sit in `dispatching`. **Ask the resumed worker what the previous one was doing**; a resume that starts an empty conversation is a failure even when every state transition looks right
+- [X] T019 Run `uv run pytest` and `uv run ruff check .` and confirm the whole suite passes — the constitution's bar for a feature being complete — with no pre-existing expectation edited to accommodate this change
+- [X] T020 [P] Add a short section to `docs/logging.md` documenting the new `dispatch.error` record and the extended `dispatch.unconfirmed` and `dispatch.confirmed` details, following the per-milestone convention already used by "The milestone 004 actions" table
+- [X] T021 Walk [quickstart.md](./quickstart.md) step 3 by hand against a scratch `XDG_STATE_HOME`: a fast-exiting launch ends `failed` with the exit named, the session keeps `exited_error`, and no `IllegalTransition` appears in `robot-army log`
+- [ ] T022 **(left for the maintainer --- needs the real daemon and a genuinely interrupted item on this machine; see the completion report)** Walk [quickstart.md](./quickstart.md) step 4 end to end with a real daemon and a genuinely interrupted item — the phone round that found this. Include the case the spec calls out: a resume whose stored conversation is gone must land in `failed` inside the confirmation window, not sit in `dispatching`. **Ask the resumed worker what the previous one was doing**; a resume that starts an empty conversation is a failure even when every state transition looks right
 - [ ] T023 Commit as atomic changes whose messages say why — the rejected flag combination, the confirmation race, the verification gap are three separate reasons — then push the branch and open a pull request referencing issue #35
 
 ---

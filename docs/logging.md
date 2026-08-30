@@ -420,6 +420,23 @@ Paging reads daily files newest-first and stops the moment the page is full, so 
 bounded in time and memory against a log of any size rather than proportional to total
 history.
 
+## The milestone 013 actions
+
+One new action, and two records that say more than they did. All three exist to answer the
+same question: *the item said `dispatching` for fifteen minutes and then failed — what
+actually happened, and when did we know?*
+
+| Action | When | Notable detail |
+|--------|------|----------------|
+| `dispatch.error` | An exception escaped the launch | The exception, and that the item was settled before it was re-raised. The item is moved out of `dispatching` at that moment rather than being left for the age reaper |
+| `dispatch.unconfirmed` | **Changed** — as before, when the confirmation window elapses | Gains `session_state` and `outcome`. `outcome` is `lost` when the session recorded nothing, and `already_exited` when it had already reported its own ending from the daemon's process while dispatch was still waiting |
+| `dispatch.confirmed` | **Changed** — as before, on a confirmed launch | Gains `resumed_from` on a resume, naming the session whose context this attempt restored. It is inside `launch_argv` too, but that is the whole nested wrapper argv with the prompt body in it |
+
+`outcome` is the load-bearing one. "No session ever appeared" and "the session started, failed
+and told us so" are different failures needing different next steps, and before this they read
+identically in the log — when the second one appeared at all, which it did not: the
+contradiction it caused escaped as an unhandled error and the item was never failed.
+
 ## Reconstructing an item's history
 
 ```bash

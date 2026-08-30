@@ -22,8 +22,23 @@ Confirmation elapsed:
 |---|---|---|---|
 | `starting` / `running` | → `lost` | → `failed` | "launch was not confirmed within Ns…" (today's wording) |
 | `exited_error` | untouched | → `failed` | names that the worker exited and with what status |
-| `exited_clean` | untouched | left to the ordinary end-of-session rules | — |
+| `exited_clean` | untouched | → `failed` | names the clean exit, and that it came before confirmation |
 | `lost` | untouched | → `failed` | the reason already recorded |
+
+**Every terminal case fails the item, whatever the exit code says in isolation.** An earlier
+draft of this contract sent a clean exit to "the ordinary end-of-session rules" instead. That
+was wrong twice, and implementation found it:
+
+- `spool.apply_record` settles a work item only when it is `active`. During a launch the item
+  is `dispatching`, so those rules have already declined to act by the time confirmation
+  elapses. Leaving the item to them leaves it to nobody, and it wedges exactly as before.
+- `WORK_ITEM_TRANSITIONS` allows only `dispatching → active` and `dispatching → failed`, so
+  `classify_exit`'s usual targets — `awaiting_review` for a clean exit, `interrupted` for a
+  signalled one — are not reachable from here at all.
+
+And the outcome would be untrue even if it were reachable: a worker that ended before it ever
+registered did not do the work, so putting the item in the review queue would be a lie the
+maintainer acts on. The exit code still goes in the reason, because it is what says *why*.
 
 ## Guarantees
 

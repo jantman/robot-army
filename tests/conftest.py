@@ -520,8 +520,17 @@ class StubSessionHost:
         survives_display_death=True, reattachable=True, multi_viewer=True
     )
 
-    def __init__(self, *, confirm: bool = True) -> None:
+    def __init__(
+        self, *, confirm: bool = True, on_confirm: Any = None
+    ) -> None:
         self.confirm_result = confirm
+        #: Called with the session id while ``confirm_session`` is in flight, before it
+        #: answers. This is the only seam in the suite for the cross-process race that
+        #: milestone 013 fixes: in production the daemon drains the exit spool from its
+        #: own process while dispatch sits in this call, so by the time confirmation
+        #: answers, the session may already have recorded its own ending. A test that
+        #: applied the exit *before* or *after* the call would not reproduce it.
+        self.on_confirm = on_confirm
         self.spawned: list[tuple[str, list[str], str]] = []
         self.terminated: list[tuple[str, str | None]] = []
         self.alive: set[str] = set()
@@ -535,6 +544,8 @@ class StubSessionHost:
         return HostHandle(socket_path=socket_path, argv=tuple(argv))
 
     def confirm_session(self, session_id: str, timeout_seconds: float, **_: Any) -> Any:
+        if self.on_confirm is not None:
+            self.on_confirm(session_id)
         if not self.confirm_result:
             return None
         from robot_army.sessions import RegistryEntry

@@ -72,11 +72,16 @@ selected by re-reading the session row that the daemon may have updated from ano
 |---|---|---|---|
 | `starting` / `running` (nothing recorded) | → `lost` | → `failed` | "was not confirmed within Ns…" (unchanged, FR-006) |
 | `exited_error` (already recorded) | **none** — the recorded exit stands | → `failed` | names the exit status (FR-005, FR-007) |
-| `exited_clean` (already recorded) | **none** | resolved by the ordinary end-of-session rules | — |
+| `exited_clean` (already recorded) | **none** | → `failed` | names the clean exit and that it preceded confirmation |
 | `lost` (already recorded) | **none** | → `failed` | the recorded reason |
 
 The read must happen inside the confirmation branch, not be carried from before the launch: the
 whole point is that another process may have written since.
+
+Every terminal case fails the item. `dispatching` has only two legal exits — `active` and
+`failed` — so `classify_exit`'s `awaiting_review` and `interrupted` targets are unreachable
+here, and they would be untrue anyway: a session that ended before it registered did not do
+the work. See [contracts/confirmation-outcome.md](./contracts/confirmation-outcome.md).
 
 ### State-machine consequences
 

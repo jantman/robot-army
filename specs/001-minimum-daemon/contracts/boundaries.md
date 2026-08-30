@@ -24,6 +24,37 @@ which is the main thing you want to check.
 arguments, and return a **structurally valid** fake handle. Returning `None` or raising would let the
 simulated path diverge from the real one at exactly the point the requirement exists to prevent.
 
+**An outward-facing call's exit status is not evidence of its effect.** This project has now been
+caught by it twice, in both directions:
+
+- `kitty @ launch` returns `0` and a valid window id for a session that **never started** (M0 F16).
+  FR-025 exists because of it: an item does not reach `active` on the strength of the launch call
+  returning success, only on an independent observation that a session carrying the id we generated
+  exists.
+- `systemctl --user stop` returns `0` in about four milliseconds for a unit that is **already
+  inactive**, killing nothing, while a live process remains in its cgroup (issue #34). Termination
+  had no equivalent confirmation, so `cancel` reported a stopped session that was still running,
+  the work item was marked `interrupted`, and — because reconciliation's session sweep visits only
+  `active` items — nothing ever looked at it again.
+
+So: **any boundary operation whose effect is observable MUST confirm that effect independently
+before reporting it.** Not "check the return code and log it": observe the world and report what was
+observed. Three corollaries, each of which was a real bug before it was a rule:
+
+1. **Identity, not just existence.** Confirm against `pid` *and* `proc_start` together
+   (`procinfo.is_alive`, FR-038). A recycled pid is not a live session, and must never be signalled
+   as one. Never identify a process by its command line (FR-039).
+2. **Bounded.** A confirmation that does not complete within its bound reports "not confirmed",
+   never success. An unbounded confirmation is a hang with better intentions.
+3. **A contradicted success is recorded as such.** When a call reports success and the observation
+   disagrees, the record carries both, and the operation escalates rather than returning. Recording
+   only the success is how the first four milliseconds of issue #34 looked entirely healthy in the
+   log.
+
+The confirmed shape is not free, and it is not required of operations whose effect cannot be
+observed — a comment posted to an issue, say, where the API response *is* the observation. The test
+is whether the world can be asked a second, independent question. Where it can, ask it.
+
 ---
 
 ## `IssueSource`
@@ -121,7 +152,8 @@ is separate from `Display`.
 SessionHost:
     spawn(cwd, argv, socket_path) -> HostHandle
     is_alive(handle) -> bool
-    terminate(handle) -> None
+    terminate(handle, scope=None, *, expected_start=None, proc_root=None)
+        -> TerminationOutcome(confirmed, method, escalated, detail)
     attach_command(handle) -> [str]
 
     capabilities: survives_display_death, reattachable, multi_viewer
@@ -141,6 +173,15 @@ decoration.
 - `terminate` uses the recorded systemd scope (`systemctl --user stop <scope>`), read from
   `/proc/<pid>/cgroup` at confirmation and treated as an **opaque handle** — never recomputed
   (M0 F18). Falls back to signalling the process group, logging that the degraded path was taken.
+- **`terminate` confirms; it does not trust the stop command's exit status.** `systemctl --user
+  stop` exits 0 for a unit that is already inactive, killing nothing, which is how issue #34
+  produced a session reported stopped and still running twenty-six minutes later. Every rung is
+  followed by an independent `procinfo.is_alive(pid, proc_start)` observation under a bound, and
+  a rung that reports success while the process survives escalates to the next rung rather than
+  returning. `TerminationOutcome.confirmed` is the only thing a caller may change state on; a
+  `BoundaryError` is raised only when there is neither a recorded scope nor a recorded pid.
+  Full cases and caller obligations:
+  [014 contracts/termination-outcome.md](../../014-confirm-session-termination/contracts/termination-outcome.md).
 - `is_alive` **probes the socket**; it never trusts the file's existence. A dead dtach socket fails
   in ~7 ms, so there is no hang risk, and stale sockets do not clean themselves up.
 

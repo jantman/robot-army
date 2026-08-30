@@ -56,7 +56,13 @@ from robot_army.config import Config
 from robot_army.effects import Boundaries, EffectLevel, wire
 from robot_army.migrations import SCHEMA_VERSION
 from robot_army.models import ANOMALY_KINDS
-from robot_army.states import SessionState, WorkItemState, transition_work_item
+from robot_army.states import (
+    TERMINAL_SESSION_STATES,
+    SessionState,
+    WorkItemState,
+    transition_session,
+    transition_work_item,
+)
 
 # Exit codes, per contracts/cli.md.
 EXIT_OK = 0
@@ -1535,13 +1541,70 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
     )
     result = Result()
     try:
-        ctx.boundaries.session_host.terminate(handle, session.scope)
+        # ``proc_start`` is not optional here. Without it the liveness check degrades to a
+        # bare "does /proc/<pid> exist", which is the PID-reuse bug wearing a different hat
+        # (FR-038): a recycled pid reads as a live session, and gets signalled.
+        outcome = ctx.boundaries.session_host.terminate(
+            handle, session.scope, expected_start=session.proc_start
+        )
     except BoundaryError as exc:
         return Result(code=EXIT_FAILED, lines=[f"could not stop the session: {exc}"])
 
+    result.data = {
+        "item_id": item_id,
+        "session_id": session.session_id,
+        "scope": session.scope,
+        "confirmed": outcome.confirmed,
+        "method": outcome.method,
+        "escalated": outcome.escalated,
+    }
+
+    if not outcome.confirmed:
+        # Nothing is settled, and that is the point. An item marked `interrupted` while its
+        # worker is still running is visited by no sweep the system has — reconciliation
+        # walks only `active` items — so it would run unsupervised until the machine was
+        # rebooted, which is exactly what issue #34 observed. Leaving it `active` keeps it
+        # in front of the machinery that will notice.
+        attach = " ".join(ctx.boundaries.session_host.attach_command(handle))
+        return Result(
+            code=EXIT_FAILED,
+            data=result.data,
+            lines=[
+                f"could not confirm session {session.session_id} stopped: "
+                f"pid {session.pid} is still running after "
+                f"{'the systemd scope stop and ' if session.scope else ''}"
+                "signalling the process group. "
+                f"item {item_id} is unchanged. attach with: {attach}",
+            ],
+        )
+
     # The item becomes `interrupted` and the worktree is left untouched: cancelling is
     # about the process, not about the work.
+    #
+    # Re-read before settling. The daemon drains the exit spool in its own process while
+    # this runs, so a worker killed by our own SIGTERM can record its ending before we get
+    # here; forcing the transition then raises IllegalTransition and reports a perfectly
+    # successful cancel as a failure. `dispatch.py` asks the same question at the
+    # equivalent moment, for the same reason (milestone 013, 014 research R5).
+    settled = db.get_session(ctx.conn, session.session_id)
+    already_ended = settled is not None and settled.state in TERMINAL_SESSION_STATES
+    current = db.get_work_item(ctx.conn, item_id)
+    already_moved = current is None or current.state is not WorkItemState.ACTIVE
+    if already_ended or already_moved:
+        result.data["settled_by"] = "exit record"
+        return result.say(
+            f"session {session.session_id} is gone; it had already recorded its own ending, "
+            f"so item {item_id} was left as the exit record settled it"
+        )
+
     with db.transaction(ctx.conn):
+        transition_session(
+            ctx.conn,
+            ctx.audit,
+            session_row_id=session.id,
+            target=SessionState.LOST,
+            reason=f"stopped by cancel ({outcome.method}); process confirmed gone",
+        )
         transition_work_item(
             ctx.conn,
             ctx.audit,
@@ -1549,11 +1612,31 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
             target=WorkItemState.INTERRUPTED,
             reason=f"cancelled by the maintainer (session {session.session_id})",
         )
-    result.data = {"item_id": item_id, "session_id": session.session_id, "scope": session.scope}
+
+    tail = f"item {item_id} is now interrupted and its worktree is untouched"
+    if outcome.method == "already_gone":
+        return result.say(
+            f"session {session.session_id} had already ended: nothing left to stop; {tail}"
+        )
+    if outcome.escalated:
+        # The sentence that says this build caught the bug. Stating only "stopped via the
+        # process group" would hide the fact that the scope claimed to have done it.
+        return result.say(
+            f"systemd scope {session.scope} reported success but the session was still "
+            f"running; stopped session {session.session_id} by signalling the process "
+            f"group; confirmed gone. {tail}"
+        )
+    # Name the path that actually did it. The scope is named only when there is one — a
+    # method of ``systemd_scope`` with no recorded scope is a contradiction no real host
+    # produces, and printing a scope of ``None`` would be its own small lie. A simulated
+    # stop says so rather than borrowing the wording of a mechanism it never used.
+    via = {
+        "systemd_scope": f"systemd scope {session.scope}" if session.scope else "the systemd scope",
+        "process_group_signal": "the process group",
+        "simulated": "a simulated stop",
+    }.get(outcome.method, outcome.method)
     return result.say(
-        f"stopped session {session.session_id} via "
-        f"{'systemd scope ' + session.scope if session.scope else 'the process group'}; "
-        f"item {item_id} is now interrupted and its worktree is untouched"
+        f"stopped session {session.session_id} via {via}; confirmed gone. {tail}"
     )
 
 

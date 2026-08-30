@@ -449,6 +449,32 @@ holding the slot?*
 | `reconcile.pass` | **Changed** — as before, once per pass | Gains `reclaimed`: how many stale session rows that pass closed. Before this, a pass that reclaimed nothing and a pass that could not *see* the leaked row read identically, both as `checked 0` |
 | `orphan_session` anomaly | A live worker under a work item that is no longer running one | Existing kind, newly reachable. Carries the pid, the working directory, and the work item's state. The session row is deliberately **left open**: the slot really is taken, and reporting a count lower than the number of live workers would oversubscribe the very quota the cap protects |
 
+## The issue #33 actions
+
+No new action and no new anomaly kind. Two counters, and one anomaly that could not
+previously be raised — all answering the same question: *`status` says the session is
+running, but its pid belongs to nothing. Why did reconciliation not notice?*
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `state.session` | **Changed** — as before, on every session transition | A real session is now closed as `lost` at *every* effect level whose host is real, not only at `live`. Previously the sweep was skipped whenever the row was flagged simulated, which is true at `no-remote` — where the process is real — so a dead worker was never noticed there |
+| `state.session` | A superseded attempt whose process is gone | `running` → `lost`, with a `reason` naming which attempt superseded which. That is the difference between "this session died" and "this session was replaced and then died", and the log is the only place it survives |
+| `reconcile.pass` | **Changed** — as before, once per pass | Gains `skipped_never_real` and `superseded`. The first is the important one: the reported defect looked like a clean pass, `checked: 2, interrupted: 0`, with nothing saying that one of those sessions had not been examined at all |
+| `orphan_session` anomaly | A live worker from an attempt its item has already replaced | Existing kind, **newly reachable**. Carries the pid, the working directory, and both `attempt` and `current_attempt`. The row is deliberately **left open**, for the same reason milestone 015 leaves its own: reporting fewer running sessions than exist would oversubscribe the quota the cap protects |
+
+`dry_run` on a session row means "the effect level was not `live`". The question the liveness
+sweep needs answered is "did this session ever have a process", and those two disagree at
+exactly one level. Reconciliation now reads the recorded pid instead, which is written from
+the session-host boundary and is `0` for a simulated host — so the record answers the question
+without anyone having to remember to ask it correctly, and without reconciliation learning what
+an effect level is.
+
+**One gap in the record is accepted and not closed here.** When the session registry cannot be
+observed at all — the directory is missing, or its format is unrecognised — reconciliation reads
+that as every session being dead, and nothing distinguishes "observed dead" from "could not
+observe". This is pre-existing at `live`; issue #33 makes the two levels behave alike rather than
+introducing it. Tracked as issue #44.
+
 A session row occupies a global and a per-repository capacity slot for exactly as long as it
 is `starting` or `running`, and only the wrapper's exit record used to close it. A simulated
 session has no wrapper and no process, so that record can never arrive — which is why

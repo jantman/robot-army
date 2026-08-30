@@ -143,6 +143,25 @@ def test_an_ended_session_row_occupies_nothing(conn, config, registry, proc):
 # -- simulated sessions (FR-004, and FR-055 before it) ----------------------
 
 
+def test_a_session_reclaimed_as_lost_stops_counting(conn, config, registry, proc):
+    """Issue #33: closing a row is only worth doing if the slot actually comes back.
+
+    ``capacity`` needs no change for this -- the count follows from the session's state --
+    but that is a property worth asserting rather than assuming, because it is the whole
+    reason reconciliation closes the row instead of merely reporting it.
+    """
+    item = seed_item(conn, issue_number=1, dry_run=True)
+    seed_session(conn, item, state=str(SessionState.RUNNING), session_id="s-x", dry_run=True)
+    assert take(conn, config, registry, proc).per_repo == {"demo": 1}
+
+    conn.execute(
+        "UPDATE sessions SET state = ? WHERE session_id = 's-x'", (str(SessionState.LOST),)
+    )
+    snap = take(conn, config, registry, proc)
+    assert snap.total == 0
+    assert snap.per_repo == {}
+
+
 def test_a_simulated_session_counts_toward_both_caps(conn, config, registry, proc):
     """They burn the same subscription quota, so pretending they are free would make a
     dry run misleading about the one thing it exists to rehearse."""

@@ -43,8 +43,8 @@ reading before starting:
 **Purpose**: Establish the baseline this feature's claims are measured against. There is no
 project to initialise — the package, its dependencies and its tooling all already exist.
 
-- [ ] T001 Confirm the worktree is at `main` 15bf843 or later and that `git status` shows only the untracked `specs/20260830-133818-reconcile-session-liveness/` directory
-- [ ] T002 Record the baseline by running `uv run pytest -q` and confirming **1780 passed, 1 skipped**; any other number means the baseline moved and research.md R5's "2 failures, no more" claim must be re-measured
+- [X] T001 Confirm the worktree is at `main` 15bf843 or later and that `git status` shows only the untracked `specs/20260830-133818-reconcile-session-liveness/` directory
+- [X] T002 Record the baseline by running `uv run pytest -q` and confirming **1780 passed, 1 skipped**; any other number means the baseline moved and research.md R5's "2 failures, no more" claim must be re-measured
 
 **Checkpoint**: Baseline known. Every later claim about breakage is relative to this number.
 
@@ -58,10 +58,10 @@ correct against *current* code — so this phase can land as its own commit with
 **⚠️ CRITICAL**: No user story work begins until T003 is done, or the suite goes red mid-feature
 for reasons unrelated to the change being made.
 
-- [ ] T003 Correct the misleading fixture in `tests/unit/test_reconcile.py`: give the two `active_item(..., dry_run=True)` call sites `pid=0, proc_start=None`, the shape a simulated session actually has. Do not change either test's assertions. Verify with `uv run pytest tests/unit/test_reconcile.py -q` → 24 passed
-- [ ] T004 Add a comment at `active_item`'s definition in `tests/unit/test_reconcile.py` recording that its default `pid=4242` is a *real* session's shape, so a future `dry_run=True` caller does not silently recreate the conflation this feature removes
-- [ ] T005 Add `skipped_never_real: int = 0` and `superseded: int = 0` to `ReconcileResult` in `src/robot_army/reconcile.py`, placed after `reclaimed` to match the pass's execution order
-- [ ] T006 Add `"skipped_never_real"` and `"superseded"` to `ReconcileResult.summary()` in `src/robot_army/reconcile.py`, without renaming or reordering any existing key — `docs/logging.md` and the `--json` consumers read them by name
+- [X] T003 Correct the misleading fixture in `tests/unit/test_reconcile.py`: give the two `active_item(..., dry_run=True)` call sites `pid=0, proc_start=None`, the shape a simulated session actually has. Do not change either test's assertions. Verify with `uv run pytest tests/unit/test_reconcile.py -q` → 24 passed
+- [X] T004 Add a comment at `active_item`'s definition in `tests/unit/test_reconcile.py` recording that its default `pid=4242` is a *real* session's shape, so a future `dry_run=True` caller does not silently recreate the conflation this feature removes
+- [X] T005 Add `skipped_never_real: int = 0` and `superseded: int = 0` to `ReconcileResult` in `src/robot_army/reconcile.py`, placed after `reclaimed` to match the pass's execution order
+- [X] T006 Add `"skipped_never_real"` and `"superseded"` to `ReconcileResult.summary()` in `src/robot_army/reconcile.py`, without renaming or reordering any existing key — `docs/logging.md` and the `--json` consumers read them by name
 
 **Checkpoint**: Suite still green at 1780. Counters exist and read zero. Nothing has changed
 behaviour yet.
@@ -78,18 +78,18 @@ confirm the item is `interrupted`, the session `lost`, and the capacity slot fre
 
 ### Implementation for User Story 1
 
-- [ ] T007 [US1] Replace the `if session.dry_run:` skip in the active-item sweep of `src/robot_army/reconcile.py` with a skip on the absent process identifier (`if not session.pid:`), incrementing `result.skipped_never_real` at the skip ([C1](./contracts/liveness-decision.md))
-- [ ] T008 [US1] Rewrite that skip's comment in `src/robot_army/reconcile.py` to state the rule and the reason: a session with no process identifier never had a host to be alive, `NULL` and `0` mean the same thing here, and the effect level is deliberately not consulted because T147 forbids it
-- [ ] T009 [US1] Verify the change is confined correctly by running `uv run pytest tests/unit/test_effects.py -q` — T147 asserts no module outside the allow-list names `EffectLevel`, and `reconcile.py` is not exempt (FR-003)
+- [X] T007 [US1] Replace the `if session.dry_run:` skip in the active-item sweep of `src/robot_army/reconcile.py` with a skip on the absent process identifier (`if not session.pid:`), incrementing `result.skipped_never_real` at the skip ([C1](./contracts/liveness-decision.md))
+- [X] T008 [US1] Rewrite that skip's comment in `src/robot_army/reconcile.py` to state the rule and the reason: a session with no process identifier never had a host to be alive, `NULL` and `0` mean the same thing here, and the effect level is deliberately not consulted because T147 forbids it
+- [X] T009 [US1] Verify the change is confined correctly by running `uv run pytest tests/unit/test_effects.py -q` — T147 asserts no module outside the allow-list names `EffectLevel`, and `reconcile.py` is not exempt (FR-003)
 
 ### Tests for User Story 1
 
-- [ ] T010 [P] [US1] Create `tests/unit/test_session_liveness.py` with a parametrised case covering all four record shapes from [data-model.md](./data-model.md): `(dry_run=0, pid=real)`, `(dry_run=1, pid=real)`, `(dry_run=1, pid=0)`, `(dry_run=1, pid=NULL)` — asserting the item state and session state each produces against an empty registry and empty `/proc`
-- [ ] T011 [P] [US1] In `tests/unit/test_session_liveness.py`, assert the `no-remote` shape specifically: an `active` item with `dry_run=1` and a real pid whose process is gone becomes `interrupted` with its session `lost`. This is the case nothing covered before, which is why the defect shipped (FR-005)
-- [ ] T012 [P] [US1] In `tests/unit/test_session_liveness.py`, assert `live` behaviour is byte-for-byte what it was: same inputs, same outcome, same counters (FR-013)
-- [ ] T013 [P] [US1] In `tests/unit/test_session_liveness.py`, assert the exit-record precedence — a session already recording `exited_clean` or `exited_error` is left alone even though no process is found ([C2](./contracts/liveness-decision.md) ordering)
-- [ ] T014 [P] [US1] In `tests/unit/test_session_liveness.py`, assert a pre-existing row is classified with no migration step: a row written before this change carries the same `pid` it always did and is handled correctly on the first pass (FR-008)
-- [ ] T015 [US1] Add an integration case to `tests/integration/test_reconcile_pass.py` (create the module if absent) walking a full pass: `no-remote` item dispatched, worker killed, one `reconcile()` call, asserting item, session, and the released capacity slot together (FR-007)
+- [X] T010 [P] [US1] Create `tests/unit/test_session_liveness.py` with a parametrised case covering all four record shapes from [data-model.md](./data-model.md): `(dry_run=0, pid=real)`, `(dry_run=1, pid=real)`, `(dry_run=1, pid=0)`, `(dry_run=1, pid=NULL)` — asserting the item state and session state each produces against an empty registry and empty `/proc`
+- [X] T011 [P] [US1] In `tests/unit/test_session_liveness.py`, assert the `no-remote` shape specifically: an `active` item with `dry_run=1` and a real pid whose process is gone becomes `interrupted` with its session `lost`. This is the case nothing covered before, which is why the defect shipped (FR-005)
+- [X] T012 [P] [US1] In `tests/unit/test_session_liveness.py`, assert `live` behaviour is byte-for-byte what it was: same inputs, same outcome, same counters (FR-013)
+- [X] T013 [P] [US1] In `tests/unit/test_session_liveness.py`, assert the exit-record precedence — a session already recording `exited_clean` or `exited_error` is left alone even though no process is found ([C2](./contracts/liveness-decision.md) ordering)
+- [X] T014 [P] [US1] In `tests/unit/test_session_liveness.py`, assert a pre-existing row is classified with no migration step: a row written before this change carries the same `pid` it always did and is handled correctly on the first pass (FR-008)
+- [X] T015 [US1] Add an integration case to `tests/integration/test_reconcile_pass.py` (create the module if absent) walking a full pass: `no-remote` item dispatched, worker killed, one `reconcile()` call, asserting item, session, and the released capacity slot together (FR-007)
 
 **Checkpoint**: US1 complete and independently testable. This is the MVP — issue #33's reported
 defect is fixed. Expect **1780 + new cases passed, 0 failed**; if the two `test_reconcile.py`
@@ -113,10 +113,10 @@ stay `active` with sessions untouched.
 
 ### Tests for User Story 2
 
-- [ ] T016 [P] [US2] In `tests/unit/test_session_liveness.py`, assert that an `active` item whose session never had a process is unchanged across **three consecutive** `reconcile()` calls — not one, because the failure this guards against is a sweep that marks everything interrupted on the *next* pass (FR-006)
-- [ ] T017 [P] [US2] In `tests/unit/test_session_liveness.py`, assert `skipped_never_real` is incremented for such a session and `interrupted` is not, so a skipped session is distinguishable from one checked and found alive (FR-009, SC-005)
-- [ ] T018 [P] [US2] In `tests/unit/test_session_liveness.py`, assert `checked` retains its existing meaning — one per `active` item visited — so the pair `checked`/`skipped_never_real` reads correctly and no existing consumer's figure changed meaning
-- [ ] T019 [US2] Verify FR-055 is still honoured end to end by confirming `tests/unit/test_reconcile.py::test_a_simulated_session_is_not_reconciled_against_proc` passes unmodified in its assertions — only its fixture shape changed, in T003
+- [X] T016 [P] [US2] In `tests/unit/test_session_liveness.py`, assert that an `active` item whose session never had a process is unchanged across **three consecutive** `reconcile()` calls — not one, because the failure this guards against is a sweep that marks everything interrupted on the *next* pass (FR-006)
+- [X] T017 [P] [US2] In `tests/unit/test_session_liveness.py`, assert `skipped_never_real` is incremented for such a session and `interrupted` is not, so a skipped session is distinguishable from one checked and found alive (FR-009, SC-005)
+- [X] T018 [P] [US2] In `tests/unit/test_session_liveness.py`, assert `checked` retains its existing meaning — one per `active` item visited — so the pair `checked`/`skipped_never_real` reads correctly and no existing consumer's figure changed meaning
+- [X] T019 [US2] Verify FR-055 is still honoured end to end by confirming `tests/unit/test_reconcile.py::test_a_simulated_session_is_not_reconciled_against_proc` passes unmodified in its assertions — only its fixture shape changed, in T003
 
 **Checkpoint**: The invariant is defended by tests that would fail loudly if the discriminator
 were ever inverted.
@@ -134,23 +134,23 @@ normally.
 
 ### Implementation for User Story 3
 
-- [ ] T020 [US3] Add `_sweep_superseded_sessions()` to `src/robot_army/reconcile.py` implementing [C3](./contracts/liveness-decision.md)'s three branches over `db.list_sessions_for_item`, skipping the item's current attempt and any record not in `starting`/`running`
-- [ ] T021 [US3] In `_sweep_superseded_sessions()` in `src/robot_army/reconcile.py`, implement the **alive** branch: add the pid to `claimed_pids`, raise an `orphan_session` anomaly carrying `pid`, `cwd`, `work_item_id` and `attempt`, and **leave the record open**. Document in the docstring that closing it would report fewer running sessions than exist, which is the only direction of capacity error that causes harm
-- [ ] T022 [US3] In `_sweep_superseded_sessions()`, implement the **dead** branch: transition the record to `lost` with a reason naming it as superseded rather than current, so the log distinguishes the two closures ([C6](./contracts/liveness-decision.md))
-- [ ] T023 [US3] In `_sweep_superseded_sessions()`, implement the **never-real** branch: a superseded record with no process identifier is left entirely alone, by the same rule as [C1](./contracts/liveness-decision.md)
-- [ ] T024 [US3] Call `_sweep_superseded_sessions()` from inside the active-item loop in `src/robot_army/reconcile.py`, before the current attempt's liveness check, accumulating into `result.superseded`. Placing it here is what satisfies [C5](./contracts/liveness-decision.md)'s ordering without any new coordination
-- [ ] T025 [US3] Confirm `_orphan_sweep` and `_sweep_stale_sessions` are untouched with `git diff -U0 src/robot_army/reconcile.py` — both must remain byte-identical, as #28 established and [C4](./contracts/liveness-decision.md) requires
+- [X] T020 [US3] Add `_sweep_superseded_sessions()` to `src/robot_army/reconcile.py` implementing [C3](./contracts/liveness-decision.md)'s three branches over `db.list_sessions_for_item`, skipping the item's current attempt and any record not in `starting`/`running`
+- [X] T021 [US3] In `_sweep_superseded_sessions()` in `src/robot_army/reconcile.py`, implement the **alive** branch: add the pid to `claimed_pids`, raise an `orphan_session` anomaly carrying `pid`, `cwd`, `work_item_id` and `attempt`, and **leave the record open**. Document in the docstring that closing it would report fewer running sessions than exist, which is the only direction of capacity error that causes harm
+- [X] T022 [US3] In `_sweep_superseded_sessions()`, implement the **dead** branch: transition the record to `lost` with a reason naming it as superseded rather than current, so the log distinguishes the two closures ([C6](./contracts/liveness-decision.md))
+- [X] T023 [US3] In `_sweep_superseded_sessions()`, implement the **never-real** branch: a superseded record with no process identifier is left entirely alone, by the same rule as [C1](./contracts/liveness-decision.md)
+- [X] T024 [US3] Call `_sweep_superseded_sessions()` from inside the active-item loop in `src/robot_army/reconcile.py`, before the current attempt's liveness check, accumulating into `result.superseded`. Placing it here is what satisfies [C5](./contracts/liveness-decision.md)'s ordering without any new coordination
+- [X] T025 [US3] Confirm `_orphan_sweep` and `_sweep_stale_sessions` are untouched with `git diff -U0 src/robot_army/reconcile.py` — both must remain byte-identical, as #28 established and [C4](./contracts/liveness-decision.md) requires
 
 ### Tests for User Story 3
 
-- [ ] T026 [P] [US3] In `tests/unit/test_session_liveness.py`, assert the live-ghost case: an `active` item with an older open session whose process is alive produces exactly one `orphan_session` anomaly naming that session, with its record still open (FR-017)
-- [ ] T027 [P] [US3] In `tests/unit/test_session_liveness.py`, assert no double report — `_orphan_sweep` contributes `orphans=0` for that worker because C3 left the record `running` (FR-019, SC-008)
-- [ ] T028 [P] [US3] In `tests/unit/test_session_liveness.py`, assert the dead-ghost case: the older record becomes `lost`, `superseded` is incremented, and the **item stays `active`** on its current attempt — a resumed item must never be interrupted by the ghost of the attempt the resume replaced (FR-018)
-- [ ] T029 [P] [US3] In `tests/unit/test_session_liveness.py`, assert simulated multi-attempt rows are untouched: two open `pid=0` records under one `active` item, `superseded=0`, both still `running` (FR-006 under US3's new code path)
-- [ ] T030 [P] [US3] In `tests/unit/test_session_liveness.py`, assert idempotency: a second `reconcile()` over the same live ghost produces no second anomaly, the open-anomaly index absorbing re-detection
-- [ ] T031 [P] [US3] In `tests/unit/test_session_liveness.py`, assert the single-session case is unchanged — an `active` item with exactly one open record behaves identically to before this phase (FR-011's non-regression half)
-- [ ] T032 [US3] Add an integration case to `tests/integration/test_reconcile_pass.py` covering a resumed item whose first worker survived, asserting the anomaly, the untouched record, and the item's state from its current attempt alone
-- [ ] T033 [US3] Assert the capacity consequence in `tests/unit/test_capacity.py`: a superseded record closed as `lost` stops counting toward both the global and per-repository caps (FR-007)
+- [X] T026 [P] [US3] In `tests/unit/test_session_liveness.py`, assert the live-ghost case: an `active` item with an older open session whose process is alive produces exactly one `orphan_session` anomaly naming that session, with its record still open (FR-017)
+- [X] T027 [P] [US3] In `tests/unit/test_session_liveness.py`, assert no double report — `_orphan_sweep` contributes `orphans=0` for that worker because C3 left the record `running` (FR-019, SC-008)
+- [X] T028 [P] [US3] In `tests/unit/test_session_liveness.py`, assert the dead-ghost case: the older record becomes `lost`, `superseded` is incremented, and the **item stays `active`** on its current attempt — a resumed item must never be interrupted by the ghost of the attempt the resume replaced (FR-018)
+- [X] T029 [P] [US3] In `tests/unit/test_session_liveness.py`, assert simulated multi-attempt rows are untouched: two open `pid=0` records under one `active` item, `superseded=0`, both still `running` (FR-006 under US3's new code path)
+- [X] T030 [P] [US3] In `tests/unit/test_session_liveness.py`, assert idempotency: a second `reconcile()` over the same live ghost produces no second anomaly, the open-anomaly index absorbing re-detection
+- [X] T031 [P] [US3] In `tests/unit/test_session_liveness.py`, assert the single-session case is unchanged — an `active` item with exactly one open record behaves identically to before this phase (FR-011's non-regression half)
+- [X] T032 [US3] Add an integration case to `tests/integration/test_reconcile_pass.py` covering a resumed item whose first worker survived, asserting the anomaly, the untouched record, and the item's state from its current attempt alone
+- [X] T033 [US3] Assert the capacity consequence in `tests/unit/test_capacity.py`: a superseded record closed as `lost` stops counting toward both the global and per-repository caps (FR-007)
 
 **Checkpoint**: All behavioural stories complete. Both blind spots closed.
 
@@ -167,9 +167,9 @@ one observed.
 > **This phase needs a real worker** and cannot be settled by the suite. It is the one part of
 > this feature CI cannot close.
 
-- [ ] T034 [US4] Run the terminal-death case from `specs/001-minimum-daemon/quickstart.md` scenario 4 against a real session at `no-remote`: `kill -9` the wrapper, then check with `ps` whether the worker actually survived, and record the observed result
-- [ ] T035 [US4] Update `specs/001-minimum-daemon/quickstart.md` scenario 4 to state what T034 observed. If the worker did **not** survive, say so plainly and point the orphan case at this feature's scenario 3, which produces one by a route that works; if it **did** survive, confirm the `orphan_session` anomaly appears and note that reconciliation now reaches this at `no-remote` too (FR-014)
-- [ ] T036 [US4] Append T034's result to issue #1's verification round, since that is where the original observation was recorded and where the contradiction was found
+- [X] T034 [US4] *(partial — mechanism only; see completion notes)* Run the terminal-death case from `specs/001-minimum-daemon/quickstart.md` scenario 4 against a real session at `no-remote`: `kill -9` the wrapper, then check with `ps` whether the worker actually survived, and record the observed result
+- [X] T035 [US4] Update `specs/001-minimum-daemon/quickstart.md` scenario 4 to state what T034 observed. If the worker did **not** survive, say so plainly and point the orphan case at this feature's scenario 3, which produces one by a route that works; if it **did** survive, confirm the `orphan_session` anomaly appears and note that reconciliation now reaches this at `no-remote` too (FR-014)
+- [X] T036 [US4] Append T034's result to issue #1's verification round, since that is where the original observation was recorded and where the contradiction was found
 
 **Checkpoint**: The acceptance test for stories 1 and 3 can distinguish success from failure.
 
@@ -177,13 +177,13 @@ one observed.
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T037 [P] Update `docs/logging.md` around line 449 to record the two new `reconcile.pass` figures and the newly-reachable `orphan_session` case, in the same table and style #28 used for `reclaimed`
-- [ ] T038 [P] Update `docs/state.md` around line 428 with the interruption behaviour of the superseded sweep, alongside the existing stale-session-sweep rows
-- [ ] T039 [P] Record in `docs/state.md` the accepted gap this feature enumerates: reconciliation reads an unobservable registry as death, tracked as issue #44, with a pointer to this feature's plan for the reasoning
-- [ ] T040 Run `uv run ruff check src/ tests/` and confirm clean
-- [ ] T041 Run the full suite and confirm **no failures** and a total of 1780 plus the cases added here; a failure in `tests/unit/test_reconcile.py` means T003 was skipped or reverted
-- [ ] T042 Walk quickstart scenarios 1–4 from [quickstart.md](./quickstart.md) by hand against a real database, since a green suite is not a substitute for walking them once
-- [ ] T043 Re-check the plan's Constitution Check against what was actually built, and record any elaboration that crept in beyond the four already rejected in [plan.md](./plan.md)
+- [X] T037 [P] Update `docs/logging.md` around line 449 to record the two new `reconcile.pass` figures and the newly-reachable `orphan_session` case, in the same table and style #28 used for `reclaimed`
+- [X] T038 [P] Update `docs/state.md` around line 428 with the interruption behaviour of the superseded sweep, alongside the existing stale-session-sweep rows
+- [X] T039 [P] Record in `docs/state.md` the accepted gap this feature enumerates: reconciliation reads an unobservable registry as death, tracked as issue #44, with a pointer to this feature's plan for the reasoning
+- [X] T040 Run `uv run ruff check src/ tests/` and confirm clean
+- [X] T041 Run the full suite and confirm **no failures** and a total of 1780 plus the cases added here; a failure in `tests/unit/test_reconcile.py` means T003 was skipped or reverted
+- [X] T042 *(partial — scenarios 1, 2, 4 walked; 3 covered by tests only, see notes)* Walk quickstart scenarios 1–4 from [quickstart.md](./quickstart.md) by hand against a real database, since a green suite is not a substitute for walking them once
+- [X] T043 Re-check the plan's Constitution Check against what was actually built, and record any elaboration that crept in beyond the four already rejected in [plan.md](./plan.md)
 
 ---
 
@@ -265,3 +265,35 @@ which reads like a bug unless the capacity reasoning is in the message.
   belongs in the code
 - Issue #44 is deliberately **not** in this list. It was split out by decision D2 and fixing it
   here would change `live` behaviour, which FR-013 forbids
+
+---
+
+## Completion notes
+
+All 43 tasks done. Two were completed only in part, and both are recorded here rather than
+quietly ticked.
+
+**T034 — the terminal-death rehearsal.** The mechanism was measured in isolation: a `kill -9` of
+a dtach master on this machine takes its child with it, and the socket file survives because
+SIGKILL leaves dtach no chance to clean up. That corroborates the observation issue #33 recorded.
+It is *not* a full scenario-4 run: the probe used `sleep` under dtach, not `claude` under
+`robot-army-session-wrapper`, and the real arrangement has the wrapper in between. The only live
+session on this machine at the time belonged to another in-flight rehearsal and was not mine to
+kill. Recorded on issue #1 with the same caveat.
+
+**T042 — walking the quickstart.** Scenarios 1, 2 and 4 were walked at CLI level against a real
+SQLite database: a dead `no-remote` session went `active` → `interrupted` with its row `lost` and
+its capacity slot returned; a simulated-host item stayed `active` and quiet across three
+consecutive passes, reporting `skipped_never_real: 1` each time. Scenario 3 was **not** walked at
+CLI level: the session registry lives at `~/.claude/sessions/`, which is shared with the daemon
+and live session running on this machine, and planting a synthetic entry there could perturb the
+capacity accounting of work that is not this feature's. It is covered by unit and integration
+tests, which control that directory properly.
+
+**One discrepancy from the plan**, recorded per T043: the plan estimated "roughly forty lines of
+production code" and the diff is +130/-5 in `reconcile.py`. The executable part is close to the
+estimate; the remainder is the docstring and comments explaining why the middle branch declines
+to close a row it can see is alive, which is the part most likely to be "simplified" later by
+someone who has not read this feature. Every other Constitution Check claim was re-verified
+mechanically: no schema change, no migration, no new dependency, no new anomaly kind, and
+`states.py`, `capacity.py` and `db.py` all byte-identical.

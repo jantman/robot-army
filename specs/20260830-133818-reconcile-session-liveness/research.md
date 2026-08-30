@@ -151,6 +151,30 @@ change to the `dry_run` skip reaches it, because the sweep never loads that row 
 
 **Decision required** — see "Open decisions" below. US3 cannot be planned as written.
 
+### R7a — correction, made during implementation
+
+The measurement above reads the `orphans` counter, which counts only `_orphan_sweep`'s own
+findings. It does **not** check the anomalies table, and that omission made the gap look wider
+than it is. Re-measured properly, with the anomalies table inspected:
+
+```
+  current attempt ALIVE (item stays `active`)  -> anomalies=[]                        <-- the gap
+  current attempt DEAD  (item -> interrupted)  -> anomalies=[('orphan_session','s-1')] <-- covered
+```
+
+When the current attempt also dies, the item leaves `active`, and #28's `_sweep_stale_sessions`
+then reports the ghost correctly — that case was never uncovered. The genuine gap is narrower:
+**an item still `active`, whose current attempt is alive, owning an older open row.** #28's rule
+says such a row is legitimate because its item *is* running something, and it is right to; it
+simply does not ask whether the item is running *that* row.
+
+A second, quieter half of the same gap surfaced with it: an `active` item's *dead* superseded row
+is closed by nothing either, so it holds a capacity slot indefinitely. Both are covered by
+FR-017/FR-018 and by the tests added for US3.
+
+The lesson worth keeping: a counter is not the state. R7's original conclusion was drawn from a
+counter without checking the table it summarises.
+
 ---
 
 ## R8 — ⚠️ Quantifies the edge case the spec deferred

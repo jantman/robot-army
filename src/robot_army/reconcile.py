@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from robot_army.audit import AuditLog
     from robot_army.config import Config
     from robot_army.effects import Boundaries
-    from robot_army.models import Session
+    from robot_army.models import Session, WorkItem
     from robot_army.paths import Layout
 
 
@@ -44,6 +44,8 @@ class ReconcileResult:
     dispatching_failed: int = 0
     closed_done: int = 0
     reclaimed: int = 0
+    skipped_never_real: int = 0
+    superseded: int = 0
     orphans: int = 0
     stale_sockets: int = 0
     prunable: int = 0
@@ -59,6 +61,8 @@ class ReconcileResult:
             "dispatching_failed": self.dispatching_failed,
             "closed_done": self.closed_done,
             "reclaimed": self.reclaimed,
+            "skipped_never_real": self.skipped_never_real,
+            "superseded": self.superseded,
             "orphans": self.orphans,
             "stale_sockets": self.stale_sockets,
             "prunable_worktrees": self.prunable,
@@ -216,6 +220,96 @@ def reclaim_stale_session(
 
 
 
+
+def _sweep_superseded_sessions(
+    conn: sqlite3.Connection,
+    *,
+    audit: AuditLog,
+    item: WorkItem,
+    current: Session,
+    scan: sessions.RegistryScan,
+    claimed_pids: set[int],
+    proc_root: Path | None,
+) -> int:
+    """Open session rows an ``active`` item owns that are **not** its current attempt (#33).
+
+    Resuming or restarting an item opens a second row without closing the first. Nothing
+    visited that first row: the sweep above reads only ``latest_session_for_item``, and
+    ``_orphan_sweep`` passes over any worker whose row still says ``running`` -- which it
+    does precisely because nothing visits it. Each blind spot held the other up.
+
+    ``_sweep_stale_sessions`` (#28) does not reach these either, and deliberately so: its
+    rule is that an open row is legitimate while its item is ``dispatching`` or ``active``,
+    and here the item *is* ``active``. That rule is right for the question #28 asked -- is
+    this row's item still running something? -- and simply does not ask whether the item is
+    running *this* row. Measured: with the current attempt alive, an earlier attempt's live
+    worker produces no anomaly from any sweep.
+
+    **The middle branch is the one that matters**, for the same reason it did in #28. A
+    worker that can be seen is left open and reported, never closed: reporting fewer running
+    sessions than exist would oversubscribe the one subscription the cap protects, and an
+    under-count is the only direction of capacity error that does real harm.
+
+    The caller owns no transaction here -- each row is decided and committed independently,
+    so a pass killed midway leaves the rows it reached settled and the rest for next time.
+    """
+    acted = 0
+    for other in db.list_sessions_for_item(conn, item.id):
+        if other.id == current.id:
+            continue
+        if other.state not in (SessionState.STARTING, SessionState.RUNNING):
+            continue
+
+        entry = scan.find(other.session_id)
+        if entry is not None and entry.alive(proc_root=proc_root):
+            # Claimed so ``_orphan_sweep`` does not report it a second time, and left open
+            # because the slot it holds really is taken.
+            claimed_pids.add(entry.pid)
+            with db.transaction(conn):
+                created = db.raise_anomaly(
+                    conn,
+                    kind="orphan_session",
+                    entity_type="session",
+                    entity_id=other.session_id,
+                    detail={
+                        "pid": entry.pid,
+                        "cwd": entry.cwd,
+                        "proc_start": entry.proc_start,
+                        "work_item_id": item.id,
+                        "attempt": other.attempt,
+                        "current_attempt": current.attempt,
+                        "note": (
+                            "a live worker from an attempt this item has already replaced. "
+                            "Its session row is left open on purpose: the slot really is "
+                            "taken, and reporting a count lower than the number of live "
+                            "workers would oversubscribe the very quota the cap protects"
+                        ),
+                    },
+                )
+            if created:
+                acted += 1
+            continue
+
+        if not other.pid:
+            # It never had a process, so its absence is not evidence of anything -- the
+            # same rule the current attempt is judged by, applied to a superseded one.
+            continue
+
+        with db.transaction(conn):
+            transition_session(
+                conn,
+                audit,
+                session_row_id=other.id,
+                target=SessionState.LOST,
+                reason=(
+                    f"attempt {other.attempt} was superseded by attempt {current.attempt} "
+                    "and its process is gone"
+                ),
+            )
+        acted += 1
+    return acted
+
+
 def reconcile(
     conn: sqlite3.Connection,
     *,
@@ -246,6 +340,19 @@ def reconcile(
             result.interrupted += 1
             continue
 
+        # Before judging the current attempt, settle any the item has already replaced.
+        # Placed here rather than as a pass of its own so it runs before #28's sweep sees
+        # these rows, which is what keeps one worker to one report (C5).
+        result.superseded += _sweep_superseded_sessions(
+            conn,
+            audit=audit,
+            item=item,
+            current=session,
+            scan=scan,
+            claimed_pids=claimed_pids,
+            proc_root=proc_root,
+        )
+
         entry = by_session.get(session.session_id)
         alive = entry is not None and entry.alive(proc_root=proc_root)
         if alive and entry is not None:
@@ -257,10 +364,28 @@ def reconcile(
         if session.state in (SessionState.EXITED_CLEAN, SessionState.EXITED_ERROR):
             continue
 
-        if session.dry_run:
-            # A simulated session has no process to be alive. Its life is bounded by the
-            # simulated host, not by /proc, so reconciling it against the registry would
-            # mark every simulated item interrupted on the very next pass (FR-055).
+        if not session.pid:
+            # A session that never had a process has none to be alive, so there is nothing
+            # to reconcile it against and marking it interrupted would be a lie about a
+            # machine that was never asked to do anything (FR-055).
+            #
+            # The question is **"did this session have a host?"**, not "was the effect level
+            # live". Those are different, and conflating them is issue #33: `dry_run` means
+            # the level was below `live`, which is true at `no-remote` — where the session
+            # host is real and the pid below is a real process. Keying the skip on `dry_run`
+            # therefore switched the whole sweep off at the one level the quickstart
+            # recommends for rehearsing with real sessions.
+            #
+            # The pid answers the real question without anyone having to remember to ask it
+            # correctly: it is written from whatever `SessionHost.confirm_session()` returned,
+            # and `SimulatedSessionHost` returns 0 by construction. `NULL` and `0` mean the
+            # same thing here — no process was ever recorded — and both are falsey.
+            #
+            # Deliberately derived from the record rather than from the effect level:
+            # reconciliation must never consult that (FR-053), and
+            # `test_only_effects_py_knows_the_effect_level_exists` greps this file's text --
+            # comments included -- so even naming the type here fails the suite.
+            result.skipped_never_real += 1
             continue
 
         with db.transaction(conn):

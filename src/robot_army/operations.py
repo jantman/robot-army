@@ -1712,11 +1712,18 @@ def restart(ctx: Context, item_id: int, *, registry_dir: Path | None = None) -> 
     )
 
 
-def abandon(ctx: Context, item_id: int) -> Result:
+def abandon(
+    ctx: Context,
+    item_id: int,
+    *,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+) -> Result:
     """Mark the item abandoned. Deliberately **not** destructive — the worktree stays."""
     item = db.get_work_item(ctx.conn, item_id)
     if item is None:
         return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
+    session = db.latest_session_for_item(ctx.conn, item_id)
     try:
         with db.transaction(ctx.conn):
             transition_work_item(
@@ -1726,6 +1733,22 @@ def abandon(ctx: Context, item_id: int) -> Result:
                 target=WorkItemState.ABANDONED,
                 reason="abandoned by the maintainer",
             )
+            # An abandoned item is finished, so any session row still open under it is
+            # holding a capacity slot for work that will never resume (#28). ``cancel``
+            # closes its own row because it can confirm the process is gone first (#34);
+            # ``abandon`` stops nothing, so it asks the rule instead — and a worker that
+            # turns out to be alive is reported rather than closed, which here is the
+            # likelier case, not the exotic one. The item moves first so the rule sees the
+            # state that makes the row stale.
+            if session is not None:
+                reconcile.reclaim_stale_session(
+                    ctx.conn,
+                    ctx.audit,
+                    session=session,
+                    scan=sessions.scan(registry_dir=registry_dir, proc_root=proc_root),
+                    proc_root=proc_root,
+                    reason="the work item was abandoned",
+                )
     except Exception as exc:  # noqa: BLE001 - an illegal transition is a usage error here
         return Result(code=EXIT_FAILED, lines=[str(exc)])
     # FR-029: a card must not sit in the in-progress list claiming to be busy when nothing

@@ -437,6 +437,24 @@ and told us so" are different failures needing different next steps, and before 
 identically in the log — when the second one appeared at all, which it did not: the
 contradiction it caused escaped as an unhandled error and the item was never failed.
 
+## The milestone 015 actions
+
+No new action, one new counter, and one anomaly that could not previously be raised. All
+three answer the same question: *the queue says `repo_cap` and nothing is running — what is
+holding the slot?*
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `state.session` | **Changed** — as before, on every session transition | A session row is now closed as `lost` when its work item stops being one that can have a session in flight. The `reason` names the route: cancellation, abandonment, or the reconciliation sweep. That distinction survives nowhere else, and it is the difference between "the maintainer stopped this" and "this was found stale later" |
+| `reconcile.pass` | **Changed** — as before, once per pass | Gains `reclaimed`: how many stale session rows that pass closed. Before this, a pass that reclaimed nothing and a pass that could not *see* the leaked row read identically, both as `checked 0` |
+| `orphan_session` anomaly | A live worker under a work item that is no longer running one | Existing kind, newly reachable. Carries the pid, the working directory, and the work item's state. The session row is deliberately **left open**: the slot really is taken, and reporting a count lower than the number of live workers would oversubscribe the very quota the cap protects |
+
+A session row occupies a global and a per-repository capacity slot for exactly as long as it
+is `starting` or `running`, and only the wrapper's exit record used to close it. A simulated
+session has no wrapper and no process, so that record can never arrive — which is why
+`robot-army cancel` on a rehearsal used to hold its repository's only slot forever, silently,
+with `repo_cap` as the queue's stated reason.
+
 ## Reconstructing an item's history
 
 ```bash

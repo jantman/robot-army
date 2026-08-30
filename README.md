@@ -313,15 +313,20 @@ prompt now carries them, in every repository, with nothing to configure and no f
   branch nobody fetched are the one thing `worktree remove` can destroy, which is why the
   cleanup guards are as paranoid as they are — this is the same problem addressed a step
   earlier.
-- **The work product is a diff, not a changed machine.** An issue about the health timer is
-  satisfied by editing the unit file in the repo, not by running `systemctl --user edit`. The
-  second is faster, leaves no reviewable record, and no `git revert` undoes it. So the prompt
-  says: don't satisfy the issue by changing the state of this or any other system.
+- **The repository is the mechanism, not the record.** Where a repo is how a thing gets changed
+  — configuration management, infrastructure as code, deployment or schedule definitions — an
+  issue asking for that thing is asking for the code that produces it. "Set up and run this
+  service", filed against a Puppet repo, means write the manifest and open the PR. Doing it by
+  hand also works, and is worse than not doing it: invisible to review, absent from the history,
+  and gone the next time Puppet runs.
 
-The second one, read literally, forbids the first — pushing a branch *is* changing another
-system's state — so the block names the push and the PR as its exceptions, and says outright
-that running tests, builds, and dependency installs inside the worktree are not what it
-restricts.
+The second one is deliberately drawn at *bypassing the repository*, not at touching a system. A
+rule against changing any system state would forbid the push and the PR the first instruction
+demands, forbid running the test suite, and still not explain the Puppet case — so it would need
+an exception list, and an exception list is how you know a rule is drawn in the wrong place. The
+block says so in one sentence: build, run, test, install dependencies, start things locally,
+read live systems, push, open the PR. The limit is on reaching past the repository to change a
+live system where a change to the repository is what was asked for.
 
 **Both are defaults, and the issue outranks them.** "Investigate why the poller stalls and
 report back" wants an answer, not a branch; "delete the stale worktrees" is deliberately an

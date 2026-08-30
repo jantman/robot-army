@@ -50,13 +50,21 @@ MAX_BODY_CHARS = 60_000
 #: every repository the daemon dispatches into, so a caller opt-in would be a knob with one
 #: caller that always passes the same constant.
 #:
-#: Two sentences are load-bearing and were argued out in ``specs/012-prompt-branch-pr-safety``:
+#: Three things about the wording are load-bearing, and all three were got wrong in a draft
+#: before being fixed — see ``specs/012-prompt-branch-pr-safety/research.md`` D3 and D6:
 #:
-#: * The push and the pull request are named as *exceptions* to "do not change the state of any
-#:   system". Without that, the second instruction forbids the first one.
-#: * The override rule is stated rather than implied. Every other precedence in this file is
-#:   encoded by position, and position says the opposite here: the issue body is *below* this
-#:   text and still outranks it.
+#: * **The third paragraph is about the mechanism of change, not about side effects.** The
+#:   failure it exists for is a session in a Puppet repository reading "set up and run this
+#:   service" and setting it up by hand. That is not wrong because it touched a machine; it is
+#:   wrong because the repository was the thing that was supposed to do it, and a hand-made
+#:   change is invisible to review and gone at the next real run. Phrasing it as "do not change
+#:   the state of any system" instead — which is where this started — bans the push, the pull
+#:   request, and the test suite, and still does not explain the Puppet case.
+#: * **Nothing needs an exception, because nothing legitimate is prohibited.** An exception
+#:   list would be the tell that the rule was drawn in the wrong place.
+#: * **The override rule is stated rather than implied.** Every other precedence in this file
+#:   is encoded by position, and position says the opposite here: the issue body is *below*
+#:   this text and still outranks it.
 #:
 #: It never says "above" of the branch, either. The branch name appears in the issue section,
 #: which sits below this block — so a direction word pointing up would read perfectly well and
@@ -70,12 +78,16 @@ default branch. When the work is done, commit it, push that branch to `origin`, 
 pull request. Commits sitting on an unpushed branch are not a finished job: the worktree can
 be reclaimed, and unpushed work is the one thing that cannot be recovered from it.
 
-What you produce should be code and file changes in this git repository, arriving as commits
-and pull requests. Do not satisfy the issue by changing the state of this machine or any other
-system — do not deploy, restart, reconfigure, or edit something in place where the change
-belongs in this repository instead. Pushing your branch and opening the pull request are the
-exceptions. Running tests, running builds, and installing dependencies inside this worktree
-are ordinary parts of doing the work and are not what this restricts.
+Deliver the work as code and file changes in this repository, arriving as commits and a pull
+request. Where this repository is the mechanism for changing something — configuration
+management, infrastructure as code, deployment or schedule definitions — an issue asking for
+that thing is asking you to write the code that produces it, not to go and do it directly. A
+change made by hand is invisible to review and gone the next time the real tool runs.
+
+This is not a limit on how you work: build, run, test, install dependencies, start things
+locally, read whatever you need to read including live systems, and push your branch and open
+the pull request at the end. It is a limit on one thing — reaching past the repository to
+change a live system, where a change to the repository is what was asked for.
 
 If the issue below explicitly asks for something else — no pull request, a commit straight to
 the default branch, or an action on a system — the issue wins. Nothing here is checked."""

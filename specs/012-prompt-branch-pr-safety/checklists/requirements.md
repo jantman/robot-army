@@ -47,6 +47,16 @@ Two items were reworked during validation rather than passing on the first read:
   as the named exception) and FR-007 (worktree-scoped work is not what it prohibits), each
   separately checkable.
 
+**Amended 2026-08-30, after the first implementation was reviewed.** The
+"testable and unambiguous" fix recorded above was the right diagnosis and the wrong remedy.
+Splitting the clause into a prohibition plus two carve-outs made it self-consistent but left it
+aimed at side effects, which is not what the issue meant: the target is a session that satisfies
+"set up and run this service" in a Puppet repository by doing it by hand. That rule needs no
+carve-outs, because nothing legitimate falls inside it. FR-005 through FR-007 and the block's
+wording were rewritten accordingly, and FR-006 now forbids the exception-list shape outright.
+The checklist item still passes — the requirements are testable and unambiguous — but it passes
+against a different rule than it did this morning. See [research.md](../research.md) D6.
+
 One deliberate non-clarification: whether to add a configuration switch. Recorded as an
 assumption rather than a question, on the grounds that the Spec Kit switch exists because that
 paragraph is wrong for some repositories while these instructions are right for all of them, and

@@ -8,10 +8,10 @@
 
 Every dispatched session gets told two things it is not told today: that the work stays on the
 feature branch it was placed on and ends pushed to `origin` with a pull request open, and that
-the work product is commits and pull requests rather than changes made directly to this or any
-other running system — with the push and the pull request named as the exception so the second
-rule cannot be read as forbidding the first, and with an explicit instruction in the issue body
-overriding both.
+where this repository is the *mechanism* for changing something — configuration management,
+infrastructure as code, deployment definitions — an issue asking for that thing is asking for the
+code that produces it rather than for it to be done by hand. An explicit instruction in the issue
+body overrides both.
 
 The whole feature is a constant and one line that appends it. `prompt.compose()` already
 assembles ordered sections whose position encodes their precedence; this adds a fourth section
@@ -21,11 +21,20 @@ worktree, nothing new is logged, no schema changes, and the daemon gains no abil
 branch or open a pull request itself (FR-013).
 
 The cost is concentrated somewhere unusual: the prose. The text has to satisfy eight functional
-requirements in four paragraphs, resolve a contradiction latent in the issue as written (a rule
-against changing any system, alongside a rule requiring a push and a pull request), and avoid a
-direction word that would be subtly false given where the block sits. That text is specified
-byte-for-byte in [contracts/delivery-block.md](contracts/delivery-block.md), and the work of
-this milestone is mostly the work of having settled it there.
+requirements in five paragraphs, name the fault precisely enough that a session can reason about
+the cases the text does not list, and avoid a direction word that would be subtly false given
+where the block sits. That text is specified byte-for-byte in
+[contracts/delivery-block.md](contracts/delivery-block.md), and the work of this milestone is
+mostly the work of having settled it there.
+
+**Amended after review.** The first implementation drew the second rule at the wrong place —
+"do not change the state of this or any other system", with the push, the pull request and the
+test suite carved back out as exceptions. That is a faithful reading of the issue text and it is
+wrong twice over: too broad, because it forbids the delivery it demands, and too narrow in the
+way that matters, because the case it exists for is a session satisfying "set up and run this
+service" in a Puppet repository by hand — which is wrong not for touching a machine but for
+bypassing the repository that was supposed to. The rule is now drawn at the bypass, needs no
+exceptions, and gives its reason. [research.md D6](research.md) records the reversal in full.
 
 ## Technical Context
 
@@ -49,7 +58,7 @@ called once per dispatch.
 
 **Constraints**: the block must stay under 1,500 characters (SC-004) and must contain no format
 placeholders (FR-010). The composed prompt remains a single argv entry well inside `ARG_MAX`;
-1,173 characters against a 60,000-character body cap is not a factor (FR-012).
+1,445 characters against a 60,000-character body cap is not a factor (FR-012).
 
 **Scale/Scope**: one constant, one call site, one section inserted, one golden string updated,
 one README section, one line each in five prose paragraphs of tests.

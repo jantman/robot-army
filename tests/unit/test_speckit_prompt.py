@@ -19,36 +19,40 @@ from robot_army import prompt, speckit
 from robot_army.boundaries import Issue
 
 GOLDEN = (
-    "Unless the issue below explicitly says otherwise, this is how the work is expected to be\n"
-    "delivered.\n"
-    "\n"
+    'Unless the issue below explicitly says otherwise, this is how the work is expected to be\n'
+    'delivered.\n'
+    '\n'
     "Do the work on the feature branch this session was started on, never on the repository's\n"
-    "default branch. When the work is done, commit it, push that branch to `origin`, and open a\n"
-    "pull request. Commits sitting on an unpushed branch are not a finished job: the worktree can\n"
-    "be reclaimed, and unpushed work is the one thing that cannot be recovered from it.\n"
-    "\n"
-    "What you produce should be code and file changes in this git repository, arriving as commits\n"
-    "and pull requests. Do not satisfy the issue by changing the state of this machine or any other\n"
-    "system — do not deploy, restart, reconfigure, or edit something in place where the change\n"
-    "belongs in this repository instead. Pushing your branch and opening the pull request are the\n"
-    "exceptions. Running tests, running builds, and installing dependencies inside this worktree\n"
-    "are ordinary parts of doing the work and are not what this restricts.\n"
-    "\n"
-    "If the issue below explicitly asks for something else — no pull request, a commit straight to\n"
-    "the default branch, or an action on a system — the issue wins. Nothing here is checked.\n"
-    "\n"
-    "---\n"
-    "\n"
-    "You are working on jantman/robot-army issue #9 in a dedicated git\n"
-    "worktree on branch `robot-army/issue-9-speckit-extensions`.\n"
-    "\n"
-    "**Title**: Speckit Extensions\n"
-    "**URL**: https://github.com/jantman/robot-army/issues/9\n"
-    "**Labels**: robot-army\n"
-    "\n"
-    "---\n"
-    "\n"
-    "A body with **markdown** and a trailing line."
+    'default branch. When the work is done, commit it, push that branch to `origin`, and open a\n'
+    'pull request. Commits sitting on an unpushed branch are not a finished job: the worktree can\n'
+    'be reclaimed, and unpushed work is the one thing that cannot be recovered from it.\n'
+    '\n'
+    'Deliver the work as code and file changes in this repository, arriving as commits and a pull\n'
+    'request. Where this repository is the mechanism for changing something — configuration\n'
+    'management, infrastructure as code, deployment or schedule definitions — an issue asking for\n'
+    'that thing is asking you to write the code that produces it, not to go and do it directly. A\n'
+    'change made by hand is invisible to review and gone the next time the real tool runs.\n'
+    '\n'
+    'This is not a limit on how you work: build, run, test, install dependencies, start things\n'
+    'locally, read whatever you need to read including live systems, and push your branch and open\n'
+    'the pull request at the end. It is a limit on one thing — reaching past the repository to\n'
+    'change a live system, where a change to the repository is what was asked for.\n'
+    '\n'
+    'If the issue below explicitly asks for something else — no pull request, a commit straight to\n'
+    'the default branch, or an action on a system — the issue wins. Nothing here is checked.\n'
+    '\n'
+    '---\n'
+    '\n'
+    'You are working on jantman/robot-army issue #9 in a dedicated git\n'
+    'worktree on branch `robot-army/issue-9-speckit-extensions`.\n'
+    '\n'
+    '**Title**: Speckit Extensions\n'
+    '**URL**: https://github.com/jantman/robot-army/issues/9\n'
+    '**Labels**: robot-army\n'
+    '\n'
+    '---\n'
+    '\n'
+    'A body with **markdown** and a trailing line.'
 )
 
 ISSUE = Issue(

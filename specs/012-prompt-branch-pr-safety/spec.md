@@ -1,4 +1,4 @@
-# Feature Specification: Every Session Is Told How Work Is Delivered — A Branch, A Push, A Pull Request, And Nothing Else Touched
+# Feature Specification: Every Session Is Told How Work Is Delivered — A Branch, A Push, A Pull Request, And The Repository As The Mechanism
 
 **Feature Branch**: `robot-army/issue-29-ensure-that-prompts-include-pr-creation`
 
@@ -11,6 +11,13 @@ must say that work happens on a non-default branch which ends pushed with a pull
 and that the work product is commits and pull requests rather than changes made directly to
 this or any other running system, unless the issue body explicitly says otherwise
 
+**Amended**: 2026-08-30, after review of the first implementation. The issue's second clause was
+read too literally as "change no system state", which forbids the push and pull request the
+first clause requires. The intent is narrower and different in kind: do not *bypass the
+repository* to change something the repository is the mechanism for changing — the Puppet
+repository where "set up and run this service" gets satisfied by hand. User Story 2, FR-004
+through FR-007, and the block's wording are written to that intent.
+
 ## User Scenarios & Testing *(mandatory)*
 
 <!--
@@ -19,8 +26,9 @@ this or any other running system, unless the issue body explicitly says otherwis
   kinds of action are in bounds while it is being done. Both halves are standing instructions
   the maintainer would otherwise repeat in every issue they write.
 
-  Story 1 is the delivery half, Story 2 is the containment half, Story 3 is the escape hatch
-  that keeps both from being wrong when an issue genuinely needs something else. Each is
+  Story 1 is the delivery half, Story 2 is the mechanism half — the repository is how the
+  change gets made, not merely where it gets recorded — and Story 3 is the escape hatch that
+  keeps both from being wrong when an issue genuinely needs something else. Each is
   independently testable, and each is worth shipping on its own.
 -->
 
@@ -69,55 +77,62 @@ with a pull request opened, without any file having been added to that repositor
 
 ---
 
-### User Story 2 - The work product is a diff, not a changed system (Priority: P1)
+### User Story 2 - The repository is the mechanism, not just the record (Priority: P1)
 
-The maintainer's issues describe changes to software. A session reading "the health timer fires
-too often" can satisfy that sentence two ways: edit the unit file in the repository and open a
-pull request, or run `systemctl --user edit` and be finished in ten seconds. The second is
-faster, is not what was wanted, leaves no reviewable record, and changes the maintainer's
-machine in a way no pull request describes and no `git revert` undoes.
+The maintainer's issues describe changes to things the repository manages. In a
+configuration-management repository, "set up and run this service on the build host" can be
+satisfied two ways: write the manifest, commit it, open a pull request — or log in and install
+the service by hand. The second is faster, satisfies the sentence, and is wrong.
 
-The same shape scales badly outwards. An issue about a deployment could be satisfied by
-deploying. An issue about a remote configuration could be satisfied by changing it. Sessions
-run with a permission mode that does not stop them, in a worktree that has the maintainer's
-credentials in ambient reach, and the daemon currently offers no standing position on any of
-it.
+It is not wrong because a machine was touched. It is wrong because the repository was the thing
+that was supposed to touch it. A hand-made change is invisible to review, absent from the
+history, and gone the next time the real tool runs and asserts its own idea of that host. The
+issue looks done and the repository has not moved.
 
-After this change the prompt takes one: the output of this work is code and file changes inside
-this git repository, becoming commits and pull requests. Do not change the state of this machine
-or any other system as a way of satisfying the issue.
+The same shape recurs wherever a repository *is* the control plane rather than a description of
+one: infrastructure as code, deployment definitions, schedules, dotfiles, CI configuration. An
+issue about any of them can be closed by reaching past the repository, and the reach is often
+the shortest path.
 
-The instruction has to be drawn precisely enough to still permit the work. Running the test
-suite, building, installing dependencies into the worktree, and reading whatever is readable are
-ordinary parts of writing the change, all of them scoped to the worktree and all of them
-reversible by deleting it. Pushing the branch and opening the pull request are outward actions
-by definition — Story 1 requires them — so the instruction must name them as the exception
-rather than contradict itself.
+After this change the prompt says which path is meant: deliver the work as changes to this
+repository, and where this repository is the mechanism for changing something, an issue asking
+for that thing is asking for the code that produces it — not for it to be done directly.
+
+The rule has to be drawn at the *bypass*, not at the side effect. A rule against changing the
+state of any system forbids pushing a branch, opening a pull request, and running the test
+suite, and still fails to explain the Puppet case, because it names the wrong thing as the
+fault. So the block scopes itself in one sentence — build, run, test, install dependencies,
+start things locally, read live systems, push, open the pull request; the limit is on reaching
+past the repository to change a live system where a change to the repository is what was asked
+for.
 
 **Why this priority**: This is the second half of the issue and the half whose failure mode is
-irreversible and off-repository. It also stands alone: a session that changes nothing outside
-its worktree but forgets to open a pull request has produced recoverable work, while one that
-reconfigured the maintainer's machine has not.
+off-repository and unreviewable. It also stands alone: a session that forgot to open a pull
+request has produced recoverable work sitting in a worktree, while one that configured a host
+by hand has produced a change nobody can review and the next Puppet run will erase.
 
-**Independent Test**: Compose a dispatch prompt and read it. Confirm it states that the work
-product is repository changes reaching the maintainer as commits and a pull request, that
-directly mutating this or any other system is not how the issue is to be satisfied, and that
-running tests and builds inside the worktree together with the push and the pull request are
-not what that prohibits.
+**Independent Test**: Read the composed block. Confirm it says the repository is the mechanism,
+names the kinds of repository where that bites, gives the reason a hand-made change is worse
+than none, and scopes itself so the ordinary working loop and the required push are plainly
+outside the limit.
 
 **Acceptance Scenarios**:
 
-1. **Given** any dispatch prompt, **When** it is read, **Then** it states that the work should
-   be code and file changes in the git repository, delivered as commits and pull requests.
-2. **Given** the same prompt, **When** it is read, **Then** it states that the session should
-   not directly change the state of the local machine or any other system in order to satisfy
-   the issue.
-3. **Given** the same prompt, **When** the two instructions are read together, **Then** pushing
-   the branch and opening the pull request are identified as permitted outward actions, so the
-   containment instruction cannot be read as forbidding the delivery instruction.
-4. **Given** the same prompt, **When** it is read, **Then** it does not forbid the ordinary
-   local work of producing the change — running tests, builds, and dependency installation
-   within the worktree.
+1. **Given** any dispatch prompt, **When** it is read, **Then** it states that the work is
+   delivered as code and file changes in the repository, arriving as commits and a pull request.
+2. **Given** the same prompt, **When** it is read, **Then** it states that where the repository
+   is the mechanism for changing something, an issue asking for that thing is asking for the
+   code that produces it rather than for it to be done directly — with configuration
+   management, infrastructure as code, and deployment or schedule definitions named as the
+   cases.
+3. **Given** the same prompt, **When** it is read, **Then** it gives the reason: a hand-made
+   change is invisible to review and gone the next time the real tool runs.
+4. **Given** the same prompt, **When** the delivery instruction and this one are read together,
+   **Then** the limit is scoped to reaching past the repository, so it cannot be read as
+   forbidding the push and pull request that User Story 1 requires.
+5. **Given** the same prompt, **When** it is read, **Then** building, running, testing,
+   installing dependencies, starting things locally, and reading live systems are plainly
+   outside the limit rather than exceptions carved out of it.
 
 ---
 
@@ -165,6 +180,14 @@ sentence is present and refers to the issue body specifically.
 
 - **An issue body that says nothing about delivery.** The overwhelmingly common case. Both
   standing instructions apply as written; no interpretation is required of the session.
+- **An issue in a repository that manages nothing.** A plain library or application repository
+  has no live system to bypass, so the third paragraph simply does not bite and the first two
+  carry the whole instruction. The text is fixed for every repository precisely so this needs no
+  detection: a rule scoped by "where this repository is the mechanism" answers its own
+  applicability.
+- **An issue that legitimately requires touching a system.** "Delete the stale worktrees under
+  `~/worktrees`" asks for an action, not a diff, and says so. The override paragraph covers it;
+  see User Story 3.
 - **A session that ignores the instructions.** Nothing enforces them and nothing is recorded as
   failed. This matches the existing stance on the Spec Kit paragraph: the prompt states a
   default, the judgement stays the session's, and the observable outcome is whatever the
@@ -200,14 +223,21 @@ sentence is present and refers to the issue body specifically.
   branch the session was placed on, not on the repository's default branch.
 - **FR-003**: The standing instructions MUST state that at the conclusion of the work the branch
   is to be pushed to `origin` and a pull request opened.
-- **FR-004**: The standing instructions MUST state that the work should take the form of code and
-  file changes within the git repository, delivered as commits and pull requests.
-- **FR-005**: The standing instructions MUST state that the session should not directly change
-  the state of the local machine or of any other system as a means of satisfying the issue.
-- **FR-006**: The standing instructions MUST identify the branch push and the opening of the pull
-  request as permitted outward actions, so that FR-005 cannot be read as prohibiting FR-003.
-- **FR-007**: The standing instructions MUST NOT prohibit local, worktree-scoped work needed to
-  produce the change — running tests, running builds, and installing dependencies.
+- **FR-004**: The standing instructions MUST state that the work is delivered as code and file
+  changes within the git repository, arriving as commits and a pull request.
+- **FR-005**: The standing instructions MUST state that where the repository is the mechanism for
+  changing something, an issue asking for that thing is asking for the code that produces it and
+  not for it to be done directly; MUST name configuration management, infrastructure as code, and
+  deployment or schedule definitions as the cases; and MUST give the reason — a hand-made change
+  is invisible to review and gone at the next run of the real tool.
+- **FR-006**: The standing instructions MUST scope FR-005 to reaching past the repository, so that
+  it cannot be read as prohibiting FR-003's push and pull request. It MUST NOT be phrased as a
+  prohibition on changing system state with permitted actions excepted from it: an exception list
+  is evidence the rule has been drawn in the wrong place, and the first draft of this feature
+  demonstrated it by forbidding its own delivery instruction.
+- **FR-007**: The standing instructions MUST place the ordinary working loop outside the limit
+  rather than inside it as an exception — building, running, testing, installing dependencies,
+  starting things locally, and reading live systems.
 - **FR-008**: The standing instructions MUST state that an explicit instruction in the issue body
   overrides them, because the issue body appears after them in the prompt and position alone
   would imply the opposite.
@@ -251,6 +281,9 @@ sentence is present and refers to the issue body specifically.
   disagree.
 - **SC-004**: The standing instructions add no more than 1,500 characters to the prompt, keeping
   the issue itself the substantial majority of what the session reads.
+- **SC-007**: A reader of the block can tell, without inference, that pushing the branch, opening
+  the pull request, and running the test suite are outside its limit rather than exceptions to
+  it — the property the first draft failed and the one an exception list cannot deliver.
 - **SC-005**: Zero repositories need to be re-onboarded, reconfigured, or otherwise touched for
   the behaviour to take effect; the next dispatch after the change carries it.
 - **SC-006**: No new outward-facing action becomes reachable from the daemon as a result of this

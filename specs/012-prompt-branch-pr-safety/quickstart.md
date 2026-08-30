@@ -36,10 +36,13 @@ print(len(prompt.DELIVERY), 'characters')
 Expected: the four paragraphs from
 [contracts/delivery-block.md](contracts/delivery-block.md), and a count under 1,500 (SC-004).
 
-Read it as the session will. It should be possible to answer, from the text alone: which branch
-the work goes on, what happens at the end, what is not an acceptable way to satisfy the issue,
-that pushing and opening a pull request are allowed anyway, that running the tests is allowed,
-and what happens when the issue says otherwise (SC-003).
+Read it as the session will, and against the case it exists for: an issue in a
+configuration-management repository reading "set up and run this service". It should be possible
+to answer, from the text alone — which branch the work goes on; what happens at the end; that the
+change belongs in the code that manages the service rather than in the service; *why* (a
+hand-made change is unreviewable and gone at the next run); that building, testing, running
+locally, reading live systems, pushing and opening the pull request are outside the limit rather
+than exceptions to it; and what happens when the issue says otherwise (SC-003, SC-007).
 
 ## 3. Compose a prompt and look at the ordering
 

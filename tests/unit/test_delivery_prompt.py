@@ -2,9 +2,11 @@
 
 The feature is a fixed string, so these tests are assertions about prose — which is an unusual
 thing to test and worth defending. The prose *is* the deliverable: it is the only thing that
-reaches the session, nothing enforces it, and a well-meaning edit that drops the sentence naming
-the push as an exception would turn the block into one that forbids the very delivery it demands.
-Each test below names the requirement it holds and would fail on exactly that kind of edit.
+reaches the session, nothing enforces it, and an edit that broadens the third paragraph back into
+"do not change the state of any system" would turn the block into one that forbids the very
+delivery it demands two paragraphs earlier. That is not hypothetical: it is what the first draft
+of this milestone shipped. Each test below names the requirement it holds and would fail on
+exactly that kind of edit.
 
 Assertions run against whitespace-normalised, lowercased text. The constant is hard-wrapped and
 several of the sentences that matter straddle a line break, so matching the raw string would make
@@ -99,42 +101,83 @@ def test_the_block_never_points_upwards_at_the_branch_name() -> None:
     assert "this session was started on" in BLOCK
 
 
-# --- User Story 2: the work product is a diff, not a changed system -------------------------
+# --- User Story 2: the work product is a diff, not a hand-changed system --------------------
 
 
 def test_the_block_says_the_work_product_is_changes_in_this_repository() -> None:
     """FR-004."""
-    assert "code and file changes in this git repository" in BLOCK
-    assert "arriving as commits and pull requests" in BLOCK
+    assert "deliver the work as code and file changes in this repository" in BLOCK
+    assert "arriving as commits and a pull request" in BLOCK
 
 
-def test_the_block_forbids_satisfying_the_issue_by_changing_a_system() -> None:
-    """FR-005. Both scopes — this machine and any other."""
-    assert "do not satisfy the issue by changing the state of this machine or any other" in BLOCK
-    assert "do not deploy, restart, reconfigure" in BLOCK
+def test_the_block_says_the_repository_is_the_mechanism_not_just_the_record() -> None:
+    """FR-005, and the failure it actually exists for.
 
-
-def test_the_push_and_the_pull_request_are_named_as_exceptions() -> None:
-    """FR-006, and the reason this file exists.
-
-    FR-005 read alone forbids FR-003: pushing a branch and opening a pull request are changes
-    to the state of another system by any honest reading. Without this sentence the block
-    contradicts itself, and the contradiction is the kind a session resolves silently and
-    wrongly.
+    The case is a Puppet repository and an issue reading "set up and run this service". Setting
+    it up by hand satisfies the sentence, is faster, and is wrong — not because a machine was
+    touched, but because the repository was the thing that was supposed to touch it. A rule
+    phrased as "do not change the state of any system" does not say that, and a session that
+    obeyed it literally would still have to guess what to do here.
     """
-    assert "pushing your branch and opening the pull request are the" in BLOCK
-    assert "exceptions" in BLOCK
-    # The carve-out must come after the prohibition it carves out of; a reader who stops at
-    # the prohibition has still not been misled, but one who never reaches the carve-out has.
-    assert BLOCK.index("do not satisfy the issue") < BLOCK.index("are the exceptions")
+    assert "where this repository is the mechanism for changing something" in BLOCK
+    assert "asking you to write the code that produces it, not to go and do it directly" in BLOCK
 
 
-def test_the_block_does_not_forbid_the_ordinary_work_of_making_the_change() -> None:
-    """FR-007. Running the suite is how the constitution says the work is finished."""
-    assert "running tests, running builds, and installing dependencies inside this worktree" in (
-        BLOCK
-    )
-    assert "are not what this restricts" in BLOCK
+def test_the_block_names_the_kinds_of_repository_this_bites_on() -> None:
+    """FR-005. Named categories, so the rule generalises past whichever one is in front of you."""
+    assert "configuration management, infrastructure as code" in BLOCK
+    assert "deployment or schedule definitions" in BLOCK
+
+
+def test_the_block_says_why_a_hand_made_change_is_worse_than_none() -> None:
+    """FR-005. The reason, not just the rule.
+
+    A session told only *what* has to guess when the instruction meets a surprise. Told that a
+    hand-made change is unreviewable and transient, it can work out the unlisted cases itself —
+    which is the whole job of this paragraph, since no list would ever be complete.
+    """
+    assert "invisible to review" in BLOCK
+    assert "gone the next time the real tool runs" in BLOCK
+
+
+def test_the_scope_line_permits_the_ordinary_working_loop() -> None:
+    """FR-006 and FR-007 together, which after the rewording are one sentence rather than two.
+
+    The earlier draft prohibited changing the state of any system and then carved the push, the
+    pull request and the test suite back out of it. An exception list is the tell that a rule
+    was drawn in the wrong place: nothing legitimate is prohibited here, so nothing legitimate
+    needs excepting.
+    """
+    assert "this is not a limit on how you work" in BLOCK
+    assert "build, run, test, install dependencies, start things locally" in BLOCK
+    assert "read whatever you need to read including live systems" in BLOCK
+    assert "push your branch and open the pull request at the end" in BLOCK
+
+
+def test_the_prohibition_is_scoped_to_bypassing_the_repository() -> None:
+    """FR-005, FR-006. The narrow thing, said narrowly.
+
+    "It is a limit on one thing" has to survive editing. If this ever grows into a list, the
+    paragraph has stopped being a principle a session can reason from and become rules it can
+    only pattern-match against — and the unlisted case is the one that matters.
+    """
+    assert "it is a limit on one thing" in BLOCK
+    assert "reaching past the repository to change a live system" in BLOCK
+    assert "where a change to the repository is what was asked for" in BLOCK
+
+
+def test_the_block_does_not_prohibit_what_it_then_requires() -> None:
+    """FR-006, asserted as the property rather than as a phrase.
+
+    The regression this guards is the one the first draft shipped: a prohibition broad enough
+    to forbid the push and pull request the block demands two paragraphs earlier. Neither an
+    unqualified ban nor an exceptions list should reappear.
+    """
+    assert "any other system" not in BLOCK
+    assert "are the exceptions" not in BLOCK
+    # The scope line must come after the rule it scopes; a reader who stops early is then
+    # left with a rule that is narrower than they think, never one that is broader.
+    assert BLOCK.index("mechanism for changing something") < BLOCK.index("not a limit on how")
 
 
 # --- User Story 3: an issue that needs something else can say so ----------------------------

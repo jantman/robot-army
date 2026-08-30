@@ -42,18 +42,28 @@ the meaning it had when it was written; above the issue so the block cannot be p
 > pull request. Commits sitting on an unpushed branch are not a finished job: the worktree can
 > be reclaimed, and unpushed work is the one thing that cannot be recovered from it.
 >
-> What you produce should be code and file changes in this git repository, arriving as commits
-> and pull requests. Do not satisfy the issue by changing the state of this machine or any other
-> system — do not deploy, restart, reconfigure, or edit something in place where the change
-> belongs in this repository instead. Pushing your branch and opening the pull request are the
-> exceptions. Running tests, running builds, and installing dependencies inside this worktree
-> are ordinary parts of doing the work and are not what this restricts.
+> Deliver the work as code and file changes in this repository, arriving as commits and a pull
+> request. Where this repository is the mechanism for changing something — configuration
+> management, infrastructure as code, deployment or schedule definitions — an issue asking for
+> that thing is asking you to write the code that produces it, not to go and do it directly. A
+> change made by hand is invisible to review and gone the next time the real tool runs.
+>
+> This is not a limit on how you work: build, run, test, install dependencies, start things
+> locally, read whatever you need to read including live systems, and push your branch and open
+> the pull request at the end. It is a limit on one thing — reaching past the repository to
+> change a live system, where a change to the repository is what was asked for.
 >
 > If the issue below explicitly asks for something else — no pull request, a commit straight to
 > the default branch, or an action on a system — the issue wins. Nothing here is checked.
 
-Four paragraphs, one job each: the override framing, delivery (FR-002, FR-003), containment
-with its carve-outs (FR-004 – FR-007), and the override rule stated outright (FR-008).
+1,445 characters. Five paragraphs, one job each: the override framing, delivery (FR-002,
+FR-003), the mechanism rule with its reason (FR-004, FR-005), the scope line (FR-006, FR-007),
+and the override rule stated outright (FR-008).
+
+The third and fourth paragraphs are one idea split deliberately. The rule needs its boundary
+stated in its own sentence rather than as a subordinate clause, because the boundary is the part
+a session is most likely to get wrong in the cautious direction — and a session that will not run
+the test suite is as broken as one that reconfigures a host.
 
 ## Rules
 
@@ -62,10 +72,10 @@ with its carve-outs (FR-004 – FR-007), and the override rule stated outright (
 | Present on every dispatch, in every repository, with no per-repository file or setting | FR-001, FR-011 |
 | Says work happens on the non-default branch, not the default one | FR-002 |
 | Says the branch is pushed to `origin` and a pull request opened at the end | FR-003 |
-| Says the work product is repository changes delivered as commits and pull requests | FR-004 |
-| Says not to satisfy the issue by changing this or another system | FR-005 |
-| Names the push and the pull request as permitted, so it cannot forbid its own delivery rule | FR-006 |
-| Leaves tests, builds, and dependency installation inside the worktree explicitly permitted | FR-007 |
+| Says the work is delivered as repository changes arriving as commits and a pull request | FR-004 |
+| Says the repository is the mechanism, names the repository kinds, and gives the reason | FR-005 |
+| Scopes the limit to bypassing the repository, so it cannot forbid its own delivery rule | FR-006 |
+| Puts the ordinary working loop outside the limit, not inside it as an exception | FR-007, SC-007 |
 | States that an explicit instruction in the issue body overrides it | FR-008 |
 | Sits below `.claude/robot-army.md`, which continues to outrank it | FR-009 |
 | Identical bytes on every dispatch; no interpolation, no placeholders | FR-010 |
@@ -80,6 +90,14 @@ with its carve-outs (FR-004 – FR-007), and the override rule stated outright (
   cost the determinism test its one-line proof, to restate something on the next line.
 - **Not a claim of enforcement.** Nothing checks any of this, and text implying otherwise would
   be the kind of false boundary the spec's Out of Scope rules out.
+- **Not "do not change the state of any system", and not an exceptions list.** This is where the
+  first draft went wrong, and the failure is instructive enough to record: phrased as a ban on
+  side effects, the rule forbids the push and the pull request the block demands two paragraphs
+  earlier, forbids running the test suite, and *still* does not explain the case it exists for,
+  because it names the wrong thing as the fault. The fault is bypassing the repository, not
+  touching a system. A rule drawn there needs no exceptions — which is why the reappearance of an
+  exception list should be read as evidence the rule has drifted back to the wrong place. See
+  [research.md D6](../research.md).
 
 ## The determinism tests
 

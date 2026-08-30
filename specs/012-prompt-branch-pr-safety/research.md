@@ -1,8 +1,10 @@
 # Phase 0 Research: Standing Delivery Instructions In The Dispatch Prompt
 
-Five decisions. None of them needed a spike; all of them needed the existing prompt code read
-carefully, because every one is about where a paragraph goes and what that position already
-means in a file where **position is the precedence mechanism**.
+Six decisions. Five needed the existing prompt code read carefully, because each is about where
+a paragraph goes and what that position already means in a file where **position is the
+precedence mechanism**. The sixth, D6, is different in kind and was added after the first
+implementation was reviewed: it is about what the prohibition is a prohibition *of*, and it
+reverses what this milestone originally shipped.
 
 ---
 
@@ -138,6 +140,65 @@ why, which is the difference between a superseded expectation and a quietly weak
 **Alternatives considered**: keeping the old golden by making the block opt-in. That is D1's
 rejected parameter, arrived at from the other end — preserving a test by weakening the feature it
 tests. Rejected.
+
+---
+
+## D6. The containment rule is drawn at the bypass, not at the side effect
+
+**Decision**: The third paragraph says *where this repository is the mechanism for changing
+something, write the code that produces it rather than doing it directly*, followed by a sentence
+scoping the limit. It does **not** say "do not change the state of this machine or any other
+system", and it carries no exception list.
+
+**Rationale**: This reverses the first implementation, which shipped and was corrected on review.
+The reversal is worth recording in full, because the wrong version was a faithful reading of the
+issue text and passed every test written for it.
+
+The issue asks that "nothing should be done to directly effect the state of this or any other
+system". Read as a rule about side effects, that has two defects and they pull in opposite
+directions:
+
+- **It is too broad.** Pushing a branch and opening a pull request change the state of another
+  system, and so does running a build, starting a container, or installing a dependency. The
+  first draft noticed this and bolted on an exception list — the push and the pull request are
+  permitted; tests, builds and dependency installation are not what this restricts. That patched
+  the contradiction without fixing it, and an exception list is the reliable tell that a rule has
+  been drawn in the wrong place. It also cannot be complete: a session wondering whether it may
+  start a local dev server finds nothing in the list and has to guess.
+- **It is too narrow, in the way that matters.** The case it exists for is a
+  configuration-management repository and an issue reading "set up and run this service".
+  Installing the service by hand is wrong — but *not because a machine was touched*. It is wrong
+  because the repository was the thing that was supposed to touch it, so the change is invisible
+  to review, absent from history, and erased by the next real run of the tool. A rule about side
+  effects does not say any of that, and a session reasoning from it would have to arrive at the
+  right answer by luck.
+
+Naming the fault correctly fixes both at once. Bypassing the repository is the wrong thing;
+touching a system is not. The push, the pull request, the test suite and the local dev loop stop
+needing permission because they were never in scope, and the Puppet case is covered by the rule
+itself rather than by hoping the session extrapolates.
+
+The paragraph also gives its reason rather than only its rule. That is deliberate and is the
+difference between a constraint a session can reason from and one it can only pattern-match
+against. No list of repository kinds will ever be complete; "invisible to review and gone at the
+next run" generalises to the ones the list omits.
+
+**Alternatives considered**:
+
+- *Keep the broad rule, extend the exception list.* Rejected. Each addition makes the list look
+  more authoritative and its omissions more meaningful, and the underlying rule still names the
+  wrong fault.
+- *Keep both — a side-effect ban and the mechanism rule.* Rejected: a session that hits the two
+  and finds them in tension will resolve it silently, which is the failure mode this whole block
+  exists to remove.
+- *Say nothing about side effects at all and rely on the permission mode.* Rejected. The
+  permission mode is not a boundary the daemon sets per issue, and the spec's Out of Scope is
+  explicit that this feature ships an instruction rather than a boundary — but an instruction
+  that is absent is not an instruction that is safe.
+
+**Cost of having got it wrong first**: one commit's worth of prose, five tests rewritten, and a
+requirement (FR-006) that now states the property — the rule must not need exceptions — rather
+than mandating the exception list. Cheap, and only because nothing had been pushed yet.
 
 ---
 

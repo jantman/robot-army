@@ -141,6 +141,22 @@ wrote.
 
 ---
 
+## Phase 7: Rewording after review
+
+Added after Phases 1–6 were complete and reviewed. The block shipped with its second rule drawn
+at side effects rather than at bypassing the repository — see
+[research.md D6](research.md) for the reversal and why the first version passed every test
+written for it. Nothing about the mechanism changed: same constant, same position, same absence
+of a parameter.
+
+- [X] T016 Rewrite the third and fourth paragraphs of `DELIVERY` in `src/robot_army/prompt.py` around the mechanism rule and a single scope sentence, dropping the side-effect prohibition and its exception list, and rewrite the constant's comment to record why the first shape was wrong
+- [X] T017 Replace the User Story 2 tests in `tests/unit/test_delivery_prompt.py` — the mechanism rule, the named repository kinds, the stated reason, the scope line, and a regression test asserting neither an unqualified ban nor an exceptions list has reappeared
+- [X] T018 Re-capture the `GOLDEN` literal in `tests/unit/test_speckit_prompt.py` for the new text
+- [X] T019 Bring the documents to the shipped wording: User Story 2, FR-004 – FR-007 and SC-007 in `spec.md`; D6 in `research.md`; the text, rules table and "what it must not say" in `contracts/delivery-block.md`; the summary in `plan.md`; check 2 in `quickstart.md`; the amendment note in `checklists/requirements.md`; and the section in `README.md`
+- [X] T020 Re-run `uv run ruff check .` and `uv run pytest`, and re-run quickstart checks 1 through 3
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

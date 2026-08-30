@@ -284,11 +284,22 @@ a refusal is a result, and one that leaves no trace is a gap. Every non-zero exi
 | `source_unreachable` | the source system could not be asked — a bad token, or no network |
 | `unapproved_committed_settings` | `--yes` refused to skip an unreviewed settings change |
 | `aborted_at_prompt` | I said no |
+| `interrupted_at_prompt` | I pressed Ctrl-C at the prompt |
+| `no_answer_available` | input ended before the prompt was answered |
 
 ```bash
 jq -r 'select(.action == "repo.onboard" and .detail.refused) | "\(.entity_id) \(.detail.cause)"' \
   ~/.local/state/robot-army/logs/audit-*.jsonl
 ```
+
+**The last two are milestone 011, and are the same bug fix one milestone later.** Onboarding
+asked for approval before showing what was being approved (issue #17), so nobody reached that
+prompt informed enough to walk away from it — and the two ways of walking away both exited
+non-zero writing nothing. `Ctrl-C` propagated past `onboard` before its audit action opened;
+end-of-input was an uncaught `EOFError` and a traceback. Now that the approval screen arrives
+first, giving up after reading it is the expected second answer, so both are recorded like the
+decline they resemble. Every terminating path through `onboard` now leaves exactly one outcome
+record: an approval, or a refusal naming its cause.
 
 ### The dispatch-time re-verification writes only on failure
 

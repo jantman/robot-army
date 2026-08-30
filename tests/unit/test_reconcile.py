@@ -23,6 +23,16 @@ from robot_army.states import SessionState, WorkItemState
 
 
 def active_item(conn, *, session_id="s-1", pid=4242, proc_start="777", **kwargs):
+    """An ``active`` item with a ``running`` session row.
+
+    The ``pid``/``proc_start`` defaults describe a **real** session. A caller passing
+    ``dry_run=True`` must override them with ``pid=0, proc_start=None``, because that is the
+    only shape the dispatch path can produce for a simulated host: the session row's pid comes
+    from ``SessionHost.confirm_session()``, and ``SimulatedSessionHost`` returns ``0`` by
+    construction. A ``dry_run=True`` row carrying a real-looking pid is a record that cannot
+    exist, and reconciliation now reads that column to decide whether the session ever had a
+    process to be alive.
+    """
     item_id = seed_item(conn, state=str(WorkItemState.ACTIVE), **kwargs)
     with db.transaction(conn):
         row_id = db.insert_session(
@@ -131,7 +141,7 @@ def test_a_session_that_already_reported_its_exit_is_not_re_interrupted(
 def test_a_simulated_session_is_not_reconciled_against_proc(conn, audit, config, tmp_path):
     """A simulated session has no process to be alive; reconciling it against the
     registry would mark every simulated item interrupted on the very next pass."""
-    item_id = active_item(conn, session_id="s-sim", dry_run=True)
+    item_id = active_item(conn, session_id="s-sim", dry_run=True, pid=0, proc_start=None)
     (tmp_path / "registry").mkdir()
     (tmp_path / "proc").mkdir()
 
@@ -225,7 +235,7 @@ def test_the_closed_check_is_skipped_for_simulated_items(conn, audit, config, tm
         def is_closed(self, repo_key, number):
             raise AssertionError("a simulated item must not reach GitHub")
 
-    item_id = active_item(conn, session_id="s-sim", dry_run=True)
+    item_id = active_item(conn, session_id="s-sim", dry_run=True, pid=0, proc_start=None)
     (tmp_path / "registry").mkdir()
     (tmp_path / "proc").mkdir()
     run(conn, audit, config, tmp_path, boundaries=make_boundaries(audit, reader=ExplodingReader()))

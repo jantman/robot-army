@@ -427,6 +427,24 @@ summary:
 | After `cancel` signalled the process, before the transaction committed | Rolled back: the item is still `active` and its session row still open, while the process is stopped. The reconciliation sweep resolves it — an open row under an item that is not `dispatching` or `active` is stale by definition, and this is why closing it at the command is belt rather than braces |
 | Mid-sweep of stale session rows | Rows already reclaimed are committed with their audit records; rows not yet reached stay open and are taken by the next pass. Each row is decided independently, so there is no cross-row state to lose |
 | After a row was reclaimed, when its exit record finally arrives | `spool.apply_record` returns `duplicate` — its terminal set already includes `lost` — and the work item is untouched, because that path only moves an item in `active`. The history keeps `lost` rather than the truer exit status. Accepted: a weaker reason in the log, never a wrong state |
+| Mid-sweep of an item's superseded session rows | Each superseded row is decided and committed on its own, so a killed pass leaves the rows it reached settled and the rest for the next one. The item's own state is decided by its current attempt alone and is never touched by this sweep, so a partial sweep cannot leave the item disagreeing with its sessions |
+| A superseded row is closed, then its worker turns out to have been alive | Cannot happen in that order: the liveness check runs *before* the decision to close, and a row whose worker can be seen is reported and left open rather than closed. The failure direction is always *leave it counting* — an under-count of running sessions is the only capacity error that does harm |
+
+## An accepted gap: an unobservable registry reads as death
+
+Reconciliation decides a session is gone by failing to find it in the session registry. When
+the registry cannot be observed at all — the directory is missing, or its version is
+unrecognised — that failure is indistinguishable from every session having exited, and every
+`active` item is marked `interrupted` in one pass.
+
+This is **pre-existing at `live`** and is not introduced by issue #33; what #33 changes is that
+`no-remote` now behaves the same way, because the skip that was masking the sweep there is gone.
+`sessions.RegistryScan` already distinguishes the two conditions and `capacity.py` acts on the
+distinction; `reconcile.py` does not consult either flag.
+
+It is recoverable — interruption touches no worktree and resumes nothing automatically — but it
+is silent and wholesale. Tracked as issue #44 rather than fixed alongside #33, because closing it
+changes `live` behaviour and is a separate subject.
 
 ## Disk
 

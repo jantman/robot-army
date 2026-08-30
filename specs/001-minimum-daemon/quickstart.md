@@ -157,9 +157,23 @@ uv run robot-army reconcile
 uv run robot-army anomalies
 ```
 
-**Expected**: an `orphan_session` anomaly. The worker keeps running, reparented, while dtach tears
-down its socket — so the daemon sees no socket and no exit report. `interrupted` does **not** mean
-nothing is running, and an unflagged live session here means FR-043 is missing.
+**Expected on this machine**: the worker does **not** survive. Killing the wrapper takes `claude`
+with it, almost certainly via SIGHUP when dtach's pty goes away — observed during the issue #1
+verification round, and reproduced against the mechanism in isolation while planning #33: a
+`kill -9` of a dtach master takes its child with it, leaving the socket file behind because
+SIGKILL gives dtach no chance to clean up.
+
+So **this route no longer produces an orphan**, and the absence of an `orphan_session` anomaly
+here is not evidence that FR-043 is missing. What must still hold is that the item does not stay
+`active` against a dead session: check `robot-army show <item>` reports `interrupted` and the
+session `lost`. Before issue #33 was fixed it did not, at any level below `live`.
+
+The design this scenario was written against is still real — M0 F17, a worker that outlives its
+wrapper — and `interrupted` still does **not** mean nothing is running. It is simply no longer
+reachable by killing the wrapper on this machine. To exercise the orphan path deliberately, use
+scenario 3 of
+`specs/20260830-133818-reconcile-session-liveness/quickstart.md`, which produces a live worker
+that no current attempt accounts for by resuming an item whose first worker is still alive.
 
 ## Scenario 5 — The real thing (effect level `live`)
 

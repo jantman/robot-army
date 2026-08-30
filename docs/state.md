@@ -424,6 +424,9 @@ summary:
 | During the containment fetch | Nothing removed. Containment is unproven, so the branch is retained and the item is reconsidered. The failure direction is always *keep* |
 | After a state transition, before its notification | State committed and logged; no message sent. The state change is fully reconstructible; the lost message is the named gap in [logging.md](logging.md) |
 | Mid-notification, after the POST left | Possibly delivered, recorded as attempted with its outcome. **No retry** — a duplicate notification is noise, and a retry loop is a Principle IV violation |
+| After `cancel` signalled the process, before the transaction committed | Rolled back: the item is still `active` and its session row still open, while the process is stopped. The reconciliation sweep resolves it — an open row under an item that is not `dispatching` or `active` is stale by definition, and this is why closing it at the command is belt rather than braces |
+| Mid-sweep of stale session rows | Rows already reclaimed are committed with their audit records; rows not yet reached stay open and are taken by the next pass. Each row is decided independently, so there is no cross-row state to lose |
+| After a row was reclaimed, when its exit record finally arrives | `spool.apply_record` returns `duplicate` — its terminal set already includes `lost` — and the work item is untouched, because that path only moves an item in `active`. The history keeps `lost` rather than the truer exit status. Accepted: a weaker reason in the log, never a wrong state |
 
 ## Disk
 

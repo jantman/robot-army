@@ -29,7 +29,7 @@ from tests.conftest import (
     write_registry,
 )
 
-from robot_army import capacity, db, dispatch, ordering
+from robot_army import capacity, db, dispatch, operations, ordering
 from robot_army.boundaries.hooks import SubprocessHookRunner
 from robot_army.states import SessionState, WorkItemState
 
@@ -536,6 +536,104 @@ def test_a_repository_at_its_cap_frees_up_when_its_session_ends(
             "UPDATE sessions SET state = ? WHERE id = ?",
             (str(SessionState.EXITED_CLEAN), row),
         )
+
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
+    assert db.get_work_item(conn, waiting).state is WorkItemState.ACTIVE
+
+
+def test_cancelling_a_simulated_session_frees_the_repository_it_was_holding(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """Issue #28, end to end and by the front door.
+
+    The sibling case above ends a session by writing ``exited_clean`` into the row by hand,
+    which is what an exit record would have done. This one ends it the way the maintainer
+    does — ``robot-army cancel`` — on a *simulated* session, which has no wrapper and no
+    process and so can never produce that record. Before #28 was fixed the row stayed
+    ``running`` forever, the repository stayed at its cap, and the waiting item was held
+    with ``repo_cap`` as the reason, which reads exactly like the cap working correctly.
+    """
+    registry, proc = machine
+    config = capped_at(two_repos, 4)
+    running = seed_item(
+        conn, repo_key="demo", issue_number=1, state=str(WorkItemState.ACTIVE), dry_run=True
+    )
+    seed_session(
+        conn, running, state=str(SessionState.RUNNING), session_id="s-sim", dry_run=True, pid=0
+    )
+    waiting = ready_item(conn, config, repo_key="demo", issue_number=2)
+
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 0
+    assert db.get_work_item(conn, waiting).state is WorkItemState.READY
+
+    boundaries = make_boundaries(
+        audit, writer=RecordingWriter(), host=StubSessionHost(confirm=True)
+    )
+    ctx = operations.Context(
+        conn=conn,
+        config=config,
+        audit=audit,
+        boundaries=boundaries,
+        effect_level=boundaries.level,
+    )
+    assert (
+        operations.cancel(
+            ctx, running, force=True, registry_dir=registry, proc_root=proc
+        ).code
+        == 0
+    )
+
+    # No reconciliation pass runs between the cancel and the dispatch: FR-012's whole
+    # point is that the CLI-only rehearsal has nothing sweeping on a timer.
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
+    assert db.get_work_item(conn, waiting).state is WorkItemState.ACTIVE
+
+
+def test_reconciliation_frees_a_slot_leaked_before_the_fix_existed(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """Issue #28, User Story 3: the recovery path for a database that is already leaking.
+
+    The maintainer's own round was worked around by raising `default_repo_max_sessions`
+    rather than by clearing the row, so the row is still there. Nothing but a sweep can
+    reach it: the active-item sweep iterates items in `active`, and every route that leaks
+    has already moved the item off that list.
+    """
+    from robot_army import reconcile
+
+    registry, proc = machine
+    config = capped_at(two_repos, 4)
+    stranded = seed_item(
+        conn,
+        repo_key="demo",
+        issue_number=1,
+        state=str(WorkItemState.INTERRUPTED),
+        dry_run=True,
+    )
+    seed_session(
+        conn, stranded, state=str(SessionState.RUNNING), session_id="s-leak", dry_run=True, pid=0
+    )
+    waiting = ready_item(conn, config, repo_key="demo", issue_number=2)
+
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 0
+    assert db.get_work_item(conn, waiting).state is WorkItemState.READY
+
+    boundaries = make_boundaries(audit, writer=RecordingWriter(), host=StubSessionHost())
+    result = reconcile.reconcile(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+    assert result.reclaimed == 1
+    # Nothing was discarded to get the slot back (FR-004).
+    assert {i.id for i in db.list_work_items(conn, include_simulated=True)} == {
+        stranded,
+        waiting,
+    }
 
     assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
     assert db.get_work_item(conn, waiting).state is WorkItemState.ACTIVE

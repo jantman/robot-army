@@ -1514,7 +1514,15 @@ def worktree_prune(ctx: Context) -> Result:
 # -- lifecycle verbs --------------------------------------------------------
 
 
-def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = input) -> Result:
+def cancel(
+    ctx: Context,
+    item_id: int,
+    *,
+    force: bool = False,
+    confirm: Any = input,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+) -> Result:
     """Stop that item's running session and **only** that session (FR-050)."""
     item = db.get_work_item(ctx.conn, item_id)
     if item is None:
@@ -1541,6 +1549,13 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
 
     # The item becomes `interrupted` and the worktree is left untouched: cancelling is
     # about the process, not about the work.
+    #
+    # The session row is closed here rather than left to the exit path, because for a
+    # stopped session that path may never run: a simulated session has no wrapper and no
+    # process, so no exit record can ever arrive, and the row would hold its capacity slot
+    # forever (#28). The order inside the transaction is load-bearing — the item moves
+    # first, so ``reclaim_stale_session`` sees it in the state that makes its row stale.
+    # A worker that survived the signal is left alone and reported; see that function.
     with db.transaction(ctx.conn):
         transition_work_item(
             ctx.conn,
@@ -1548,6 +1563,14 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
             item_id=item_id,
             target=WorkItemState.INTERRUPTED,
             reason=f"cancelled by the maintainer (session {session.session_id})",
+        )
+        reconcile.reclaim_stale_session(
+            ctx.conn,
+            ctx.audit,
+            session=session,
+            scan=sessions.scan(registry_dir=registry_dir, proc_root=proc_root),
+            proc_root=proc_root,
+            reason="cancelled by the maintainer",
         )
     result.data = {"item_id": item_id, "session_id": session.session_id, "scope": session.scope}
     return result.say(
@@ -1629,11 +1652,18 @@ def restart(ctx: Context, item_id: int, *, registry_dir: Path | None = None) -> 
     )
 
 
-def abandon(ctx: Context, item_id: int) -> Result:
+def abandon(
+    ctx: Context,
+    item_id: int,
+    *,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+) -> Result:
     """Mark the item abandoned. Deliberately **not** destructive — the worktree stays."""
     item = db.get_work_item(ctx.conn, item_id)
     if item is None:
         return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
+    session = db.latest_session_for_item(ctx.conn, item_id)
     try:
         with db.transaction(ctx.conn):
             transition_work_item(
@@ -1643,6 +1673,20 @@ def abandon(ctx: Context, item_id: int) -> Result:
                 target=WorkItemState.ABANDONED,
                 reason="abandoned by the maintainer",
             )
+            # An abandoned item is finished, so any session row still open under it is
+            # holding a capacity slot for work that will never resume (#28). As in
+            # ``cancel``, the item moves first so the rule sees the state that makes the
+            # row stale, and a worker that is somehow still alive is reported rather than
+            # closed — ``abandon`` stops no process, so that is the likelier case here.
+            if session is not None:
+                reconcile.reclaim_stale_session(
+                    ctx.conn,
+                    ctx.audit,
+                    session=session,
+                    scan=sessions.scan(registry_dir=registry_dir, proc_root=proc_root),
+                    proc_root=proc_root,
+                    reason="the work item was abandoned",
+                )
     except Exception as exc:  # noqa: BLE001 - an illegal transition is a usage error here
         return Result(code=EXIT_FAILED, lines=[str(exc)])
     # FR-029: a card must not sit in the in-progress list claiming to be busy when nothing

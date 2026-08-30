@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from robot_army.audit import AuditLog
     from robot_army.config import Config
     from robot_army.effects import Boundaries
+    from robot_army.models import Session
     from robot_army.paths import Layout
 
 
@@ -42,6 +43,7 @@ class ReconcileResult:
     interrupted: int = 0
     dispatching_failed: int = 0
     closed_done: int = 0
+    reclaimed: int = 0
     orphans: int = 0
     stale_sockets: int = 0
     prunable: int = 0
@@ -56,6 +58,7 @@ class ReconcileResult:
             "interrupted": self.interrupted,
             "dispatching_failed": self.dispatching_failed,
             "closed_done": self.closed_done,
+            "reclaimed": self.reclaimed,
             "orphans": self.orphans,
             "stale_sockets": self.stale_sockets,
             "prunable_worktrees": self.prunable,
@@ -115,6 +118,102 @@ def scan_registry(
                 (Path(config.worker.binary).name,), proc_root=proc_root
             )
     return result
+
+
+#: The only two work item states that may legitimately hold an open session row.
+#:
+#: Derived from the dispatch path, which is the only code that opens one: ``dispatch_item``
+#: moves the item to ``dispatching``, inserts the row, and only later moves the session to
+#: ``running`` and the item to ``active``. Everything else — ``ready``, ``awaiting_review``,
+#: ``interrupted``, ``failed``, ``done``, ``abandoned`` — means no session is in flight.
+#:
+#: Deliberately an allow-list rather than a deny-list of ``TERMINAL_WORK_ITEM_STATES``.
+#: That set is only ``{done, abandoned}``, and issue #28's reported case leaves the item
+#: ``interrupted``, which is not terminal — it is resumable. A rule written against the
+#: terminal set would miss the very leak it was written for.
+SESSION_BEARING_STATES: frozenset[WorkItemState] = frozenset(
+    {WorkItemState.DISPATCHING, WorkItemState.ACTIVE}
+)
+
+
+def reclaim_stale_session(
+    conn: sqlite3.Connection,
+    audit: AuditLog,
+    *,
+    session: Session,
+    scan: sessions.RegistryScan,
+    proc_root: Path | None = None,
+    reason: str,
+) -> str:
+    """Decide what one open session row is: legitimate, alive, or a leaked slot (#28).
+
+    Returns ``"left"``, ``"reported"`` or ``"reclaimed"`` — the same shape as
+    ``spool.apply_record``, and for the same reason: the caller usually wants to count the
+    outcomes rather than re-derive them.
+
+    A session row occupies a global and a per-repository capacity slot for exactly as long
+    as it is ``starting`` or ``running``. Nothing closes it but the wrapper's exit record,
+    and a **simulated** session has no wrapper and no process, so for one of those the
+    record can never arrive. The row then holds its slot forever, and the queue stops
+    dispatching with ``repo_cap`` as its reason — which reads as the cap working correctly.
+
+    **The middle branch is the one that matters.** ``interrupted`` has never meant "nothing
+    is running" (M0 F17): a worker whose wrapper died keeps going, reparented. Closing that
+    row would make the reported capacity *lower* than the number of live workers, which
+    oversubscribes the one subscription the cap exists to protect. An under-count is the
+    only capacity error that causes harm, so a row whose worker can be seen is reported as
+    an orphan and left exactly where it is.
+
+    The caller owns the transaction, exactly as ``transition_session`` requires, so the
+    state change and its audit record commit together with whatever else the caller is
+    doing.
+
+    ``reason`` names the route — cancellation, abandonment, or the sweep — because that is
+    the difference between "the maintainer stopped this" and "this was found stale later",
+    and the log is the only place that distinction survives.
+    """
+    if session.state not in (SessionState.STARTING, SessionState.RUNNING):
+        return "left"
+
+    item = db.get_work_item(conn, session.work_item_id)
+    if item is not None and item.state in SESSION_BEARING_STATES:
+        return "left"
+    # An open row whose work item is gone still holds a global slot and nothing else can
+    # ever close it, so it is stale by the same argument.
+    item_state = str(item.state) if item is not None else "absent"
+
+    entry = scan.find(session.session_id)
+    if entry is not None and entry.alive(proc_root=proc_root):
+        db.raise_anomaly(
+            conn,
+            kind="orphan_session",
+            entity_type="session",
+            entity_id=session.session_id,
+            detail={
+                "pid": entry.pid,
+                "cwd": entry.cwd,
+                "proc_start": entry.proc_start,
+                "work_item_id": session.work_item_id,
+                "work_item_state": item_state,
+                "note": (
+                    "a live worker under a work item that is no longer running one. Its "
+                    "session row is left open on purpose: the slot really is taken, and "
+                    "reporting a count lower than the number of live workers would "
+                    "oversubscribe the very quota the cap protects"
+                ),
+            },
+        )
+        return "reported"
+
+    transition_session(
+        conn,
+        audit,
+        session_row_id=session.id,
+        target=SessionState.LOST,
+        reason=f"{reason} (work item is {item_state}, so no session is in flight)",
+    )
+    return "reclaimed"
+
 
 
 def reconcile(
@@ -251,6 +350,16 @@ def reconcile(
         result.retained += sum(
             1 for d in decisions if d.state in (cleanup.RETAINED, cleanup.BRANCH_RETAINED)
         )
+
+    # -- session rows that outlived their work item (#28) ------------------
+    #
+    # Positioned deliberately. *After* the active-item sweep and the closed-issue pass, so
+    # every item is seen in the state this pass has already settled it into and no row they
+    # closed is examined twice. *Before* the orphan sweep, whose inputs are left exactly as
+    # they were — this feature adds a caller of the anomaly, not a change to that sweep.
+    result.reclaimed += _sweep_stale_sessions(
+        conn, audit=audit, scan=scan, proc_root=proc_root
+    )
 
     # -- the orphan sweep (FR-043, M0 F17) ---------------------------------
     result.orphans += _orphan_sweep(
@@ -427,6 +536,46 @@ def _resolve_closed_issues(
             )
         resolved += 1
     return resolved
+
+
+def _sweep_stale_sessions(
+    conn: sqlite3.Connection,
+    *,
+    audit: AuditLog,
+    scan: sessions.RegistryScan,
+    proc_root: Path | None,
+) -> int:
+    """Close every session row that outlived the work item it belongs to (#28).
+
+    The invariant the reported bug violates: a row is only ``starting`` or ``running``
+    while its item is ``dispatching`` or ``active``. Nothing else in this module could
+    reach the leaked rows, because the active-item sweep above iterates items in
+    ``active`` and every route that leaks has already moved the item off that list.
+
+    Bounded by the number of open rows, which the global cap bounds in turn — this is not
+    a scan of the sessions table's history.
+    """
+    reclaimed = 0
+    for session in db.list_sessions(
+        conn,
+        include_simulated=True,
+        states=[SessionState.STARTING, SessionState.RUNNING],
+    ):
+        with db.transaction(conn):
+            outcome = reclaim_stale_session(
+                conn,
+                audit,
+                session=session,
+                scan=scan,
+                proc_root=proc_root,
+                reason=(
+                    "reconciliation found a session row still open under a work item "
+                    "that is not running one"
+                ),
+            )
+        if outcome == "reclaimed":
+            reclaimed += 1
+    return reclaimed
 
 
 def _orphan_sweep(

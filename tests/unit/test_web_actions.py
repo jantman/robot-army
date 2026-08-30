@@ -368,6 +368,39 @@ def test_cancel_stops_exactly_one_session_and_leaves_the_others_running(web, con
     assert web.host.terminated == [("/tmp/one.sock", None)]
 
 
+def test_abandon_from_the_web_releases_the_capacity_slot_too(web, conn, config):
+    """Issue #28's second route, through the interface rather than the terminal."""
+    from robot_army import capacity
+
+    item_id = seed_item(conn, state="interrupted")
+    seed_session(conn, item_id, state="running")
+
+    assert web.post_json(f"/item/{item_id}/abandon").status == 303
+
+    assert state_of(conn, item_id) == WorkItemState.ABANDONED
+    assert db.latest_session_for_item(conn, item_id).state is SessionState.LOST
+    assert capacity.snapshot(conn, config=config).total == 0
+
+
+def test_cancel_from_the_web_releases_the_capacity_slot_too(web, conn, config):
+    """Issue #28. The web routes through the same ``operations.cancel``, so it must not be
+    a second way to leak the slot — and the first session's row closing must not disturb
+    the second item's, which is still genuinely running."""
+    from robot_army import capacity
+
+    first = seed_item(conn, issue_number=1, state="active")
+    second = seed_item(conn, issue_number=2, state="active")
+    seed_session(conn, first, state="running", host_socket="/tmp/one.sock")
+    seed_session(conn, second, state="running", host_socket="/tmp/two.sock")
+
+    assert web.post_json(f"/item/{first}/cancel").status == 303
+
+    assert db.latest_session_for_item(conn, first).state is SessionState.LOST
+    assert db.latest_session_for_item(conn, first).ended_at is not None
+    assert db.latest_session_for_item(conn, second).state is SessionState.RUNNING
+    assert capacity.snapshot(conn, config=config).total == 1
+
+
 def test_cancel_does_not_touch_the_checkout(web, conn):
     item_id = seed_item(conn, state="active")
     with db.transaction(conn):

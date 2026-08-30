@@ -112,3 +112,25 @@ def test_every_simulated_write_is_marked_as_simulated(audit, layout):
     ]
     assert len(written) == 3
     assert all(r.get("simulated") is True for r in written)
+
+
+def test_a_simulated_comment_records_the_whole_body_and_posts_nothing(audit, layout):
+    """Issue #38's rehearsal path, and the thing that makes it worth rehearsing.
+
+    ``robot-army run --effect-level local`` is how the comment's wording is checked without
+    spending a real issue on it. That only works because the simulated writer logs the body
+    it *would* have posted, in full — a record that counted the write, or truncated it,
+    would leave the wording unverifiable anywhere but production.
+    """
+    writer = SimulatedIssueWriter(audit)
+    body = "🤖 robot-army dispatched a session for this issue.\n\n- Host: `orion`\n"
+    url = writer.comment("me/demo", 42, body)
+    audit.close()
+
+    assert url.startswith("https://github.com/me/demo/issues/42#issuecomment-simulated-")
+
+    written = [r for r in records(layout) if r["action"] == "github.comment"]
+    assert len(written) == 1
+    assert written[0]["simulated"] is True
+    assert written[0]["target"] == "me/demo#42"
+    assert written[0]["detail"]["body"] == body, "the full body, not a count and not a prefix"

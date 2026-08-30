@@ -462,6 +462,65 @@ Four things worth knowing:
 There is deliberately no aging: a low-priority repository can wait indefinitely while a
 high-priority one keeps producing work, which is what choosing that mode means.
 
+## What it writes on the issue
+
+Two machines now run this, and a worktree path is not an address. So when a session is
+confirmed, the issue is told where it is:
+
+```markdown
+🤖 robot-army dispatched a session for this issue.
+
+- Host: `phoenix`
+- Session: `ra-robot-army-38`
+- Session id: `2f1c9c3e-6a54-4a0b-9f0d-4c2a1d8e77b1`
+- Branch: `robot-army/issue-38-issue-comments-on-dispatch`
+- Worktree: `/home/jantman/worktrees/robot-army/issue-38`
+```
+
+Both session handles are there because they are the two different things I search with: the
+**name** is what appears in the tab title and the `/resume` picker, the **id** names the
+transcript, the log records and the exit spool. The **branch** is the link to the pull
+request — a PR for this work is opened from it — so an issue, its PR and its session logs
+are one chain from either end.
+
+Resume or restart an item and the next comment says so rather than repeating itself:
+
+```markdown
+🤖 robot-army reassigned this issue to a new session (attempt 2).
+…
+- Continues: `2f1c9c3e-…` (that session's context was restored)
+```
+
+A restart says `Supersedes:` instead, and says the new session starts without that
+session's context — which is the difference between reading the earlier transcript for
+context and reading it for facts that no longer apply. If no earlier session is on record
+(a rebuilt database), it says that rather than naming one.
+
+A failed attempt gets its own comment naming the host and the reason. Trust is granted per
+machine, so "it works on the other one" is a real case and the host line is what makes it
+visible.
+
+Three rules hold throughout:
+
+- **Nothing is posted before a session is confirmed running.** The comment is the last
+  thing a dispatch does, after the check that a launch really started something — because
+  `kitty @ launch` returns success either way.
+- **Nothing is ever edited or deleted.** One comment per attempt, in order. That ordering
+  is the record.
+- **Below `live`, nothing reaches GitHub.** The body that *would* have been posted is in
+  the log in full, which is how the wording gets checked without spending a real issue:
+
+  ```bash
+  uv run robot-army run --effect-level local --once
+  jq -r 'select(.action == "github.comment" and .simulated == true) | .detail.body' \
+    ~/.local/state/robot-army/logs/audit-$(date -u +%F).jsonl
+  ```
+
+A comment that fails to post is logged and otherwise ignored: GitHub being down is not a
+reason to fail a session that is running. Nothing retries it, so a comment lost to a crash
+between confirmation and the POST stays lost — `robot-army show <id>` still knows
+everything the comment would have said.
+
 ## Being told when something happens
 
 Off by default — nothing is sent until I ask, and there is no second webhook to configure.

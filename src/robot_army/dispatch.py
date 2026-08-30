@@ -50,6 +50,7 @@ from robot_army.boundaries import BoundaryError, DisplayHandle, Issue
 from robot_army.ordering import HoldReason
 from robot_army.paths import claude_trust_file
 from robot_army.states import (
+    TERMINAL_SESSION_STATES,
     SessionState,
     WorkItemState,
     transition_session,
@@ -477,8 +478,15 @@ def build_launch_plan(
 
     worker_argv: list[str] = [config.worker.binary, "--session-id", session_id]
     if resume_session_id:
-        # A resume is a *new attempt* restoring the prior session's context (FR-047).
-        worker_argv += ["--resume", resume_session_id]
+        # A resume is a *new attempt* restoring the prior session's context (FR-047), and
+        # --fork-session is what makes that sentence true rather than merely intended.
+        # Without it the binary rejects the pair before running anything --- "--session-id
+        # can only be used with --continue or --resume if --fork-session is also
+        # specified" --- so every resume exited 1 within a second. With it, the forked
+        # session carries the prior conversation and runs under the id *we* chose, which is
+        # what confirmation, attach, terminate and exit correlation all address it by
+        # (milestone 013, contracts/worker-launch-shapes.md G1-G5, measured not assumed).
+        worker_argv += ["--resume", resume_session_id, "--fork-session"]
     # Both name flags are set because they surface in different places and the
     # auto-derived default is not identifiable (R19).
     worker_argv += ["-n", name, "--remote-control", name]
@@ -555,8 +563,91 @@ def dispatch_item(
     """Prepare and launch one item. Returns ``True`` when it reached ``active``.
 
     Failure at any point leaves the item ``failed`` with a reason, never ``active`` and
-    never silently stuck.
+    never silently stuck. This wrapper is what makes the second half of that sentence
+    true for the unforeseen failures as well as the handled ones.
+
+    An exception escaping the launch used to strand the item in ``dispatching``, where it
+    reads as "starting up, be patient" until the 15-minute reaper clears it --- a failure
+    detected in under three seconds and reported to nobody (milestone 013, FR-008). So the
+    item is settled here and the exception is then **re-raised**: settling without
+    re-raising would be the swallowing catch-all Principle III forbids, and re-raising
+    without settling is the bug. Both, or neither is right.
     """
+    try:
+        return _dispatch_item(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            layout=layout,
+            item_id=item_id,
+            trust_file=trust_file,
+            registry_dir=registry_dir,
+            proc_root=proc_root,
+            resume_session_id=resume_session_id,
+            skip_gates=skip_gates,
+        )
+    except Exception as exc:
+        # The item is read *before* the record is written, so the record can say which item
+        # this was and what is about to happen to it. Only ``dispatching`` is settled here:
+        # from anywhere else the transition would itself be illegal, and an exception raised
+        # while handling one would bury the failure that actually matters. An item can
+        # legitimately be past ``dispatching`` when this runs --- notification, the board
+        # update and the transcript check all follow confirmation --- so the note must say
+        # which of the two happened rather than assert a settle that never occurred.
+        item = db.get_work_item(conn, item_id)
+        settling = item is not None and item.state is WorkItemState.DISPATCHING
+        audit.error(
+            "dispatch.error",
+            error=exc,
+            entity_type="work_item",
+            entity_id=item_id,
+            detail={
+                "item_state": str(item.state) if item is not None else None,
+                "settling": settling,
+                "note": (
+                    "an exception escaped the launch; the item is being failed before the "
+                    "exception is re-raised (the state.work_item record that follows is the "
+                    "settle itself)"
+                    if settling
+                    else "an exception escaped the launch, but the item is not dispatching "
+                    "and is left as it stands: this ran after the launch had already been "
+                    "confirmed, and nothing here may move an item the state table does not "
+                    "allow to be moved"
+                ),
+            },
+            # Without this a crash while dispatching a simulated item is indistinguishable
+            # in the log from a crash on a real one (FR-055).
+            dry_run=bool(item is not None and item.dry_run),
+        )
+        if settling:
+            _fail(
+                conn,
+                audit,
+                item_id,
+                f"dispatch raised {type(exc).__name__}: {exc}",
+                boundaries=boundaries,
+                config=config,
+                item=item,
+            )
+        raise
+
+
+def _dispatch_item(
+    conn: sqlite3.Connection,
+    *,
+    boundaries: Boundaries,
+    audit: AuditLog,
+    config: Config,
+    layout: Layout,
+    item_id: int,
+    trust_file: Path | None = None,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+    resume_session_id: str | None = None,
+    skip_gates: bool = False,
+) -> bool:
+    """The launch itself. Always called through ``dispatch_item``, never directly."""
     item = db.get_work_item(conn, item_id)
     if item is None:
         raise LookupError(f"no work item {item_id}")
@@ -757,31 +848,49 @@ def dispatch_item(
             window_state = boundaries.display.window_state(display_handle)
         except Exception:  # noqa: BLE001 - diagnosis is best-effort; the failure stands
             window_state = None
-        reason = (
-            f"launch was not confirmed within {config.daemon.confirm_timeout_seconds}s: no "
-            f"session registry entry appeared for session id {session_id}. The launch call "
-            "itself returned success, which M0 F16 measured as meaningless on its own"
-        )
-        # A session *did* start in our worktree, but carrying an id we did not ask for.
-        # That is an anomaly, not a success (R10's corollary, FR-065): it means something
-        # overrode --session-id, and the session we launched is not the one we can track.
-        _detect_session_id_mismatch(
-            conn,
-            audit,
-            item_id=item_id,
-            expected=session_id,
-            worktree_path=worktree_path,
-            registry_dir=registry_dir,
-            proc_root=proc_root,
-        )
-        with db.transaction(conn):
-            transition_session(
+
+        # Ask the session what it knows before concluding anything about it. The exit
+        # spool is drained by the daemon, in its own process, while this call was
+        # waiting: a worker that died fast has already recorded its own ending, and
+        # overwriting that with LOST is both a contradiction the state gate rejects and a
+        # loss of the most useful fact in the record. `reconcile` asks the same question
+        # at the equivalent moment and for the same reason (milestone 013, research R3).
+        recorded = db.get_session(conn, session_id)
+        already = recorded.state if recorded else None
+
+        if already in TERMINAL_SESSION_STATES:
+            outcome = "already_exited"
+            reason = _exited_before_confirmation(already, recorded, config)
+            # No mismatch scan: the question that scan answers --- did something else
+            # start under a different id? --- is already answered by this session having
+            # reported its own ending. Probing would hunt a rival that cannot exist.
+        else:
+            outcome = "lost"
+            reason = (
+                f"launch was not confirmed within {config.daemon.confirm_timeout_seconds}s: no "
+                f"session registry entry appeared for session id {session_id}. The launch call "
+                "itself returned success, which M0 F16 measured as meaningless on its own"
+            )
+            # A session *did* start in our worktree, but carrying an id we did not ask for.
+            # That is an anomaly, not a success (R10's corollary, FR-065): it means something
+            # overrode --session-id, and the session we launched is not the one we can track.
+            _detect_session_id_mismatch(
                 conn,
                 audit,
-                session_row_id=session_row_id,
-                target=SessionState.LOST,
-                reason="confirmation window elapsed",
+                item_id=item_id,
+                expected=session_id,
+                worktree_path=worktree_path,
+                registry_dir=registry_dir,
+                proc_root=proc_root,
             )
+            with db.transaction(conn):
+                transition_session(
+                    conn,
+                    audit,
+                    session_row_id=session_row_id,
+                    target=SessionState.LOST,
+                    reason="confirmation window elapsed",
+                )
         audit.record(
             "dispatch.unconfirmed",
             outcome="error",
@@ -789,6 +898,10 @@ def dispatch_item(
             entity_id=item_id,
             detail={
                 "session_id": session_id,
+                # Which of the two stories this was. "Never appeared" and "already exited"
+                # call for different next steps, so the log must not blur them (FR-010).
+                "session_state": str(already) if already else None,
+                "outcome": outcome,
                 "launch_argv": plan.argv,
                 "window_id": display_handle.window_id,
                 "window_state": window_state,
@@ -877,6 +990,11 @@ def dispatch_item(
         entity_id=item_id,
         detail={
             "session_id": session_id,
+            # Which session's context this attempt restored, or absent when it restored
+            # none. It is inside launch_argv too, but that is the whole nested wrapper
+            # argv with the prompt body in it, and "what did this resume?" should not
+            # cost a parse of that to answer from the log (FR-002).
+            **({"resumed_from": resume_session_id} if resume_session_id else {}),
             "pid": entry.pid,
             "scope": scope,
             "window_id": display_handle.window_id,
@@ -962,6 +1080,35 @@ def _detect_session_id_mismatch(
             )
         return created
     return False
+
+
+def _exited_before_confirmation(
+    state: SessionState, session: Any, config: Config
+) -> str:
+    """Why a launch failed when the session ended before confirmation could see it.
+
+    Every one of these settles the item as ``failed``, whatever the exit code says in
+    isolation. ``classify_exit`` would send a clean exit to ``awaiting_review`` and a
+    signalled one to ``interrupted``, but neither is reachable from ``dispatching`` and
+    neither would be true: a worker that ended before it ever registered did not do the
+    work, and putting an untouched item in the review queue would be a lie the maintainer
+    acts on. The exit code still goes in the reason, because it is what says *why*.
+    """
+    window = config.daemon.confirm_timeout_seconds
+    if state is SessionState.LOST:
+        return (
+            f"the session was already recorded lost before the {window}s confirmation "
+            "window elapsed"
+        )
+    code = getattr(session, "exit_code", None)
+    signal = getattr(session, "signal", None)
+    detail = f"the worker exited {code}" if code is not None else "the worker exited"
+    if signal is not None:
+        detail += f" (signal {signal})"
+    return (
+        f"{detail} before the launch could be confirmed, inside the {window}s "
+        "confirmation window. A session that ends this quickly never started the work"
+    )
 
 
 def _fail(

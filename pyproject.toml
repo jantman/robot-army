@@ -35,6 +35,7 @@ pythonpath = ["src", "."]
 addopts = "-ra --strict-markers"
 markers = [
     "requires_git: test shells out to a real git binary",
+    "requires_worker: test shells out to the real worker binary",
 ]
 
 [tool.ruff]

@@ -532,6 +532,11 @@ def test_resume_adds_the_resume_flag(config, layout, audit):
     assert "--resume" in plan.worker_argv
     assert plan.worker_argv[plan.worker_argv.index("--resume") + 1] == "old-id"
     assert plan.worker_argv[plan.worker_argv.index("--session-id") + 1] == "new-id"
+    # This test passed for the entire life of `resume`, on a command the binary refuses:
+    # --session-id with --resume is rejected unless --fork-session is given too. Asserting
+    # the flags we meant to pass is not the same as asserting a command that runs, which
+    # is why tests/unit/test_launch_shapes.py now hands the shape to the real binary.
+    assert "--fork-session" in plan.worker_argv
 
 
 # -- the recorded location, re-verified at dispatch (milestone 005) ---------
@@ -713,3 +718,319 @@ def test_reapprove_after_either_failure_lets_dispatch_resume(conn, audit, config
         )
 
     gates(conn, audit, config, config.repos["demo"], trust)
+
+
+# -- resume: the launch shape and what it records (milestone 013) -----------
+
+
+def records_of(layout, audit, action: str) -> list[dict]:
+    """Every audit record for one action. ``audit.close()`` first — the log is a file."""
+    audit.close()
+    text = "\n".join(p.read_text(encoding="utf-8") for p in layout.log_dir.glob("*.jsonl"))
+    return [
+        json.loads(line)
+        for line in text.splitlines()
+        if json.loads(line).get("action") == action
+    ]
+
+
+def interrupt(conn, item_id: int, audit) -> None:
+    from robot_army.states import transition_work_item
+
+    with db.transaction(conn):
+        transition_work_item(
+            conn,
+            audit,
+            item_id=item_id,
+            target=WorkItemState.INTERRUPTED,
+            reason="the maintainer closed the laptop",
+        )
+
+
+def test_a_resume_is_a_new_attempt_naming_what_it_restored(
+    conn, audit, config, tmp_path, layout
+):
+    """FR-002. The prior session id is in ``launch_argv`` too, but that is the whole nested
+    wrapper argv with the prompt body inside it. Principle III's standard is reconstruction
+    from the log, and "which session did this restore" should not require parsing that."""
+    boundaries = make_boundaries(audit, hooks=SubprocessHookRunner(audit))
+    trust = trust_file(tmp_path, config.repos["demo"].path)
+    item_id = ready_item(conn, config)
+
+    assert dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust,
+    )
+    first = db.latest_session_for_item(conn, item_id)
+    assert first is not None and first.attempt == 1
+    interrupt(conn, item_id, audit)
+
+    assert dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust,
+        resume_session_id=first.session_id,
+    )
+
+    second = db.latest_session_for_item(conn, item_id)
+    assert second is not None
+    assert second.attempt == 2, "a resume is a new attempt, not a continuation of the old one"
+    assert second.session_id != first.session_id
+
+    confirmed = records_of(layout, audit, "dispatch.confirmed")
+    assert confirmed[-1]["detail"]["resumed_from"] == first.session_id
+    assert confirmed[0]["detail"].get("resumed_from") is None, (
+        "a fresh launch restored nothing and must not claim otherwise"
+    )
+
+
+# -- the confirmation race (milestone 013) ---------------------------------
+#
+# A worker can die before its launch is confirmed, and when it does, the daemon applies its
+# exit record from a *different process* while dispatch is still sitting in confirmation.
+# The session then holds a terminal state that dispatch used to try to overwrite with LOST,
+# which the state gate refuses --- the exception escaped, `_fail` never ran, and the item
+# stayed in `dispatching` until the 15-minute reaper. See specs/013's research R3.
+#
+# `spool.apply_record` deliberately leaves a `dispatching` item alone (it only settles
+# `active` ones), because dispatch owns the item until confirmation resolves. That division
+# is correct; it is what makes settling the item here dispatch's job and nobody else's.
+
+
+def dying_host(conn, audit, exit_code: int):
+    """A host whose worker records its own exit while confirmation is still waiting."""
+    from robot_army import spool
+
+    def record_the_exit(session_id: str) -> None:
+        for payload in (
+            {"schema": 1, "event": "start", "session_id": session_id, "pid": 4242},
+            {"schema": 1, "event": "exit", "session_id": session_id, "exit": exit_code},
+        ):
+            with db.transaction(conn):
+                spool.apply_record(conn, audit, payload)
+
+    return StubSessionHost(confirm=False, on_confirm=record_the_exit)
+
+
+def launch_with(conn, audit, config, layout, tmp_path, host):
+    boundaries = make_boundaries(audit, host=host, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config)
+    ok = dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+    return item_id, ok
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "session_state", "in_reason"),
+    [
+        (1, SessionState.EXITED_ERROR, "exited 1"),
+        (0, SessionState.EXITED_CLEAN, "exited 0"),
+        (143, SessionState.EXITED_ERROR, "exited 143"),
+    ],
+)
+def test_a_session_that_already_exited_is_not_overwritten_as_lost(
+    conn, audit, config, tmp_path, layout, exit_code, session_state, in_reason
+):
+    """FR-005. The session recorded its own ending; that ending is the answer. Declaring it
+    `lost` would both contradict the record and destroy the most useful fact in it."""
+    item_id, ok = launch_with(
+        conn, audit, config, layout, tmp_path, dying_host(conn, audit, exit_code)
+    )
+    assert ok is False
+
+    session = db.latest_session_for_item(conn, item_id)
+    assert session is not None
+    assert session.state is session_state, "the recorded exit stands"
+    assert session.exit_code == exit_code
+
+    item = db.get_work_item(conn, item_id)
+    assert item is not None
+    assert item.state is WorkItemState.FAILED, (
+        "a launch that failed must be settled here, not left for the 15-minute reaper"
+    )
+    assert in_reason in (item.failure_reason or "")
+
+
+def test_the_illegal_transition_that_wedged_the_item_never_happens(
+    conn, audit, config, tmp_path, layout
+):
+    """The reported symptom, asserted directly: no IllegalTransition, and no `state.session`
+    record moving a terminal session anywhere."""
+    item_id, _ = launch_with(conn, audit, config, layout, tmp_path, dying_host(conn, audit, 1))
+    audit.close()
+    text = "\n".join(p.read_text(encoding="utf-8") for p in layout.log_dir.glob("*.jsonl"))
+
+    assert "IllegalTransition" not in text
+    assert "illegal session transition" not in text
+    moves = [
+        json.loads(line)
+        for line in text.splitlines()
+        if json.loads(line).get("action") == "state.session"
+    ]
+    assert not any(m["detail"]["to"] == "lost" for m in moves), (
+        "nothing may move a session that already reported its own ending"
+    )
+    assert db.get_work_item(conn, item_id).state is WorkItemState.FAILED
+
+
+def test_the_unconfirmed_record_says_which_outcome_it_took(
+    conn, audit, config, tmp_path, layout
+):
+    """FR-010. From the log alone, 'never appeared' and 'already exited' must be different
+    stories, because they call for different next steps."""
+    launch_with(conn, audit, config, layout, tmp_path, dying_host(conn, audit, 1))
+    record = records_of(layout, audit, "dispatch.unconfirmed")[-1]
+
+    assert record["detail"]["session_state"] == "exited_error"
+    assert record["detail"]["outcome"] == "already_exited"
+
+
+def test_a_session_that_recorded_nothing_is_still_declared_lost(
+    conn, audit, config, tmp_path, layout
+):
+    """FR-006. The pre-existing path, unchanged. A worker that never wrote anything really
+    is lost, and this is the case the old code was written for."""
+    item_id, ok = launch_with(
+        conn, audit, config, layout, tmp_path, StubSessionHost(confirm=False)
+    )
+    assert ok is False
+
+    session = db.latest_session_for_item(conn, item_id)
+    assert session is not None and session.state is SessionState.LOST
+    item = db.get_work_item(conn, item_id)
+    assert item.state is WorkItemState.FAILED
+    assert "not confirmed" in (item.failure_reason or "")
+
+    record = records_of(layout, audit, "dispatch.unconfirmed")[-1]
+    assert record["detail"]["outcome"] == "lost"
+
+
+def test_an_exception_inside_the_launch_settles_the_item_and_re_raises(
+    conn, audit, config, tmp_path, layout
+):
+    """FR-008. Nothing is swallowed --- the exception still reaches the caller --- but it may
+    not strand the item on its way out. That combination is the whole requirement."""
+
+    class ExplodingDisplay(StubDisplay):
+        def open(self, cwd, argv, title, user_vars, env):
+            # Not a BoundaryError --- that one is handled and tested above. This is the
+            # unforeseen kind: a boundary raising something nobody planned for.
+            raise RuntimeError("kitty fell over mid-launch")
+
+    host = dying_host(conn, audit, 1)
+    boundaries = make_boundaries(
+        audit, host=host, display=ExplodingDisplay(), hooks=SubprocessHookRunner(audit)
+    )
+    item_id = ready_item(conn, config)
+
+    with pytest.raises(RuntimeError, match="kitty fell over"):
+        dispatch.dispatch_item(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            layout=layout,
+            item_id=item_id,
+            trust_file=trust_file(tmp_path, config.repos["demo"].path),
+        )
+
+    item = db.get_work_item(conn, item_id)
+    assert item is not None
+    assert item.state is WorkItemState.FAILED, "an escaping exception may not wedge the item"
+    assert "kitty fell over" in (item.failure_reason or "")
+    assert records_of(layout, audit, "dispatch.error"), "and it must be in the record"
+
+
+def test_a_crash_on_a_simulated_item_is_distinguishable_in_the_log(
+    conn, audit, config, tmp_path, layout
+):
+    """A `dispatch.error` that omits `dry_run` makes a crash while dispatching a simulated
+    item read exactly like a crash on a real one. Every other record in this module carries
+    it; this one must too (FR-055)."""
+
+    class ExplodingDisplay(StubDisplay):
+        def open(self, cwd, argv, title, user_vars, env):
+            raise RuntimeError("kitty fell over mid-launch")
+
+    boundaries = make_boundaries(
+        audit,
+        host=dying_host(conn, audit, 1),
+        display=ExplodingDisplay(),
+        hooks=SubprocessHookRunner(audit),
+    )
+    item_id = seed_item(
+        conn,
+        state=str(WorkItemState.READY),
+        dry_run=True,
+        clone_path=config.repos["demo"].path,
+    )
+
+    with pytest.raises(RuntimeError, match="kitty fell over"):
+        dispatch.dispatch_item(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            layout=layout,
+            item_id=item_id,
+            trust_file=trust_file(tmp_path, config.repos["demo"].path),
+        )
+
+    record = records_of(layout, audit, "dispatch.error")[-1]
+    assert record["dry_run"] is True
+    assert record["detail"]["settling"] is True
+    assert record["detail"]["item_state"] == "dispatching"
+
+
+def test_a_crash_after_confirmation_does_not_claim_a_settle_it_did_not_make(
+    conn, audit, config, tmp_path, layout, monkeypatch
+):
+    """Notification, the board update and the transcript check all run *after* the item
+    reaches `active`. An exception in any of them lands in the same handler, where the item
+    can no longer legally be moved --- so the record must say the item was left alone. An
+    audit trail that claims an outcome nobody produced is worse than one that says nothing."""
+
+    def explode(**kwargs):
+        raise RuntimeError("the notifier fell over after the session was confirmed")
+
+    monkeypatch.setattr(dispatch.notifications, "emit", explode)
+    boundaries = make_boundaries(audit, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config)
+
+    with pytest.raises(RuntimeError, match="the notifier fell over"):
+        dispatch.dispatch_item(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            layout=layout,
+            item_id=item_id,
+            trust_file=trust_file(tmp_path, config.repos["demo"].path),
+        )
+
+    item = db.get_work_item(conn, item_id)
+    assert item is not None
+    assert item.state is WorkItemState.ACTIVE, (
+        "the session really is running; failing the item here would be the false report"
+    )
+
+    record = records_of(layout, audit, "dispatch.error")[-1]
+    assert record["detail"]["settling"] is False
+    assert record["detail"]["item_state"] == "active"
+    assert "left as it stands" in record["detail"]["note"]

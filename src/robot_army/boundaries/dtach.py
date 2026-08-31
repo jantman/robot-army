@@ -228,6 +228,54 @@ class DtachHost:
                     clock=clock,
                 )
 
+            def refuse(reason: str) -> TerminationOutcome:
+                outcome["refused"] = True
+                outcome["refused_reason"] = reason
+                # Stated rather than implied. "We refused" and "we refused and sent
+                # nothing" are the same claim only to a reader who trusts the code, and
+                # this whole guard exists because that trust was misplaced once.
+                outcome["signals_sent"] = 0
+                return settle(
+                    TerminationOutcome(
+                        confirmed=False,
+                        method="refused",
+                        refused_reason=reason,
+                        detail={"rungs": rungs},
+                    )
+                )
+
+            # Before anything is attempted: is this pid ours to signal at all? A row whose
+            # pid cannot be a session process is a malformed row, and its recorded scope is
+            # no more trustworthy than its pid — so this sits ahead of the scope rung too,
+            # not just ahead of the signal (069 S5).
+            #
+            # ``None`` is not judged here. It means there is nothing to signal, and the
+            # no-pid paths below already refuse to signal *and* refuse to claim a
+            # confirmation (014 C7, C8). Turning that into a refusal would change two cases
+            # this feature has no business changing.
+            if handle.pid is not None:
+                impossible = _refusal_reason(handle.pid)
+                if impossible is not None:
+                    return refuse(impossible)
+
+            # And is it *identified*? A pid with no recorded start time is a bare number.
+            # ``procinfo.is_alive`` degrades to a plain "/proc/<pid> exists" check when the
+            # start time is ``None``; that degradation is documented and fine for liveness,
+            # and it is exactly what carried a recorded pid of 1 past the pre-check below
+            # and into ``killpg`` on 2026-08-31. Termination gets the stricter rule (069
+            # S1), and it lives here rather than in ``procinfo`` because the other callers
+            # are only ever *reading* — this one is about to act.
+            #
+            # No legitimate row is lost to this: ``pid`` and ``proc_start`` are written in
+            # the same transaction at session confirmation, so a row carrying one carries
+            # the other. A row that does not was never safely cancellable.
+            if handle.pid is not None and expected_start is None:
+                return refuse(
+                    f"the session row records pid {handle.pid} but no process start time, "
+                    "so there is no way to tell that pid apart from any other process that "
+                    "happens to hold the number"
+                )
+
             # Ask before acting. A session that already died on its own needs no signal,
             # and a *recycled* pid — one whose start time no longer matches — means our
             # process is gone and that a stranger now holds its number. Signalling that
@@ -295,7 +343,16 @@ class DtachHost:
                 )
 
             signal_detail: dict[str, object] = {}
-            _signal_group(handle.pid, signal_detail)
+            try:
+                _signal_group(handle.pid, signal_detail)
+            except BoundaryError as exc:
+                # The pid looked ordinary and its start time matched, so the guard above
+                # passed it; only resolving the process group revealed that signalling it
+                # would be ``kill(-1)``. That is a refusal like any other from the caller's
+                # side — but note the scope rung has already run by now, and ``rungs``
+                # records that it did. A refusal decided here is not the same as one
+                # decided up front, and the record must not pretend otherwise (069 S5).
+                return refuse(str(exc))
             gone, waited = confirm()
             rungs.append(
                 {
@@ -351,15 +408,73 @@ def _confirm_gone(
         sleep(TERMINATE_POLL_INTERVAL)
 
 
+def _refusal_reason(pid: int | None) -> str | None:
+    """Why this pid must not be signalled, or ``None`` if there is no reason (069 S2).
+
+    Three values, three separate reasons, and none of them is implied by the others —
+    which is why this is a flat test and not a clever one:
+
+    * **1** — ``os.getpgid(1)`` is ``1``, and ``killpg(1, sig)`` is ``kill(-1, sig)``:
+      POSIX for *every process the caller may signal*. The daemon runs as the desktop
+      user, so on 2026-08-31 that was the whole session, robot-army included. It reported
+      the cancel confirmed afterwards, because the recorded pid was certainly gone.
+    * **0** — ``getpgid(0)`` does not ask about pid 0. It asks about **the caller**, and
+      returns the caller's own group: an ordinary number nowhere near 1, so a
+      ``pgid <= 1`` test does not catch it. Signalling it ends the daemon, or the
+      operator's shell when the CLI is doing the asking.
+    * **None** — nothing to signal. Reachable only by a caller that skipped the no-pid
+      paths in ``terminate``; those refuse to signal *and* refuse to claim a
+      confirmation, which is a different and already-correct answer.
+
+    A sentence rather than a code: it is what the maintainer reads and what the record
+    carries, and there is nobody to translate a code back for.
+    """
+    if pid is None:
+        return "no pid recorded, so there is nothing that can be signalled"
+    if pid == 1:
+        return (
+            "the recorded pid is 1, which cannot be a session process: its process group "
+            "is 1, and signalling that group signals every process this user owns"
+        )
+    if pid == 0:
+        return (
+            "the recorded pid is 0, which cannot be a session process: it resolves to the "
+            "caller's own process group, so signalling it would signal this process"
+        )
+    if pid < 0:
+        return f"the recorded pid is {pid}, which is not a process id"
+    return None
+
+
 def _signal_group(pid: int, outcome: dict[str, object]) -> None:
     import signal
     import time
+
+    # Belt and braces, and deliberately so. ``terminate`` has already refused these values
+    # before reaching here, so this is unreachable in the shipped path — which is exactly
+    # the argument that was available for not checking at all, right up until the day the
+    # call below took the machine down. One layer of "this cannot happen" is not enough
+    # when the failure is unrecoverable, so the primitive that makes the call also refuses
+    # to make it (069 S7).
+    reason = _refusal_reason(pid)
+    if reason is not None:
+        raise BoundaryError(f"refusing to signal: {reason}")
 
     try:
         pgid = os.getpgid(pid)
     except ProcessLookupError:
         outcome["already_gone"] = True
         return
+
+    # The pid was ordinary; the group it resolves to is not. This is the third route to
+    # ``kill(-1)`` and the only one visible from here — a session leader that has died can
+    # leave its children in a group we must not signal wholesale (069 S3).
+    if pgid <= 1:
+        raise BoundaryError(
+            f"refusing to signal: pid {pid} resolves to process group {pgid}, and "
+            f"signalling that group would signal every process this user owns"
+        )
+
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:

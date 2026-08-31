@@ -57,10 +57,15 @@ class Harness:
         signal_kills: bool = True,
         pid: int | None = PID,
         starttime: str = START,
+        real_signal_group: bool = False,
+        pgid: int = 4200,
     ) -> None:
         self.proc_root = proc_root
         self.stop_calls: list[list[str]] = []
         self.signal_calls: list[int] = []
+        #: Only populated when ``real_signal_group`` is set: what the genuine
+        #: ``_signal_group`` asked the operating system to do (069 S-C8).
+        self.killpg_calls: list[tuple[int, int]] = []
         self.pid = pid
         if pid is not None:
             write_proc(proc_root, pid, starttime=starttime)
@@ -78,13 +83,34 @@ class Harness:
                 self._kill()
 
         monkeypatch.setattr("robot_army.boundaries.dtach.run", fake_run)
-        monkeypatch.setattr("robot_army.boundaries.dtach._signal_group", fake_signal_group)
+        if real_signal_group:
+            # 069 S-C8 needs the genuine primitive, because the value under test — the
+            # process group the pid resolves to — is one the stub never computes. Stand in
+            # for ``os`` instead, one layer further out.
+            harness = self
+
+            class SpyOs:
+                def getpgid(self, target_pid: int) -> int:
+                    return pgid
+
+                def killpg(self, target_pgid: int, sig: int) -> None:
+                    harness.killpg_calls.append((target_pgid, sig))
+
+            monkeypatch.setattr("robot_army.boundaries.dtach.os", SpyOs())
+        else:
+            monkeypatch.setattr("robot_army.boundaries.dtach._signal_group", fake_signal_group)
 
     def _kill(self) -> None:
         if self.pid is not None:
             shutil.rmtree(self.proc_root / str(self.pid), ignore_errors=True)
 
-    def terminate(self, host: DtachHost, *, scope: str | None = SCOPE) -> Any:
+    def terminate(
+        self,
+        host: DtachHost,
+        *,
+        scope: str | None = SCOPE,
+        expected_start: str | None = START,
+    ) -> Any:
         # A fake clock that only advances when the code sleeps. The bounded waits are
         # then exercised in full without spending five real seconds each on a process
         # that the test has already decided will never die.
@@ -96,7 +122,7 @@ class Harness:
         return host.terminate(
             HostHandle(socket_path=SOCKET, argv=(), pid=self.pid),
             scope,
-            expected_start=START,
+            expected_start=expected_start,
             proc_root=self.proc_root,
             sleep=sleep,
             clock=lambda: self.now,
@@ -301,3 +327,186 @@ def test_the_record_alone_answers_what_was_tried_and_what_was_observed(
     # asserting on the fake. What is worth pinning is that the *right* scope was asked to
     # stop: an opaque handle read at confirmation time, never recomputed (M0 F18).
     assert harness.stop_calls == [["systemctl", "--user", "stop", SCOPE]]
+
+
+# -- 069: what may be signalled ---------------------------------------------------------
+#
+# The rungs above answer "did it stop?". These answer the question nobody asked until
+# 2026-08-31: "is this pid ours to stop at all?". `_signal_group` had no opinion, so a
+# recorded pid of 1 became `killpg(1, SIGTERM)` — `kill(-1)`, every process the user owns.
+#
+# Every case here asserts that *nothing was attempted*: no `systemctl`, no signal. A
+# refusal that still stops the scope would be a smaller catastrophe, not a fixed one.
+
+
+def test_s_c1_a_recorded_pid_of_one_is_refused_before_anything_runs(host, tmp_path, monkeypatch):
+    """The incident's exact row: pid 1, and no recorded start time to contradict it.
+
+    ``procinfo.is_alive(1, None)`` is ``True`` — measured — because a missing start time
+    degrades the check to "does /proc/1 exist". That degradation is what carried the
+    recorded pid past the 014 pre-check and into ``killpg``.
+    """
+    harness = Harness(monkeypatch, tmp_path, pid=1)
+    outcome = harness.terminate(host, expected_start=None)
+
+    assert outcome.confirmed is False
+    assert outcome.method == "refused"
+    assert outcome.refused_reason is not None
+    assert "1" in outcome.refused_reason
+    assert harness.stop_calls == [], "a row we do not trust has no trustworthy scope either"
+    assert harness.signal_calls == []
+
+
+def test_s_c2_a_recorded_pid_of_one_is_refused_even_with_a_matching_start_time(
+    host, tmp_path, monkeypatch
+):
+    """Identity validation alone would let this through.
+
+    ``/proc/1`` has a real start time like any other process (measured: ``17``), so a row
+    carrying pid 1 *and* a matching one satisfies every identity check we have. The flat
+    rejection has to stand on its own — this is the test that fails if someone later
+    "simplifies" the two guards into one.
+    """
+    harness = Harness(monkeypatch, tmp_path, pid=1)
+    outcome = harness.terminate(host, expected_start=START)
+
+    assert outcome.confirmed is False
+    assert outcome.method == "refused"
+    assert harness.stop_calls == []
+    assert harness.signal_calls == []
+
+
+def test_s_c3_a_recorded_pid_of_zero_is_refused(host, tmp_path, monkeypatch):
+    """``getpgid(0)`` means *the caller*, not pid 0.
+
+    It returns the caller's own process group — an ordinary number, nowhere near 1 — so a
+    ``pgid <= 1`` guard does not catch this. Signalling it ends the daemon, or the
+    operator's shell when the CLI is the one asking. The fixture ``/proc/0`` here exists
+    deliberately: the guard must fire even when liveness says the row is alive.
+    """
+    harness = Harness(monkeypatch, tmp_path, pid=0)
+    outcome = harness.terminate(host, expected_start=START)
+
+    assert outcome.confirmed is False
+    assert outcome.method == "refused"
+    assert "0" in (outcome.refused_reason or "")
+    assert harness.stop_calls == []
+    assert harness.signal_calls == []
+
+
+def test_s_c8_a_live_pid_whose_group_resolves_to_one_is_refused(host, tmp_path, monkeypatch):
+    """The third route to the same catastrophe, and the one only the primitive can see.
+
+    The recorded pid is ordinary and its start time matches, so both of the guards above
+    pass it. Only resolving the group reveals that signalling it would be ``kill(-1)``.
+    The ladder reports that as a refusal like any other; the primitive underneath raises.
+    """
+    harness = Harness(
+        monkeypatch, tmp_path, stop_returns=5, stop_kills=False, real_signal_group=True, pgid=1
+    )
+    outcome = harness.terminate(host)
+
+    assert outcome.confirmed is False
+    assert outcome.method == "refused"
+    assert harness.killpg_calls == [], "the whole point: the call was never made"
+
+
+def test_the_guards_do_not_cost_an_ordinary_stop(host, tmp_path, monkeypatch):
+    """The positive control, at the ladder level (S-C9, SC-005).
+
+    A guard that refused everything would satisfy every assertion above. This is the test
+    that says an ordinary well-formed session still stops exactly as it did before.
+    """
+    harness = Harness(monkeypatch, tmp_path, stop_returns=0, stop_kills=True)
+    outcome = harness.terminate(host)
+
+    assert outcome.confirmed is True
+    assert outcome.method == "systemd_scope"
+    assert outcome.refused_reason is None
+
+
+def test_s_c6_a_pid_with_no_recorded_start_time_is_not_signalled(host, tmp_path, monkeypatch):
+    """A bare number is not an identity (069 S1).
+
+    This is the guard that generalises the three flat rejections above. The recorded pid
+    is live and perfectly ordinary; what is missing is the ``proc_start`` that says it is
+    *ours*. ``procinfo.is_alive`` degrades to "does /proc/<pid> exist" when the start time
+    is ``None`` — documented, and fine for liveness — and that degradation is precisely
+    what carried a recorded pid of 1 past the pre-check on 2026-08-31.
+
+    Any row reaching this state is malformed by construction: ``pid`` and ``proc_start``
+    are written in the same transaction at session confirmation, so nothing that records
+    one records the other.
+    """
+    harness = Harness(monkeypatch, tmp_path)
+    outcome = harness.terminate(host, expected_start=None)
+
+    assert outcome.confirmed is False
+    assert outcome.method == "refused"
+    assert "start time" in (outcome.refused_reason or "")
+    assert harness.stop_calls == []
+    assert harness.signal_calls == []
+
+
+def test_a_recycled_pid_is_still_already_gone_and_not_a_refusal(host, tmp_path, monkeypatch):
+    """S-C7, restated as a regression guard on the *boundary* between two verdicts.
+
+    A start time that is present and does not match is a completely different fact from
+    one that is absent: it says our process is gone and a stranger holds its number. That
+    is ``already_gone`` — a confirmed stop — and folding it into the refusal above would
+    make every recycled pid an operator error to investigate.
+    """
+    harness = Harness(monkeypatch, tmp_path, starttime="11111111")
+    outcome = harness.terminate(host, expected_start=START)
+
+    assert outcome.confirmed is True
+    assert outcome.method == "already_gone"
+    assert outcome.refused_reason is None
+    assert harness.signal_calls == []
+
+
+def test_a_matching_start_time_still_takes_the_whole_ladder(host, tmp_path, monkeypatch):
+    """S-C9 / SC-005: the identity guard must cost no legitimate cancel.
+
+    Pid recorded, start time recorded and matching, scope lying about its success — the
+    exact shape of issue #34. It must still escalate to the signal and still confirm.
+    """
+    harness = Harness(monkeypatch, tmp_path, stop_returns=0, stop_kills=False, signal_kills=True)
+    outcome = harness.terminate(host, expected_start=START)
+
+    assert outcome.confirmed is True
+    assert outcome.method == "process_group_signal"
+    assert outcome.escalated is True
+    assert outcome.refused_reason is None
+    assert harness.signal_calls == [PID]
+
+
+def test_the_record_says_what_was_refused_and_that_nothing_was_sent(
+    host, tmp_path, monkeypatch, layout
+):
+    """069 S7/FR-007: reconstruction, which is the standard Principle III sets.
+
+    From the log alone, without re-running anything, a reader must be able to say which
+    session, which recorded value, why, and — stated rather than inferred — that no signal
+    was delivered. ``signals_sent: 0`` is explicit because "we refused" and "we refused and
+    sent nothing" are the same claim only to a reader who trusts the code.
+    """
+    from robot_army.audit import read_records
+
+    harness = Harness(monkeypatch, tmp_path, pid=1)
+    harness.terminate(host, expected_start=None)
+
+    terminations = [
+        record
+        for record, _ in read_records(layout.log_dir)
+        if record is not None
+        and record.get("action") == "session.terminate"
+        and record.get("outcome") == "ok"
+    ]
+    assert terminations, "a refusal that leaves no record is a Principle III violation"
+    detail = terminations[-1]["detail"]
+    assert detail["refused"] is True
+    assert detail["signals_sent"] == 0
+    assert "process group" in detail["refused_reason"]
+    assert detail["pid"] == 1, "the intent already named the pid; the outcome keeps it"
+    assert detail["rungs"] == [], "decided up front, so nothing was attempted at all"

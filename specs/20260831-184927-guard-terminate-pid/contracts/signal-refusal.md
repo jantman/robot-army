@@ -35,9 +35,18 @@ NOT be signalled. `killpg(1, sig)` is `kill(-1, sig)`: every process the caller 
 stop, nor an unconfirmed stop, nor `already_gone`. `refused_reason is not None` ⟺
 `method == "refused"`, and `method == "refused"` ⇒ `confirmed is False` and `escalated is False`.
 
-**S5 — A refusal attempts nothing.** Zero signals, zero rungs, zero state changes, zero writes
-other than the record. In particular the systemd scope rung MUST NOT run: a row whose pid has just
-been judged untrustworthy has no more trustworthy a scope.
+**S5 — A refusal delivers no signal and settles nothing.** Zero signals, zero state changes, zero
+writes other than the record.
+
+A refusal decided **up front** — S2's impossible pids, S1's missing identity — additionally attempts
+*nothing at all*: the systemd scope rung MUST NOT run, because a row whose pid has just been judged
+untrustworthy has no more trustworthy a scope.
+
+A refusal discovered **at the signal rung** (S-C8, where only resolving the process group reveals
+the problem) is by definition reached after the scope rung, and `detail["rungs"]` MUST show that it
+ran. Reporting it as though nothing was attempted would be the same class of falsehood this whole
+contract exists to prevent. The two are distinguishable in the record by exactly that: an empty
+rung list versus a populated one.
 
 **S6 — The guard is not the caller's job.** The checks live at the boundary, in
 `SessionHost.terminate` and again in the signalling primitive beneath it, so that every present and

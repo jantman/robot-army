@@ -1536,15 +1536,32 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
         if str(answer).strip().lower() not in ("y", "yes"):
             return Result(code=EXIT_FAILED, lines=["aborted"])
 
+    # Which host owns this session is a property of the *record*, not of the configured
+    # effect level (069 FR-011/FR-012). A row created under simulation stays simulated for
+    # the whole of its life, and the level may well have moved since: dispatch at ``local``
+    # leaves a ``dry_run`` row with ``pid = 0`` that no worker will ever close, then raising
+    # ``effect_level`` and restarting — one line in config.toml, the ordinary go-live step —
+    # makes ``session_host`` real while the row is not. Routing that row to the real host
+    # reaches ``killpg(getpgid(0), …)``, and ``getpgid(0)`` answers about the *caller*: the
+    # daemon's own process group, or the operator's shell when the CLI is asking.
+    #
+    # This is the only place in the system that picks an implementation from stored state.
+    # A test asserts that it stays the only one.
+    host = (
+        ctx.boundaries.simulated_session_host if session.dry_run else ctx.boundaries.session_host
+    )
     handle = HostHandle(
-        socket_path=session.host_socket or "", argv=(), pid=session.pid
+        socket_path=session.host_socket or "",
+        argv=(),
+        simulated=bool(session.dry_run),
+        pid=session.pid,
     )
     result = Result()
     try:
         # ``proc_start`` is not optional here. Without it the liveness check degrades to a
         # bare "does /proc/<pid> exist", which is the PID-reuse bug wearing a different hat
         # (FR-038): a recycled pid reads as a live session, and gets signalled.
-        outcome = ctx.boundaries.session_host.terminate(
+        outcome = host.terminate(
             handle, session.scope, expected_start=session.proc_start
         )
     except BoundaryError as exc:
@@ -1559,13 +1576,35 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
         "escalated": outcome.escalated,
     }
 
+    if outcome.refused_reason is not None:
+        # The boundary declined to act, which is a third thing — neither "it stopped" nor
+        # "I signalled it and it survived". Falling through to the branch below would print
+        # "pid N is still running after signalling the process group", and every clause of
+        # that is false here: nothing was signalled, and whether the pid is running was
+        # never the question. Telling the maintainer their machine had just been signalled
+        # when it had not is the specific harm issue #69 is about (069 S-K3).
+        #
+        # The row is malformed, so the message hands over the row: the next step is to look
+        # at it, not to try the cancel again.
+        result.data["refused"] = True
+        result.data["refused_reason"] = outcome.refused_reason
+        return Result(
+            code=EXIT_FAILED,
+            data=result.data,
+            lines=[
+                f"refused to stop session {session.session_id}: {outcome.refused_reason}. "
+                f"nothing was signalled. item {item_id} is unchanged; "
+                f"inspect its session row with: robot-army show {item_id}",
+            ],
+        )
+
     if not outcome.confirmed:
         # Nothing is settled, and that is the point. An item marked `interrupted` while its
         # worker is still running is visited by no sweep the system has — reconciliation
         # walks only `active` items — so it would run unsupervised until the machine was
         # rebooted, which is exactly what issue #34 observed. Leaving it `active` keeps it
         # in front of the machinery that will notice.
-        attach = " ".join(ctx.boundaries.session_host.attach_command(handle))
+        attach = " ".join(host.attach_command(handle))
         return Result(
             code=EXIT_FAILED,
             data=result.data,

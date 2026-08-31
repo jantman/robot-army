@@ -455,3 +455,77 @@ def test_no_consequence_is_stated_at_live():
     from robot_army.effects import EffectLevel, consequences
 
     assert consequences(EffectLevel.LIVE) == []
+
+
+# -- 069: the one selection that is not made by effect level ----------------
+
+
+@pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
+def test_a_simulated_session_host_is_always_available_to_wire(level, config, audit):
+    """A session created as simulated stays simulated for the whole of its life.
+
+    The configured effect level answers "what should a *new* session use". It cannot
+    answer "what owns this row", because the row may predate the current configuration by
+    a restart — dispatch at ``local``, raise the level, restart, cancel. That sequence is
+    the ordinary go-live step, and before this it handed a ``pid=0`` row to the real host.
+    """
+    wired = wire(level, config, audit)
+    assert type(wired.simulated_session_host).__name__ == "SimulatedSessionHost"
+
+
+@pytest.mark.parametrize(
+    "level", [EffectLevel.PLAN, EffectLevel.LOCAL], ids=lambda level: level.value
+)
+def test_at_a_simulated_level_the_two_names_are_one_object(level, config, audit):
+    """Not merely equal — *identical*, and that matters.
+
+    ``SimulatedSessionHost`` carries an ``_alive`` set. Two instances would diverge the
+    moment one of them spawned something, and ``is_alive`` would start answering
+    differently depending on which field the caller happened to reach for. One object,
+    two names.
+    """
+    wired = wire(level, config, audit)
+    assert wired.session_host is wired.simulated_session_host
+
+
+@pytest.mark.parametrize(
+    "level", [EffectLevel.NO_REMOTE, EffectLevel.LIVE], ids=lambda level: level.value
+)
+def test_at_a_real_level_they_are_deliberately_different_objects(level, config, audit):
+    wired = wire(level, config, audit)
+    assert type(wired.session_host).__name__ == "DtachHost"
+    assert wired.session_host is not wired.simulated_session_host
+
+
+def test_the_startup_record_names_the_simulated_host_too(config, audit):
+    """Principle III: the startup log names every wired implementation, not most of them.
+
+    A boundary that can be selected later but is absent from the record is exactly the
+    kind of gap that makes a log unreconstructable — the reader would see the daemon wire
+    ``DtachHost`` and have no way to know a second host was standing by.
+    """
+    described = wire(EffectLevel.LIVE, config, audit).describe()
+    assert described["session_host"] == "DtachHost"
+    assert described["simulated_session_host"] == "SimulatedSessionHost"
+
+
+def test_only_cancel_selects_a_host_from_a_record(config, audit):
+    """The departure from "selection is a function of the effect level", written down.
+
+    ``test_only_effects_py_selects_a_simulated_implementation`` above scans for *class*
+    names and would not see this: ``operations.py`` reaches a simulated implementation by
+    attribute, not by constructor. That is deliberate — but a guard nobody can see is not
+    a guard, so the exception is asserted here rather than left to be discovered.
+
+    If a second module ever needs this, that is the moment to ask whether the selection
+    belongs back in the wiring instead.
+    """
+    users = sorted(
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if path.name != "effects.py" and "simulated_session_host" in path.read_text("utf-8")
+    )
+    assert users == ["operations.py"], (
+        "record-driven host selection spread beyond cancel; see 069 plan.md "
+        "Complexity Tracking before adding another"
+    )

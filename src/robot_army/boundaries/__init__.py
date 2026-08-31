@@ -222,11 +222,34 @@ class TerminationOutcome:
     was still there afterwards. It is kept separate from ``method`` because "the scope
     stop lied and the signal worked" is the sentence the maintainer needs, and it cannot
     be reconstructed from the winning method alone.
+
+    ``refused_reason`` is the third fact, added by issue #69: *there was something to try
+    and we declined to try it*. That is neither "nothing to confirm against"
+    (``method == "none"``) nor "tried and it survived" (``confirmed=False`` with a rung
+    recorded), and collapsing it into either would report a session as signalled that was
+    never touched. Four invariants, from 069 contracts/signal-refusal.md S4:
+
+    1. ``refused_reason is not None`` if and only if ``method == "refused"``.
+    2. A refusal is always ``confirmed=False``. It can never authorise a state change, so
+       invariant 1 above already forbids settling on it.
+    3. A refusal is always ``escalated=False``. Nothing was attempted, so nothing
+       over-reported.
+    4. A refusal delivered **zero signals**. Not "fewer"; zero. The record says so
+       explicitly (``signals_sent: 0``), because "we refused" and "we refused and sent
+       nothing" are the same claim only to a reader who trusts the code, and this field
+       exists because that trust was misplaced once. Note that ``detail["rungs"]`` may
+       still be non-empty: a refusal decided up front attempts nothing at all, but one
+       discovered while resolving the process group is reached *after* the scope rung has
+       run, and the record shows that it did.
+
+    It is a sentence rather than an enum: there are three producers, all in one function,
+    and a code would have to be translated back into that sentence at both ends.
     """
 
     confirmed: bool
     method: str
     escalated: bool = False
+    refused_reason: str | None = None
     detail: dict[str, Any] = field(default_factory=dict)
 
 
@@ -542,6 +565,26 @@ class SessionHost(Protocol):
         ``expected_start`` is the recorded ``/proc/<pid>/stat`` start time. Passing it is
         not optional for callers that have one: pid alone is not identity, and a recycled
         pid reads as a live session to anything that omits it (FR-038).
+
+        Three more rules, from 069 contracts/signal-refusal.md. Where 014 established that
+        *an exit status is not evidence of an effect*, these are its converse: **a recorded
+        pid is not evidence of a process.** A number in a column is a claim.
+
+        - **S1 — No signal without identity.** A signal may be delivered only to a pid
+          identified by the recorded pid **and** the recorded start time together. A pid
+          with no recorded start time is a bare number and must not be signalled.
+          ``procinfo.is_alive`` degrades to a bare existence check when the start time is
+          ``None``; that degradation is fine for liveness and forbidden here.
+        - **S2 — Impossible pids are rejected on sight.** ``0`` and ``1`` are never session
+          pids, refused before any rung, independently of S1 — ``/proc/1`` has a real start
+          time, so a row carrying pid 1 and a matching one would satisfy S1.
+        - **S3 — Impossible process groups too.** A group resolving to ``1`` or lower is
+          never signalled: ``killpg(1, sig)`` is ``kill(-1, sig)``.
+
+        A refusal is returned, not raised: ``method="refused"`` with a ``refused_reason``.
+        ``BoundaryError`` keeps its T7 meaning. The primitive beneath this one raises
+        instead, because it has no outcome vocabulary and a raise there can never be
+        mistaken for a stop.
         """
         ...
 

@@ -522,12 +522,22 @@ class StubSessionHost:
     )
 
     def __init__(
-        self, *, confirm: bool = True, on_confirm: Any = None, terminate_confirmed: bool = True
+        self,
+        *,
+        confirm: bool = True,
+        on_confirm: Any = None,
+        terminate_confirmed: bool = True,
+        refuse_reason: str | None = None,
     ) -> None:
         self.confirm_result = confirm
         #: What ``terminate`` reports having observed. ``False`` is the session that
         #: survived every rung — the case the caller must refuse to settle on (014 K1).
         self.terminate_confirmed = terminate_confirmed
+        #: When set, ``terminate`` refuses instead of acting: the session row named a pid
+        #: that could not be this session's, so nothing was signalled at all (069 S4).
+        #: Distinct from ``terminate_confirmed=False``, which means it *was* signalled and
+        #: survived — the caller must not report the two alike.
+        self.refuse_reason = refuse_reason
         #: Called with the session id while ``confirm_session`` is in flight, before it
         #: answers. This is the only seam in the suite for the cross-process race that
         #: milestone 013 fixes: in production the daemon drains the exit spool from its
@@ -576,6 +586,15 @@ class StubSessionHost:
         proc_root: Any = None,
     ) -> TerminationOutcome:
         self.terminated.append((handle.socket_path, scope))
+        if self.refuse_reason is not None:
+            # Nothing signalled, so the session stays in ``alive``: a refusal changes
+            # nothing about the world, which is the whole of 069 S5.
+            return TerminationOutcome(
+                confirmed=False,
+                method="refused",
+                refused_reason=self.refuse_reason,
+                detail={"pid": handle.pid, "signals_sent": 0},
+            )
         if not self.terminate_confirmed:
             # A surviving session stays in ``alive``: the whole point of the unconfirmed
             # outcome is that nothing about the world changed.
@@ -662,9 +681,11 @@ def make_boundaries(
     vcs: Any = None,
     hooks: Any = None,
     host: Any = None,
+    simulated_host: Any = None,
     display: Any = None,
     notifier: Any = None,
 ) -> Boundaries:
+    from robot_army.boundaries.dtach import SimulatedSessionHost
     from robot_army.boundaries.git import GitVersionControl
 
     return Boundaries(
@@ -679,6 +700,10 @@ def make_boundaries(
         version_control=vcs or GitVersionControl(audit),
         hook_runner=hooks or StubHookRunner(),
         session_host=host or StubSessionHost(),
+        # A real ``SimulatedSessionHost`` rather than a stub: 069 routes a simulated
+        # session *record* here regardless of level, so a test that seeds one is
+        # exercising the production object, which is the point of the routing.
+        simulated_session_host=simulated_host or SimulatedSessionHost(audit),
         display=display or StubDisplay(),
         notifier=notifier or RecordingNotifier(),
     )
@@ -825,6 +850,54 @@ def _no_real_session_registry(tmp_path: Path, monkeypatch: Any) -> Any:
     empty.mkdir(exist_ok=True)
     monkeypatch.setattr("robot_army.sessions.claude_registry_dir", lambda: empty)
     return empty
+
+
+class _NoRealSignals:
+    """Stands in for ``os`` inside ``boundaries.dtach`` so no test can signal anything.
+
+    Every attribute falls through to the real module except ``killpg``, which is the one
+    call that reaches outside the process. On 2026-08-31 that call — reached with a
+    recorded pid of ``1``, so ``killpg(1, sig)`` was ``kill(-1, sig)`` — ended the
+    maintainer's desktop session, robot-army's own daemon included. Staging that scenario
+    by hand is what caused the incident, and the test suite runs on the same machine.
+
+    So the suite refuses the call outright rather than trusting every future test not to
+    reach it. This is not defence against a hypothetical: it is the exact accident that
+    already happened once, and the only reason it did not happen inside pytest is that
+    every existing test replaced ``_signal_group`` wholesale.
+    """
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def killpg(self, pgid: int, sig: int) -> None:
+        raise AssertionError(
+            f"a test reached the real os.killpg({pgid}, {sig}). No test may signal a real "
+            "process. If this test means to observe the call, install its own spy with "
+            'monkeypatch.setattr("robot_army.boundaries.dtach.os", ...) — a later '
+            "monkeypatch wins over this fixture."
+        )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_signals(monkeypatch: Any) -> Any:
+    """Make a real signal impossible for the duration of every test (069 T003).
+
+    Scoped to the *module reference* in ``boundaries.dtach``'s own namespace, never to an
+    attribute on the real ``os`` module: patching ``os.killpg`` itself would leak into
+    every other test in the session, including ones that have nothing to do with
+    termination.
+
+    A test that wants to watch the call installs its own stand-in over the same name. That
+    is the escape hatch, and it needs no flag — ``monkeypatch`` applies in order and undoes
+    in reverse, so the later setattr simply wins.
+    """
+    from robot_army.boundaries import dtach as dtach_mod
+
+    monkeypatch.setattr(dtach_mod, "os", _NoRealSignals(dtach_mod.os))
 
 
 @pytest.fixture(autouse=True)

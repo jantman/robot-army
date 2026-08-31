@@ -1,5 +1,7 @@
 # robot-army
 
+⚠️☠️☢️🚨 **DANGER: Entering Vibe Land!** This is entirely vibe coded by Claude and reviewed by Claude. I've barely looked at a single line of the code. You probably don't want to ever run this if you're not me. 🚨☢️☠️⚠️
+
 A single-user daemon that turns labelled GitHub issues into real, interactive Claude Code
 sessions in the terminal I already have open.
 

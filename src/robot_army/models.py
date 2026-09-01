@@ -130,6 +130,11 @@ class Session:
     signal: int | None = None
     confirmed_at: str | None = None
     ended_at: str | None = None
+    #: When this session's transcript question was answered, or ``NULL`` while it is still
+    #: open. Written once by ``reconcile._sweep_transcripts`` and never cleared: a closed
+    #: question stays closed, so no session can be reported twice however many passes run
+    #: and whether or not its anomaly was acknowledged.
+    transcript_checked_at: str | None = None
 
     @property
     def argv(self) -> list[str]:

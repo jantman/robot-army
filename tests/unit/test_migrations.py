@@ -507,7 +507,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 7
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 8
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -608,6 +608,20 @@ def test_a_pre_005_row_reads_back_with_a_null_clone_path_and_its_fingerprint_int
     conn.close()
 
 
+def _run_one(conn: sqlite3.Connection, number: int) -> None:
+    """Run exactly the numbered migration, and nothing after it.
+
+    The three ``adds_no_table_and_no_index`` tests below used to call ``migrate()``, which
+    runs the *whole remaining ladder*. That asserted what their names say only for as long
+    as the migration under test was the last rung: migration 008 adds an index, and it made
+    all three fail at once while saying nothing about 005, 006 or 007. Running one rung
+    keeps each test's claim its own.
+    """
+    conn.execute("BEGIN")
+    migrations.MIGRATIONS[number - 1](conn)
+    conn.commit()
+
+
 def test_migration_005_adds_no_table_and_no_index(tmp_path):
     conn = db.connect(tmp_path / "state.db")
     _run_only_004(conn)
@@ -616,7 +630,7 @@ def test_migration_005_adds_no_table_and_no_index(tmp_path):
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
     }
 
-    migrate(conn)
+    _run_one(conn, 5)
 
     after = {
         row["name"]
@@ -726,7 +740,7 @@ def test_migration_006_adds_no_table_and_no_index(tmp_path):
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
     }
 
-    migrate(conn)
+    _run_one(conn, 6)
 
     after = {
         row["name"]
@@ -835,11 +849,134 @@ def test_migration_007_adds_no_table_and_no_index(tmp_path):
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
     }
 
-    migrate(conn)
+    _run_one(conn, 7)
 
     after = {
         row["name"]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','index')")
     }
     assert after == before
+    conn.close()
+
+
+# -- migration 008: the transcript question (issue #58) ----------------------
+
+
+def _run_only_007(conn: sqlite3.Connection) -> None:
+    """Bring a database to exactly the 007-era schema, as one in the field would be."""
+    conn.execute("BEGIN")
+    for step in migrations.MIGRATIONS[:7]:
+        step(conn)
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+
+
+def _seed_session(conn: sqlite3.Connection, session_id: str) -> None:
+    """One session row, written the way a 007-era database already holds them."""
+    conn.execute(
+        "INSERT OR IGNORE INTO repos (repo_key, onboarded_at, fingerprint_approved_at) "
+        "VALUES ('o/r', '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO work_items (source, source_id, source_url, repo_key, issue_number, "
+        "title, body, labels, state, dry_run, discovered_at, updated_at) "
+        "VALUES ('github', ?, 'u', 'o/r', 1, 't', 'b', '[]', 'active', 0, '2026-08-30T00:00:00Z', "
+        "'2026-08-30T00:00:00Z')",
+        (session_id,),
+    )
+    item_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO sessions (work_item_id, session_id, attempt, state, dry_run, started_at) "
+        "VALUES (?, ?, 1, 'running', 0, '2026-08-30T00:00:00Z')",
+        (item_id, session_id),
+    )
+
+
+def test_migration_008_runs_on_a_007_era_database(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_007(conn)
+    assert current_version(conn) == 7
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (7, SCHEMA_VERSION)
+    assert SCHEMA_VERSION == 8
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+    assert "transcript_checked_at" in columns
+    conn.close()
+
+
+def test_migration_008_creates_the_partial_index_the_sweep_reads_through(tmp_path):
+    """FR-010 is structural, not incidental: without this index the sweep's query scans
+    every session ever dispatched, every 60 seconds, forever."""
+    conn = db.connect(tmp_path / "state.db")
+    migrate(conn)
+
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'idx_sessions_transcript_open'"
+    ).fetchone()
+
+    assert row is not None
+    assert "transcript_checked_at IS NULL" in row["sql"]
+    conn.close()
+
+
+def test_every_pre_008_session_is_backfilled_as_already_checked(tmp_path):
+    """The one that matters. These sessions were already judged, correctly or not, by the
+    old inline check. Left NULL, the first pass after the upgrade would re-ask the question
+    about the entire history at once and report all of it."""
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_007(conn)
+    _seed_session(conn, "old-session-1")
+    _seed_session(conn, "old-session-2")
+
+    migrate(conn)
+
+    unchecked = conn.execute(
+        "SELECT COUNT(*) AS n FROM sessions WHERE transcript_checked_at IS NULL"
+    ).fetchone()["n"]
+    assert unchecked == 0
+    stamps = [
+        row["transcript_checked_at"]
+        for row in conn.execute("SELECT transcript_checked_at FROM sessions ORDER BY id")
+    ]
+    # The app's own format, so ``_age_seconds`` could parse it if anything ever did.
+    assert all(s.endswith("Z") and s[10] == "T" for s in stamps), stamps
+    conn.close()
+
+
+def test_a_session_created_after_008_starts_with_an_open_question(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    migrate(conn)
+    _seed_session(conn, "new-session")
+
+    row = conn.execute(
+        "SELECT transcript_checked_at FROM sessions WHERE session_id = 'new-session'"
+    ).fetchone()
+
+    assert row["transcript_checked_at"] is None
+
+
+def test_a_killed_migration_008_leaves_user_version_at_seven_and_re_runs(tmp_path, monkeypatch):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_007(conn)
+
+    def boom(_conn):
+        raise sqlite3.OperationalError("killed mid-migration")
+
+    monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:7], boom))
+    with pytest.raises(sqlite3.OperationalError):
+        migrate(conn)
+
+    assert current_version(conn) == 7
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+    assert "transcript_checked_at" not in columns
+
+    monkeypatch.undo()
+    start, end = migrate(conn)
+
+    assert (start, end) == (7, SCHEMA_VERSION)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+    assert "transcript_checked_at" in columns
     conn.close()

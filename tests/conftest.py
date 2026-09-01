@@ -852,6 +852,50 @@ def _no_real_session_registry(tmp_path: Path, monkeypatch: Any) -> Any:
     return empty
 
 
+@pytest.fixture(autouse=True)
+def _no_real_transcripts(tmp_path: Path, monkeypatch: Any) -> Path:
+    """Point the *default* transcript directory at an empty one of this test's own.
+
+    Exactly ``_no_real_session_registry``'s reasoning, one directory over. Issue #58 moved
+    the transcript check into reconciliation, and reconciliation does not take a path
+    argument -- so without this a suite run would read the maintainer's real
+    ``~/.claude/projects`` and whether a test passed would depend on which sessions they
+    happen to have run. That is not a flake to chase later; it is the same class of
+    non-determinism the fixture directories at the top of this file exist to remove.
+
+    Tests that want a transcript to exist call ``write_transcript`` against the returned
+    directory. Tests that pass ``home=`` explicitly are unaffected -- this only replaces the
+    fallback.
+    """
+    projects = tmp_path / "no-transcripts"
+    projects.mkdir(exist_ok=True)
+    monkeypatch.setattr("robot_army.sessions.claude_projects_dir", lambda: projects)
+    return projects
+
+
+def write_transcript(projects: Path, session_id: str, *, project: str = "-home-someone-repo") -> Path:
+    """Make a session's transcript appear, the way the worker eventually does.
+
+    The nesting matters: ``transcript_exists`` globs ``projects/**/<session_id>.jsonl``, so a
+    file written flat into the root would pass a test that the real layout would fail.
+    """
+    directory = projects / project
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{session_id}.jsonl"
+    path.write_text('{"type":"user"}\n', encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def transcripts(_no_real_transcripts: Path) -> Path:
+    """The directory the default transcript lookup reads, for tests that want one to exist.
+
+    A readable alias for the autouse fixture above, so a test can say ``transcripts`` rather
+    than requesting a private name.
+    """
+    return _no_real_transcripts
+
+
 class _NoRealSignals:
     """Stands in for ``os`` inside ``boundaries.dtach`` so no test can signal anything.
 

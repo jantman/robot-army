@@ -49,6 +49,8 @@ class ReconcileResult:
     orphans: int = 0
     stale_sockets: int = 0
     prunable: int = 0
+    transcripts_checked: int = 0
+    no_transcript: int = 0
     cleaned: int = 0
     retained: int = 0
     speckit_phase_changes: int = 0
@@ -66,6 +68,8 @@ class ReconcileResult:
             "orphans": self.orphans,
             "stale_sockets": self.stale_sockets,
             "prunable_worktrees": self.prunable,
+            "transcripts_checked": self.transcripts_checked,
+            "no_transcript": self.no_transcript,
             "cleaned": self.cleaned,
             "retained": self.retained,
             "speckit_phase_changes": self.speckit_phase_changes,
@@ -486,6 +490,17 @@ def reconcile(
         conn, audit=audit, scan=scan, proc_root=proc_root
     )
 
+    # -- transcripts that never appeared (issue #58) ------------------------
+    #
+    # Here rather than in dispatch, which is the whole point: the worker has not written its
+    # transcript a second after exec, so asking there reported every healthy session. Placed
+    # with the other session-focused sweeps and after everything that could have settled a
+    # session's state this tick, so what is recorded describes the session as this pass
+    # leaves it.
+    checked, reported = _sweep_transcripts(conn, audit=audit)
+    result.transcripts_checked += checked
+    result.no_transcript += reported
+
     # -- the orphan sweep (FR-043, M0 F17) ---------------------------------
     result.orphans += _orphan_sweep(
         conn, audit=audit, config=config, scan=scan, claimed_pids=claimed_pids
@@ -701,6 +716,160 @@ def _sweep_stale_sessions(
         if outcome == "reclaimed":
             reclaimed += 1
     return reclaimed
+
+
+#: How long a session gets to write its transcript before its absence means anything.
+#:
+#: Issue #58: the check this constant exists for used to run inline in dispatch, one line
+#: after the session was confirmed running. The worker writes its transcript when it begins
+#: processing, not at exec, so the file reliably did not exist yet and the anomaly fired on
+#: every healthy dispatch — including the first live one ever performed.
+#:
+#: 300s against a single measurement of under eight seconds, on a warm cache, which the
+#: report explicitly declines to treat as a bound. Roughly forty times the one observation
+#: available, which absorbs a cold cache, a loaded machine, and a worker that takes a while
+#: to reach its first write. Erring long is nearly free: a late report concerns a session
+#: that is already unrecoverable, while an early one recreates the bug this replaced.
+#:
+#: A constant rather than configuration, deliberately — one caller, no second use in hand
+#: (Principle I). If the value proves wrong, the value changes.
+TRANSCRIPT_GRACE_SECONDS = 300
+
+#: What the anomaly says, and the reason it no longer says what it used to.
+#:
+#: The old note asserted a cause: "check for CLAUDE_CODE_* variables in the terminal
+#: daemon's environment". On the machine where it fired, that environment was verifiably
+#: clean — `doctor` reported zero such variables — so the guidance led away from the answer
+#: rather than toward it (issue #58).
+#:
+#: This check observes an absence. It genuinely cannot tell a transcript that was never
+#: saved from one whose session died before writing it, and pretending otherwise is what
+#: made the last note worse than useless. So it names both, names what settles each, and
+#: ends with the one instruction that holds either way.
+_NO_TRANSCRIPT_NOTE = (
+    "no resumable transcript for this session after waiting {waited}. Two causes are "
+    "possible and this check cannot tell them apart: the worker never saved one — check "
+    "`robot-army doctor` for CLAUDE_CODE_* in the session host's environment — or the "
+    "session ended before it wrote one, which its exit record will show. Either way this "
+    "session cannot be resumed; restart the item rather than resuming it."
+)
+
+
+def _sweep_transcripts(conn: sqlite3.Connection, *, audit: AuditLog) -> tuple[int, int]:
+    """Answer, once per session, whether it left anything resumable behind (issue #58).
+
+    The observation is M0 F19's and has not changed: a session can run, exit 0, and be
+    permanently unresumable, and the missing transcript is the only sign. What changed is
+    *when* the question is asked. Here it can wait, and the waiting is the whole feature.
+
+    Returns ``(checked, reported)``.
+
+    Three properties worth stating, because each is load-bearing:
+
+    * **The population is the open questions.** ``transcript_checked_at IS NULL`` and
+      nothing else — no state filter, no age window. Every session is resolved exactly once
+      and then leaves the set permanently, so it bounds itself.
+    * **A session younger than the grace period is left exactly as it was found.** That
+      branch writes nothing at all, which is what makes the next pass ask again.
+    * **The report and the row's answer commit together.** A kill between them would
+      otherwise either report twice or mark a session answered that was never reported.
+    """
+    checked = 0
+    reported = 0
+    for session in db.sessions_awaiting_transcript_check(conn):
+        detail: dict[str, Any] = {
+            "session_id": session.session_id,
+            "item_id": session.work_item_id,
+        }
+
+        # A session with no process never ran, so nothing could have written a transcript
+        # and its absence says nothing at all.
+        #
+        # The question is **"did this session have a process?"**, not "was the effect level
+        # live". Those are different, and conflating them is issue #33 — which this module
+        # has already corrected once, in the active-item sweep above, for the same reason.
+        # `dry_run` means the level was below `live`, which is true at `no-remote`, where
+        # the session host is real and the pid below is a real process. Keying on it is what
+        # made every rehearsal blind to this detector, so that the first observation of a
+        # defect in it was a live dispatch against a real issue (issue #58).
+        #
+        # The pid answers the real question without anyone having to remember to ask it
+        # correctly: it is written from whatever `SessionHost.confirm_session()` returned,
+        # and the simulated host returns 0 by construction. `NULL` and `0` mean the same
+        # thing here — no process was ever recorded — and both are falsey.
+        #
+        # Checked before the filesystem is consulted, deliberately: reaching for a file to
+        # learn what the record already says would be a slower way to be wrong.
+        if not session.pid:
+            with db.transaction(conn):
+                db.mark_transcript_checked(conn, session.id)
+            audit.record(
+                "session.transcript_skipped",
+                outcome="ok",
+                entity_type="session",
+                entity_id=session.session_id,
+                detail={**detail, "reason": "no process was ever recorded"},
+            )
+            checked += 1
+            continue
+
+        # The clock starts at confirmation, not at insertion: the row is written *before*
+        # the process launches, and confirmation can take up to `confirm_timeout_seconds`.
+        # Measuring from `started_at` would charge the session for time it did not have.
+        # `started_at` is the fallback only because it is NOT NULL and always answers.
+        age = _age_seconds(session.confirmed_at or session.started_at)
+        waited = None if age == float("inf") else int(age)
+
+        if sessions.transcript_exists(session.session_id):
+            with db.transaction(conn):
+                db.mark_transcript_checked(conn, session.id)
+            audit.record(
+                "session.transcript_found",
+                outcome="ok",
+                entity_type="session",
+                entity_id=session.session_id,
+                detail={**detail, "waited_s": waited},
+            )
+            checked += 1
+            continue
+
+        if age < TRANSCRIPT_GRACE_SECONDS:
+            # Too early to mean anything. Write nothing — not the column, not a record —
+            # and ask again next pass. This branch is the bug fix.
+            continue
+
+        # The anomaly and the answer commit together or not at all. Split, an interruption
+        # between them would either report this session again on every later pass, or mark
+        # it answered without ever having reported it.
+        with db.transaction(conn):
+            db.raise_anomaly(
+                conn,
+                kind="no_transcript",
+                entity_type="session",
+                entity_id=session.session_id,
+                detail={
+                    # Not `**detail`: the anomaly's own `entity_id` is the session id, and
+                    # repeating it in the body prints it twice in the terminal.
+                    "item_id": session.work_item_id,
+                    "waited_s": waited,
+                    "session_state": str(session.state),
+                    **({"ended_at": session.ended_at} if session.ended_at else {}),
+                    "note": _NO_TRANSCRIPT_NOTE.format(
+                        waited=f"{waited}s" if waited is not None else "an unknown time"
+                    ),
+                },
+            )
+            db.mark_transcript_checked(conn, session.id)
+        audit.record(
+            "session.transcript_missing",
+            outcome="ok",
+            entity_type="session",
+            entity_id=session.session_id,
+            detail={**detail, "waited_s": waited, "session_state": str(session.state)},
+        )
+        checked += 1
+        reported += 1
+    return checked, reported
 
 
 def _orphan_sweep(

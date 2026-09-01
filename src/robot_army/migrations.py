@@ -334,6 +334,37 @@ ALTER TABLE work_items ADD COLUMN speckit_phase_at    TEXT;
 """
 
 
+SCHEMA_008_SQL = """
+-- Whether a session's transcript has been accounted for, and when (issue #58).
+--
+-- NULL is the whole design: it means "this session's transcript question is still open".
+-- The check that answers it used to run inline in dispatch, one line after the session was
+-- confirmed running -- before the worker had written anything -- so it fired on every
+-- healthy dispatch. Moving it to reconciliation means the question outlives the pass that
+-- asked it, and a column is what carries it across a restart.
+--
+-- Written once and never cleared. That is what makes "at most one anomaly per session,
+-- ever" true where the anomalies table alone cannot: its partial unique index dedupes only
+-- *unacknowledged* rows, so acknowledging a still-transcript-less session's anomaly would
+-- otherwise let the next pass raise it again.
+ALTER TABLE sessions ADD COLUMN transcript_checked_at TEXT;
+
+-- The sweep's cost must follow open questions, not session history (FR-010). Without this
+-- the result set is tiny but the scan is over every session ever dispatched, on a query
+-- that runs every 60 seconds forever.
+CREATE INDEX idx_sessions_transcript_open
+    ON sessions (transcript_checked_at)
+    WHERE transcript_checked_at IS NULL;
+
+-- Every session that already exists has been judged, correctly or not, by the old inline
+-- check. Leaving them NULL would make the first pass after this upgrade re-ask the
+-- question about the entire history at once and report all of it. Inside migration 008's
+-- transaction, so an interrupted upgrade re-runs the backfill whole.
+UPDATE sessions SET transcript_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE transcript_checked_at IS NULL;
+"""
+
+
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
         conn.execute(statement)
@@ -369,6 +400,11 @@ def _migration_007(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_008(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_008_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -378,6 +414,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_005,
     _migration_006,
     _migration_007,
+    _migration_008,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

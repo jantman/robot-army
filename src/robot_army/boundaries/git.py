@@ -198,6 +198,43 @@ class GitVersionControl:
         except ValueError:
             return None
 
+    def remote_branch_head(self, clone_path: str, remote: str, branch: str) -> str | None:
+        """``git ls-remote`` — the remote's own answer, and nothing written to the clone.
+
+        ``check=True`` is what makes the three answers three. ``ls-remote`` exits zero with
+        no output when the remote answered and has no such ref, and non-zero when it could
+        not be reached or refused us; so an empty success is ``None`` and a failure raises,
+        without this code having to guess which kind of sadness a message describes.
+
+        ``FETCH_TIMEOUT`` rather than ``QUICK_TIMEOUT``: this contacts the network. It
+        transfers no objects and will normally answer in well under a second, but the
+        smaller bound would turn a merely slow remote into "could not ask", and the caller
+        keeps a branch every time it cannot ask.
+
+        The branch is named as a fully-qualified ``refs/heads/<branch>`` and the returned
+        ref name must equal it exactly. ``ls-remote`` treats its arguments as patterns
+        matched on ``/`` boundaries from the right, and a decision this destructive should
+        not rest on the argument having been pattern-free.
+        """
+        ref = f"refs/heads/{branch}"
+        with self._audit.action(
+            "git.ls_remote", target=f"{remote}/{branch}", detail={"clone": clone_path, "ref": ref}
+        ) as outcome:
+            result = self._run(
+                ["ls-remote", remote, ref],
+                cwd=clone_path,
+                timeout=FETCH_TIMEOUT,
+                action="git.subprocess",
+            )
+            for line in result.stdout.splitlines():
+                sha, _, name = line.partition("\t")
+                if name.strip() == ref and sha.strip():
+                    outcome["sha"] = sha.strip()
+                    return sha.strip()
+            outcome["sha"] = None
+            outcome["note"] = "the remote answered and does not have this branch"
+            return None
+
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None:
         """Read a file from the git object store, not the filesystem.
 
@@ -338,6 +375,14 @@ class SimulatedVersionControl:
         # branch — a divergence from the real path, which is what the simulated boundaries
         # exist to avoid.
         return 0
+
+    def remote_branch_head(self, clone_path: str, remote: str, branch: str) -> str | None:
+        self._log("git.ls_remote", clone=clone_path, remote=remote, branch=branch)
+        # The same forty zeroes ``rev_parse`` answers with, and for the same reason. A
+        # simulated cleanup must reach the decision the real one would; answering ``None``
+        # here would mean "the remote does not have this branch", so every branch would be
+        # retained at ``plan`` level and the simulation would stop describing the product.
+        return "0" * 40
 
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None:
         self._log("git.show_file_at_ref", clone=clone_path, ref=ref, path=path)

@@ -31,7 +31,7 @@ Asks the remote, right now, what it has at `refs/heads/<branch>`.
 |---|---|---|
 | a sha string | the remote has the branch, there | `ls-remote` exit 0, one matching line |
 | `None` | the remote answered, and does not have the branch | `ls-remote` exit 0, no matching line |
-| raises `BoundaryError` | the remote could not be asked | `ls-remote` non-zero, or timeout |
+| raises | the remote could not be asked | `ls-remote` non-zero, or timeout |
 
 The tri-state is the point. Two of these keep the branch and one of them can prove it publishable,
 and collapsing "does not have it" into "could not ask" would lose the distinction FR-007 requires

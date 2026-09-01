@@ -100,3 +100,118 @@ def test_default_remote_still_prefers_origin_after_being_rebuilt_on_list_remotes
 
     git(bare_clone, "remote", "add", "origin", "git@github.com:jantman/demo.git")
     assert vcs.default_remote(str(bare_clone)) == "origin"
+
+
+# -- remote_branch_head (issue #105) ----------------------------------------
+#
+# The read that replaced a remote-tracking ref in cleanup's containment check. It is
+# tested here rather than only through cleanup because its whole value is the *three*
+# distinguishable answers: collapse two of them and the caller cannot tell "the remote
+# does not have this branch" from "the remote could not be asked", and only one of those
+# is allowed to sound like an answer.
+
+
+@pytest.fixture
+def clone_with_remote(tmp_path):
+    """A clone whose ``origin`` is a real bare repository holding one branch."""
+    from tests.conftest import make_repo
+
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    git(bare, "init", "--bare", "-q", "-b", "main")
+    clone = make_repo(tmp_path / "clones" / "demo")
+    git(clone, "remote", "add", "origin", str(bare))
+    git(clone, "push", "-q", "origin", "main")
+    return clone, bare
+
+
+def refs_of(path: Path) -> str:
+    return subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname) %(objectname)"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def test_a_branch_the_remote_has_answers_with_its_commit(clone_with_remote, audit):
+    clone, bare = clone_with_remote
+    expected = subprocess.run(
+        ["git", "rev-parse", "main"], cwd=bare, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    vcs = GitVersionControl(audit)
+    assert vcs.remote_branch_head(str(clone), "origin", "main") == expected
+
+
+def test_a_branch_the_remote_does_not_have_answers_none_rather_than_raising(
+    clone_with_remote, audit
+):
+    """``None`` and a raise are different answers to different questions. The remote was
+    reachable and said it has no such branch; that is information, and cleanup records it
+    as a distinct retention reason."""
+    clone, _bare = clone_with_remote
+
+    vcs = GitVersionControl(audit)
+    assert vcs.remote_branch_head(str(clone), "origin", "never-existed") is None
+
+
+def test_a_remote_that_cannot_be_reached_raises(clone_with_remote, tmp_path, audit):
+    clone, _bare = clone_with_remote
+    git(clone, "remote", "add", "dead", str(tmp_path / "does-not-exist.git"))
+
+    vcs = GitVersionControl(audit)
+    with pytest.raises(Exception):  # noqa: B017 - any failure means "could not ask"
+        vcs.remote_branch_head(str(clone), "dead", "main")
+
+
+def test_asking_the_remote_writes_nothing_to_the_clone(clone_with_remote, audit):
+    """FR-009, and the property the whole fix rests on.
+
+    A read that updated ``refs/remotes/origin/<branch>`` would leave behind exactly the
+    kind of ref that caused the defect, ready for the next reader to mistake for the
+    remote's answer. So the assertion is not "it did the right thing" but "it left
+    nothing behind at all".
+    """
+    clone, bare = clone_with_remote
+    git(clone, "checkout", "-q", "-b", "feature")
+    git(clone, "push", "-q", "origin", "feature:feature")
+    git(bare, "update-ref", "-d", "refs/heads/feature")
+    before = refs_of(clone)
+
+    vcs = GitVersionControl(audit)
+    assert vcs.remote_branch_head(str(clone), "origin", "feature") is None
+    assert refs_of(clone) == before, "the stale tracking ref is left exactly as it was"
+    assert "refs/remotes/origin/feature" in before, "...and it really was stale"
+
+
+def test_the_request_is_on_the_record(clone_with_remote, audit, layout):
+    """Constitution III: an outward-facing read is recorded before it runs and completed
+    with its outcome, the same way the fetch beside it is."""
+    import json
+
+    clone, _bare = clone_with_remote
+    GitVersionControl(audit).remote_branch_head(str(clone), "origin", "main")
+    audit.close()
+
+    records = [
+        json.loads(line)
+        for log in sorted(layout.log_dir.glob("audit-*.jsonl"))
+        for line in log.read_text(encoding="utf-8").splitlines()
+    ]
+    ls_remote = [r for r in records if r["action"] == "git.ls_remote"]
+    assert [r["outcome"] for r in ls_remote] == ["pending", "ok"]
+    assert ls_remote[1]["detail"]["sha"]
+
+
+def test_the_simulation_answers_so_a_planned_cleanup_still_decides(clone_with_remote, audit):
+    """``SimulatedVersionControl`` answers with the forty zeroes its ``rev_parse`` answers
+    with. Returning ``None`` would mean "the remote does not have this branch", and every
+    ``plan``-level cleanup would retain every branch — a divergence from the real path,
+    which is the one thing the simulated boundaries exist to avoid."""
+    clone, _bare = clone_with_remote
+
+    simulated = SimulatedVersionControl(audit)
+    assert simulated.remote_branch_head(str(clone), "origin", "anything") == "0" * 40
+    assert simulated.rev_parse(str(clone), "0" * 40) == "0" * 40

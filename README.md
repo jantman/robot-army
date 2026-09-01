@@ -809,10 +809,15 @@ the automatic path is enabled, so the manual route cannot drift from the automat
 - **The branch**: my own containment check, because git's is the wrong one here. `git branch
   -d` accepts only a branch merged into the clone's current `HEAD`; the normal case is a PR
   merged on GitHub while my clone has a stale `main` checked out, so `-d` would refuse every
-  time and `robot-army/*` branches would accumulate forever. Instead the base ref is
-  fetched and the branch is deleted only if every commit on it is provably on the remote —
-  contained in the published base, or pushed and up to date. If git cannot answer, that is
-  "unproven", never "safe", and the branch is kept.
+  time and `robot-army/*` branches would accumulate forever. Instead the branch is deleted
+  only if every commit on it is provably on the remote — contained in the published base,
+  which is fetched first, or on the remote under its own name, which the **remote is asked
+  about during the check**. A remote-tracking ref is not taken as the remote's answer: it is
+  a cache of what the remote said last time, a fetch scoped to the base branch neither
+  refreshes nor prunes it, and #105 measured a branch deleted on the remote going on proving
+  itself "pushed and up to date" from that leftover until a `gc` on the remote made the loss
+  permanent. If the remote cannot be asked, or git cannot answer, that is "unproven", never
+  "safe", and the branch is kept.
 
 Four outcomes, all visible in `robot-army show <id>` and on the item's web page:
 

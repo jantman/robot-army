@@ -16,6 +16,17 @@ refuses every time and ``robot-army/*`` branches accumulate forever. Containment
 therefore checked explicitly against the remote, and ``force=True`` on the delete means a
 *stronger* guard than git's has already passed, never that a guard was skipped.
 
+**"Against the remote" has to mean the remote, asked now.** Until issue #105 the second
+containment test — the branch is published under its own name — was answered by reading
+``refs/remotes/<remote>/<branch>``, which is a local cache of what the remote said the last
+time anything asked, and the only fetch here is scoped to the base branch, so it neither
+refreshes nor prunes it. A branch that was pushed and has since been deleted on the remote
+went on reading as published for as long as nobody ran a full fetch, and it was deleted with
+``force`` on that evidence. Measured end to end: after a routine ``gc`` on the remote, the
+commit survived nowhere but the stale ref that had been mistaken for proof. The remote is
+now asked directly (``VersionControl.remote_branch_head``) and no remote-tracking ref is
+read here at all.
+
 Every unresolved doubt keeps the branch. ``commits_ahead`` returning ``None`` means "could
 not determine" and satisfies no test (R11).
 """
@@ -297,7 +308,16 @@ def _branch_is_contained(
     work is on the remote under its own name).
 
     The fetch is required, not defensive. Without it the check reads a stale
-    remote-tracking ref and answers a question about the past.
+    remote-tracking ref and answers a question about the past — and for most of milestone
+    004's life that reasoning was written here and applied to only the *first* test.
+    ``{remote}/{branch}`` on the second one resolved to ``refs/remotes/<remote>/<branch>``,
+    a local ref nothing here ever fetched, and the fetch above is scoped to the base so it
+    neither refreshes nor prunes it. A branch that was pushed and has since been deleted on
+    the remote therefore went on proving itself "pushed and up to date" from a leftover
+    cache, and ``force=True`` deleted it. Issue #105 measured that end to end: after an
+    ordinary ``gc`` on the remote the commit existed nowhere but the stale ref that had
+    been mistaken for proof. The second test now asks the remote — see
+    :func:`_pushed_to_remote` — and no remote-tracking ref is read here at all.
 
     ``commits_ahead`` returning ``None`` means *could not determine* and satisfies neither
     test (R11). Its previous ``return 0`` meant "no information" to the resume-signal caller
@@ -319,26 +339,75 @@ def _branch_is_contained(
     except Exception as exc:  # noqa: BLE001 - see above
         return False, f"could not fetch {remote}/{base} ({exc}), so containment is unproven"
 
-    def ahead(haystack: str) -> int | None:
-        try:
-            return vcs.commits_ahead(clone, haystack, branch)  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 - "could not determine" is the only honest answer
-            return None
-
-    in_base = ahead(f"{remote}/{base}")
+    try:
+        in_base = vcs.commits_ahead(clone, f"{remote}/{base}", branch)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - "could not determine" is the only honest answer
+        in_base = None
     if in_base == 0:
         return True, f"every commit is contained in {remote}/{base}"
-    pushed = ahead(f"{remote}/{branch}")
-    if pushed == 0:
-        return True, f"the branch is pushed and up to date with {remote}/{branch}"
 
-    if in_base is None and pushed is None:
-        return False, "git could not determine containment, which is never taken as proof"
-    unpushed = in_base if in_base is not None else pushed
-    return False, (
-        f"{unpushed} commit(s) exist on {branch} that are not on {remote}/{base} "
-        f"or {remote}/{branch}"
+    pushed, pushed_evidence = _pushed_to_remote(vcs, clone=clone, remote=remote, branch=branch)
+    if pushed:
+        return True, pushed_evidence
+
+    # Both answers, not the winning one. The reader asking "why is this branch still
+    # here?" months from now is owed what each test said, because "1 commit ahead of the
+    # base" and "the remote does not have this branch" are different problems with
+    # different remedies, and reporting only one of them sends them to the wrong place.
+    in_base_evidence = (
+        "git could not compare it with the base"
+        if in_base is None
+        else f"{in_base} commit(s) are not on {remote}/{base}"
     )
+    return False, f"{in_base_evidence}; {pushed_evidence}"
+
+
+def _pushed_to_remote(
+    vcs: object, *, clone: str, remote: str, branch: str
+) -> tuple[bool, str]:
+    """Is every commit on ``branch`` on the remote **under its own name**? (issue #105)
+
+    Six outcomes, six visible returns, and exactly one of them authorises a delete. They
+    are written out rather than folded together because the value of this function is that
+    "the remote does not have this branch" and "the remote could not be asked" reach the
+    same decision by different routes and must not reach the same *sentence* — the operator
+    reading a retained branch's reason has to know which of them happened.
+
+    The evidence names the commit the remote reported, not just the ref that was consulted.
+    That distinction is the whole fix: *"the branch is pushed and up to date with
+    origin/<branch>"* is what this said while reading a ref the remote had never been asked
+    about, and a record that cannot tell a sound deletion from that one is not a record.
+
+    Every ``except`` is broad for the reason the caller's are: the boundary can fail in more
+    ways than it declares, which way changes nothing, and unproven keeps the branch.
+    """
+    try:
+        head = vcs.remote_branch_head(clone, remote, branch)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 - could not ask is never taken as an answer
+        return False, f"could not ask {remote} about {branch} ({exc}), so it is unproven"
+
+    if head is None:
+        return False, f"{remote} does not have {branch}"
+
+    try:
+        local = vcs.rev_parse(clone, head)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - see above
+        local = None
+    if local is None:
+        # Someone pushed to this branch from elsewhere. Their commit is not in this clone,
+        # so there is no way to show our commits are reachable from it without fetching
+        # objects — and this check is deliberately a question, not a synchronisation.
+        return False, f"{remote} has {branch} at {head}, which this clone does not have"
+
+    try:
+        ahead = vcs.commits_ahead(clone, head, branch)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - see above
+        ahead = None
+    if ahead is None:
+        return False, f"git could not compare {branch} with {head}, so it is unproven"
+    if ahead > 0:
+        return False, f"{ahead} commit(s) on {branch} are not on {remote}, which has {head}"
+    return True, f"every commit is on {remote}/{branch}, which is at {head} now"
 
 
 def _record(

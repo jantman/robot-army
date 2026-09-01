@@ -429,6 +429,34 @@ class VersionControl(Protocol):
         """
         ...
 
+    def remote_branch_head(self, clone_path: str, remote: str, branch: str) -> str | None:
+        """What ``remote`` has at ``refs/heads/<branch>``, asked of the remote right now.
+
+        Three answers, and **they must stay three**:
+
+        * a sha — the remote has the branch, at that commit;
+        * ``None`` — the remote answered, and has no such branch;
+        * a raise — the remote could not be asked at all.
+
+        Placed beside ``commits_ahead`` because it is the same lesson. That docstring
+        records what happens when a read folds two meanings into one value: a transient
+        failure came back as ``0`` and authorised deleting commits that existed nowhere
+        else. This read has the same shape of danger. Collapsing "does not have it" into
+        "could not ask" would lose the distinction the recorded retention reason needs;
+        collapsing either of them into a sha is unthinkable, and collapsing a sha into
+        ``None`` merely keeps a branch that could have been reclaimed.
+
+        It exists because a remote-tracking ref is **not** this answer. ``origin/<branch>``
+        is a cache written by whatever last pushed or fetched it, and a fetch scoped to the
+        base branch neither refreshes nor prunes it — so a branch deleted on the remote goes
+        on looking published locally for as long as nobody runs a full fetch. Cleanup read
+        it as proof and force-deleted the branch; issue #105 measured that end to end.
+
+        Implementations MUST NOT write to the clone to answer this — no ref, no object, no
+        working tree. The whole point is that it is a question rather than a synchronisation.
+        """
+        ...
+
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None: ...
 
     def rev_parse(self, clone_path: str, ref: str) -> str | None:

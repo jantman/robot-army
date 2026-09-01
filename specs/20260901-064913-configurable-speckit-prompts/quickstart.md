@@ -42,6 +42,22 @@ uv run robot-army doctor        # exits non-zero
 Expected: three problems reported together, not one — a non-string value, an empty global value, and
 an unknown command name — each naming its key. Then remove them again.
 
+To try it without touching the live file, put the same keys in a scratch config and point at it —
+`--config` is a **global** flag and goes before the subcommand, not after:
+
+```bash
+uv run robot-army --config /tmp/scratch.toml doctor
+```
+
+Verified 2026-09-01: three problems, exit 3.
+
+```text
+configuration is invalid (3 problem(s)):
+  - [speckit.commands] implement must be a string, got 42
+  - [speckit.commands] unknown command 'plna'; valid commands are specify, plan, tasks, implement
+  - [speckit.commands] specify is empty; omit the key instead
+```
+
 The point of running `doctor` rather than a unit test here is that the aggregate `ConfigError` path
 is what the maintainer actually meets, and a problem that only exists in a test is a problem that
 can be reported in an unreadable way without anyone noticing.

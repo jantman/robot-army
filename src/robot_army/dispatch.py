@@ -421,6 +421,10 @@ def speckit_block(
     try:
         detection = speckit.detect(worktree_path)
         enabled, suppressed_by = config.speckit_enabled_for(repo_key)
+        # Inside the same ``try`` as everything else here: a configured instruction is
+        # prose, and prose must not be able to fail a dispatch any more than a failed
+        # ``stat`` can.
+        instructions = config.speckit_commands_for(repo_key)
     except Exception as exc:  # noqa: BLE001 - see the docstring; a miss, never a failure
         audit.record(
             "speckit.detect",
@@ -442,6 +446,20 @@ def speckit_block(
         detail["form"] = detection.form
     if detection.detected and not enabled and suppressed_by:
         detail["suppressed_by"] = suppressed_by
+    if instructions and detail["enabled"]:
+        # Gated on the block actually being sent, not merely on configuration existing: a
+        # suppressed repository is told nothing, and a record listing instructions it never
+        # received would describe a prompt that was not composed. ``suppressed_by`` already
+        # says configuration was consulted.
+        #
+        # Which setting supplied each instruction, never the instruction itself. The log
+        # does not reconstruct a composed prompt today — the issue body, the repository's
+        # own instructions and the delivery block are all absent from it — and recording
+        # up to 16,000 characters of configured prose beside an omitted issue body would
+        # privilege this one section for no defensible reason. This is the Principle III
+        # gap milestone 039's plan enumerates and justifies; do not close it by adding the
+        # text here.
+        detail["instructions"] = {i.command: i.source for i in instructions}
     audit.record(
         "speckit.detect",
         outcome="ok",
@@ -450,7 +468,11 @@ def speckit_block(
         target=worktree_path,
         detail=detail,
     )
-    return speckit.GUIDANCE if (detection.detected and enabled) else None
+    if not (detection.detected and enabled):
+        return None
+    # Configured text lives *inside* the gate rather than beside it: a repository whose
+    # block is suppressed receives no instructions either (FR-005, US1 scenario 4).
+    return speckit.guidance(instructions)
 
 
 def build_launch_plan(

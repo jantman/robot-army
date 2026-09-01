@@ -36,7 +36,7 @@ Single Python package at the repository root: `src/robot_army/`, `tests/unit/`,
 
 **Purpose**: Establish a clean baseline so any later failure is attributable to this work.
 
-- [ ] T001 Run `uv run pytest` and `uv run ruff check` from the repository root and confirm both pass before any edit, so a later golden-string or lint failure is known to be caused by this milestone rather than inherited
+- [X] T001 Run `uv run pytest` and `uv run ruff check` from the repository root and confirm both pass before any edit, so a later golden-string or lint failure is known to be caused by this milestone rather than inherited
 
 ---
 
@@ -48,13 +48,13 @@ Phase 1.
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T002 In `src/robot_army/speckit.py`, split the `GUIDANCE` constant into `GUIDANCE_BODY` (the first three paragraphs) and `GUIDANCE_CLOSING` (the precedence sentence), and define `GUIDANCE = GUIDANCE_BODY + "\n\n" + GUIDANCE_CLOSING` so its value is unchanged by construction; add a comment recording that the split exists so `guidance()` can insert between them without string-slicing, per `contracts/prompt-block.md` "Absence is byte-identical"
-- [ ] T003 In `src/robot_army/speckit.py`, add to the module docstring the rule that this module must never import `robot_army.config`, naming it as the invariant that keeps the `config → speckit` edge acyclic (research R2)
-- [ ] T004 [P] In `src/robot_army/config.py`, add `from robot_army.speckit import LIFECYCLE` and `MAX_INSTRUCTION_CHARS = 4000`, with a comment giving the reason for the cap (the composed prompt is one `argv` entry; `prompt.MAX_BODY_CHARS` exists for the same reason)
-- [ ] T005 [P] In `src/robot_army/config.py`, add the frozen slots dataclass `CommandInstruction` with fields `command`, `text`, `source`, per `data-model.md` "CommandInstruction"
-- [ ] T006 In `src/robot_army/config.py`, add `commands: dict[str, str]` to `SpecKitConfig` (default empty) and `speckit_commands: dict[str, str]` to `RepoConfig` (default empty via `field(default_factory=dict)`, following `env`'s precedent), each with a docstring comment noting that an empty-string value is meaningful only in the repository form
-- [ ] T007 In `src/robot_army/config.py`, add `"commands"` to `_KNOWN_KEYS["speckit"]` and `"speckit_commands"` to `_REPO_KEYS`, so a mistyped table name is caught by the existing strict-unknown-key machinery
-- [ ] T008 Run `uv run pytest` and confirm the whole suite still passes with no test edited — the shapes exist and nothing reads them yet
+- [X] T002 In `src/robot_army/speckit.py`, split the `GUIDANCE` constant into `GUIDANCE_BODY` (the first three paragraphs) and `GUIDANCE_CLOSING` (the precedence sentence), and define `GUIDANCE = GUIDANCE_BODY + "\n\n" + GUIDANCE_CLOSING` so its value is unchanged by construction; add a comment recording that the split exists so `guidance()` can insert between them without string-slicing, per `contracts/prompt-block.md` "Absence is byte-identical"
+- [X] T003 In `src/robot_army/speckit.py`, add to the module docstring the rule that this module must never import `robot_army.config`, naming it as the invariant that keeps the `config → speckit` edge acyclic (research R2)
+- [X] T004 [P] In `src/robot_army/config.py`, add `from robot_army.speckit import LIFECYCLE` and `MAX_INSTRUCTION_CHARS = 4000`, with a comment giving the reason for the cap (the composed prompt is one `argv` entry; `prompt.MAX_BODY_CHARS` exists for the same reason)
+- [X] T005 [P] In `src/robot_army/config.py`, add the frozen slots dataclass `CommandInstruction` with fields `command`, `text`, `source`, per `data-model.md` "CommandInstruction"
+- [X] T006 In `src/robot_army/config.py`, add `commands: dict[str, str]` to `SpecKitConfig` (default empty) and `speckit_commands: dict[str, str]` to `RepoConfig` (default empty via `field(default_factory=dict)`, following `env`'s precedent), each with a docstring comment noting that an empty-string value is meaningful only in the repository form
+- [X] T007 In `src/robot_army/config.py`, add `"commands"` to `_KNOWN_KEYS["speckit"]` and `"speckit_commands"` to `_REPO_KEYS`, so a mistyped table name is caught by the existing strict-unknown-key machinery
+- [X] T008 Run `uv run pytest` and confirm the whole suite still passes with no test edited — the shapes exist and nothing reads them yet
 
 **Checkpoint**: Shapes in place, behaviour unchanged, suite green.
 
@@ -71,20 +71,20 @@ to `/speckit-implement`, unaltered. Change the string, compose again, and only t
 
 ### Tests for User Story 1
 
-- [ ] T009 [P] [US1] Create `tests/unit/test_speckit_commands_config.py` with tests for the global happy path: a `[speckit.commands]` table of valid strings parses into `SpecKitConfig.commands`, and `Config.speckit_commands_for("demo")` returns one `CommandInstruction` per configured command with `source` equal to `[speckit.commands] <cmd>`
-- [ ] T010 [P] [US1] Create `tests/unit/test_speckit_guidance_render.py` asserting that `speckit.guidance(())` returns `speckit.GUIDANCE` unchanged, and that `speckit.guidance((implement_instruction,))` places the lead-in sentence and the `` `/speckit-implement`: `` block between the constitution paragraph and the closing precedence sentence, with the closing sentence still last
-- [ ] T011 [P] [US1] In `tests/unit/test_speckit_guidance_render.py`, assert verbatim carriage: an instruction containing backticks, quotation marks, and two paragraphs separated by a blank line appears in the output exactly as supplied, unwrapped and unindented (FR-009)
-- [ ] T012 [P] [US1] In `tests/unit/test_speckit_dispatch_prompt.py`, extend the existing tests to assert that a configured instruction reaches the composed prompt via `dispatch.speckit_block`, and that it does **not** when the repository's block is suppressed by `[speckit] enabled = false` or by the per-repository `speckit = false` (User Story 1 scenario 4, FR-005)
-- [ ] T013 [P] [US1] In `tests/integration/test_speckit_dispatch.py`, extend the existing dispatch test to assert the `speckit.detect` audit record carries `instructions` naming the setting that supplied each one, and that the instruction **text** is absent from the record (research R6)
+- [X] T009 [P] [US1] Create `tests/unit/test_speckit_commands_config.py` with tests for the global happy path: a `[speckit.commands]` table of valid strings parses into `SpecKitConfig.commands`, and `Config.speckit_commands_for("demo")` returns one `CommandInstruction` per configured command with `source` equal to `[speckit.commands] <cmd>`
+- [X] T010 [P] [US1] Create `tests/unit/test_speckit_guidance_render.py` asserting that `speckit.guidance(())` returns `speckit.GUIDANCE` unchanged, and that `speckit.guidance((implement_instruction,))` places the lead-in sentence and the `` `/speckit-implement`: `` block between the constitution paragraph and the closing precedence sentence, with the closing sentence still last
+- [X] T011 [P] [US1] In `tests/unit/test_speckit_guidance_render.py`, assert verbatim carriage: an instruction containing backticks, quotation marks, and two paragraphs separated by a blank line appears in the output exactly as supplied, unwrapped and unindented (FR-009)
+- [X] T012 [P] [US1] In `tests/unit/test_speckit_dispatch_prompt.py`, extend the existing tests to assert that a configured instruction reaches the composed prompt via `dispatch.speckit_block`, and that it does **not** when the repository's block is suppressed by `[speckit] enabled = false` or by the per-repository `speckit = false` (User Story 1 scenario 4, FR-005)
+- [X] T013 [P] [US1] In `tests/integration/test_speckit_dispatch.py`, extend the existing dispatch test to assert the `speckit.detect` audit record carries `instructions` naming the setting that supplied each one, and that the instruction **text** is absent from the record (research R6)
 
 ### Implementation for User Story 1
 
-- [ ] T014 [US1] In `src/robot_army/config.py`, parse `[speckit.commands]` in the existing `-- [speckit] --` block: reject a non-table `commands` value as a problem, then for each entry validate the key against `LIFECYCLE` and the value as a non-empty string within `MAX_INSTRUCTION_CHARS`, appending problems in the message shapes given in `contracts/config.md` "Validation"
-- [ ] T015 [US1] In `src/robot_army/config.py`, add `Config.speckit_commands_for(repo_key) -> tuple[CommandInstruction, ...]` returning the globally configured instructions in `LIFECYCLE` order with their `source` strings, with a docstring stating — as `speckit_enabled_for`'s does — that the provenance is returned alongside the value because two callers need it and computing it twice is how they come to disagree
-- [ ] T016 [US1] In `src/robot_army/speckit.py`, add `guidance(instructions=())` returning `GUIDANCE` when empty, and otherwise `GUIDANCE_BODY`, the lead-in sentence, one `` `/speckit-<command>`: `` block per instruction, and `GUIDANCE_CLOSING` last — exactly the layout in `contracts/prompt-block.md` "The rendered text", with a comment recording why the insertion point is above the closing sentence rather than after it (research R4)
-- [ ] T017 [US1] In `src/robot_army/dispatch.py`, have `speckit_block` call `config.speckit_commands_for(repo_key)` alongside its existing `speckit_enabled_for` call, inside the same `try`, and return `speckit.guidance(instructions)` in place of `speckit.GUIDANCE`
-- [ ] T018 [US1] In `src/robot_army/dispatch.py`, add the `instructions` field to the `speckit.detect` audit `detail` — a mapping of command name to `source` string, omitted entirely when nothing resolved — per `contracts/config.md` "Audit detail"
-- [ ] T019 [US1] Run `uv run pytest tests/unit/test_speckit_commands_config.py tests/unit/test_speckit_guidance_render.py tests/unit/test_speckit_dispatch_prompt.py tests/integration/test_speckit_dispatch.py` and confirm all pass
+- [X] T014 [US1] In `src/robot_army/config.py`, parse `[speckit.commands]` in the existing `-- [speckit] --` block: reject a non-table `commands` value as a problem, then for each entry validate the key against `LIFECYCLE` and the value as a non-empty string within `MAX_INSTRUCTION_CHARS`, appending problems in the message shapes given in `contracts/config.md` "Validation"
+- [X] T015 [US1] In `src/robot_army/config.py`, add `Config.speckit_commands_for(repo_key) -> tuple[CommandInstruction, ...]` returning the globally configured instructions in `LIFECYCLE` order with their `source` strings, with a docstring stating — as `speckit_enabled_for`'s does — that the provenance is returned alongside the value because two callers need it and computing it twice is how they come to disagree
+- [X] T016 [US1] In `src/robot_army/speckit.py`, add `guidance(instructions=())` returning `GUIDANCE` when empty, and otherwise `GUIDANCE_BODY`, the lead-in sentence, one `` `/speckit-<command>`: `` block per instruction, and `GUIDANCE_CLOSING` last — exactly the layout in `contracts/prompt-block.md` "The rendered text", with a comment recording why the insertion point is above the closing sentence rather than after it (research R4)
+- [X] T017 [US1] In `src/robot_army/dispatch.py`, have `speckit_block` call `config.speckit_commands_for(repo_key)` alongside its existing `speckit_enabled_for` call, inside the same `try`, and return `speckit.guidance(instructions)` in place of `speckit.GUIDANCE`
+- [X] T018 [US1] In `src/robot_army/dispatch.py`, add the `instructions` field to the `speckit.detect` audit `detail` — a mapping of command name to `source` string, omitted entirely when nothing resolved — per `contracts/config.md` "Audit detail"
+- [X] T019 [US1] Run `uv run pytest tests/unit/test_speckit_commands_config.py tests/unit/test_speckit_guidance_render.py tests/unit/test_speckit_dispatch_prompt.py tests/integration/test_speckit_dispatch.py` and confirm all pass
 
 **Checkpoint**: A single configured instruction reaches a session and is accounted for in the log.
 User Story 1 is fully functional and independently testable.
@@ -103,16 +103,16 @@ all.
 
 ### Tests for User Story 2
 
-- [ ] T020 [P] [US2] In `tests/unit/test_speckit_commands_config.py`, assert that a `[speckit.commands]` table written in reverse file order (`implement`, `tasks`, `plan`, `specify`) resolves to a tuple in `LIFECYCLE` order (FR-011)
-- [ ] T021 [P] [US2] In `tests/unit/test_speckit_guidance_render.py`, assert that with a subset configured, exactly the configured commands are named and no placeholder, empty heading, or "none" line appears for the others (FR-010)
-- [ ] T022 [P] [US2] In `tests/unit/test_speckit_guidance_render.py`, assert that the lead-in sentence appears exactly once regardless of how many instructions are configured, that it contains the "in addition to, not instead of" clause, and that the block's existing sentence about the issue being the input to `/speckit-specify` is still present and unmodified (FR-012)
-- [ ] T023 [P] [US2] In `tests/unit/test_speckit_guidance_render.py`, assert that with all four configured the closing precedence sentence is still the last paragraph of the block (FR-015)
+- [X] T020 [P] [US2] In `tests/unit/test_speckit_commands_config.py`, assert that a `[speckit.commands]` table written in reverse file order (`implement`, `tasks`, `plan`, `specify`) resolves to a tuple in `LIFECYCLE` order (FR-011)
+- [X] T021 [P] [US2] In `tests/unit/test_speckit_guidance_render.py`, assert that with a subset configured, exactly the configured commands are named and no placeholder, empty heading, or "none" line appears for the others (FR-010)
+- [X] T022 [P] [US2] In `tests/unit/test_speckit_guidance_render.py`, assert that the lead-in sentence appears exactly once regardless of how many instructions are configured, that it contains the "in addition to, not instead of" clause, and that the block's existing sentence about the issue being the input to `/speckit-specify` is still present and unmodified (FR-012)
+- [X] T023 [P] [US2] In `tests/unit/test_speckit_guidance_render.py`, assert that with all four configured the closing precedence sentence is still the last paragraph of the block (FR-015)
 
 ### Implementation for User Story 2
 
-- [ ] T024 [US2] In `src/robot_army/config.py`, confirm `speckit_commands_for` iterates `LIFECYCLE` rather than the parsed mapping's insertion order, so the ordering guarantee holds at the single point where it is tested, and add a comment saying so
-- [ ] T025 [US2] In `src/robot_army/speckit.py`, confirm `guidance()` emits the lead-in exactly once and omits unconfigured commands entirely; adjust the join so a single instruction and four instructions produce the same spacing between elements
-- [ ] T026 [US2] Run `uv run pytest tests/unit/ -k speckit` and confirm all pass
+- [X] T024 [US2] In `src/robot_army/config.py`, confirm `speckit_commands_for` iterates `LIFECYCLE` rather than the parsed mapping's insertion order, so the ordering guarantee holds at the single point where it is tested, and add a comment saying so
+- [X] T025 [US2] In `src/robot_army/speckit.py`, confirm `guidance()` emits the lead-in exactly once and omits unconfigured commands entirely; adjust the join so a single instruction and four instructions produce the same spacing between elements
+- [X] T026 [US2] Run `uv run pytest tests/unit/ -k speckit` and confirm all pass
 
 **Checkpoint**: All four commands are configurable, ordered, and independently omissible. User
 Stories 1 and 2 both work.
@@ -130,15 +130,15 @@ reported.
 
 ### Tests for User Story 3
 
-- [ ] T027 [P] [US3] In `tests/unit/test_speckit_prompt.py`, extend the module docstring to record that this milestone amended 007's FR-009 — the block is fixed per *effective configuration*, not universally — following the precedent that file already set when milestone 012 superseded 007's FR-010, and confirm the existing `GOLDEN` string still passes **unedited** (FR-013)
-- [ ] T028 [P] [US3] In `tests/unit/test_speckit_prompt.py`, add a test composing a prompt with a configured instruction and asserting it differs from `GOLDEN` only by the inserted block, so the golden test guards both directions
-- [ ] T029 [P] [US3] In `tests/unit/test_speckit_commands_config.py`, add failure-path tests for each shape in `contracts/config.md` "Validation": `commands` not a table; a key that is not a lifecycle command; a non-string value; an empty and a whitespace-only global value; a value exceeding `MAX_INSTRUCTION_CHARS`. Assert the message shape and the offending key are named
-- [ ] T030 [P] [US3] In `tests/unit/test_speckit_commands_config.py`, assert that three malformed entries in one file produce three problems in a single `ConfigError` rather than aborting at the first (FR-006, User Story 3 scenario 2)
+- [X] T027 [P] [US3] In `tests/unit/test_speckit_prompt.py`, extend the module docstring to record that this milestone amended 007's FR-009 — the block is fixed per *effective configuration*, not universally — following the precedent that file already set when milestone 012 superseded 007's FR-010, and confirm the existing `GOLDEN` string still passes **unedited** (FR-013)
+- [X] T028 [P] [US3] In `tests/unit/test_speckit_prompt.py`, add a test composing a prompt with a configured instruction and asserting it differs from `GOLDEN` only by the inserted block, so the golden test guards both directions
+- [X] T029 [P] [US3] In `tests/unit/test_speckit_commands_config.py`, add failure-path tests for each shape in `contracts/config.md` "Validation": `commands` not a table; a key that is not a lifecycle command; a non-string value; an empty and a whitespace-only global value; a value exceeding `MAX_INSTRUCTION_CHARS`. Assert the message shape and the offending key are named
+- [X] T030 [P] [US3] In `tests/unit/test_speckit_commands_config.py`, assert that three malformed entries in one file produce three problems in a single `ConfigError` rather than aborting at the first (FR-006, User Story 3 scenario 2)
 
 ### Implementation for User Story 3
 
-- [ ] T031 [US3] In `src/robot_army/config.py`, complete the validation added in T014 so every shape in the contract's table produces its documented message, including the length message naming both the limit and the length found
-- [ ] T032 [US3] Run `uv run pytest tests/unit/test_speckit_prompt.py tests/unit/test_speckit_commands_config.py` and confirm the golden string passes unedited
+- [X] T031 [US3] In `src/robot_army/config.py`, complete the validation added in T014 so every shape in the contract's table produces its documented message, including the length message naming both the limit and the length found
+- [X] T032 [US3] Run `uv run pytest tests/unit/test_speckit_prompt.py tests/unit/test_speckit_commands_config.py` and confirm the golden string passes unedited
 
 **Checkpoint**: The unconfigured path is provably unchanged and every malformed shape is refused out
 loud. User Stories 1, 2 and 3 all work.
@@ -156,18 +156,18 @@ command and the global text for the rest; the second shows the global text throu
 
 ### Tests for User Story 4
 
-- [ ] T033 [P] [US4] In `tests/unit/test_speckit_commands_config.py`, add a test covering every row of the resolution matrix in `data-model.md`: absent/absent, global only, override only, override beats global, override-empty clears a global, and override-empty with no global
-- [ ] T034 [P] [US4] In `tests/unit/test_speckit_commands_config.py`, assert `source` is `[repos."<key>".speckit_commands] <cmd>` for an overridden command and `[speckit.commands] <cmd>` for an inherited one in the same call, and that a repository with no section inherits everything (FR-023, FR-026)
-- [ ] T035 [P] [US4] In `tests/unit/test_speckit_commands_config.py`, add failure-path tests for the repository form: `speckit_commands` not a table, unknown command name, non-string value, over-length value — each naming the repository and the command — and assert that an **empty string is accepted** here rather than reported (R5, FR-025, FR-028)
-- [ ] T036 [P] [US4] In `tests/unit/test_speckit_guidance_render.py`, assert that a command overridden to empty produces a block with no mention of that command, while the other commands' global instructions are unaffected
-- [ ] T037 [P] [US4] Create or extend a test in `tests/unit/` covering `operations._speckit_column`, asserting the returned detail carries the `instructions` provenance mapping for a detected repository and omits it when nothing resolved
+- [X] T033 [P] [US4] In `tests/unit/test_speckit_commands_config.py`, add a test covering every row of the resolution matrix in `data-model.md`: absent/absent, global only, override only, override beats global, override-empty clears a global, and override-empty with no global
+- [X] T034 [P] [US4] In `tests/unit/test_speckit_commands_config.py`, assert `source` is `[repos."<key>".speckit_commands] <cmd>` for an overridden command and `[speckit.commands] <cmd>` for an inherited one in the same call, and that a repository with no section inherits everything (FR-023, FR-026)
+- [X] T035 [P] [US4] In `tests/unit/test_speckit_commands_config.py`, add failure-path tests for the repository form: `speckit_commands` not a table, unknown command name, non-string value, over-length value — each naming the repository and the command — and assert that an **empty string is accepted** here rather than reported (R5, FR-025, FR-028)
+- [X] T036 [P] [US4] In `tests/unit/test_speckit_guidance_render.py`, assert that a command overridden to empty produces a block with no mention of that command, while the other commands' global instructions are unaffected
+- [X] T037 [P] [US4] Create or extend a test in `tests/unit/` covering `operations._speckit_column`, asserting the returned detail carries the `instructions` provenance mapping for a detected repository and omits it when nothing resolved
 
 ### Implementation for User Story 4
 
-- [ ] T038 [US4] In `src/robot_army/config.py`, parse `speckit_commands` in the `[repos.*]` loop beside the existing `speckit` boolean: reject a non-table value, validate keys against `LIFECYCLE` and values as strings within `MAX_INSTRUCTION_CHARS`, and **accept the empty string**, with a comment giving R5's reason (absent inherits, empty overrides with nothing — two different states, unlike the global form)
-- [ ] T039 [US4] In `src/robot_army/config.py`, extend `speckit_commands_for` to apply the repository override per command ahead of the global value, dropping any command whose effective text is empty, and to set `source` accordingly
-- [ ] T040 [US4] In `src/robot_army/operations.py`, extend `_speckit_column` to include the `instructions` provenance mapping in the returned detail from the same `speckit_commands_for` call, so `robot-army repos --json` and the audit record cannot disagree (FR-026, FR-027)
-- [ ] T041 [US4] Run `uv run pytest` and confirm the full suite passes
+- [X] T038 [US4] In `src/robot_army/config.py`, parse `speckit_commands` in the `[repos.*]` loop beside the existing `speckit` boolean: reject a non-table value, validate keys against `LIFECYCLE` and values as strings within `MAX_INSTRUCTION_CHARS`, and **accept the empty string**, with a comment giving R5's reason (absent inherits, empty overrides with nothing — two different states, unlike the global form)
+- [X] T039 [US4] In `src/robot_army/config.py`, extend `speckit_commands_for` to apply the repository override per command ahead of the global value, dropping any command whose effective text is empty, and to set `source` accordingly
+- [X] T040 [US4] In `src/robot_army/operations.py`, extend `_speckit_column` to include the `instructions` provenance mapping in the returned detail from the same `speckit_commands_for` call, so `robot-army repos --json` and the audit record cannot disagree (FR-026, FR-027)
+- [X] T041 [US4] Run `uv run pytest` and confirm the full suite passes
 
 **Checkpoint**: All four user stories are functional. The mechanism is global with per-repository
 exceptions, and every answer carries its provenance.
@@ -179,12 +179,20 @@ exceptions, and every answer carries its provenance.
 **Purpose**: The documentation obligations the spec makes requirements (FR-014, FR-021) and the
 final verification.
 
-- [ ] T042 [P] In `specs/007-speckit-extensions/contracts/prompt.md`, add a note under **Rules** recording that FR-009's "identical text on every dispatch, in every repository" is amended by this milestone to "identical per effective configuration", linking to `contracts/prompt-block.md`, and stating that the byte-identity rule still holds for an installation that configures nothing (FR-014)
-- [ ] T043 [P] In `specs/007-speckit-extensions/contracts/config.md`, add a note recording that `[speckit]` gained a `commands` sub-table and `[repos.*]` gained `speckit_commands`, linking to this milestone's `contracts/config.md`
-- [ ] T044 [P] In `README.md`, extend the "When a repository uses Spec Kit" section with the configuration: the `[speckit.commands]` table, the `[repos.*].speckit_commands` override, the empty-string-clears rule, and the two paragraphs from issue #39 shown explicitly as **examples of use rather than defaults** (FR-021, FR-022)
-- [ ] T045 Run `uv run ruff check` and fix any finding introduced by this milestone, respecting the project's line-length of 100
-- [ ] T046 Run `uv run pytest` — the whole suite, including `tests/integration/test_speckit_writes_nothing.py` unedited, which is what asserts FR-019 rather than any sentence in the spec
+- [X] T042 [P] In `specs/007-speckit-extensions/contracts/prompt.md`, add a note under **Rules** recording that FR-009's "identical text on every dispatch, in every repository" is amended by this milestone to "identical per effective configuration", linking to `contracts/prompt-block.md`, and stating that the byte-identity rule still holds for an installation that configures nothing (FR-014)
+- [X] T043 [P] In `specs/007-speckit-extensions/contracts/config.md`, add a note recording that `[speckit]` gained a `commands` sub-table and `[repos.*]` gained `speckit_commands`, linking to this milestone's `contracts/config.md`
+- [X] T044 [P] In `README.md`, extend the "When a repository uses Spec Kit" section with the configuration: the `[speckit.commands]` table, the `[repos.*].speckit_commands` override, the empty-string-clears rule, and the two paragraphs from issue #39 shown explicitly as **examples of use rather than defaults** (FR-021, FR-022)
+- [X] T045 Run `uv run ruff check` and fix any finding introduced by this milestone, respecting the project's line-length of 100
+- [X] T046 Run `uv run pytest` — the whole suite, including `tests/integration/test_speckit_writes_nothing.py` unedited, which is what asserts FR-019 rather than any sentence in the spec
 - [ ] T047 Walk `quickstart.md` steps 1 through 4 against a real `config.toml`, confirming in particular that `uv run robot-army doctor` reports three malformed entries together and exits non-zero, and that `robot-army repos --json` shows the resolved provenance
+
+> **T047 is partially done and deliberately left open.** Steps 1 and 3 (the suites) and step 2's
+> refusal check were run and pass — the refusal was verified against a scratch config rather than
+> `~/.config/robot-army/config.toml`, and `quickstart.md` records the output. Steps 4 and 5 were
+> **not** run: step 4 reads the live state directory, and step 5 needs a real dispatch into a real
+> Spec Kit repository. Both are the maintainer's to run. Step 4's behaviour is covered by
+> `test_the_repositories_listing_carries_the_instruction_provenance` and
+> `test_a_suppressed_repository_lists_no_instructions`; step 5 is the one check no test replaces.
 
 ---
 

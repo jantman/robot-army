@@ -8,6 +8,7 @@ way to keep them agreeing is for one function to answer both.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -117,3 +118,56 @@ def test_non_boolean_repo_override_is_an_error(
         )
 
     assert any("speckit must be true or false" in problem for problem in caught.value.problems)
+
+
+def test_the_repositories_listing_carries_the_instruction_provenance(
+    repo_clone: Path, layout: Any, tmp_path: Path
+) -> None:
+    """FR-027 / SC-008: answerable offline, before anything is labelled.
+
+    The table keeps its four values and gains no column — the cell answers "is this
+    repository getting the block", which milestone 039 did not change. The provenance rides
+    in the ``--json`` payload, from the same resolution call the audit record uses.
+    """
+    from tests.conftest import make_speckit_tree
+
+    from robot_army import operations
+
+    # Into the real clone fixture: config validates that a repository path is a git
+    # repository, so a bare directory of Spec Kit files is refused before the listing runs.
+    clone = make_speckit_tree(repo_clone)
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        speckit={"commands": {"implement": "open a PR."}},
+    )
+    ctx = SimpleNamespace(config=config)
+
+    cell, detail = operations._speckit_column(ctx, "demo", clone)
+
+    assert cell == "yes"
+    assert detail["instructions"] == {"implement": "[speckit.commands] implement"}
+
+
+def test_a_suppressed_repository_lists_no_instructions(
+    repo_clone: Path, layout: Any, tmp_path: Path
+) -> None:
+    """It will be told nothing, so listing what it would have been told would mislead."""
+    from tests.conftest import make_speckit_tree
+
+    from robot_army import operations
+
+    clone = make_speckit_tree(repo_clone)
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        speckit={"enabled": False, "commands": {"implement": "open a PR."}},
+    )
+    ctx = SimpleNamespace(config=config)
+
+    cell, detail = operations._speckit_column(ctx, "demo", clone)
+
+    assert cell == "off"
+    assert "instructions" not in detail

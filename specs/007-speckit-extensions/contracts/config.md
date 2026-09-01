@@ -71,3 +71,19 @@ The `speckit.detect` record carries, in `detail`:
 that can be *wrong* — a repository without Spec Kit is a repository without Spec Kit, not a
 misconfiguration, and a check that reports it would be a check that is amber on half the machine's
 repositories forever.
+
+## Amendment: two new keys, by milestone 039
+
+`[speckit]` gained a `commands` sub-table and `[repos.*]` gained `speckit_commands`, holding
+what each lifecycle command is invoked with.
+
+Everything above is unchanged. `[speckit] enabled` and `[repos.*] speckit` keep their exact
+meaning and their exact resolution, and they gate the new instructions too — configured text
+lives *inside* this gate rather than beside it, so a repository whose block is suppressed
+receives no instructions either. No new enable/disable switch was added.
+
+The `speckit.detect` audit record's `detail` gained one field, `instructions`, naming which
+setting supplied each one. `doctor` still gains nothing, for the reason given above.
+
+Full surface, validation rules and resolution matrix:
+[`contracts/config.md`](../../20260901-064913-configurable-speckit-prompts/contracts/config.md).

@@ -370,6 +370,58 @@ phases and which do not, and then says plainly that nothing checks. A typo fix t
 lifecycle is a correct outcome, not a stall — it produces an item with no phase, and nothing
 anywhere treats that as a failure.
 
+### Telling it how *I* run the lifecycle
+
+That paragraph is true of Spec Kit in general, which is why it can be a constant. How I run
+it is not: it changes as my habits change, and putting it in the daemon would mean a code
+change and a release to alter a sentence about my own working practice.
+
+So each lifecycle command can carry an instruction I write, and the daemon just carries it:
+
+```toml
+[speckit.commands]
+specify = "When the specification is written, commit it to the branch before continuing."
+plan = "When the plan is written, commit it to the branch before continuing."
+tasks = "When the task list is written, commit it to the branch before continuing."
+implement = """
+when finished with implementation, commit, push the branch to origin, and open a PR. Once \
+that's done, monitor the CI jobs on the PR. Once all are complete, use /answer-reviews to \
+respond to any reviews. Repeat this until claude reviews with a comment of "No issues \
+found. Checked for bugs and CLAUDE.md compliance.".\
+"""
+```
+
+**Those are examples, not defaults.** Nothing ships configured; an installation that writes
+none of this gets exactly the block it got before, byte for byte. What the text *says* is
+entirely mine — the daemon never reads it, never checks whether the commands it names exist,
+and never records whether a session did any of it.
+
+One repository can differ, on the same override pattern as every other per-repository
+setting:
+
+```toml
+[repos."jantman/some-repo".speckit_commands]
+implement = "when finished, commit and push. Do not open a pull request here."
+tasks = ""              # no instruction for /speckit-tasks in this repository
+```
+
+An empty string means *none here* — it drops one instruction in one repository without
+`speckit = false` removing the whole block. Globally an empty string is a mistake and is
+refused, because there it says nothing that omitting the key does not.
+
+The instructions land inside the block, above its closing "the instruction above wins"
+sentence, so a repository's own `.claude/robot-army.md` still outranks them. Which setting
+supplied each one is recorded on dispatch and shown offline, before I label anything:
+
+```bash
+uv run robot-army repos --json | jq '.repos[] | {repo_key, speckit}'
+```
+
+The text itself is not written to the log — only the name of the setting that supplied it.
+The log has never reconstructed a composed prompt (the issue body isn't in there either), and
+recording pages of my own prose beside an omitted issue body would be an odd thing to start
+doing.
+
 ### Seeing how far it has got
 
 `/active` used to show a session five minutes into `/speckit-specify` and one three hours

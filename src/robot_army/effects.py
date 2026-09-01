@@ -143,6 +143,24 @@ class Boundaries:
     version_control: VersionControl
     hook_runner: HookRunner
     session_host: SessionHost
+    #: The one boundary with a second name, and the one selection that is **not** a
+    #: function of the effect level (069 FR-011).
+    #:
+    #: The level answers "what should a *new* session use". It cannot answer "what owns
+    #: this row", because a session hosted by simulation stays that way for the whole of its
+    #: life no matter what the configuration later becomes — and the ordinary go-live step
+    #: is exactly that change. Dispatch at ``local``, raise the level, restart, cancel: the
+    #: row still says ``pid = 0``, and ``getpgid(0)`` answers about the *caller*, so the
+    #: real host would have signalled the daemon's own process group.
+    #:
+    #: Note for anyone extending this: the caller must **not** select on ``dry_run`` alone.
+    #: ``EffectLevel.is_simulated`` is "not live", so ``no-remote`` rows are dry-run records
+    #: whose host is the real ``DtachHost`` with a real process behind it. Sending those
+    #: here would report a live worker as stopped.
+    #:
+    #: ``operations.cancel`` is the only reader, asserted by a test. If a second appears,
+    #: that is the moment to ask whether the selection belongs back in the table.
+    simulated_session_host: SessionHost
     display: Display
     notifier: Notifier
 
@@ -161,6 +179,11 @@ class Boundaries:
                 "version_control",
                 "hook_runner",
                 "session_host",
+                # Named here too: a boundary that can be selected later but is absent from
+                # the startup record is a gap in the reconstruction (Principle III). A
+                # reader would see ``DtachHost`` wired and have no way to know a second
+                # host was standing by.
+                "simulated_session_host",
                 "display",
                 "notifier",
             )
@@ -224,11 +247,13 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
         if is_real("hook_runner", level)
         else SimulatedHookRunner(audit)
     )
-    host: SessionHost = (
-        DtachHost(audit)
-        if is_real("session_host", level)
-        else SimulatedSessionHost(audit)
-    )
+    # Constructed once and reused, so that at a simulated level ``session_host`` and
+    # ``simulated_session_host`` are the *same object*. Two instances would not be
+    # equivalent: ``SimulatedSessionHost`` carries an ``_alive`` set, and they would
+    # diverge the moment one of them spawned something — after which ``is_alive`` would
+    # answer differently depending on which field the caller reached for.
+    simulated_host = SimulatedSessionHost(audit)
+    host: SessionHost = DtachHost(audit) if is_real("session_host", level) else simulated_host
     display: Display = (
         KittyDisplay(config, audit)
         if is_real("display", level)
@@ -249,6 +274,7 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
         version_control=vcs,
         hook_runner=hooks,
         session_host=host,
+        simulated_session_host=simulated_host,
         display=display,
         notifier=notifier,
     )

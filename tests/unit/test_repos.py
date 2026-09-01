@@ -586,6 +586,7 @@ def test_the_listing_makes_no_network_call(conn, audit, config, tmp_path):
         version_control=GitVersionControl(audit),
         hook_runner=None,
         session_host=None,
+        simulated_session_host=None,
         display=None,
         notifier=None,
     )

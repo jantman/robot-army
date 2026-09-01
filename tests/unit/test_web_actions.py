@@ -558,3 +558,29 @@ def test_a_referer_naming_something_that_is_not_a_view_is_ignored(web, conn):
         response = web.post(f"/item/{row}/abandon", headers={"Referer": referer})
         assert response.headers["Location"].startswith(f"/item/{row}"), referer
     assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED
+
+
+# -- 069 T014: a refusal must not arrive in the browser wearing the success banner ------
+
+
+def test_a_refused_cancel_is_reported_as_a_refusal_not_as_cancelled(web, conn):
+    """The route maps a successful cancel to the ``cancelled`` banner — "Session stopped."
+
+    A refusal must not reach that banner. Nothing was stopped and nothing was signalled, so
+    telling the maintainer their session is interrupted would be false in both halves. This
+    asserts the existing machinery already handles it: ``_report`` refuses on any non-zero
+    code, so the refusal travels as its own reason rather than needing a banner of its own.
+    """
+    item_id = seed_item(conn, state="active")
+    seed_session(conn, item_id, state="running")
+    web.host.refuse_reason = "the recorded pid is 1, which cannot be a session process"
+
+    response = web.post_json(f"/item/{item_id}/cancel")
+
+    assert response.status == 409
+    payload = response.json()
+    assert "cannot be a session process" in payload["reason"]
+    assert payload["refused"] is True
+    assert payload["confirmed"] is False
+    assert state_of(conn, item_id) == WorkItemState.ACTIVE
+    assert db.latest_session_for_item(conn, item_id).state is SessionState.RUNNING

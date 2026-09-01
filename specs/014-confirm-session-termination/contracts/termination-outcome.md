@@ -52,6 +52,17 @@ neither a recorded scope nor a recorded pid — the pre-existing behaviour. An u
 is a returned outcome, not an exception, because the caller must distinguish "could not try"
 from "tried and it survived".
 
+> **Amended by issue #69** (`specs/20260831-184927-guard-terminate-pid/contracts/signal-refusal.md`).
+> T7's two-way distinction — "could not try" versus "tried and it survived" — is no longer
+> exhaustive. There is a third outcome: **refused**, meaning *there was something to try and we
+> declined to try it*, because the recorded pid could not belong to a session process. It is
+> `confirmed=False, method="refused"` with a `refused_reason`, and it is neither of T7's cases.
+>
+> This matters beyond bookkeeping. This contract's founding rule is that an exit status is not
+> evidence of an effect; #69 is its converse — **a recorded pid is not evidence of a process**.
+> Confirming that the recorded pid is gone says nothing at all when the signal that removed it
+> was `kill(-1)`.
+
 **T8 — Simulated hosts confirm by construction.** `SimulatedSessionHost` returns
 `confirmed=True, method="simulated"` and performs no `/proc` observation, so a simulated cancel
 takes the same branch a real successful one does.

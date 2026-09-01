@@ -106,7 +106,8 @@ And the narrow fix is not narrow: `worktree_path` stays on the record after a su
 simply including terminal items in that sweep would raise an anomaly for every worktree cleanup
 legitimately removed. Distinguishing them needs `robot-army worktree remove` to record what it did
 first — it currently writes no cleanup record and does not clear `worktree_path` — and that is the
-manual removal path, changed for #79 three commits earlier. It is its own piece of work.
+manual removal path, changed for #79 three commits earlier. It is its own piece of work, and is
+filed as #113.
 
 ---
 

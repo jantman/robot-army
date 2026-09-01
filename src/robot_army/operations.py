@@ -1553,19 +1553,21 @@ def worktree_remove(
     Removal is two steps, and doing only the first accumulates ``robot-army/*`` branches
     in every repository forever.
 
-    The three guards answer different questions, and only the last is ours:
+    Two guards run here, and they answer different questions:
 
-    1. **Is anything still running in there?** Asked of the session rows (issue #79). Until
-       #79 this was not asked at all, and the automatic reclaim path — which *did* ask it,
-       and records ``skipped`` — was the conservative one. That was the wrong way round:
-       ``cleanup`` runs unattended, while this is what someone reaches for when the disk
-       is full, and it is the one that can override git.
-    2. **Does the tree hold uncommitted or merely untracked work?** Git's own refusal,
-       taken as-is, never overridden by default. That refusal is the feature.
-    3. **Is the branch contained?** Not asked here at all — the manual path deletes the
-       branch it created, and ``cleanup`` owns the containment check.
+    1. **Is anything still running in there?** Ours, asked of the session rows (issue #79).
+       Until #79 this was not asked at all, and the automatic reclaim path — which *did*
+       ask it, and records ``skipped`` — was the conservative one. That was the wrong way
+       round: ``cleanup`` runs unattended, while this is what someone reaches for when the
+       disk is full, and it is the one that can override git.
+    2. **Does the tree hold uncommitted or merely untracked work?** Git's, taken as-is and
+       never overridden by default. That refusal is the feature, not an obstacle.
 
-    Guard 1 is deliberately blind to two things. It never reads the work item's **state**:
+    A third question — **is the branch contained?** — is deliberately not asked here. This
+    command deletes the branch it made along with the worktree; containment is
+    ``cleanup``'s guard, on the path that reclaims work it did not start.
+
+    The first guard is deliberately blind to two things. It never reads the work item's **state**:
     the reported case was a ``done`` item, because an issue can close while its worker
     types on, and terminal is precisely the state disk gets reclaimed from. And it never
     decides on **process liveness**: a row whose process cannot be seen is still a row
@@ -1607,7 +1609,7 @@ def worktree_remove(
                 ],
             )
 
-        # -- the third guard: is anything still running in there? (issue #79) --
+        # -- the session guard: is anything still running in there? (#79) --
         #
         # Asked of the **session rows**, never of the work item's state and never of the
         # process table. The reported case was a ``done`` item, so a guard keyed on state

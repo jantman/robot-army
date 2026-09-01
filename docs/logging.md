@@ -224,8 +224,20 @@ asked long after the fact: *why did nothing dispatch for twenty minutes?* and *w
 | `capacity.unobservable` | The registry and `/proc` both failed | Which failed, and that dispatch is being withheld as a result. Also raises a de-duplicated anomaly of the same kind |
 | `cleanup.considered` | An item is evaluated for cleanup | The decision and the guard that made it — including "not eligible", so an item that was looked at and passed over is distinguishable from one nobody looked at |
 | `cleanup.retained` | A guard refused a removal | Which guard, what it saw, and the worktree and branch it kept |
-| `notify.send` | A notification is attempted | The kind, the item, and whether the per-cycle bound suppressed it. Written whether or not it left the machine |
+| `notify.send` | A **message** is attempted | The kind, the item, and whether the per-cycle bound suppressed it. Written whether or not it left the machine |
+| `notify.channel` | A **delivery** to one channel is attempted | The channel name (`webhook`, `pushover`), the kind, the item, and our own reason on failure. One record per channel per message |
 | `notify.suppressed` | The per-cycle bound was reached | How many were held back, and of which kinds |
+| `health.notify` | The stale-heartbeat alert is sent to one channel | The channel name, the staleness reason, and the outcome. One record per configured channel |
+
+Since issue #106 a *message* and a *delivery* are different things: one message may go to
+zero, one, or two channels. `notify.send` records the message and `notify.channel` records
+each delivery, which is what lets the log answer "the webhook took it and Pushover did
+not". The per-cycle bound counts messages, not deliveries, so configuring a second channel
+does not halve how many events you are told about.
+
+Neither a Pushover application token nor a user key can appear in any of these. The
+credentials travel in the request body rather than the URL, and no upstream response body
+is ever recorded — the two habits that would otherwise leak one.
 
 The existing `git.remove_worktree` and `git.delete_branch` gain a new caller and are
 otherwise unchanged. `git.delete_branch` from cleanup always carries `force: true`, which

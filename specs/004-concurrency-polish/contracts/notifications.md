@@ -19,6 +19,17 @@ The real implementation reuses the bounded POST `health.notify` already performs
 share one explicit-timeout call. No second HTTP client, no second URL knob: `[health] webhook_url` is
 the channel (R14).
 
+> **Superseded in part by issue #106.** The premise of R14 was that "a generic webhook covers ntfy and
+> Pushover without either becoming a dependency". **The Pushover half was factually wrong**: ntfy accepts
+> an arbitrary JSON body, Pushover takes form-encoded parameters and rejects one, so pointing
+> `webhook_url` at Pushover produced a rejected request rather than a notification.
+>
+> The *instinct* survives untouched — one HTTP client, one timeout convention, no vendor client library,
+> and still no second URL knob. What changed is that the real implementation is now a fan-out over zero,
+> one or two **channels** built by `robot_army.channels.build`, and `health.notify` was replaced by the
+> pure composer `health.alert_fields` so the stale-heartbeat alert can reach them too. See
+> `specs/20260901-052213-pushover-notifications/contracts/notifications.md`.
+
 ## Call sites
 
 Four, each one line, each immediately **after** its transaction closes:
@@ -44,8 +55,9 @@ max_per_cycle = 5
 ```
 
 Empty by default, so nothing notifies and no outbound request is made until the author asks (FR-033).
-With `[health] webhook_url` unset, `events` is a warning rather than an error — the intent is legible
-and the resolution is obvious.
+With no channel configured — since issue #106 that means neither `[health] webhook_url` nor
+`[pushover]` — `events` is a warning rather than an error: the intent is legible and the resolution is
+obvious.
 
 ## The bound (R15)
 

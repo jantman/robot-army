@@ -26,8 +26,8 @@ from typing import Any, TextIO
 
 from robot_army import audit as audit_mod
 from robot_army import capacity as capacity_mod
-from robot_army import cleanup as cleanup_mod
 from robot_army import (
+    channels,
     control,
     db,
     dispatch,
@@ -42,6 +42,7 @@ from robot_army import (
     timefmt,
     worktree,
 )
+from robot_army import cleanup as cleanup_mod
 from robot_army import (
     daemon as daemon_mod,
 )
@@ -2856,15 +2857,38 @@ def health_check(ctx: Context, *, max_age: float | None = None, do_notify: bool 
         data=report.to_dict(),
     )
     if not report.healthy and do_notify:
-        sent, message = health.notify(ctx.config.health.webhook_url, report)
-        result.data["notified"] = sent
-        result.data["notify_message"] = message
-        result.say(message)
-        ctx.audit.record(
-            "health.notify",
-            outcome="ok" if sent else "error",
-            detail={"reason": report.reason, "message": message},
-        )
+        # Every configured channel, not just the webhook (issue #106, FR-018).
+        #
+        # **This path is deliberately not effect-level gated**, and was not before this
+        # feature either: ``health_check`` has never touched ``ctx.boundaries``. The reason
+        # is worth stating where someone would otherwise "fix" it — ``health --notify``
+        # takes no ``--effect-level`` flag and resolves its level from ``[daemon]
+        # effect_level``, so routing it through the notifier boundary would silently
+        # disable the dead-man's switch for anyone running their daemon at ``local``. The
+        # effect level governs what the *daemon* does autonomously; a human, or that
+        # human's systemd timer, running this command has already made the decision the
+        # effect level exists to withhold (research.md R2).
+        title, message_text, fields = health.alert_fields(report)
+        outcomes: list[dict[str, Any]] = []
+        for channel in channels.build(ctx.config):
+            sent, detail = channel.send(title, message_text, fields)
+            outcomes.append({"channel": channel.name, "sent": sent, "message": detail})
+            result.say(f"{channel.name}: {detail}")
+            ctx.audit.record(
+                "health.notify",
+                outcome="ok" if sent else "error",
+                detail={
+                    "channel": channel.name,
+                    "reason": report.reason,
+                    "message": detail,
+                },
+            )
+        if not outcomes:
+            # Nothing configured is not an error — it is an author who has not asked to be
+            # told. Saying so beats a silence indistinguishable from a delivered alert.
+            result.say("no notification channel configured")
+        result.data["notified"] = any(o["sent"] for o in outcomes)
+        result.data["notify_channels"] = outcomes
     return result
 
 

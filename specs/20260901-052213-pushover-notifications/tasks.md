@@ -38,7 +38,7 @@ Single Python package: `src/robot_army/` and `tests/` at the repository root. Bo
 **Purpose**: Establish the regression baseline this feature must not break. There is nothing to install —
 no new runtime dependency is added (plan.md, Technical Context).
 
-- [ ] T001 Run `uv run pytest -q` and record the passing baseline; `tests/unit/test_notifications.py` and `tests/unit/test_health.py` are the two modules whose current assertions FR-016 and SC-003 require to keep passing unchanged
+- [X] T001 Run `uv run pytest -q` and record the passing baseline; `tests/unit/test_notifications.py` and `tests/unit/test_health.py` are the two modules whose current assertions FR-016 and SC-003 require to keep passing unchanged
 
 ---
 
@@ -51,16 +51,16 @@ no new runtime dependency is added (plan.md, Technical Context).
 **Behaviour must not change in this phase.** Every task here is either new-but-unreached code or a
 refactor with identical output. T001's baseline must still be green at the checkpoint.
 
-- [ ] T002 [P] Add `PushoverConfig` frozen dataclass (`token_file: Path`, `user_key_file: Path`, `read_token()`, `read_user_key()`) to `src/robot_army/config.py` beside `TrelloConfig`; both readers strip trailing whitespace per data-model.md, and neither credential is retained on the instance
-- [ ] T003 Add `pushover: PushoverConfig | None` to the `Config` dataclass in `src/robot_army/config.py`, register `"pushover"` in `_SECTIONS`, `_STRICT_KEY_SECTIONS`, and `_KNOWN_KEYS` with `{"token_file", "user_key_file"}` (depends on T002)
-- [ ] T004 Add `_parse_pushover(section, problems) -> PushoverConfig | None` to `src/robot_army/config.py` handling only the happy path and the absent section (returns `None`); the four refusal rules are US3's work — wire it into `parse()` so `config.pushover` is populated (depends on T003)
-- [ ] T005 [P] Add `post_form(url, data, *, timeout=10.0) -> tuple[bool, str]` to `src/robot_army/health.py` beside `post_json`: form-encoded via `httpx.post(url, data=...)`, explicit timeout, no retry, same `(ok, message)` return shape — per contracts/channels.md and research.md R5
-- [ ] T006 Create `src/robot_army/channels.py` with the `Channel` protocol (`name`, `send(title, message, fields) -> tuple[bool, str]`), the shared `webhook_body(title, message, fields)` composer, and `WebhookChannel` wrapping `[health] webhook_url` and sending via `health.post_json` — per contracts/channels.md
-- [ ] T007 Add `build(config) -> tuple[Channel, ...]` to `src/robot_army/channels.py` returning the configured channels in stable order (webhook first) and `()` when none is configured, so no request is ever constructed for an unconfigured installation (depends on T004, T006)
-- [ ] T008 Establish the never-raises contract in `src/robot_army/channels.py`: every channel catches its own exceptions and returns `(False, reason)` rather than propagating, so a channel failure is never the caller's problem (FR-010) (depends on T006)
-- [ ] T009 Rewire `compose(event)` in `src/robot_army/boundaries/notifier.py` to call `channels.webhook_body` so the body the simulated notifier records and the body the real channel posts have one composer and cannot drift (depends on T006)
-- [ ] T010 [P] Add a `RecordingChannel` helper to `tests/conftest.py` alongside `RecordingNotifier`: captures `(title, message, fields)` per send and returns a configurable `(ok, message)`, so a test can assert what a channel was handed without a network
-- [ ] T011 Add unit tests to `tests/unit/test_notifications.py` pinning that `WebhookChannel` reproduces today's event body byte-for-byte, and to `tests/unit/test_health.py` that `build()` returns `()`, webhook-only, and pushover-only tuples for the four reachable configurations in contracts/config.md (depends on T007, T009)
+- [X] T002 [P] Add `PushoverConfig` frozen dataclass (`token_file: Path`, `user_key_file: Path`, `read_token()`, `read_user_key()`) to `src/robot_army/config.py` beside `TrelloConfig`; both readers strip trailing whitespace per data-model.md, and neither credential is retained on the instance
+- [X] T003 Add `pushover: PushoverConfig | None` to the `Config` dataclass in `src/robot_army/config.py`, register `"pushover"` in `_SECTIONS`, `_STRICT_KEY_SECTIONS`, and `_KNOWN_KEYS` with `{"token_file", "user_key_file"}` (depends on T002)
+- [X] T004 Add `_parse_pushover(section, problems) -> PushoverConfig | None` to `src/robot_army/config.py` handling only the happy path and the absent section (returns `None`); the four refusal rules are US3's work — wire it into `parse()` so `config.pushover` is populated (depends on T003)
+- [X] T005 [P] Add `post_form(url, data, *, timeout=10.0) -> tuple[bool, str]` to `src/robot_army/health.py` beside `post_json`: form-encoded via `httpx.post(url, data=...)`, explicit timeout, no retry, same `(ok, message)` return shape — per contracts/channels.md and research.md R5
+- [X] T006 Create `src/robot_army/channels.py` with the `Channel` protocol (`name`, `send(title, message, fields) -> tuple[bool, str]`), the shared `webhook_body(title, message, fields)` composer, and `WebhookChannel` wrapping `[health] webhook_url` and sending via `health.post_json` — per contracts/channels.md
+- [X] T007 Add `build(config) -> tuple[Channel, ...]` to `src/robot_army/channels.py` returning the configured channels in stable order (webhook first) and `()` when none is configured, so no request is ever constructed for an unconfigured installation (depends on T004, T006)
+- [X] T008 Establish the never-raises contract in `src/robot_army/channels.py`: every channel catches its own exceptions and returns `(False, reason)` rather than propagating, so a channel failure is never the caller's problem (FR-010) (depends on T006)
+- [X] T009 Rewire `compose(event)` in `src/robot_army/boundaries/notifier.py` to call `channels.webhook_body` so the body the simulated notifier records and the body the real channel posts have one composer and cannot drift (depends on T006)
+- [X] T010 [P] Add a `RecordingChannel` helper to `tests/conftest.py` alongside `RecordingNotifier`: captures `(title, message, fields)` per send and returns a configurable `(ok, message)`, so a test can assert what a channel was handed without a network
+- [X] T011 Add unit tests to `tests/unit/test_notifications.py` pinning that `WebhookChannel` reproduces today's event body byte-for-byte, and to `tests/unit/test_health.py` that `build()` returns `()`, webhook-only, and pushover-only tuples for the four reachable configurations in contracts/config.md (depends on T007, T009)
 
 **Checkpoint**: `uv run pytest -q` is still green with no assertion changed. `channels.py` exists and is
 correct but nothing calls `build()` yet.
@@ -78,27 +78,27 @@ Pushover message is delivered and the send is recorded. Quickstart Scenarios 1, 
 
 ### Implementation for User Story 1
 
-- [ ] T012 [US1] Add `PushoverChannel` to `src/robot_army/channels.py`: `name = "pushover"`, form POST to `https://api.pushover.net/1/messages.json` via `health.post_form` with `token`, `user`, `title`, `message`, and `url` only when `fields["url"]` is present and non-empty (depends on T005, T006, T008)
-- [ ] T013 [US1] Read both credentials at send time in `PushoverChannel.send` in `src/robot_army/channels.py` via `PushoverConfig.read_token()` / `read_user_key()`, never at construction and never retained on the instance (FR-003) (depends on T002, T012)
-- [ ] T014 [US1] Truncate `title` to 250 and `message` to 1024 characters in `PushoverChannel.send` in `src/robot_army/channels.py` before sending, since Pushover rejects rather than truncates (research.md R4); the untruncated text stays in the audit record
-- [ ] T015 [US1] Record only the HTTP status and our own message on failure in `src/robot_army/channels.py` — never the Pushover response body, per contracts/channels.md and plan.md's Principle III section
-- [ ] T016 [US1] Register `PushoverChannel` in `channels.build()` in `src/robot_army/channels.py`, built when `config.pushover is not None` (depends on T007, T012)
-- [ ] T017 [US1] Replace `WebhookNotifier` with `MultiNotifier` in `src/robot_army/boundaries/notifier.py`: holds the channel tuple, adds `event_fields(event)` returning `{"kind", "item_id", "repo_key", "url"}`, iterates channels, returns `True` if any accepted and `False` with zero channels (depends on T009, T016)
-- [ ] T018 [US1] Emit one `notify.channel` audit record per delivery from `MultiNotifier.send` in `src/robot_army/boundaries/notifier.py` carrying channel name, kind, item id, outcome, and the reason on failure (FR-011); `notify.failed` is removed with `WebhookNotifier` rather than kept as a second way to say the same thing (depends on T017)
-- [ ] T019 [US1] Record the configured channel **names** in `SimulatedNotifier`'s record in `src/robot_army/boundaries/notifier.py` — one record for the one message, not one per channel, since below `live` there are no deliveries to record (research.md R9)
-- [ ] T020 [US1] Update `wire()` in `src/robot_army/effects.py` to build `channels.build(config)` and pass it to `MultiNotifier` at `live` or to `SimulatedNotifier` below it; `REAL_AT["notifier"]` is unchanged (depends on T017, T019)
-- [ ] T021 [US1] Add a three-line optional `describe_name()` lookup to `Boundaries.describe()` in `src/robot_army/effects.py` and implement it on both notifiers so the startup record reads `MultiNotifier(webhook, pushover)` rather than losing which channels are live (depends on T020)
-- [ ] T022 [US1] Reword the load warning in `src/robot_army/config.py` from "events are configured but `[health] webhook_url` is empty" to the channel-neutral form in contracts/config.md — webhook *or* Pushover satisfies it (FR-015); it stays a warning, not an error (depends on T004)
+- [X] T012 [US1] Add `PushoverChannel` to `src/robot_army/channels.py`: `name = "pushover"`, form POST to `https://api.pushover.net/1/messages.json` via `health.post_form` with `token`, `user`, `title`, `message`, and `url` only when `fields["url"]` is present and non-empty (depends on T005, T006, T008)
+- [X] T013 [US1] Read both credentials at send time in `PushoverChannel.send` in `src/robot_army/channels.py` via `PushoverConfig.read_token()` / `read_user_key()`, never at construction and never retained on the instance (FR-003) (depends on T002, T012)
+- [X] T014 [US1] Truncate `title` to 250 and `message` to 1024 characters in `PushoverChannel.send` in `src/robot_army/channels.py` before sending, since Pushover rejects rather than truncates (research.md R4); the untruncated text stays in the audit record
+- [X] T015 [US1] Record only the HTTP status and our own message on failure in `src/robot_army/channels.py` — never the Pushover response body, per contracts/channels.md and plan.md's Principle III section
+- [X] T016 [US1] Register `PushoverChannel` in `channels.build()` in `src/robot_army/channels.py`, built when `config.pushover is not None` (depends on T007, T012)
+- [X] T017 [US1] Replace `WebhookNotifier` with `MultiNotifier` in `src/robot_army/boundaries/notifier.py`: holds the channel tuple, adds `event_fields(event)` returning `{"kind", "item_id", "repo_key", "url"}`, iterates channels, returns `True` if any accepted and `False` with zero channels (depends on T009, T016)
+- [X] T018 [US1] Emit one `notify.channel` audit record per delivery from `MultiNotifier.send` in `src/robot_army/boundaries/notifier.py` carrying channel name, kind, item id, outcome, and the reason on failure (FR-011); `notify.failed` is removed with `WebhookNotifier` rather than kept as a second way to say the same thing (depends on T017)
+- [X] T019 [US1] Record the configured channel **names** in `SimulatedNotifier`'s record in `src/robot_army/boundaries/notifier.py` — one record for the one message, not one per channel, since below `live` there are no deliveries to record (research.md R9)
+- [X] T020 [US1] Update `wire()` in `src/robot_army/effects.py` to build `channels.build(config)` and pass it to `MultiNotifier` at `live` or to `SimulatedNotifier` below it; `REAL_AT["notifier"]` is unchanged (depends on T017, T019)
+- [X] T021 [US1] Add a three-line optional `describe_name()` lookup to `Boundaries.describe()` in `src/robot_army/effects.py` and implement it on both notifiers so the startup record reads `MultiNotifier(webhook, pushover)` rather than losing which channels are live (depends on T020)
+- [X] T022 [US1] Reword the load warning in `src/robot_army/config.py` from "events are configured but `[health] webhook_url` is empty" to the channel-neutral form in contracts/config.md — webhook *or* Pushover satisfies it (FR-015); it stays a warning, not an error (depends on T004)
 
 ### Tests for User Story 1
 
-- [ ] T023 [P] [US1] Create `tests/unit/test_pushover.py` covering `PushoverChannel`'s form composition: exact parameter names, `url` present only when the field is, and the endpoint — with `httpx.post` monkeypatched as `tests/unit/test_health.py` already does
-- [ ] T024 [P] [US1] Add truncation tests to `tests/unit/test_pushover.py`: a 2000-character message and a 400-character title are sent truncated to 1024 and 250, and the audit record keeps the untruncated text
-- [ ] T025 [P] [US1] Add failure-path tests to `tests/unit/test_pushover.py`: a transport error and a 4xx each return `(False, reason)`, neither raises, and neither puts the response body in the record
-- [ ] T026 [US1] Add tests to `tests/unit/test_notifications.py` for a Pushover-only installation: each of the four kinds is delivered, and `events = []` produces **no** request at all rather than one built and skipped (US1 AS1, AS2)
-- [ ] T027 [US1] Add a test to `tests/unit/test_notifications.py` that below `live` nothing reaches Pushover and the simulated record carries the full composed body plus the configured channel names (US1 AS3)
-- [ ] T028 [P] [US1] Add tests to `tests/unit/test_effects.py` for `wire()` selecting `MultiNotifier` at `live` and `SimulatedNotifier` below it, and for `describe()` naming the configured channels
-- [ ] T029 [P] [US1] Add a test to `tests/unit/test_config.py` that a non-empty `events` with neither channel configured warns rather than errors, and that either channel alone clears the warning (US1 AS4)
+- [X] T023 [P] [US1] Create `tests/unit/test_pushover.py` covering `PushoverChannel`'s form composition: exact parameter names, `url` present only when the field is, and the endpoint — with `httpx.post` monkeypatched as `tests/unit/test_health.py` already does
+- [X] T024 [P] [US1] Add truncation tests to `tests/unit/test_pushover.py`: a 2000-character message and a 400-character title are sent truncated to 1024 and 250, and the audit record keeps the untruncated text
+- [X] T025 [P] [US1] Add failure-path tests to `tests/unit/test_pushover.py`: a transport error and a 4xx each return `(False, reason)`, neither raises, and neither puts the response body in the record
+- [X] T026 [US1] Add tests to `tests/unit/test_notifications.py` for a Pushover-only installation: each of the four kinds is delivered, and `events = []` produces **no** request at all rather than one built and skipped (US1 AS1, AS2)
+- [X] T027 [US1] Add a test to `tests/unit/test_notifications.py` that below `live` nothing reaches Pushover and the simulated record carries the full composed body plus the configured channel names (US1 AS3)
+- [X] T028 [P] [US1] Add tests to `tests/unit/test_effects.py` for `wire()` selecting `MultiNotifier` at `live` and `SimulatedNotifier` below it, and for `describe()` naming the configured channels
+- [X] T029 [P] [US1] Add a test to `tests/unit/test_config.py` that a non-empty `events` with neither channel configured warns rather than errors, and that either channel alone clears the warning (US1 AS4)
 
 **Checkpoint**: A Pushover-only installation is fully functional. This is the MVP — it delivers the whole
 of issue #106's request.
@@ -120,16 +120,16 @@ guarantee that is not pinned by a test is not a guarantee. Two small code tasks 
 
 ### Implementation for User Story 2
 
-- [ ] T030 [US2] Confirm and, if needed, correct `MultiNotifier.send` in `src/robot_army/boundaries/notifier.py` so one channel's failure never short-circuits the loop: every channel is attempted, every outcome recorded, and the return is "any succeeded" (FR-009, FR-010) (depends on T017)
-- [ ] T031 [US2] Verify in `src/robot_army/notifications.py` that `_CYCLE["sent"]` still increments once per **event** and not per delivery, and add the comment saying why — the cap bounds a burst of news, not of packets, so two channels must not halve it (FR-013, research.md R7)
+- [X] T030 [US2] Confirm and, if needed, correct `MultiNotifier.send` in `src/robot_army/boundaries/notifier.py` so one channel's failure never short-circuits the loop: every channel is attempted, every outcome recorded, and the return is "any succeeded" (FR-009, FR-010) (depends on T017)
+- [X] T031 [US2] Verify in `src/robot_army/notifications.py` that `_CYCLE["sent"]` still increments once per **event** and not per delivery, and add the comment saying why — the cap bounds a burst of news, not of packets, so two channels must not halve it (FR-013, research.md R7)
 
 ### Tests for User Story 2
 
-- [ ] T032 [US2] Add a test to `tests/unit/test_notifications.py` that one event with both channels configured produces exactly one `notify.send` record and two `notify.channel` records with independent outcomes (US2 AS1)
-- [ ] T033 [US2] Add a test to `tests/unit/test_notifications.py` that with Pushover failing, the webhook still delivers, the Pushover failure is recorded, and `emit()` still returns without raising, delaying, or retrying (US2 AS2)
-- [ ] T034 [US2] Add a test to `tests/unit/test_notifications.py` that both channels failing produces two independent failure records and still does not fail the caller (spec Edge Cases)
-- [ ] T035 [US2] Add a test to `tests/unit/test_notifications.py` that a burst past `max_per_cycle` suppresses on message count with two channels configured, and that the single suppression summary reaches both (US2 AS4)
-- [ ] T036 [US2] Confirm `tests/unit/test_notifications.py`'s pre-existing webhook-only assertions pass **unchanged** — this is the FR-016 / SC-003 regression gate, and an assertion edited to accommodate the new code is the failure this task exists to catch (US2 AS3)
+- [X] T032 [US2] Add a test to `tests/unit/test_notifications.py` that one event with both channels configured produces exactly one `notify.send` record and two `notify.channel` records with independent outcomes (US2 AS1)
+- [X] T033 [US2] Add a test to `tests/unit/test_notifications.py` that with Pushover failing, the webhook still delivers, the Pushover failure is recorded, and `emit()` still returns without raising, delaying, or retrying (US2 AS2)
+- [X] T034 [US2] Add a test to `tests/unit/test_notifications.py` that both channels failing produces two independent failure records and still does not fail the caller (spec Edge Cases)
+- [X] T035 [US2] Add a test to `tests/unit/test_notifications.py` that a burst past `max_per_cycle` suppresses on message count with two channels configured, and that the single suppression summary reaches both (US2 AS4)
+- [X] T036 [US2] Confirm `tests/unit/test_notifications.py`'s pre-existing webhook-only assertions pass **unchanged** — this is the FR-016 / SC-003 regression gate, and an assertion edited to accommodate the new code is the failure this task exists to catch (US2 AS3)
 
 **Checkpoint**: Both channels work together and the existing installation is provably untouched.
 
@@ -145,19 +145,19 @@ and confirm each is refused by name. Quickstart Scenarios 2 and 8.
 
 ### Implementation for User Story 3
 
-- [ ] T037 [US3] Extract the exists-and-mode-0600 half of `_trello_credential` into a shared `_secret_file(section_name, key, raw, problems)` in `src/robot_army/config.py` and switch `[trello]` to it, so the new section gains a caller rather than a copy (research.md R6)
-- [ ] T038 [US3] Add the both-or-neither rule to `_parse_pushover` in `src/robot_army/config.py`: one key alone is an **error** naming the missing key, not a warning, because a half-configured channel silently never fires (FR-004) (depends on T004)
-- [ ] T039 [US3] Apply `_secret_file` to both `[pushover]` keys in `src/robot_army/config.py` for the exists and mode-0600 rules, each message naming the key, the path, and the found mode (FR-005) (depends on T037, T038)
-- [ ] T040 [US3] Add a Pushover-only literal-credential pattern (`^[A-Za-z0-9]{30}$`) to `src/robot_army/config.py`, consulted **only** when scanning `[pushover]` and deliberately not added to the shared `_TOKEN_PATTERNS` — widening the shared tuple would create an error a `[github]` or `[trello]` author could not clear (research.md R6)
-- [ ] T041 [US3] Scan `[pushover]` values for a literal credential in `src/robot_army/config.py` using both `_looks_like_token` and the new pattern, erroring with the message in contracts/config.md (FR-006) (depends on T040)
+- [X] T037 [US3] Extract the exists-and-mode-0600 half of `_trello_credential` into a shared `_secret_file(section_name, key, raw, problems)` in `src/robot_army/config.py` and switch `[trello]` to it, so the new section gains a caller rather than a copy (research.md R6)
+- [X] T038 [US3] Add the both-or-neither rule to `_parse_pushover` in `src/robot_army/config.py`: one key alone is an **error** naming the missing key, not a warning, because a half-configured channel silently never fires (FR-004) (depends on T004)
+- [X] T039 [US3] Apply `_secret_file` to both `[pushover]` keys in `src/robot_army/config.py` for the exists and mode-0600 rules, each message naming the key, the path, and the found mode (FR-005) (depends on T037, T038)
+- [X] T040 [US3] Add a Pushover-only literal-credential pattern (`^[A-Za-z0-9]{30}$`) to `src/robot_army/config.py`, consulted **only** when scanning `[pushover]` and deliberately not added to the shared `_TOKEN_PATTERNS` — widening the shared tuple would create an error a `[github]` or `[trello]` author could not clear (research.md R6)
+- [X] T041 [US3] Scan `[pushover]` values for a literal credential in `src/robot_army/config.py` using both `_looks_like_token` and the new pattern, erroring with the message in contracts/config.md (FR-006) (depends on T040)
 
 ### Tests for User Story 3
 
-- [ ] T042 [P] [US3] Add tests to `tests/unit/test_config.py` for the four refusals — missing key, missing file, mode 0644, inline literal credential — each asserting the offending key is named and that loading fails rather than warns (US3 AS2-AS4, SC-005)
-- [ ] T043 [P] [US3] Add a test to `tests/unit/test_config.py` that a valid section loads and that neither credential value appears in `repr(config)` (US3 AS1, FR-003)
-- [ ] T044 [P] [US3] Add a test to `tests/unit/test_config.py` that an unknown key in `[pushover]` is an error, since the section is in `_STRICT_KEY_SECTIONS`
-- [ ] T045 [US3] Add the credential-containment assertion to `tests/unit/test_pushover.py`: across a run including an authentication failure, neither credential appears in any audit record or any error string — the case where a token would otherwise ride along inside an error rather than in a field anyone chose to add (FR-007, SC-004, US3 AS5)
-- [ ] T046 [P] [US3] Add a test to `tests/unit/test_config.py` that a credential file deleted after load produces a recorded delivery failure naming the **path**, never the contents (spec Edge Cases)
+- [X] T042 [P] [US3] Add tests to `tests/unit/test_config.py` for the four refusals — missing key, missing file, mode 0644, inline literal credential — each asserting the offending key is named and that loading fails rather than warns (US3 AS2-AS4, SC-005)
+- [X] T043 [P] [US3] Add a test to `tests/unit/test_config.py` that a valid section loads and that neither credential value appears in `repr(config)` (US3 AS1, FR-003)
+- [X] T044 [P] [US3] Add a test to `tests/unit/test_config.py` that an unknown key in `[pushover]` is an error, since the section is in `_STRICT_KEY_SECTIONS`
+- [X] T045 [US3] Add the credential-containment assertion to `tests/unit/test_pushover.py`: across a run including an authentication failure, neither credential appears in any audit record or any error string — the case where a token would otherwise ride along inside an error rather than in a field anyone chose to add (FR-007, SC-004, US3 AS5)
+- [X] T046 [P] [US3] Add a test to `tests/unit/test_config.py` that a credential file deleted after load produces a recorded delivery failure naming the **path**, never the contents (spec Edge Cases)
 
 **Checkpoint**: Every documented misconfiguration is refused by name, and no credential can reach a log.
 
@@ -173,19 +173,19 @@ told the daemon died — and it keeps being told regardless of the effect level.
 
 ### Implementation for User Story 4
 
-- [ ] T047 [US4] Add the pure composer `alert_fields(report) -> tuple[str, str, dict]` to `src/robot_army/health.py` returning the title, `report.reason`, and `{"healthy", "age_seconds"}` — the exact body `notify` builds today (data-model.md)
-- [ ] T048 [US4] Remove `health.notify` from `src/robot_army/health.py`; it was this composer welded to a single transport, and Principle V permits the outright replacement rather than an alias (depends on T047)
-- [ ] T049 [US4] Rewrite the notify branch of `health_check` in `src/robot_army/operations.py` to iterate `channels.build(ctx.config)`, sending `alert_fields(report)` to each (depends on T007, T047, T048)
-- [ ] T050 [US4] Emit one `health.notify` audit record **per channel** in `src/robot_army/operations.py`, each carrying `channel`, `reason`, the returned message, and the outcome (depends on T049)
-- [ ] T051 [US4] Report one output line per channel from `health_check` in `src/robot_army/operations.py`, and with zero channels report that nothing was sent without erroring — the one user-visible string this feature changes, and only in the nothing-configured case (FR-019) (depends on T049)
+- [X] T047 [US4] Add the pure composer `alert_fields(report) -> tuple[str, str, dict]` to `src/robot_army/health.py` returning the title, `report.reason`, and `{"healthy", "age_seconds"}` — the exact body `notify` builds today (data-model.md)
+- [X] T048 [US4] Remove `health.notify` from `src/robot_army/health.py`; it was this composer welded to a single transport, and Principle V permits the outright replacement rather than an alias (depends on T047)
+- [X] T049 [US4] Rewrite the notify branch of `health_check` in `src/robot_army/operations.py` to iterate `channels.build(ctx.config)`, sending `alert_fields(report)` to each (depends on T007, T047, T048)
+- [X] T050 [US4] Emit one `health.notify` audit record **per channel** in `src/robot_army/operations.py`, each carrying `channel`, `reason`, the returned message, and the outcome (depends on T049)
+- [X] T051 [US4] Report one output line per channel from `health_check` in `src/robot_army/operations.py`, and with zero channels report that nothing was sent without erroring — the one user-visible string this feature changes, and only in the nothing-configured case (FR-019) (depends on T049)
 
 ### Tests for User Story 4
 
-- [ ] T052 [US4] Update the two existing tests in `tests/unit/test_health.py` that call the removed `health.notify` — `test_notify_without_a_webhook_reports_that_rather_than_pretending` and `test_notify_posts_a_plain_json_body` — to go through the channel path, keeping their assertions about the body intact (depends on T048)
-- [ ] T053 [US4] Add a test to `tests/unit/test_health.py` that with Pushover configured and no webhook, a stale heartbeat delivers the alert to Pushover and records it (US4 AS1)
-- [ ] T054 [US4] Add a test to `tests/unit/test_health.py` that with both channels configured the alert reaches both and each outcome is recorded separately (US4 AS2)
-- [ ] T055 [US4] Add a test to `tests/unit/test_health.py` **pinning the effect-level exception**: with `[daemon] effect_level = "local"`, the alert is still sent for real on every channel. This is the task that stops a future reader from "fixing" the inconsistency — `health --notify` has no `--effect-level` flag and inherits `[daemon] effect_level`, so gating it would silently disable the dead-man's switch (US4 AS5, research.md R2)
-- [ ] T056 [P] [US4] Add a test to `tests/unit/test_health.py` that with no channel configured the command exits 4 and reports nothing was sent, without erroring (US4 AS4)
+- [X] T052 [US4] Update the two existing tests in `tests/unit/test_health.py` that call the removed `health.notify` — `test_notify_without_a_webhook_reports_that_rather_than_pretending` and `test_notify_posts_a_plain_json_body` — to go through the channel path, keeping their assertions about the body intact (depends on T048)
+- [X] T053 [US4] Add a test to `tests/unit/test_health.py` that with Pushover configured and no webhook, a stale heartbeat delivers the alert to Pushover and records it (US4 AS1)
+- [X] T054 [US4] Add a test to `tests/unit/test_health.py` that with both channels configured the alert reaches both and each outcome is recorded separately (US4 AS2)
+- [X] T055 [US4] Add a test to `tests/unit/test_health.py` **pinning the effect-level exception**: with `[daemon] effect_level = "local"`, the alert is still sent for real on every channel. This is the task that stops a future reader from "fixing" the inconsistency — `health --notify` has no `--effect-level` flag and inherits `[daemon] effect_level`, so gating it would silently disable the dead-man's switch (US4 AS5, research.md R2)
+- [X] T056 [P] [US4] Add a test to `tests/unit/test_health.py` that with no channel configured the command exits 4 and reports nothing was sent, without erroring (US4 AS4)
 
 **Checkpoint**: All four user stories are independently functional.
 
@@ -196,13 +196,14 @@ told the daemon died — and it keeps being told regardless of the effect level.
 **Purpose**: The documentation that makes the feature findable, and the correction of the false claim that
 caused issue #106 in the first place.
 
-- [ ] T057 [P] Correct the false Pushover claim in `health.post_json`'s docstring in `src/robot_army/health.py` — ntfy accepts a JSON body, Pushover does not — and say what the module now does instead (research.md R1)
-- [ ] T058 [P] Correct the same claim in the docstring of `test_notify_posts_a_plain_json_body` in `tests/unit/test_health.py`
-- [ ] T059 [P] Correct R14's Pushover claim in `specs/004-concurrency-polish/contracts/notifications.md`, noting the instinct survived and only the factual premise was wrong
-- [ ] T060 [P] Add the `notify.channel` row to the audit-action table in `docs/logging.md` and, while in there, the `health.notify` row that has been missing since it was written
-- [ ] T061 [P] Rewrite the "Being told when something happens" section of `README.md`: the `[pushover]` keys, where to get the two credentials, that both channels may run at once, that the cap counts messages rather than deliveries, and that the health alert reaches every channel at any effect level
+- [X] T057 [P] Correct the false Pushover claim in `health.post_json`'s docstring in `src/robot_army/health.py` — ntfy accepts a JSON body, Pushover does not — and say what the module now does instead (research.md R1)
+- [X] T058 [P] Correct the same claim in the docstring of `test_notify_posts_a_plain_json_body` in `tests/unit/test_health.py`
+- [X] T059 [P] Correct R14's Pushover claim in `specs/004-concurrency-polish/contracts/notifications.md`, noting the instinct survived and only the factual premise was wrong
+- [X] T060 [P] Add the `notify.channel` row to the audit-action table in `docs/logging.md` and, while in there, the `health.notify` row that has been missing since it was written
+- [X] T061 [P] Rewrite the "Being told when something happens" section of `README.md`: the `[pushover]` keys, where to get the two credentials, that both channels may run at once, that the cap counts messages rather than deliveries, and that the health alert reaches every channel at any effect level
 - [ ] T062 Run every scenario in `specs/20260901-052213-pushover-notifications/quickstart.md` against a real configuration, including the deliberate misconfigurations and the effect-level check in Scenario 7
-- [ ] T063 Run `uv run pytest -q` and confirm the full suite passes; implementation is not complete until it does (Constitution, Development Workflow)
+  - **Partially done.** Scenarios 1 and 2 (the valid section, the four refusals, credential containment, `build()` channel selection) were run through the real TOML entry point and behave as specified. Scenarios 4, 5, 7 and 8 need a real Pushover application token, a real user key, and a phone to receive on — they are the author's to run. Their automated equivalents pass in `tests/unit/test_pushover.py`, `tests/unit/test_notifications.py` and `tests/unit/test_health.py`, which is a floor, not a substitute: only a real send proves the credentials and the endpoint agree.
+- [X] T063 Run `uv run pytest -q` and confirm the full suite passes; implementation is not complete until it does (Constitution, Development Workflow)
 
 ---
 

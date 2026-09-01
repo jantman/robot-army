@@ -170,7 +170,12 @@ class Boundaries:
             # ``NoneType`` for the board pair on an installation with no ``[trello]``
             # section, which is exactly what FR-001 means by inert and is worth seeing in
             # the startup record rather than omitting.
-            name: type(getattr(self, name)).__name__
+            #
+            # A boundary may name itself more precisely than its class does. The notifier
+            # is the one that needs to: since issue #106 it fans out over zero, one or two
+            # channels, and ``MultiNotifier`` alone would hide which — the one fact a reader
+            # of the startup record actually wants.
+            name: _describe_one(getattr(self, name))
             for name in (
                 "issue_reader",
                 "issue_writer",
@@ -190,12 +195,19 @@ class Boundaries:
         }
 
 
+def _describe_one(value: object) -> str:
+    """A boundary's name for the startup record: its own if it offers one, else its class."""
+    named = getattr(value, "describe_name", None)
+    return named() if callable(named) else type(value).__name__
+
+
 def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
     """Select one implementation per boundary. Called exactly once, at startup.
 
     Imports are local so that ``effects`` stays importable by ``config`` without a cycle,
     and so a test can import the table without dragging in httpx.
     """
+    from robot_army import channels as channels_mod
     from robot_army.boundaries.dtach import DtachHost, SimulatedSessionHost
     from robot_army.boundaries.git import GitVersionControl, SimulatedVersionControl
     from robot_army.boundaries.github import (
@@ -205,7 +217,7 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
     )
     from robot_army.boundaries.hooks import SimulatedHookRunner, SubprocessHookRunner
     from robot_army.boundaries.kitty import KittyDisplay, SimulatedDisplay
-    from robot_army.boundaries.notifier import SimulatedNotifier, WebhookNotifier
+    from robot_army.boundaries.notifier import MultiNotifier, SimulatedNotifier
     from robot_army.boundaries.trello import (
         SimulatedCardWriter,
         TrelloCardReader,
@@ -259,10 +271,14 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
         if is_real("display", level)
         else SimulatedDisplay(audit)
     )
+    # Zero, one or two channels, decided once here and never again (research.md R3). An
+    # empty tuple is the unconfigured installation: nothing is built, so no outbound
+    # request can be constructed by accident.
+    notify_channels = channels_mod.build(config)
     notifier: Notifier = (
-        WebhookNotifier(config, audit)
+        MultiNotifier(notify_channels, audit)
         if is_real("notifier", level)
-        else SimulatedNotifier(audit)
+        else SimulatedNotifier(audit, notify_channels)
     )
 
     return Boundaries(

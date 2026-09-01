@@ -670,6 +670,30 @@ class RecordingNotifier:
         return [event.kind for event in self.events]
 
 
+class RecordingChannel:
+    """One notification channel, captured instead of posted.
+
+    Milestone 106's fan-out means a test can no longer ask "was it sent?" — it has to ask
+    "was it sent *there*?". This records what each channel was handed and lets a test decide
+    what that channel does about it, which is how the isolation properties get asserted:
+    one channel failing must not stop another, and both failing must not fail the caller.
+    """
+
+    def __init__(self, name: str = "recording", *, ok: bool = True, raises: bool = False):
+        self.name = name
+        self.ok = ok
+        self.raises = raises
+        self.sends: list[tuple[str, str, dict[str, Any]]] = []
+
+    def send(self, title: str, message: str, fields: dict[str, Any]) -> tuple[bool, str]:
+        self.sends.append((title, message, dict(fields)))
+        if self.raises:
+            # A channel that breaks its own never-raises contract, so a test can prove the
+            # caller survives one that does.
+            raise RuntimeError(f"{self.name} exploded")
+        return self.ok, f"{self.name} {'ok' if self.ok else 'failed'}"
+
+
 def make_boundaries(
     audit: AuditLog,
     *,

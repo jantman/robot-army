@@ -10,6 +10,14 @@ anything, so a hook that failed to run is indistinguishable from one whose momen
 arrived. Every question this module answers is therefore answered from files on disk, which
 cannot decline to be true. The full argument, and the three conditions that would make hooks
 worth revisiting, are in ``specs/007-speckit-extensions/spec.md`` under Out of Scope.
+
+**This module must never import** :mod:`robot_army.config` **at runtime.** Milestone 039
+made the guidance block configurable, which meant ``config.py`` importing :data:`LIFECYCLE`
+from here so the four command names have one definition; that edge is acyclic today and
+stays acyclic only while nothing here imports back. :func:`guidance` therefore takes
+already-resolved instructions rather than a ``Config`` — the ``TYPE_CHECKING`` import below
+names their type and creates no import at run time — and ``dispatch.py`` remains the one
+place where configuration and Spec Kit knowledge meet.
 """
 
 from __future__ import annotations
@@ -25,7 +33,10 @@ from robot_army import db
 from robot_army.states import utcnow
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from robot_army.audit import AuditLog
+    from robot_army.config import CommandInstruction
     from robot_army.models import WorkItem
 
 #: The four lifecycle commands, in the order they run. A repository missing any of them
@@ -61,14 +72,20 @@ RUNG_FILES: dict[str, str] = {
 #: What a session in a Spec Kit repository is told (milestone 007, contracts/prompt.md).
 #:
 #: Fixed text. It does not vary with the command form detected, the repository, or the
-#: issue — which is what makes the determinism requirement (FR-009) a one-line test rather
-#: than an argument. Both installation forms are invoked as ``/speckit-<name>`` anyway, so
-#: there is nothing to vary.
+#: issue. Both installation forms are invoked as ``/speckit-<name>`` anyway, so there is
+#: nothing here to vary.
+#:
+#: Milestone 039 amended 007's FR-009 — "identical text on every dispatch, in every
+#: repository" — to *identical per effective configuration*: :func:`guidance` may insert
+#: the maintainer's configured per-command instructions between this body and
+#: :data:`GUIDANCE_CLOSING`. An installation that configures nothing still gets these bytes
+#: and only these, which is what ``tests/unit/test_speckit_prompt.py``'s golden string
+#: holds.
 #:
 #: The last paragraph is load-bearing: ``prompt.compose`` puts a repository's own
 #: ``.claude/robot-army.md`` *above* this, and position is how that file already encodes
 #: precedence. Saying so explicitly costs a sentence and removes an inference.
-GUIDANCE = """\
+GUIDANCE_BODY = """\
 This repository uses Spec Kit for feature work. Its lifecycle is `/speckit-specify` \u2192
 `/speckit-plan` \u2192 `/speckit-tasks` \u2192 `/speckit-implement`, run in that order, and the
 issue below is the input to `/speckit-specify` \u2014 hand it the issue rather than
@@ -81,10 +98,60 @@ That judgement is yours; nothing checks it and nothing is recorded as failed if 
 this issue does not warrant the lifecycle.
 
 If this repository has a constitution at `.specify/memory/constitution.md`, it governs, and
-the plan must include its Constitution Check.
+the plan must include its Constitution Check."""
 
+#: The closing sentence, kept separate so :func:`guidance` can insert configured
+#: instructions *above* it. Splitting the constant is what makes "nothing configured
+#: produces the pre-milestone bytes" true by construction rather than by a ``rstrip`` that
+#: has to stay correct --- see ``contracts/prompt-block.md``, "Absence is byte-identical".
+GUIDANCE_CLOSING = """\
 Where any instruction above this paragraph conflicts with this one, the instruction above
 wins."""
+
+GUIDANCE = GUIDANCE_BODY + "\n\n" + GUIDANCE_CLOSING
+
+#: Introduces the maintainer's configured per-command instructions (milestone 039).
+#:
+#: "in addition to, not instead of" is FR-012 and is the whole reason this sentence exists
+#: rather than the instructions simply being listed. Without it a configured ``specify``
+#: instruction reads as a replacement for the body's "the issue below is the input to
+#: ``/speckit-specify``", which is the one thing it must not do. One sentence covering all
+#: four commands, rather than a special case for one of them.
+INSTRUCTIONS_LEAD = """\
+When you run these commands, invoke each with the instruction given for it below — in
+addition to, not instead of, any input named for it above."""
+
+
+def guidance(instructions: Sequence[CommandInstruction] = ()) -> str:
+    """The block a Spec Kit session is sent, with the configured instructions in it.
+
+    Pure, and deliberately ignorant of configuration: the caller resolves, this renders.
+    That is what keeps the ``config`` → ``speckit`` import edge acyclic (see the module
+    docstring).
+
+    **The instructions go above** :data:`GUIDANCE_CLOSING`, never after it. That sentence
+    reads "Where any instruction above this paragraph conflicts with this one, the
+    instruction above wins", and it is how the block defers to a repository's own
+    ``.claude/robot-army.md``, which ``prompt.compose`` places above the whole block. Its
+    scope is literally *above this paragraph*, so text appended after it would fall outside
+    the precedence rule the block advertises — FR-015 would be false by construction while
+    every test still passed. Placing them above also has the desirable second effect of
+    making the maintainer's own instructions outrank the block's generic paragraphs, which
+    needed no new wording to establish (research R4).
+
+    With nothing to render this returns :data:`GUIDANCE` itself, so an installation that
+    configures nothing gets the pre-milestone bytes by construction rather than by a
+    string-slicing round trip that has to stay correct (FR-013).
+    """
+    if not instructions:
+        return GUIDANCE
+
+    parts = [GUIDANCE_BODY, INSTRUCTIONS_LEAD]
+    for instruction in instructions:
+        parts.append(f"`/speckit-{instruction.command}`:")
+        parts.append(instruction.text)
+    parts.append(GUIDANCE_CLOSING)
+    return "\n\n".join(parts)
 
 
 @dataclass(frozen=True, slots=True)

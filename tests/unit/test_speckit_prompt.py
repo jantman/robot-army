@@ -11,12 +11,22 @@ since. Milestone 012 then made the delivery block unconditional, so every prompt
 and the pre-007 bytes are gone on purpose — see
 ``specs/012-prompt-branch-pr-safety/research.md`` D5. The test is kept rather than deleted
 because what it is actually good for survives the change of expected value.
+
+Milestone 039 then made the block *configurable* and amended 007's FR-009 — "identical text
+on every dispatch, in every repository" — to identical per **effective configuration**. The
+guarantee this file holds is the one that survived: an installation that configures nothing
+gets these exact bytes. ``GOLDEN`` must therefore keep passing unedited, and
+``test_a_configured_instruction_changes_only_the_block`` guards the other direction, so the
+two together catch both "the unconfigured path drifted" and "the configured path leaked into
+it". Recording the amendment here follows the precedent 012 set above rather than leaving a
+reader of 007 to discover it from a changed expected value.
 """
 
 from __future__ import annotations
 
 from robot_army import prompt, speckit
 from robot_army.boundaries import Issue
+from robot_army.config import CommandInstruction
 
 GOLDEN = (
     'Unless the issue below explicitly says otherwise, this is how the work is expected to be\n'
@@ -128,3 +138,30 @@ def test_the_block_is_not_interpolated_from_anything() -> None:
     """A constant with no format placeholders is what makes determinism a one-line test."""
     assert "{" not in speckit.GUIDANCE
     assert "}" not in speckit.GUIDANCE
+
+
+def test_an_unconfigured_installation_still_gets_the_constant() -> None:
+    """FR-013, from the renderer's side rather than the constant's."""
+    assert speckit.guidance() is speckit.GUIDANCE
+
+
+def test_a_configured_instruction_changes_only_the_block() -> None:
+    """The other direction of the golden test.
+
+    ``GOLDEN`` catches the unconfigured path drifting. This catches the configured path
+    leaking somewhere it should not: everything outside the Spec Kit block must be
+    identical, whatever is configured.
+    """
+    instruction = CommandInstruction(
+        command="implement",
+        text="push the branch and open a PR.",
+        source="[speckit.commands] implement",
+    )
+
+    plain = compose(speckit_block=speckit.GUIDANCE)
+    configured = compose(speckit_block=speckit.guidance((instruction,)))
+
+    assert configured != plain
+    assert plain.replace(speckit.GUIDANCE, "") == configured.replace(
+        speckit.guidance((instruction,)), ""
+    )

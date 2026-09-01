@@ -566,6 +566,19 @@ def _speckit_column(ctx: Context, key: str, path: Any) -> tuple[str, dict[str, A
     }
     if not enabled and suppressed_by:
         detail["suppressed_by"] = suppressed_by
+    if enabled:
+        # Which setting supplies each lifecycle instruction here (milestone 039, FR-027).
+        # From the same ``speckit_commands_for`` call the audit record uses, so the listing
+        # and the log cannot disagree about the same question.
+        #
+        # The **table** deliberately keeps its four values and gains no eighth column: the
+        # cell answers "is this repository getting the block at all", which this milestone
+        # did not change, and instructions are prose that no table cell can hold. Together
+        # with the configuration file — where the maintainer wrote the text — the
+        # provenance here is a complete offline answer (research R7).
+        instructions = ctx.config.speckit_commands_for(key)
+        if instructions:
+            detail["instructions"] = {i.command: i.source for i in instructions}
     return cell, detail
 
 

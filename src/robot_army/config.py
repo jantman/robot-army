@@ -26,6 +26,18 @@ from typing import Any
 from robot_army.effects import EffectLevel
 from robot_army.paths import Layout, default_config_path
 
+# The four lifecycle command names have one definition, and it is the one detection already
+# uses. This edge is acyclic and stays that way under the rule recorded in ``speckit.py``'s
+# docstring: that module must never import this one (milestone 039, research R2).
+from robot_army.speckit import LIFECYCLE
+
+#: Longest instruction accepted for a single Spec Kit lifecycle command. The composed prompt
+#: is one ``argv`` entry, which is why ``prompt.MAX_BODY_CHARS`` exists at all; four of these
+#: add at most 16,000 characters beside a body already capped at 60,000. The number is not
+#: tuned for anything — it is generous for an instruction and small enough that a document
+#: pasted in by accident is refused rather than dispatched.
+MAX_INSTRUCTION_CHARS = 4000
+
 #: Things that look like a credential rather than a variable name.
 #:
 #: The point of this list is that a `*_env` key holds the **name** of an environment
@@ -126,6 +138,16 @@ class RepoConfig:
     #: ``[speckit] enabled``; the distinction is kept rather than resolved at parse time so
     #: the record can say *which* setting suppressed a dispatch (milestone 007, FR-011).
     speckit: bool | None = None
+    #: This repository's overrides for what each lifecycle command is invoked with
+    #: (milestone 039). Absent key inherits ``[speckit.commands]``; **an empty-string value
+    #: is meaningful here** and means "no instruction for this command in this repository".
+    #: Globally those two are the same state and empty is a mistake; here they differ, and
+    #: empty is the only way to drop one instruction without ``speckit = false`` removing
+    #: the whole guidance block.
+    #:
+    #: Not called ``speckit`` for the dull reason that the name is taken by the boolean
+    #: above and TOML cannot make one key both a bool and a table (research R1).
+    speckit_commands: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,9 +398,35 @@ class SpecKitConfig:
     It governs the **prompt block only**. Phase observation and the repositories listing
     are reads that cost nothing and mislead no one, so they keep working when this is off —
     which is what makes turning it off a safe experiment rather than a trade.
+
+    ``commands`` is milestone 039: what each lifecycle command is invoked with, keyed by
+    bare command name. Only non-empty values are ever present — globally an empty
+    instruction says exactly what omitting it says, so it is refused at parse time rather
+    than stored as a state with no meaning. The repository form is different; see
+    :attr:`RepoConfig.speckit_commands`.
     """
 
     enabled: bool = True
+    commands: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CommandInstruction:
+    """One resolved Spec Kit lifecycle instruction, and the setting that produced it.
+
+    ``text`` is never empty: a command whose effective instruction resolves to nothing is
+    omitted from :meth:`Config.speckit_commands_for`'s result entirely, rather than carried
+    as a present-but-blank entry that every consumer would then have to remember to skip.
+
+    ``source`` is written to be quoted verbatim into a record or a listing —
+    ``[speckit.commands] implement`` or ``[repos."jantman/x".speckit_commands] implement``.
+    It exists for the same reason ``speckit_enabled_for`` returns its provenance: two
+    callers need it, and computing it separately at each is how they come to disagree.
+    """
+
+    command: str
+    text: str
+    source: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,6 +515,43 @@ class Config:
             return False, "[speckit] enabled"
         return True, None
 
+    def speckit_commands_for(self, key: str) -> tuple[CommandInstruction, ...]:
+        """What each lifecycle command is invoked with here, and what said so (039).
+
+        Returns only the commands that end up with text, **in lifecycle order** rather than
+        in either table's insertion order (FR-011). Ordering here rather than in the
+        renderer puts the guarantee at the one place it can be tested once, instead of at
+        every consumer that might get it wrong.
+
+        Each entry carries its provenance for the same reason ``speckit_enabled_for``
+        returns its own: two callers need it — the ``speckit.detect`` audit record and the
+        repositories listing — and computing it separately at each site is how the two come
+        to disagree.
+
+        Derived on every call and never cached. There is nothing to cache but a
+        four-element tuple, and a cache would be a second answer about a file the
+        maintainer edits by hand.
+
+        Never raises: everything here survived validation at parse time.
+        """
+        repo = self.repos.get(key)
+        overrides = repo.speckit_commands if repo is not None else {}
+        resolved: list[CommandInstruction] = []
+        for command in LIFECYCLE:
+            if command in overrides:
+                # Present-and-empty is an override to *nothing*, which is why this branch
+                # is taken on membership rather than on truthiness (research R5).
+                text = overrides[command]
+                source = f'[repos."{key}".speckit_commands] {command}'
+            else:
+                text = self.speckit.commands.get(command, "")
+                source = f"[speckit.commands] {command}"
+            if text:
+                resolved.append(
+                    CommandInstruction(command=command, text=text, source=source)
+                )
+        return tuple(resolved)
+
     def effective_repo_cap(self, key: str) -> tuple[int, bool]:
         """How many sessions this repository may run, and whether the author said so.
 
@@ -549,7 +634,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "dispatch": {"order", "default_repo_max_sessions"},
     "cleanup": {"on_issue_close"},
     "notifications": {"events", "max_per_cycle"},
-    "speckit": {"enabled"},
+    "speckit": {"enabled", "commands"},
     # Unknown keys here are an **error** too, for the reason ``[trello]`` states: a typo in
     # a section that exists is a credential that quietly never loads.
     "pushover": {"token_file", "user_key_file"},
@@ -576,6 +661,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
 _REPO_KEYS = {
     "path",
     "speckit",
+    "speckit_commands",
     "base_branch",
     "post_create",
     "env",
@@ -585,6 +671,66 @@ _REPO_KEYS = {
     "priority",
 }
 _STEP_KEYS = {"run", "link", "copy", "timeout"}
+
+
+def _parse_speckit_commands(
+    raw: Any,
+    *,
+    table_label: str,
+    prefix: str,
+    allow_empty: bool,
+    problems: list[str],
+) -> dict[str, str]:
+    """Validate one table of Spec Kit lifecycle instructions (milestone 039).
+
+    Shared by the global ``[speckit.commands]`` and each repository's
+    ``speckit_commands``, which differ in exactly one rule and are otherwise identical —
+    so the difference is a parameter rather than a second copy of five checks.
+
+    ``allow_empty`` is that rule. Globally an empty instruction and an absent one are the
+    same state, so an empty one says nothing that omitting it does not and is a mistake
+    worth reporting. In a repository section they are *different* states — absent inherits
+    the global, empty overrides it with nothing — so there empty is the only way to drop
+    one instruction without ``speckit = false`` removing the whole guidance block
+    (research R5, FR-025).
+
+    Text is stripped of surrounding whitespace and otherwise untouched: TOML's multi-line
+    string form leaves a trailing newline that would render as a blank line, and
+    ``prompt.compose`` already strips the issue body and the repository's own instructions
+    for the same reason. Everything *inside* the text — markdown, backticks, quotation
+    marks, blank lines between paragraphs — is carried exactly as written (FR-009).
+
+    Never raises. Every failure becomes a problem appended to ``problems``, so a file with
+    three mistakes reports three (FR-006, FR-028).
+    """
+    if not isinstance(raw, dict):
+        problems.append(f"{table_label} must be a table")
+        return {}
+
+    parsed: dict[str, str] = {}
+    for name in sorted(raw):
+        if name not in LIFECYCLE:
+            problems.append(
+                f"{prefix} unknown command {name!r}; "
+                f"valid commands are {', '.join(LIFECYCLE)}"
+            )
+            continue
+        value = raw[name]
+        if not isinstance(value, str):
+            problems.append(f"{prefix} {name} must be a string, got {value!r}")
+            continue
+        if len(value) > MAX_INSTRUCTION_CHARS:
+            problems.append(
+                f"{prefix} {name} is {len(value)} characters; "
+                f"the limit is {MAX_INSTRUCTION_CHARS}"
+            )
+            continue
+        text = value.strip()
+        if not text and not allow_empty:
+            problems.append(f"{prefix} {name} is empty; omit the key instead")
+            continue
+        parsed[name] = text
+    return parsed
 
 
 def load(path: Path | None = None) -> Config:
@@ -841,7 +987,14 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             f"[speckit] enabled must be true or false, got {speckit_enabled!r}"
         )
         speckit_enabled = True
-    speckit = SpecKitConfig(enabled=speckit_enabled)
+    speckit_commands = _parse_speckit_commands(
+        speckit_raw.get("commands", {}),
+        table_label="[speckit] commands",
+        prefix="[speckit.commands]",
+        allow_empty=False,
+        problems=problems,
+    )
+    speckit = SpecKitConfig(enabled=speckit_enabled, commands=speckit_commands)
 
     if notifications.events and not health.webhook_url and "pushover" not in raw:
         # A warning, not a problem: the intent is legible and the fix is obvious, and
@@ -967,6 +1120,18 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             )
             repo_speckit = None
 
+        # ``allow_empty=True`` is the one rule that differs from the global table: here an
+        # empty value overrides the global instruction with nothing, which is the only way
+        # to drop one instruction in one repository without ``speckit = false`` removing
+        # the entire guidance block (research R5, FR-025).
+        repo_speckit_commands = _parse_speckit_commands(
+            section.get("speckit_commands", {}),
+            table_label=f"[repos.{key}] speckit_commands",
+            prefix=f'[repos."{key}".speckit_commands]',
+            allow_empty=True,
+            problems=problems,
+        )
+
         repos[key] = RepoConfig(
             key=key,
             path=repo_path,
@@ -978,6 +1143,7 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             max_sessions=max_sessions,
             priority=priority,
             speckit=repo_speckit,
+            speckit_commands=repo_speckit_commands,
         )
 
     # A cross-field check that is a warning rather than an error, because the maintainer

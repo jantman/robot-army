@@ -128,3 +128,78 @@ def test_a_detection_that_raises_is_a_miss_not_a_failed_dispatch(
     record = records(layout, audit)[-1]
     assert record["outcome"] == "error"
     assert "permission denied" in record["detail"]["reason"]
+
+
+# -- milestone 039: configured instructions reach the block, and the record says so ----
+
+
+def test_configured_instruction_reaches_the_block(
+    repo_clone: Path, layout: Any, audit: Any, tmp_path: Path
+) -> None:
+    config = build_config(
+        repo_clone,
+        layout,
+        tmp_path,
+        speckit={"commands": {"implement": "push the branch and open a PR."}},
+    )
+    worktree = make_speckit_tree(tmp_path / "wt")
+
+    block = call(config, audit, worktree)
+
+    assert block is not None
+    assert "push the branch and open a PR." in block
+    assert block != speckit.GUIDANCE
+
+
+def test_the_record_names_the_setting_and_never_the_text(
+    repo_clone: Path, layout: Any, audit: Any, tmp_path: Path
+) -> None:
+    """Research R6, and the Principle III gap the plan enumerates.
+
+    The provenance is recorded because two callers need it. The *text* is not, because the
+    log does not reconstruct a composed prompt today — the issue body, the repository's own
+    instructions and the delivery block are all absent from it — and privileging configured
+    prose over the issue body sitting beside it is indefensible.
+    """
+    configured_text = "push the branch and open a PR."
+    config = build_config(
+        repo_clone,
+        layout,
+        tmp_path,
+        speckit={"commands": {"implement": configured_text}},
+    )
+    worktree = make_speckit_tree(tmp_path / "wt")
+
+    call(config, audit, worktree)
+
+    detail = records(layout, audit)[-1]["detail"]
+    assert detail["instructions"] == {"implement": "[speckit.commands] implement"}
+    assert configured_text not in json.dumps(detail)
+
+
+def test_no_instructions_field_when_nothing_is_configured(
+    repo_clone: Path, layout: Any, audit: Any, tmp_path: Path
+) -> None:
+    config = build_config(repo_clone, layout, tmp_path)
+
+    call(config, audit, make_speckit_tree(tmp_path / "wt"))
+
+    assert "instructions" not in records(layout, audit)[-1]["detail"]
+
+
+def test_suppression_withholds_the_configured_text_too(
+    repo_clone: Path, layout: Any, audit: Any, tmp_path: Path
+) -> None:
+    """US1 scenario 4, FR-005. The configuration lives inside the gate, not beside it."""
+    for overrides in (
+        {"speckit": {"enabled": False, "commands": {"implement": "push it."}}},
+        {
+            "speckit": {"commands": {"implement": "push it."}},
+            "repos": {
+                "demo": {"path": str(repo_clone), "base_branch": "main", "speckit": False}
+            },
+        },
+    ):
+        config = build_config(repo_clone, layout, tmp_path, **overrides)
+
+        assert call(config, audit, make_speckit_tree(tmp_path / "wt")) is None

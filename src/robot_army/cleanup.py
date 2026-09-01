@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from robot_army import db, repos
-from robot_army.models import WorkItem
+from robot_army.models import Session, WorkItem
 from robot_army.states import SessionState, WorkItemState
 
 if TYPE_CHECKING:
@@ -43,6 +43,17 @@ BRANCH_RETAINED = "branch_retained"
 RETAINED = "retained"
 SKIPPED = "skipped"
 
+#: The session states that mean a worker may still be running in the worktree.
+#:
+#: An **allow-list of open states**, not a deny-list of closed ones, for the reason
+#: ``reconcile.SESSION_BEARING_STATES`` gives for its own set: a closed state added later
+#: must not silently start counting as live, and a new *open* state has to be added here
+#: deliberately. Getting that wrong in the permissive direction deletes a running worker's
+#: directory, which is what issue #79 reported.
+LIVE_SESSION_STATES: frozenset[SessionState] = frozenset(
+    {SessionState.STARTING, SessionState.RUNNING}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Decision:
@@ -57,6 +68,33 @@ class Decision:
     @property
     def reclaimed(self) -> bool:
         return self.worktree_removed
+
+
+def live_sessions(conn: sqlite3.Connection, item_id: int) -> list[Session]:
+    """Every session row for the item that is still open, in attempt order.
+
+    **Every** row, not the latest attempt: a session whose attempt has been superseded
+    keeps running, reparented — that is what the ``orphan_session`` anomaly is for — so
+    ``db.latest_session_for_item`` would answer "nothing is running" while a worker is
+    still writing. Empty list means nothing is running.
+
+    One definition with two callers, deliberately (issue #79 FR-014). :func:`eligible`
+    asks it before reclaiming a finished item's disk automatically, and
+    ``operations.worktree_remove`` asks it before doing the same thing on demand. The
+    manual path had no such guard until #79, which is the wrong way round: cleanup is
+    conservative and unattended, while ``worktree remove`` is what someone reaches for
+    when the disk is full, and it is the one that can override git.
+
+    Note what this does **not** consult: the work item's state, and the process table.
+    The reported case was a ``done`` item — terminal, and therefore exactly what an
+    operator reaches for — and a row whose process cannot be found is still a row nothing
+    has closed.
+    """
+    return [
+        session
+        for session in db.list_sessions_for_item(conn, item_id)
+        if session.state in LIVE_SESSION_STATES
+    ]
 
 
 def eligible(
@@ -77,12 +115,11 @@ def eligible(
         return False, "item has no worktree on record"
     if not item.cleanup_pending and not reconsider:
         return False, f"cleanup_state is {item.cleanup_state!r}, which is a decision"
-    live = [
-        session
-        for session in db.list_sessions_for_item(conn, item.id)
-        if session.state in (SessionState.STARTING, SessionState.RUNNING)
-    ]
+    live = live_sessions(conn, item.id)
     if live:
+        # The wording is load-bearing: ``clean_item`` below decides between ``skipped``
+        # and plain ineligibility by matching "still live" in this string, and only
+        # ``skipped`` is reconsidered on a later pass.
         return False, f"session {live[0].session_id} is still live"
     return True, "done, has a worktree, and nothing is running in it"
 

@@ -506,6 +506,38 @@ session has no wrapper and no process, so that record can never arrive — which
 `robot-army cancel` on a rehearsal used to hold its repository's only slot forever, silently,
 with `repo_cap` as the queue's stated reason.
 
+## The issue #79 actions
+
+One new action, and it closes a gap that predates the issue it was added for.
+`robot-army worktree remove` wrote **no record under its own name at all**. The only records
+it produced came from the git boundary — `git.remove_worktree` and `git.delete_branch` —
+which name a *path* and never the work item, so "what happened when I removed item 21's
+worktree" could not be answered without mapping a path back to an item by hand. And a guard
+that refuses *before* reaching git would have left nothing behind at all.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `worktree.remove` | **New** — an intent/outcome pair around every manual removal | `entity_id` is the work item, `target` the worktree path. The intent carries `force` and is flushed **before** anything is removed, which is what the Operating Constraints require of an irreversible action. The outcome carries `refused`, `worktree_removed`, `branch_deleted` and `forced_over_live_session` |
+| `worktree.remove` | A refusal — a live session, git's dirty-tree refusal, or a repository that no longer resolves | `refused: true` plus `refused_by`, which is `live_session`, `git` or `unresolved_repo`. `reason` is the sentence shown at the terminal, and `live_session` names the session, its attempt, its state, its pid and how that pid looks from `/proc` |
+| `worktree.remove` | A forced removal over a live session | `forced_over_live_session: true`. This is the single most destructive thing the command can do, and `force: true` alone does not identify it — that is equally what forcing past a merely dirty tree looks like. Those are not the same act, so they are not the same record |
+| `git.remove_worktree`, `git.delete_branch` | Unchanged | **Absent** on a refusal, and that absence is the evidence that nothing was removed. It is what the tests assert on, in preference to a surviving directory — which is also what you get when a removal was attempted and merely failed |
+
+**A refusal is `outcome: "ok"`, not `"error"`.** The vocabulary is fixed to `ok`/`error`/
+`pending`, and the precedent is `cleanup.considered`, which records a `skipped` decision as
+`ok`. Nothing failed here: the command was asked a question and answered it. `error` stays
+for a boundary that broke, and `audit.action` still writes one on its own if anything raises
+— including a `KeyboardInterrupt` at the confirmation prompt, so even an abandoned prompt is
+reconstructible.
+
+The `live_session` detail reports process liveness in one of four words — `running`, `gone`,
+`unidentified`, `unrecorded` — and **none of them decides anything**. The session row is what
+refuses; the liveness answer is what the operator is told. `unidentified` is the one worth
+knowing: a recorded pid with no recorded start time cannot be told apart from an unrelated
+process that inherited that number, and reporting it as `running` is the degradation that let
+a pid of `1` through the termination guard in #69.
+
+Nothing this feature added goes unlogged, and no Principle III exception is claimed.
+
 ## Reconstructing an item's history
 
 ```bash

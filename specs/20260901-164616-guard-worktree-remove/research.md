@@ -157,7 +157,7 @@ honest answers and never consulted for the decision:
 
 | Recorded | Reported as |
 |---|---|
-| `pid` and `proc_start`, `is_alive` true | `pid N is running` |
+| `pid` and `proc_start`, `is_alive` true | `pid N is alive` |
 | `pid` and `proc_start`, `is_alive` false | `pid N is no longer there` |
 | `pid`, no `proc_start` | `pid N recorded, with no start time to identify it by` |
 | no `pid` | `no process id recorded` |

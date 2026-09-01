@@ -1446,14 +1446,133 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class _LiveSession:
+    """One open session row, described for a human who is about to delete its worktree.
+
+    ``liveness`` is a **word, not a boolean**, because there are four honest answers and
+    three of them are not "alive". Folding "cannot tell" into either "running" or "gone"
+    would be the exact mistake this guard exists to prevent, and it is the mistake that
+    let a pid of ``1`` through the termination guard in #69.
+    """
+
+    session_id: str
+    attempt: int
+    state: str
+    pid: int | None
+    liveness: str
+    socket: str | None
+
+    @property
+    def process(self) -> str:
+        if self.liveness == "unrecorded":
+            return "no process id recorded"
+        if self.liveness == "unidentified":
+            return f"pid {self.pid} recorded, with no start time to identify it by"
+        if self.liveness == "running":
+            # "alive", not "running": the sentence this lands in already says the
+            # *session* is running, and the same word twice reads as one fact repeated
+            # rather than two facts checked.
+            return f"pid {self.pid} is alive"
+        return f"pid {self.pid} is no longer there"
+
+
+def _describe_live_session(session: Any) -> _LiveSession:
+    """Build the description above from a session row, consulting ``/proc`` at most once.
+
+    ``procinfo.is_alive`` is **never** called without a recorded ``proc_start``: it
+    documents its own degradation to a bare existence check in that case, which would
+    report any process holding a recycled pid as this session. Session rows legitimately
+    carry a pid and no start time — the registration treats it as optional and nothing
+    backfills it — so the degraded branch is reachable and must be refused rather than
+    believed.
+
+    Whatever this answers changes **nothing** about the decision. The row is what refuses;
+    this is what the operator is told.
+    """
+    if session.pid is None:
+        liveness = "unrecorded"
+    elif not session.proc_start:
+        liveness = "unidentified"
+    elif procinfo.is_alive(session.pid, session.proc_start):
+        liveness = "running"
+    else:
+        liveness = "gone"
+    return _LiveSession(
+        session_id=session.session_id,
+        attempt=session.attempt,
+        state=str(session.state),
+        pid=session.pid,
+        liveness=liveness,
+        socket=session.host_socket,
+    )
+
+
+def _refuse_for_live_session(
+    result: Result,
+    *,
+    item_id: int,
+    worktree_path: str,
+    open_count: int,
+    described: _LiveSession,
+) -> str:
+    """Fill in the refusal and return its reason, which the caller also records.
+
+    The message has a job beyond saying no: the operator asked for this disk back, and
+    every route onward from here is theirs to choose. So it says which session, how it
+    looks from ``/proc``, what removing it now would cost, how to go and look at the
+    worker, and the two ways forward — rather than leaving them to find ``show``.
+    """
+    result.code = EXIT_PRECONDITION
+    result.data["refused_by"] = "live_session"
+    result.data["refused_reason"] = reason = (
+        f"session {described.session_id} (attempt {described.attempt}) is "
+        f"{described.state} — {described.process}"
+    )
+    result.data["worktree_removed"] = False
+    result.data["branch_deleted"] = False
+    result.say(f"refused to remove {worktree_path}:")
+    result.say(f"  {reason}")
+    if open_count > 1:
+        result.say(f"  ({open_count - 1} other open session(s) for this item)")
+    result.say("  A worker may still be writing in there. Removing it now leaves that")
+    result.say("  worker running in a deleted directory, and this command deletes the")
+    result.say("  branch too, so there would be nothing left to recover the work from.")
+    if described.socket:
+        result.say(f"  look:   dtach -a {described.socket}")
+    result.say(f"  then:   robot-army cancel {item_id}  (stop it), or")
+    result.say(f"          robot-army worktree remove {item_id} --force  (remove anyway)")
+    return reason
+
+
 def worktree_remove(
     ctx: Context, item_id: int, *, force: bool = False, confirm: Any = input
 ) -> Result:
-    """Remove **both** the worktree and its branch (FR-016).
+    """Remove **both** the worktree and its branch (FR-016), under three guards.
 
     Removal is two steps, and doing only the first accumulates ``robot-army/*`` branches
-    in every repository forever. It **refuses** on a worktree with uncommitted *or merely
-    untracked* changes — git's own refusal is the guard, and that refusal is the feature.
+    in every repository forever.
+
+    The three guards answer different questions, and only the last is ours:
+
+    1. **Is anything still running in there?** Asked of the session rows (issue #79). Until
+       #79 this was not asked at all, and the automatic reclaim path — which *did* ask it,
+       and records ``skipped`` — was the conservative one. That was the wrong way round:
+       ``cleanup`` runs unattended, while this is what someone reaches for when the disk
+       is full, and it is the one that can override git.
+    2. **Does the tree hold uncommitted or merely untracked work?** Git's own refusal,
+       taken as-is, never overridden by default. That refusal is the feature.
+    3. **Is the branch contained?** Not asked here at all — the manual path deletes the
+       branch it created, and ``cleanup`` owns the containment check.
+
+    Guard 1 is deliberately blind to two things. It never reads the work item's **state**:
+    the reported case was a ``done`` item, because an issue can close while its worker
+    types on, and terminal is precisely the state disk gets reclaimed from. And it never
+    decides on **process liveness**: a row whose process cannot be seen is still a row
+    nothing has closed, and refusing only on a *confirmed* live process would remove the
+    worktree in every case where liveness could not be established.
+
+    See ``specs/20260901-164616-guard-worktree-remove/contracts/worktree-removal.md``.
     """
     result = Result()
     item = db.get_work_item(ctx.conn, item_id)
@@ -1461,58 +1580,131 @@ def worktree_remove(
         return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
     if not item.worktree_path:
         return Result(code=EXIT_FAILED, lines=[f"work item {item_id} has no worktree"])
-    repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
-    if repo is None:
-        return Result(
-            code=EXIT_PRECONDITION,
-            lines=[f"repository {item.repo_key!r} does not resolve to a clone any more"],
-        )
-
+    result.data = {"item_id": item_id}
     vcs = ctx.boundaries.version_control
-    if force:
-        answer = confirm(
-            f"Type the item id ({item_id}) to force-remove {item.worktree_path} "
-            "and discard its uncommitted work: "
+    with ctx.audit.action(
+        "worktree.remove",
+        entity_type="work_item",
+        entity_id=item_id,
+        target=item.worktree_path,
+        detail={"force": force},
+        dry_run=bool(item.dry_run),
+    ) as outcome:
+        outcome["refused"] = False
+        outcome["worktree_removed"] = False
+        outcome["branch_deleted"] = False
+        outcome["forced_over_live_session"] = False
+        result.data["forced_over_live_session"] = False
+
+        repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
+        if repo is None:
+            outcome["refused"] = True
+            outcome["refused_by"] = "unresolved_repo"
+            return Result(
+                code=EXIT_PRECONDITION,
+                lines=[
+                    f"repository {item.repo_key!r} does not resolve to a clone any more"
+                ],
+            )
+
+        # -- the third guard: is anything still running in there? (issue #79) --
+        #
+        # Asked of the **session rows**, never of the work item's state and never of the
+        # process table. The reported case was a ``done`` item, so a guard keyed on state
+        # would have permitted it; and a row whose process cannot be seen is still a row
+        # nothing has closed, so deciding on liveness would remove the worktree in every
+        # case where liveness could not be established — the same bug, harder to
+        # reproduce.
+        live = cleanup_mod.live_sessions(ctx.conn, item_id)
+        described = _describe_live_session(live[0]) if live else None
+        if described is not None:
+            outcome["live_session"] = asdict(described)
+            result.data["live_session"] = asdict(described)
+        if described is not None and not force:
+            reason = _refuse_for_live_session(
+                result,
+                item_id=item_id,
+                worktree_path=item.worktree_path,
+                open_count=len(live),
+                described=described,
+            )
+            outcome["refused"] = True
+            outcome["refused_by"] = "live_session"
+            outcome["reason"] = reason
+            return result
+
+        if force:
+            # Unchanged, word for word, when nothing is running: the common case must not
+            # silently acquire different wording.
+            prompt = (
+                f"Type the item id ({item_id}) to force-remove {item.worktree_path} "
+                "and discard its uncommitted work: "
+            )
+            if described is not None:
+                # No *second* prompt. The override already demands the typed id, and a
+                # question asked twice is answered reflexively; what changes is that the
+                # operator is told what they are about to do before they answer at all.
+                prompt = (
+                    f"session {described.session_id} is {described.state} in "
+                    f"{item.worktree_path} — {described.process}. Forcing leaves that "
+                    f"worker running in a deleted directory. "
+                ) + prompt
+            answer = confirm(prompt)
+            if str(answer).strip() != str(item_id):
+                outcome["aborted"] = True
+                return Result(code=EXIT_FAILED, lines=["aborted"])
+            if described is not None:
+                # The single most destructive thing this command can do, and ``force:
+                # true`` alone does not say so — it is equally what forcing past a merely
+                # dirty tree looks like. Those are not the same act.
+                outcome["forced_over_live_session"] = True
+                result.data["forced_over_live_session"] = True
+
+        removal = vcs.remove_worktree(
+            item.worktree_path, force=force, clone_path=str(repo.path)
         )
-        if str(answer).strip() != str(item_id):
-            return Result(code=EXIT_FAILED, lines=["aborted"])
+        branch_deleted = False
+        if removal.worktree_removed and item.branch:
+            branch_deleted = vcs.delete_branch(str(repo.path), item.branch, force=force)
 
-    removal = vcs.remove_worktree(
-        item.worktree_path, force=force, clone_path=str(repo.path)
-    )
-    branch_deleted = False
-    if removal.worktree_removed and item.branch:
-        branch_deleted = vcs.delete_branch(str(repo.path), item.branch, force=force)
+        outcome["worktree_removed"] = removal.worktree_removed
+        outcome["branch_deleted"] = branch_deleted
 
-    result.data = {
-        "item_id": item_id,
-        "worktree_removed": removal.worktree_removed,
-        "branch_deleted": branch_deleted,
-        "refused_reason": removal.refused_reason,
-    }
-
-    if not removal.worktree_removed:
-        result.code = EXIT_FAILED
-        result.say(f"refused to remove {item.worktree_path}:")
-        result.say(f"  {removal.refused_reason}")
-        result.say(
-            "  Git refuses to remove a worktree with uncommitted or untracked changes. "
-            "That refusal is the guard; --force overrides it."
+        result.data.update(
+            {
+                "item_id": item_id,
+                "worktree_removed": removal.worktree_removed,
+                "branch_deleted": branch_deleted,
+                "refused_reason": removal.refused_reason,
+            }
         )
+
+        if not removal.worktree_removed:
+            outcome["refused"] = True
+            outcome["refused_by"] = "git"
+            outcome["reason"] = removal.refused_reason
+            result.data["refused_by"] = "git"
+            result.code = EXIT_FAILED
+            result.say(f"refused to remove {item.worktree_path}:")
+            result.say(f"  {removal.refused_reason}")
+            result.say(
+                "  Git refuses to remove a worktree with uncommitted or untracked changes. "
+                "That refusal is the guard; --force overrides it."
+            )
+            return result
+
+        result.say(f"removed worktree {item.worktree_path}")
+        if item.branch and branch_deleted:
+            result.say(f"deleted branch {item.branch}")
+        elif item.branch:
+            result.code = EXIT_FAILED
+            result.say(
+                f"WARNING: removed the worktree but branch {item.branch} still exists. "
+                "Removal is two steps; skipping the second accumulates robot-army/* branches"
+            )
+        with db.transaction(ctx.conn):
+            db.update_work_item_columns(ctx.conn, item_id, worktree_path=None)
         return result
-
-    result.say(f"removed worktree {item.worktree_path}")
-    if item.branch and branch_deleted:
-        result.say(f"deleted branch {item.branch}")
-    elif item.branch:
-        result.code = EXIT_FAILED
-        result.say(
-            f"WARNING: removed the worktree but branch {item.branch} still exists. "
-            "Removal is two steps; skipping the second accumulates robot-army/* branches"
-        )
-    with db.transaction(ctx.conn):
-        db.update_work_item_columns(ctx.conn, item_id, worktree_path=None)
-    return result
 
 
 def worktree_prune(ctx: Context) -> Result:

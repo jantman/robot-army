@@ -41,7 +41,7 @@ ways forward.
 
 | Recorded | Answer | Rendered |
 |---|---|---|
-| `pid` and `proc_start`, process matches | `running` | `pid N is running` |
+| `pid` and `proc_start`, process matches | `running` | `pid N is alive` |
 | `pid` and `proc_start`, no match | `gone` | `pid N is no longer there` |
 | `pid`, no `proc_start` | `unidentified` | `pid N recorded, with no start time to identify it by` |
 | no `pid` | `unrecorded` | `no process id recorded` |

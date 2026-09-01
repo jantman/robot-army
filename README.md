@@ -777,7 +777,7 @@ on_issue_close = false      # true: reclaim a finished item's worktree and branc
 
 ```bash
 uv run robot-army worktree list             # size, branch, condition, cleanup state
-uv run robot-army worktree remove <id>      # refuses if dirty — that refusal is the point
+uv run robot-army worktree remove <id>      # refuses if a session is live, or if dirty
 uv run robot-army worktree prune
 uv run robot-army cleanup                   # every eligible item, under the same guards
 uv run robot-army cleanup <id>              # one item, reconsidering a retained decision
@@ -788,8 +788,20 @@ reclaimed on the next reconciliation pass — provided nothing in either exists 
 `robot-army cleanup` runs the identical function under the identical guards whether or not
 the automatic path is enabled, so the manual route cannot drift from the automatic one.
 
-**The two guards are different guards, and that is the whole design.**
+**The guards are different guards, and that is the whole design.**
 
+- **The session**: is anything still running in there? Asked of the session rows — and of
+  nothing else. Not of the work item's state, because the reachable case is a *finished*
+  item: the issue closes, the item goes `done`, the worker types on, and terminal is
+  exactly the state I reclaim disk from. Not of the process table either, because a row
+  whose process I cannot see is still a row nothing has closed, and refusing only on a
+  *confirmed* live process would remove the worktree in every case where liveness could not
+  be established. `worktree remove` gained this guard in #79, after it deleted a running
+  worker's directory and its branch in one command and reported success; `cleanup` had it
+  from the start. That was the wrong way round — `cleanup` runs unattended and is
+  conservative by design, while `worktree remove` is what I reach for when `/home` is at
+  93%, and it is the one that can override git. `--force` still overrides it, and says so
+  in the prompt before I type anything.
 - **The worktree**: git's own refusal, taken as-is. `git worktree remove` refuses on a dirty
   tree — *including merely untracked files* — and `--force` is never passed. A refused
   worktree is recorded as `retained` with git's own message, and the branch half is not

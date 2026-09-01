@@ -121,6 +121,16 @@ def claude_registry_dir() -> Path:
     return Path.home() / ".claude" / "sessions"
 
 
+def claude_projects_dir() -> Path:
+    """``~/.claude/projects`` — where the worker writes session transcripts.
+
+    A function rather than a constant for the same reason ``claude_registry_dir`` is one:
+    it is the seam the test suite replaces. Without it a suite run reads the maintainer's
+    real transcripts and the result depends on which sessions they happen to have run.
+    """
+    return Path.home() / ".claude" / "projects"
+
+
 def claude_trust_file() -> Path:
     """``~/.claude.json`` — workspace trust."""
     return Path.home() / ".claude.json"

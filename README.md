@@ -641,8 +641,14 @@ Anomalies worth understanding rather than dismissing:
 - **`orphan_session`** — a live worker under the worktree root that no item claims.
   `interrupted` does *not* mean nothing is running: if the wrapper dies uncleanly the
   worker keeps going, reparented, while dtach tears down its socket.
-- **`no_transcript`** — the session ran but left nothing resumable. Almost always a
-  `CLAUDE_CODE_*` variable in kitty's environment.
+- **`no_transcript`** — the session ran and left nothing resumable. Raised by
+  reconciliation five minutes after the session was confirmed, not at dispatch: the worker
+  writes its transcript when it starts processing, so asking any earlier reports every
+  healthy session. Two causes, and the check cannot tell them apart — the worker never
+  saved one (`robot-army doctor` shows whether `CLAUDE_CODE_*` is set in the session host's
+  environment), or the session died before writing one (its exit record shows that).
+  Either way that session cannot be resumed: `restart` it, do not `resume` it. Raised at
+  most once per session.
 - **`registry_version_unknown`** — the worker's session-registry format changed. The
   daemon degraded to scanning `/proc` rather than crashing; identification is weaker until
   the version is reviewed.

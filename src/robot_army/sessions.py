@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from robot_army import procinfo
-from robot_army.paths import claude_registry_dir
+from robot_army.paths import claude_projects_dir, claude_registry_dir
 
 #: The registry's ``version`` field is the **worker's own version string**, e.g.
 #: ``"2.1.239"`` — measured, not assumed. It is gated on ``(major, minor)`` rather than the
@@ -271,15 +271,21 @@ def under_root(path: str | None, root: Path) -> bool:
 
 
 def transcript_exists(session_id: str, *, home: Path | None = None) -> bool:
-    """Does a resumable transcript exist for this session?
+    """Does a resumable transcript exist for this session **right now**?
 
-    M0 F19: a session can run, exit 0, and be permanently unresumable because a stray
-    ``CLAUDE_CODE_CHILD_SESSION`` in the terminal daemon's environment silently disabled
-    transcript saving. The session looks perfect; only the missing transcript reveals it.
-    Detecting that is what turns a silent failure into a ``no_transcript`` anomaly.
+    M0 F19: a session can run, exit 0, and be permanently unresumable. One cause is a stray
+    ``CLAUDE_CODE_CHILD_SESSION`` in the terminal daemon's environment silently disabling
+    transcript saving; another is a session that died before it wrote anything. The session
+    looks perfect either way, and only the missing transcript reveals it. Detecting that is
+    what turns a silent failure into a ``no_transcript`` anomaly.
+
+    **This function answers only "is it there now", and the timing is the caller's
+    problem.** The worker writes its transcript when it starts processing, not at exec, so
+    asking immediately after launch reliably gets ``False`` about a perfectly healthy
+    session — which is issue #58, and why the only caller now waits out a grace period
+    before believing the answer.
     """
-    base = Path(home) if home else Path.home()
-    projects = base / ".claude" / "projects"
+    projects = Path(home) / ".claude" / "projects" if home else claude_projects_dir()
     if not projects.is_dir():
         return False
     try:

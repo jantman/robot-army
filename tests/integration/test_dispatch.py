@@ -81,6 +81,68 @@ def test_a_confirmed_dispatch_reaches_active(conn, audit, config, tmp_path, layo
     assert writer.comments, "a dispatch comment is posted"
 
 
+def test_a_healthy_dispatch_raises_no_anomaly(conn, audit, config, tmp_path, layout):
+    """Issue #58, and the assertion whose absence let it ship.
+
+    The transcript check used to run one line after the session was confirmed, and the
+    worker writes its transcript when it begins processing, not at exec. So the file
+    reliably did not exist yet and ``no_transcript`` fired on **every healthy dispatch** --
+    including the very first live one ever performed. Dispatch now asks nothing about
+    transcripts at all; the question moved to reconciliation, where it can wait.
+
+    Deliberately asserts the *whole* anomalies table is empty rather than the absence of one
+    kind. A dispatch that succeeds has nothing anomalous to report about anything.
+    """
+    writer = RecordingWriter()
+    host = StubSessionHost(confirm=True)
+    boundaries = make_boundaries(
+        audit, writer=writer, host=host, hooks=SubprocessHookRunner(audit)
+    )
+    item_id = ready_item(conn, config)
+
+    assert dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    assert db.list_anomalies(conn) == []
+
+
+def test_a_dispatched_session_leaves_its_transcript_question_open(
+    conn, audit, config, tmp_path, layout
+):
+    """The other half of moving the check: dispatch must not *answer* the question either.
+
+    A session row leaves dispatch with ``transcript_checked_at`` NULL, which is what puts it
+    in front of the reconciliation sweep at all. Marking it answered here would be the same
+    bug wearing the opposite sign -- silence instead of noise.
+    """
+    host = StubSessionHost(confirm=True)
+    boundaries = make_boundaries(
+        audit, writer=RecordingWriter(), host=host, hooks=SubprocessHookRunner(audit)
+    )
+    item_id = ready_item(conn, config)
+
+    dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    session = db.latest_session_for_item(conn, item_id)
+    assert session is not None
+    assert session.transcript_checked_at is None
+
+
 def test_an_unconfirmed_launch_yields_failed_never_active(
     conn, audit, config, tmp_path, layout
 ):

@@ -143,3 +143,60 @@ def test_a_superseded_dead_attempt_stops_holding_its_slot(conn, audit, config, t
     assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
     after = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
     assert after.per_repo.get("demo") == 1, "only the live attempt should still count"
+
+
+def test_a_whole_pass_over_a_healthy_session_reports_no_anomaly(
+    conn, audit, config, tmp_path, transcripts
+):
+    """Issue #58 at the level the daemon actually runs at.
+
+    The unit test pins the decision; this pins that the pass carrying it composes with every
+    other sweep without reporting a healthy session as anything. ``transcripts_checked: 1``
+    is the positive half: the detector ran and was satisfied, rather than not running.
+    """
+    from tests.conftest import write_transcript
+
+    item_id = seed_item(
+        conn, repo_key="demo", issue_number=58, state=str(WorkItemState.ACTIVE)
+    )
+    seed_session(conn, item_id, state="running", session_id="healthy-58", pid=REAL_PID)
+    conn.execute("UPDATE sessions SET confirmed_at = started_at WHERE session_id = 'healthy-58'")
+    write_transcript(transcripts, "healthy-58")
+
+    registry, proc = tmp_path / "registry", tmp_path / "proc"
+    write_registry(registry, session_id="healthy-58", pid=REAL_PID, proc_start=REAL_START,
+                   cwd=str(config.worktree_root / "x"))
+    write_proc(proc, REAL_PID, starttime=REAL_START, cwd=str(config.worktree_root / "x"))
+
+    result = _pass(conn, audit, config, registry, proc)
+
+    assert db.list_anomalies(conn) == []
+    assert result.summary()["transcripts_checked"] == 1
+    assert result.summary()["no_transcript"] == 0
+
+
+def test_a_whole_pass_reports_a_session_that_never_wrote_a_transcript(
+    conn, audit, config, tmp_path
+):
+    """The other branch, at the same level: the detector still detects.
+
+    Silencing the false positive by removing the check would have traded a noisy signal for
+    no signal at all, and the failure it catches -- a session that looks perfect and can
+    never be resumed -- is invisible by any other means.
+    """
+    item_id = seed_item(
+        conn, repo_key="demo", issue_number=59, state=str(WorkItemState.ACTIVE)
+    )
+    seed_session(conn, item_id, state="running", session_id="silent-59", pid=REAL_PID)
+    old = "2026-01-01T00:00:00Z"
+    conn.execute("UPDATE sessions SET confirmed_at = ? WHERE session_id = 'silent-59'", (old,))
+
+    registry, proc = tmp_path / "registry", tmp_path / "proc"
+    write_registry(registry, session_id="silent-59", pid=REAL_PID, proc_start=REAL_START,
+                   cwd=str(config.worktree_root / "x"))
+    write_proc(proc, REAL_PID, starttime=REAL_START, cwd=str(config.worktree_root / "x"))
+
+    result = _pass(conn, audit, config, registry, proc)
+
+    assert [a.kind for a in db.list_anomalies(conn)] == ["no_transcript"]
+    assert result.summary()["no_transcript"] == 1

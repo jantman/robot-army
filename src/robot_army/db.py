@@ -424,6 +424,39 @@ def list_sessions(
     return _rows(conn.execute(sql, params), Session)
 
 
+def sessions_awaiting_transcript_check(conn: sqlite3.Connection) -> list[Session]:
+    """Sessions whose transcript question is still open — ``transcript_checked_at IS NULL``.
+
+    The whole population, with no state filter, no age filter and no ``dry_run`` filter.
+    Deliberately so: the column *is* the population (issue #58 research R2). Every session
+    is resolved exactly once and then leaves this set permanently, which is why no "recently
+    ended" window is needed to keep it bounded — there is nothing left in it to bound.
+
+    ``idx_sessions_transcript_open`` is what keeps this off a full-history scan (FR-010).
+    The result is tiny either way; the scan would not have been.
+    """
+    return _rows(
+        conn.execute(
+            "SELECT * FROM sessions WHERE transcript_checked_at IS NULL ORDER BY id"
+        ),
+        Session,
+    )
+
+
+def mark_transcript_checked(conn: sqlite3.Connection, session_row_id: int) -> None:
+    """Close a session's transcript question, for good.
+
+    Never cleared afterwards and never re-opened: a transcript deleted after the fact, an
+    acknowledged anomaly, or a resumed item do not re-ask it. A *new* session row is a new
+    question. This is what makes one anomaly per session hold where the anomalies table's
+    partial unique index cannot, since that index only dedupes unacknowledged rows.
+    """
+    conn.execute(
+        "UPDATE sessions SET transcript_checked_at = ? WHERE id = ?",
+        (utcnow(), session_row_id),
+    )
+
+
 # ``count_live_sessions`` was retired in milestone 004. It counted the daemon's own
 # bookkeeping, which is precisely the number that is blind to the author's own Claude
 # sessions — right for milestone 001, where the daemon was the only actor being modelled,

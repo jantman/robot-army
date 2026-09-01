@@ -1034,29 +1034,15 @@ def _dispatch_item(
         dry_run=dry_run,
     )
 
-    # A transcript that never appears means the session is permanently unresumable
-    # despite looking healthy (M0 F19). Worth an anomaly, not a failure.
+    # The transcript check used to sit here, one line after confirmation. It is gone, and
+    # nothing replaces it (issue #58): the worker writes its transcript when it begins
+    # processing, not at exec, so asking at this moment reliably got "no" about a perfectly
+    # healthy session and raised `no_transcript` on **every** dispatch. The question is
+    # still asked -- by `reconcile._sweep_transcripts`, which can afford to wait, and which
+    # leaves the answer on the session row rather than in this pass.
     #
-    # The dry_run guard here is FR-055, not FR-053: a simulated session never wrote a
-    # transcript because it never ran, and reporting that as an anomaly would be noise.
-    # This is a decision about *reporting on a simulated row*, not about which
-    # implementation to call — that choice lives in effects.py and nowhere else.
-    if not dry_run and not sessions.transcript_exists(session_id):
-        with db.transaction(conn):
-            db.raise_anomaly(
-                conn,
-                kind="no_transcript",
-                entity_type="session",
-                entity_id=session_id,
-                detail={
-                    "item_id": item_id,
-                    "note": (
-                        "session confirmed but no resumable transcript found; check for "
-                        "CLAUDE_CODE_* variables in the terminal daemon's environment "
-                        "(robot-army doctor)"
-                    ),
-                },
-            )
+    # Do not reinstate a check here. There is no point in this function at which a missing
+    # transcript means anything, because the process has had no time to write one.
 
     # Last, and deliberately: everything above has already established that a session is
     # really running. A comment saying so is only true because of where this line sits.

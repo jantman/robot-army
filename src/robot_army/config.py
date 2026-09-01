@@ -851,6 +851,10 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         # than the parsed ``pushover`` object on purpose: a ``[pushover]`` section that
         # failed validation has already produced a problem, and adding "and by the way
         # nothing can be sent" to it would be a second message about one mistake.
+        #
+        # That holds only because *every* malformed ``[pushover]`` section is a problem,
+        # including a bare header — see ``_parse_pushover``. If that check is ever loosened,
+        # this suppression turns into silence.
         warnings.append(
             "[notifications] events are configured but no notification channel is set, so "
             "nothing can be sent; set [health] webhook_url or [pushover], or clear the "
@@ -1054,11 +1058,18 @@ def _parse_pushover(section: Any, problems: list[str]) -> PushoverConfig | None:
     # Both, or neither. An **error** rather than a warning: a half-configured channel
     # cannot send, and a warning would leave a channel that silently never fires — the
     # quiet lie milestone 004's contract argues against (FR-004).
+    #
+    # "Neither" means *no section*, not an empty one. A bare ``[pushover]`` header, or one
+    # whose values are empty strings, is an author who meant to configure the channel and
+    # did not finish — and it must not load quietly, because the warning below is suppressed
+    # by the section's mere presence. Getting this wrong produced exactly the silence this
+    # comment claims to refuse: no channel, no problem, no warning.
     present = [key for key in ("token_file", "user_key_file") if section.get(key)]
-    if len(present) == 1:
+    if len(present) != 2:
+        found = f" (found only {present[0]})" if present else " (found neither)"
         problems.append(
-            f"[pushover] both token_file and user_key_file must be set "
-            f"(found only {present[0]}); a half-configured channel cannot send"
+            f"[pushover] both token_file and user_key_file must be set{found}; "
+            "a half-configured channel cannot send"
         )
 
     for key, value in sorted(section.items()):

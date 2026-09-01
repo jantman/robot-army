@@ -1131,3 +1131,53 @@ def test_events_with_only_pushover_configured_do_not_warn(repo_clone, layout, tm
         pushover={"token_file": str(token), "user_key_file": str(user)},
     )
     assert not any("no notification channel" in w for w in config.warnings)
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        pytest.param({}, id="bare-header"),
+        pytest.param({"token_file": "", "user_key_file": ""}, id="empty-strings"),
+        pytest.param({"token_file": ""}, id="one-empty-string"),
+    ],
+)
+def test_a_pushover_section_with_no_usable_keys_is_refused(
+    repo_clone, layout, tmp_path, section
+):
+    """The gap found in review of #109.
+
+    "Both, or neither" has to mean *no section*, not an empty one. A bare ``[pushover]``
+    header used to load cleanly — no channel, no problem, and no warning either, because
+    the "nothing can be sent" warning is suppressed by the section's mere presence. An
+    author who started configuring the channel and stopped got silence, which is precisely
+    the quiet lie this validation exists to prevent.
+    """
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, pushover=section)
+    assert any("both token_file and user_key_file must be set" in p for p in caught.value.problems)
+
+
+def test_an_incomplete_pushover_section_never_loads_silently(repo_clone, layout, tmp_path):
+    """The property behind the test above, stated as the invariant the warning depends on:
+    a ``[pushover]`` section either produces a working channel or produces a problem. It is
+    never accepted while leaving nothing to send with."""
+    token, user = pushover_files(tmp_path)
+    for section in ({}, {"token_file": str(token)}, {"user_key_file": str(user)}):
+        with pytest.raises(ConfigError):
+            build(
+                repo_clone,
+                layout,
+                tmp_path,
+                notifications={"events": ["failure"]},
+                pushover=section,
+            )
+
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        notifications={"events": ["failure"]},
+        pushover={"token_file": str(token), "user_key_file": str(user)},
+    )
+    assert config.pushover is not None
+    assert not any("no notification channel" in w for w in config.warnings)

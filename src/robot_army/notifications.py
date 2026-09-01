@@ -121,6 +121,10 @@ def emit(
         detail=detail,
         url=url,
     )
+    # Counted once per **event**, not once per delivery. Since issue #106 a message may go
+    # to two channels, and counting packets would silently halve how many things the author
+    # is told about — the cap bounds a burst of news, which is exactly how R15 argued for
+    # it (FR-013).
     sent = int(_CYCLE.get("sent") or 0)
     if sent >= config.notifications.max_per_cycle:
         suppressed = list(_CYCLE.get("suppressed") or [])

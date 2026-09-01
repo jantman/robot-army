@@ -53,6 +53,10 @@ _TOKEN_PATTERNS = (
     re.compile(r"^ATTA[A-Za-z0-9_-]{20,}$"),
 )
 
+#: A Pushover application token or user key: 30 alphanumeric characters. Consulted only
+#: when scanning ``[pushover]`` — see :func:`_looks_like_pushover_credential`.
+_PUSHOVER_CREDENTIAL = re.compile(r"^[A-Za-z0-9]{30}$")
+
 VALID_PERMISSION_MODES = (
     "acceptEdits",
     "auto",
@@ -226,6 +230,44 @@ class TrelloConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PushoverConfig:
+    """The second notification channel's two credential files (contracts/config.md).
+
+    Both fields are non-optional, and that is the point: a ``PushoverConfig`` exists only
+    when both keys were configured and both validated, so "a half-configured channel
+    cannot send" is a property of the type rather than a check somewhere downstream.
+
+    Files only, with no ``*_env`` twin. ``[github]`` and ``[trello]`` carry both forms
+    because both were asked for; issue #106 asks for files, and a second form with no
+    caller is the knob Principle I forbids.
+    """
+
+    token_file: Path
+    user_key_file: Path
+
+    def read_token(self) -> str:
+        """Resolve the application token at the moment it is needed, never storing it."""
+        return self._read("token_file", self.token_file)
+
+    def read_user_key(self) -> str:
+        return self._read("user_key_file", self.user_key_file)
+
+    @staticmethod
+    def _read(key: str, path: Path) -> str:
+        # ``strip`` because a credential file written with ``echo`` ends in a newline, and
+        # a newline in a form parameter is a 4xx nobody enjoys diagnosing.
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            # Names the *path*, never the contents — this is the one place a vanished or
+            # unreadable credential file is turned into a message, and the message travels
+            # into an audit record (FR-007).
+            raise ConfigError(
+                [f"[pushover] {key} could not be read: {path} ({exc.strerror})"]
+            ) from exc
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerConfig:
     permission_mode: str = "auto"
     model: str = ""
@@ -378,6 +420,10 @@ class Config:
     #: ``None`` when no ``[trello]`` section exists, which is the default and means the
     #: board source is inert — not merely disabled at a call site (FR-001).
     trello: TrelloConfig | None = None
+    #: ``None`` when no ``[pushover]`` section exists — the default, and the same
+    #: inert-when-absent shape ``trello`` has. Nothing is built, so no request to Pushover
+    #: is ever constructed.
+    pushover: PushoverConfig | None = None
     warnings: tuple[str, ...] = ()
 
     def repo(self, key: str) -> RepoConfig:
@@ -459,6 +505,7 @@ _TOP_LEVEL_SECTIONS = {
     "cleanup",
     "notifications",
     "speckit",
+    "pushover",
     "repos",
 }
 
@@ -466,7 +513,9 @@ _TOP_LEVEL_SECTIONS = {
 #: The rule is the one ``[repos.*]`` established and this file states above: a typo in a
 #: section that exists is a setting that quietly does nothing, which is worse than a
 #: setting that is missing, because it looks applied.
-_STRICT_KEY_SECTIONS = frozenset({"trello", "dispatch", "cleanup", "notifications", "speckit"})
+_STRICT_KEY_SECTIONS = frozenset(
+    {"trello", "dispatch", "cleanup", "notifications", "speckit", "pushover"}
+)
 
 _KNOWN_KEYS: dict[str, set[str]] = {
     "daemon": {
@@ -501,6 +550,9 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "cleanup": {"on_issue_close"},
     "notifications": {"events", "max_per_cycle"},
     "speckit": {"enabled"},
+    # Unknown keys here are an **error** too, for the reason ``[trello]`` states: a typo in
+    # a section that exists is a credential that quietly never loads.
+    "pushover": {"token_file", "user_key_file"},
     # Unknown keys here are an **error**, not the top level's warning, and are handled
     # separately below: a typo in a board section that exists is a board that quietly
     # polls the wrong thing, which is the same class of failure as a typo in [repos.*].
@@ -791,12 +843,22 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         speckit_enabled = True
     speckit = SpecKitConfig(enabled=speckit_enabled)
 
-    if notifications.events and not health.webhook_url:
+    if notifications.events and not health.webhook_url and "pushover" not in raw:
         # A warning, not a problem: the intent is legible and the fix is obvious, and
         # refusing to start over a stretch feature would be disproportionate (R17).
+        #
+        # Either channel satisfies this (FR-015). Tested against the raw section rather
+        # than the parsed ``pushover`` object on purpose: a ``[pushover]`` section that
+        # failed validation has already produced a problem, and adding "and by the way
+        # nothing can be sent" to it would be a second message about one mistake.
+        #
+        # That holds only because *every* malformed ``[pushover]`` section is a problem,
+        # including a bare header — see ``_parse_pushover``. If that check is ever loosened,
+        # this suppression turns into silence.
         warnings.append(
-            "[notifications] events are configured but [health] webhook_url is empty, so "
-            "nothing can be sent; set the webhook or clear the events"
+            "[notifications] events are configured but no notification channel is set, so "
+            "nothing can be sent; set [health] webhook_url or [pushover], or clear the "
+            "events"
         )
 
     # -- [trello] ----------------------------------------------------------
@@ -806,6 +868,14 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
     trello: TrelloConfig | None = None
     if "trello" in raw:
         trello = _parse_trello(raw["trello"], problems)
+
+    # -- [pushover] --------------------------------------------------------
+    # Absent by default, and ``None`` means the same thing it means for ``[trello]``: not
+    # "disabled at a call site" but "there is nothing to build", so ``channels.build``
+    # cannot construct a Pushover request by accident.
+    pushover: PushoverConfig | None = None
+    if "pushover" in raw:
+        pushover = _parse_pushover(raw["pushover"], problems)
 
     # -- [paths] -----------------------------------------------------------
     paths_raw = raw.get("paths", {})
@@ -968,8 +1038,56 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         repo_root=repo_root,
         layout=layout,
         trello=trello,
+        pushover=pushover,
         warnings=tuple(warnings),
     )
+
+
+def _parse_pushover(section: Any, problems: list[str]) -> PushoverConfig | None:
+    """Parse and validate ``[pushover]``, appending every problem it finds.
+
+    Returns ``None`` when the section could not be understood at all, so a caller holding
+    a ``Config`` never sees a half-built channel.
+    """
+    if not isinstance(section, dict):
+        problems.append("[pushover] must be a table")
+        return None
+    for unknown in sorted(set(section) - _KNOWN_KEYS["pushover"]):
+        problems.append(f"[pushover] unknown key {unknown!r}")
+
+    # Both, or neither. An **error** rather than a warning: a half-configured channel
+    # cannot send, and a warning would leave a channel that silently never fires — the
+    # quiet lie milestone 004's contract argues against (FR-004).
+    #
+    # "Neither" means *no section*, not an empty one. A bare ``[pushover]`` header, or one
+    # whose values are empty strings, is an author who meant to configure the channel and
+    # did not finish — and it must not load quietly, because the warning below is suppressed
+    # by the section's mere presence. Getting this wrong produced exactly the silence this
+    # comment claims to refuse: no channel, no problem, no warning.
+    present = [key for key in ("token_file", "user_key_file") if section.get(key)]
+    if len(present) != 2:
+        found = f" (found only {present[0]})" if present else " (found neither)"
+        problems.append(
+            f"[pushover] both token_file and user_key_file must be set{found}; "
+            "a half-configured channel cannot send"
+        )
+
+    for key, value in sorted(section.items()):
+        if not isinstance(value, str) or not _looks_like_pushover_credential(value):
+            continue
+        problems.append(
+            f"[pushover] {key} appears to contain a literal credential. Credentials must "
+            "come from a mode-0600 file, never this file — the repository is public"
+        )
+
+    paths: dict[str, Path | None] = {}
+    for key in ("token_file", "user_key_file"):
+        paths[key] = _secret_file("pushover", key, section.get(key), problems)
+
+    token_file, user_key_file = paths["token_file"], paths["user_key_file"]
+    if token_file is None or user_key_file is None:
+        return None
+    return PushoverConfig(token_file=token_file, user_key_file=user_key_file)
 
 
 def _trello_credential(section: dict[str, Any], what: str, problems: list[str]) -> Path | None:
@@ -983,15 +1101,31 @@ def _trello_credential(section: dict[str, Any], what: str, problems: list[str]) 
     raw_file = section.get(file_key)
     if bool(section.get(env_key)) == bool(raw_file):
         problems.append(f"[trello] exactly one of {env_key} or {file_key} must be set")
-    if not raw_file:
+    return _secret_file("trello", file_key, raw_file, problems)
+
+
+def _secret_file(section_name: str, key: str, raw: Any, problems: list[str]) -> Path | None:
+    """The two checks every credential file gets: it exists, and nobody else can read it.
+
+    Shared by ``[trello]`` and ``[pushover]`` (milestone 106, research.md R6) rather than
+    copied, so a third credential file gains a caller instead of a third opportunity to get
+    the permission mask subtly wrong. ``[trello]``'s extra rule — exactly one of ``*_env``
+    or ``*_file`` — stays with its caller, because Pushover has no ``*_env`` form.
+
+    Returns the path even when it fails a check, so the caller can report every problem
+    about it at once rather than one per load.
+    """
+    if not raw:
         return None
-    path = Path(str(raw_file)).expanduser()
+    path = Path(str(raw)).expanduser()
     if not path.exists():
-        problems.append(f"[trello] {file_key} does not exist: {path}")
+        problems.append(f"[{section_name}] {key} does not exist: {path}")
         return path
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & 0o077:
-        problems.append(f"[trello] {file_key} must be mode 0600, found {mode:04o}: {path}")
+        problems.append(
+            f"[{section_name}] {key} must be mode 0600, found {mode:04o}: {path}"
+        )
     return path
 
 
@@ -1136,3 +1270,20 @@ def _parse_steps(
 
 def _looks_like_token(value: str) -> bool:
     return any(pattern.match(value.strip()) for pattern in _TOKEN_PATTERNS)
+
+
+def _looks_like_pushover_credential(value: str) -> bool:
+    """A Pushover application token or user key pasted where a path belongs.
+
+    Deliberately **not** added to :data:`_TOKEN_PATTERNS`. Pushover's credentials are 30
+    alphanumeric characters, which matches none of the GitHub prefixes or the 32/64-hex
+    Trello shapes — the same gap milestone 003 named for Trello, where the guard could not
+    match the credential it guarded and the test that was meant to cover it proved nothing.
+
+    Widening the shared tuple would apply this rule to ``[github]`` and ``[trello]``, where
+    a legitimate 30-character alphanumeric value is improbable but possible — and there the
+    failure mode is an error the author *cannot* clear. Inside ``[pushover]`` the only
+    legitimate values are paths, which carry a separator or an extension, so a false
+    positive is not reachable (research.md R6).
+    """
+    return bool(_PUSHOVER_CREDENTIAL.match(value.strip())) or _looks_like_token(value)

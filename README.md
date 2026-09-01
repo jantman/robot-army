@@ -525,25 +525,55 @@ everything the comment would have said.
 
 ## Being told when something happens
 
-Off by default — nothing is sent until I ask, and there is no second webhook to configure.
-It reuses `[health] webhook_url`.
+Off by default — nothing is sent until I ask. There are two channels, and either, both, or
+neither may be configured.
 
 ```toml
 [health]
-webhook_url = "https://ntfy.sh/my-private-topic"
+webhook_url = "https://ntfy.sh/my-private-topic"   # a generic JSON POST
+
+[pushover]                                          # a push notification on my phone
+token_file    = "~/.config/robot-army/pushover-token"
+user_key_file = "~/.config/robot-army/pushover-user"
 
 [notifications]
 events = ["failure", "needs_info"]  # dispatch | completion | failure | needs_info
 max_per_cycle = 5
 ```
 
+**Both channels get every message.** Adding Pushover does not replace the webhook, and one
+channel failing never stops the other — each outcome is recorded separately, so the log can
+say "the webhook took it and Pushover did not".
+
+**Why Pushover needs its own channel rather than the webhook.** The webhook posts JSON.
+ntfy accepts that; **Pushover does not** — it takes form-encoded parameters and rejects a
+JSON body. `health.post_json`'s docstring claimed for two milestones that a generic webhook
+covered both, and pointing `webhook_url` at Pushover produced a rejected request rather
+than a notification. That is issue #106.
+
+**Getting the two credentials.** The API token comes from an application registered at
+<https://pushover.net/apps/build>; the user key is on the account dashboard. Each goes in
+its own file, and each file must be mode 0600 — the same rule the GitHub and Trello
+credential files follow. Both keys must be set or neither: a half-configured channel cannot
+send, so it is a load error rather than a channel that silently never fires. A credential
+written into `config.toml` instead of a file is also a load error, because this repository
+is public.
+
 At most `max_per_cycle` messages per daemon tick, then one summary naming how many were
 held back and of which kinds. The bound is per *burst* rather than per event, because a
-backlog produces different items and per-item de-duplication would not bound it at all.
-Every send is in the audit log whether or not it left the machine.
+backlog produces different items and per-item de-duplication would not bound it at all. It
+counts **messages, not deliveries**, so configuring a second channel does not halve how many
+things I am told about. Every send is in the audit log whether or not it left the machine.
 
 Messages carry identifiers and state names only. There is no field a credential could
 reach, and a test asserts it across a run that includes an authentication failure.
+
+**The stale-heartbeat alert goes to every configured channel too** — the one message that
+matters most is the one saying the daemon itself has stopped, and a channel that could not
+carry it would be the wrong half. Unlike the notifications above, that alert is *not* gated
+by the effect level and never has been: `robot-army health --notify` takes no
+`--effect-level` flag, so gating it would silently disable the dead-man's switch whenever
+I am running the daemon at `local`.
 
 ## Pausing dispatch
 

@@ -87,7 +87,7 @@ REAL_CLASSES = {
     "hook_runner": "SubprocessHookRunner",
     "session_host": "DtachHost",
     "display": "KittyDisplay",
-    "notifier": "WebhookNotifier",
+    "notifier": "MultiNotifier",
 }
 SIMULATED_CLASSES = {
     "issue_writer": "SimulatedIssueWriter",
@@ -529,3 +529,30 @@ def test_only_cancel_selects_a_host_from_a_record(config, audit):
         "record-driven host selection spread beyond cancel; see 069 plan.md "
         "Complexity Tracking before adding another"
     )
+
+
+def test_the_startup_record_names_the_configured_channels(board_config, audit):
+    """FR-057. ``MultiNotifier`` alone would hide which channels are live, which is the one
+    fact a reader of the startup record wants from this line (issue #106, R9)."""
+    from dataclasses import replace
+
+
+    described = wire(EffectLevel.LIVE, board_config, audit).describe()
+    assert described["notifier"] == "MultiNotifier()", "no channel configured"
+
+    with_webhook = replace(
+        board_config, health=replace(board_config.health, webhook_url="https://hook")
+    )
+    described = wire(EffectLevel.LIVE, with_webhook, audit).describe()
+    assert described["notifier"] == "MultiNotifier(webhook)"
+
+
+def test_the_simulated_notifier_also_names_what_it_would_have_used(board_config, audit):
+    """Below ``live`` the startup record must not say less than it would above it."""
+    from dataclasses import replace
+
+    with_webhook = replace(
+        board_config, health=replace(board_config.health, webhook_url="https://hook")
+    )
+    described = wire(EffectLevel.LOCAL, with_webhook, audit).describe()
+    assert described["notifier"] == "SimulatedNotifier(webhook)"

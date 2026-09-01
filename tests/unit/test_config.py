@@ -916,3 +916,268 @@ def test_a_repositorys_own_steps_are_what_the_budget_counts_for_it(
 
     # 5s each, from their own steps — not the 60s neither of them inherits.
     assert not any("preparation timeouts" in w for w in config.warnings)
+
+
+# -- [pushover] (issue #106) ------------------------------------------------
+#
+# The credential guard's failure mode is silent, so these are mostly about refusal. A
+# section that "works" with a token in it is a section that will eventually be pasted
+# somewhere, and the repository is public (Principle V).
+
+TOKEN = "aTokenThatIs30CharactersLong00"  # noqa: S105 - a fake credential is the fixture
+USER_KEY = "uUserKeyThatIs30CharsLong00000"
+
+
+def pushover_files(tmp_path, *, mode: int = 0o600):
+    token, user = tmp_path / "po-token", tmp_path / "po-user"
+    token.write_text(TOKEN, encoding="utf-8")
+    user.write_text(USER_KEY, encoding="utf-8")
+    token.chmod(mode)
+    user.chmod(mode)
+    return token, user
+
+
+def test_no_pushover_section_means_the_channel_is_inert(repo_clone, layout, tmp_path):
+    """``None`` is not "disabled at a call site" — there is nothing to build, so no request
+    to Pushover can be constructed by accident (the shape ``[trello]`` established)."""
+    config = build(repo_clone, layout, tmp_path)
+    assert config.pushover is None
+
+
+def test_a_valid_pushover_section_loads(repo_clone, layout, tmp_path):
+    token, user = pushover_files(tmp_path)
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        pushover={"token_file": str(token), "user_key_file": str(user)},
+    )
+    assert config.pushover is not None
+    assert config.pushover.token_file == token
+    assert config.pushover.user_key_file == user
+
+
+def test_the_credentials_never_enter_the_loaded_config(repo_clone, layout, tmp_path):
+    """FR-003. The config holds paths; the values are read at the moment they are needed."""
+    token, user = pushover_files(tmp_path)
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        pushover={"token_file": str(token), "user_key_file": str(user)},
+    )
+    rendered = repr(config)
+    assert TOKEN not in rendered
+    assert USER_KEY not in rendered
+    # ...and are readable when they are needed.
+    assert config.pushover.read_token() == TOKEN
+    assert config.pushover.read_user_key() == USER_KEY
+
+
+@pytest.mark.parametrize("present", ["token_file", "user_key_file"])
+def test_one_credential_key_alone_is_refused(repo_clone, layout, tmp_path, present):
+    """An error rather than a warning: a half-configured channel cannot send, and a warning
+    would leave a channel that silently never fires (FR-004)."""
+    token, user = pushover_files(tmp_path)
+    path = token if present == "token_file" else user
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, pushover={present: str(path)})
+    joined = "\n".join(caught.value.problems)
+    assert "both token_file and user_key_file must be set" in joined
+    assert present in joined, "the message names what was found"
+
+
+def test_a_missing_pushover_credential_file_is_refused(repo_clone, layout, tmp_path):
+    token, _ = pushover_files(tmp_path)
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            pushover={"token_file": str(token), "user_key_file": str(tmp_path / "absent")},
+        )
+    joined = "\n".join(caught.value.problems)
+    assert "user_key_file does not exist" in joined
+    assert "absent" in joined, "the message names the path"
+
+
+def test_a_world_readable_pushover_credential_is_refused(repo_clone, layout, tmp_path):
+    token, user = pushover_files(tmp_path, mode=0o644)
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            pushover={"token_file": str(token), "user_key_file": str(user)},
+        )
+    problems = "\n".join(caught.value.problems)
+    assert "must be mode 0600" in problems
+    assert "0644" in problems, "the message names the mode it found"
+
+
+@pytest.mark.parametrize("key", ["token_file", "user_key_file"])
+def test_a_literal_pushover_credential_is_refused(repo_clone, layout, tmp_path, key):
+    """The gap this closes is worth naming: before it, ``_TOKEN_PATTERNS`` could not match a
+    Pushover credential at all — they are 30 alphanumeric characters, matching none of the
+    GitHub prefixes or the hex Trello shapes. A guard that cannot match the credential it
+    guards proves nothing, which is the same defect milestone 003 found for Trello."""
+    token, user = pushover_files(tmp_path)
+    section = {"token_file": str(token), "user_key_file": str(user)}
+    section[key] = TOKEN if key == "token_file" else USER_KEY
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, pushover=section)
+    joined = "\n".join(caught.value.problems)
+    assert "appears to contain a literal credential" in joined
+    assert key in joined
+
+
+def test_a_github_shaped_token_in_pushover_is_also_refused(repo_clone, layout, tmp_path):
+    """The shared patterns still apply here; the 30-character rule is an addition, not a
+    replacement."""
+    token, user = pushover_files(tmp_path)
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            pushover={
+                "token_file": "ghp_" + "A" * 30,
+                "user_key_file": str(user),
+            },
+        )
+    assert any("literal credential" in p for p in caught.value.problems)
+    assert token.exists()
+
+
+def test_a_real_path_is_never_mistaken_for_a_pushover_credential(
+    repo_clone, layout, tmp_path
+):
+    """The false positive this rule must not have. A path carries a separator or an
+    extension; a credential is 30 bare alphanumerics. This is why the pattern is consulted
+    only inside ``[pushover]`` and was not added to the shared tuple, where a legitimate
+    30-character value would produce an error the author could not clear."""
+    token, user = pushover_files(tmp_path)
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        pushover={"token_file": str(token), "user_key_file": str(user)},
+    )
+    assert config.pushover is not None
+
+
+def test_an_unknown_key_in_pushover_is_an_error(repo_clone, layout, tmp_path):
+    """A typo in a section that exists is a credential that quietly never loads, which is
+    worse than one that is missing because it looks applied."""
+    token, user = pushover_files(tmp_path)
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            pushover={
+                "token_file": str(token),
+                "user_key_file": str(user),
+                "priority": 1,
+            },
+        )
+    assert any("unknown key 'priority'" in p for p in caught.value.problems)
+
+
+def test_every_pushover_problem_is_reported_at_once(repo_clone, layout, tmp_path):
+    """Fixing one typo per restart is a poor experience at 2am, which is the audience the
+    constitution names."""
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            pushover={"token_file": str(tmp_path / "nope"), "sound": "cosmic"},
+        )
+    joined = "\n".join(caught.value.problems)
+    assert "does not exist" in joined
+    assert "unknown key 'sound'" in joined
+    assert "both token_file and user_key_file must be set" in joined
+
+
+def test_a_credential_file_removed_after_load_names_the_path_not_the_contents(
+    repo_clone, layout, tmp_path
+):
+    """The file vanished between load and send. The message travels into an audit record,
+    so it must never carry what the file held (FR-007)."""
+    token, user = pushover_files(tmp_path)
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        pushover={"token_file": str(token), "user_key_file": str(user)},
+    )
+    token.unlink()
+    with pytest.raises(ConfigError) as caught:
+        config.pushover.read_token()
+    joined = "\n".join(caught.value.problems)
+    assert "po-token" in joined
+    assert TOKEN not in joined
+
+
+def test_events_with_only_pushover_configured_do_not_warn(repo_clone, layout, tmp_path):
+    """FR-015. Either channel satisfies the "somewhere to send" condition."""
+    token, user = pushover_files(tmp_path)
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        notifications={"events": ["failure"]},
+        pushover={"token_file": str(token), "user_key_file": str(user)},
+    )
+    assert not any("no notification channel" in w for w in config.warnings)
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        pytest.param({}, id="bare-header"),
+        pytest.param({"token_file": "", "user_key_file": ""}, id="empty-strings"),
+        pytest.param({"token_file": ""}, id="one-empty-string"),
+    ],
+)
+def test_a_pushover_section_with_no_usable_keys_is_refused(
+    repo_clone, layout, tmp_path, section
+):
+    """The gap found in review of #109.
+
+    "Both, or neither" has to mean *no section*, not an empty one. A bare ``[pushover]``
+    header used to load cleanly — no channel, no problem, and no warning either, because
+    the "nothing can be sent" warning is suppressed by the section's mere presence. An
+    author who started configuring the channel and stopped got silence, which is precisely
+    the quiet lie this validation exists to prevent.
+    """
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, pushover=section)
+    assert any("both token_file and user_key_file must be set" in p for p in caught.value.problems)
+
+
+def test_an_incomplete_pushover_section_never_loads_silently(repo_clone, layout, tmp_path):
+    """The property behind the test above, stated as the invariant the warning depends on:
+    a ``[pushover]`` section either produces a working channel or produces a problem. It is
+    never accepted while leaving nothing to send with."""
+    token, user = pushover_files(tmp_path)
+    for section in ({}, {"token_file": str(token)}, {"user_key_file": str(user)}):
+        with pytest.raises(ConfigError):
+            build(
+                repo_clone,
+                layout,
+                tmp_path,
+                notifications={"events": ["failure"]},
+                pushover=section,
+            )
+
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        notifications={"events": ["failure"]},
+        pushover={"token_file": str(token), "user_key_file": str(user)},
+    )
+    assert config.pushover is not None
+    assert not any("no notification channel" in w for w in config.warnings)

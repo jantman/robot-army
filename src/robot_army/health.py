@@ -151,16 +151,20 @@ def check(
 def post_json(
     webhook_url: str, body: dict[str, Any], *, timeout: float = 10.0
 ) -> tuple[bool, str]:
-    """The one bounded-timeout POST this project makes. Vendor-neutral by design.
+    """A bounded-timeout JSON POST. Vendor-neutral, and that is all it is.
 
-    A generic webhook covers ntfy and Pushover — both named in the planning document —
-    without either becoming a dependency. The timeout is explicit because Principle IV
-    requires it of every network call, and there is exactly one call site's worth of that
-    requirement to get right because there is exactly one function.
+    This docstring used to claim that "a generic webhook covers ntfy and Pushover — both
+    named in the planning document — without either becoming a dependency". **The Pushover
+    half was wrong**, and issue #106 exists because of it: ntfy accepts an arbitrary JSON
+    body, Pushover takes form-encoded parameters and rejects anything else. Pointing
+    ``[health] webhook_url`` at Pushover produced a rejected request, not a notification.
+
+    The instinct behind the claim survives intact — one transport module, one timeout
+    convention, no vendor client library. What changed is that "one transport" now means
+    this module's two bounded POST functions rather than this one. See ``post_form``.
 
     Extracted from ``notify`` in milestone 004 so the notifier shares it rather than
-    growing a second HTTP client with a second timeout to keep correct (R14). ``notify``'s
-    own behaviour is unchanged.
+    growing a second HTTP client with a second timeout to keep correct (R14).
     """
     if not webhook_url:
         return False, "no webhook_url configured"
@@ -175,19 +179,52 @@ def post_json(
     return True, f"notified {webhook_url} (HTTP {response.status_code})"
 
 
-def notify(webhook_url: str, report: HealthReport, *, timeout: float = 10.0) -> tuple[bool, str]:
-    """POST the health signal. The body's shape is this function's; the transport is shared."""
-    return post_json(
-        webhook_url,
-        {
-            "title": "robot-army health check failed",
-            "message": report.reason,
-            "healthy": report.healthy,
-            "age_seconds": report.age_seconds,
-            "host": os.uname().nodename,
-            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        },
-        timeout=timeout,
+def post_form(
+    url: str, data: dict[str, str], *, timeout: float = 10.0
+) -> tuple[bool, str]:
+    """A bounded-timeout form-encoded POST — ``post_json``'s sibling, for Pushover (R4).
+
+    Same shape, same explicit timeout, same absence of a retry loop, so there is still one
+    convention to keep correct rather than two. Principle IV requires the timeout of every
+    network call; a notification is also the one thing where a retry is least justified,
+    because the state change it describes is already durably logged.
+
+    **The caller's credentials belong in ``data``, never in ``url``.** The messages this
+    function returns interpolate the URL, so keeping secrets out of it makes FR-007 a
+    property of the signature rather than a rule every call site has to remember. Nothing
+    from the response body is returned for the same reason: recording an upstream body
+    verbatim is how a credential leaks the day the upstream starts echoing the request.
+    """
+    if not url:
+        return False, "no url configured"
+    import httpx
+
+    try:
+        response = httpx.post(url, data=data, timeout=timeout)
+    except httpx.HTTPError as exc:
+        return False, f"POST to {url} failed: {exc}"
+    if response.status_code >= 400:
+        return False, f"{url} returned HTTP {response.status_code}"
+    return True, f"notified {url} (HTTP {response.status_code})"
+
+
+def alert_fields(report: HealthReport) -> tuple[str, str, dict[str, Any]]:
+    """The stale-heartbeat alert, as the three arguments every channel takes.
+
+    A pure composer: the body's shape is this function's, and the transport is somebody
+    else's. It replaced ``notify``, which was this composer welded to a single transport
+    and could therefore only ever reach one channel — the reason a Pushover-only
+    installation would have been told about item failures and never about the daemon
+    dying (research.md R2).
+
+    The fields reproduce the body ``notify`` posted, so an existing webhook sees no change.
+    ``host`` and ``ts`` are added by :func:`robot_army.channels.webhook_body`, which is
+    where they were always added for the notification path.
+    """
+    return (
+        "robot-army health check failed",
+        report.reason,
+        {"healthy": report.healthy, "age_seconds": report.age_seconds},
     )
 
 

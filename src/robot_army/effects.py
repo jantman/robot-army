@@ -147,11 +147,16 @@ class Boundaries:
     #: function of the effect level (069 FR-011).
     #:
     #: The level answers "what should a *new* session use". It cannot answer "what owns
-    #: this row", because a row created as simulated stays simulated for the whole of its
+    #: this row", because a session hosted by simulation stays that way for the whole of its
     #: life no matter what the configuration later becomes — and the ordinary go-live step
     #: is exactly that change. Dispatch at ``local``, raise the level, restart, cancel: the
     #: row still says ``pid = 0``, and ``getpgid(0)`` answers about the *caller*, so the
     #: real host would have signalled the daemon's own process group.
+    #:
+    #: Note for anyone extending this: the caller must **not** select on ``dry_run`` alone.
+    #: ``EffectLevel.is_simulated`` is "not live", so ``no-remote`` rows are dry-run records
+    #: whose host is the real ``DtachHost`` with a real process behind it. Sending those
+    #: here would report a live worker as stopped.
     #:
     #: ``operations.cancel`` is the only reader, asserted by a test. If a second appears,
     #: that is the moment to ask whether the selection belongs back in the table.

@@ -1539,21 +1539,40 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
     # Which host owns this session is a property of the *record*, not of the configured
     # effect level (069 FR-011/FR-012). A row created under simulation stays simulated for
     # the whole of its life, and the level may well have moved since: dispatch at ``local``
-    # leaves a ``dry_run`` row with ``pid = 0`` that no worker will ever close, then raising
+    # leaves a row with ``pid = 0`` that no worker will ever close, then raising
     # ``effect_level`` and restarting — one line in config.toml, the ordinary go-live step —
     # makes ``session_host`` real while the row is not. Routing that row to the real host
     # reaches ``killpg(getpgid(0), …)``, and ``getpgid(0)`` answers about the *caller*: the
     # daemon's own process group, or the operator's shell when the CLI is asking.
     #
+    # The discriminator is NOT ``dry_run``, and that distinction is load-bearing.
+    # ``EffectLevel.is_simulated`` is "not live", so rows created at ``no-remote`` are
+    # ``dry_run`` too — while ``REAL_AT["session_host"]`` includes ``NO_REMOTE``, so those
+    # rows have a **real process** behind a real pid. Routing them here would return
+    # ``confirmed=True`` without signalling anything and mark the item ``interrupted``
+    # while the worker ran on, unvisited by any sweep: issue #34 again, silently, from the
+    # opposite direction. ``dry_run`` means "this row is a dry-run record", which is not the
+    # same fact as "this row's host was simulated".
+    #
+    # What identifies a simulated *host* is the signature it writes and nothing else can:
+    # ``SimulatedSessionHost.confirm_session`` returns ``pid=0, proc_start=None``
+    # deliberately, so that nothing can mistake it for a real process. A real session at any
+    # level records a real pid and (normally) a real start time.
+    #
     # This is the only place in the system that picks an implementation from stored state.
     # A test asserts that it stays the only one.
+    hosted_by_simulation = (
+        session.dry_run and session.pid == 0 and session.proc_start is None
+    )
     host = (
-        ctx.boundaries.simulated_session_host if session.dry_run else ctx.boundaries.session_host
+        ctx.boundaries.simulated_session_host
+        if hosted_by_simulation
+        else ctx.boundaries.session_host
     )
     handle = HostHandle(
         socket_path=session.host_socket or "",
         argv=(),
-        simulated=bool(session.dry_run),
+        simulated=hosted_by_simulation,
         pid=session.pid,
     )
     result = Result()

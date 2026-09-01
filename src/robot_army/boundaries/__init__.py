@@ -574,7 +574,10 @@ class SessionHost(Protocol):
           identified by the recorded pid **and** the recorded start time together. A pid
           with no recorded start time is a bare number and must not be signalled.
           ``procinfo.is_alive`` degrades to a bare existence check when the start time is
-          ``None``; that degradation is fine for liveness and forbidden here.
+          ``None``; that degradation is fine for liveness and forbidden here. This gates the
+          **signal** only — a rung that names a unit rather than a process, such as the
+          recorded systemd scope, carries none of this risk and still runs, or a real
+          session whose registration omitted its start time becomes uncancellable.
         - **S2 — Impossible pids are rejected on sight.** ``0`` and ``1`` are never session
           pids, refused before any rung, independently of S1 — ``/proc/1`` has a real start
           time, so a row carrying pid 1 and a matching one would satisfy S1.

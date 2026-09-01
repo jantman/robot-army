@@ -145,20 +145,33 @@ Step 3 keeps its exact present meaning, and `already_gone` stays distinct from a
 
 ## R6 — Is refusing an absent `proc_start` safe for real rows?
 
-**Yes.** `pid` and `proc_start` are written in the *same* `db.update_session_columns` call, inside
-one transaction, at session confirmation (`dispatch.py:920-927`, from the registry entry's
-`entry.pid` / `entry.proc_start`). There is no ordinary path that records one without the other.
+**Corrected after review (PR #107).** The original answer here was "yes, because `pid` and
+`proc_start` are written in the same transaction, so a row carrying one carries the other". That
+premise is false, and the correction changes where the guard goes.
 
-The rows that carry a pid and no start time are exactly:
+`pid` and `proc_start` *are* written together (`dispatch.py:920-927`) — but from a registry entry
+whose parser requires `pid` to be an `int` and treats `procStart` as **optional**
+(`sessions.py:159-164`: `payload.get("procStart")`, defaulting to `None`), with nothing
+backfilling it afterwards. A real session with a real pid, a real recorded scope and
+`proc_start = NULL` is therefore representable and reachable.
+
+The rows that carry a pid and no start time are:
 
 - **simulated rows** — `pid=0`, `proc_start=None` by construction
-  (`boundaries/dtach.py`, `SimulatedSessionHost.confirm_session`), which FR-011 routes away from
-  the real host entirely; and
-- **malformed rows** — hand-edited, half-written, or produced by a future bug. These are precisely
-  what the guard is for.
+  (`SimulatedSessionHost.confirm_session`), which FR-011 routes away from the real host;
+- **real sessions whose registration omitted `procStart`** — reachable, not malformed; and
+- **malformed rows** — hand-edited, half-written, or produced by a future bug.
 
-**Decision**: refusing costs no legitimate cancel. Any row that loses cancellability this way was
-never safely cancellable — it had no identity to signal against.
+**Decision**: the guard withholds the **signal** and nothing else. The recorded systemd scope names
+a unit and touches no pid or process group, so it carries none of `kill(-1)`'s risk and must still
+be attempted; refusing the whole ladder would make the second category permanently uncancellable,
+because `cancel` has no override path. That trades a catastrophe for a dead end.
+
+Confirmation after the scope stop stays sound without an identity, and the reason is worth stating
+because it is not obvious: **absence is conclusive where presence is not.** If `/proc/<pid>` is
+gone, then neither our process nor a stranger holds that number, so our session is certainly gone.
+A pid still present proves nothing — and that is exactly the case the signal guard refuses to act
+on.
 
 ---
 
@@ -175,8 +188,26 @@ choice, so something has to change.
 | C | Branch inside `DtachHost.terminate` on `HostHandle.simulated` | Rejected — makes the real host responsible for simulating, which is the divergence `contracts/boundaries.md` forbids, and leaves the real host importable-but-lying. |
 | D | Make `REAL_AT` itself record-aware | Rejected — the table is deliberately data, not branches; per-row state has no place in it. |
 
-**Decision (B)**, with one detail that matters: `wire()` constructs the simulated host **once** and
-reuses that instance for `session_host` when the level is simulated:
+**Decision (B)**, with two details that matter.
+
+**First, the discriminator — corrected after review (PR #107).** The original plan routed on
+`session.dry_run`, which is wrong in a way that reintroduces issue #34 with the sign flipped.
+`EffectLevel.is_simulated` is `self is not LIVE` (`effects.py:63-66`), so rows created at
+`no-remote` are `dry_run` — while `REAL_AT["session_host"]` is `{NO_REMOTE, LIVE}`, so at
+`no-remote` the wired host is the real `DtachHost`, which spawns a real process and records a real
+pid. Routing those rows to the simulated host returns `confirmed=True` without signalling anything,
+and `cancel` then marks the item `interrupted` while the worker runs on — visited by no sweep,
+because reconciliation walks only `active` items. Silent, and worse than the refusal this feature
+exists to produce.
+
+"This row is a dry-run record" is not the same fact as "this row's host was simulated". The
+discriminator is the full signature only the simulated host writes — `dry_run` **and** `pid = 0`
+**and** `proc_start IS NULL` — because `SimulatedSessionHost.confirm_session` returns
+`pid=0, proc_start=None` deliberately, so that nothing can mistake it for a real process. A partial
+match is not a match.
+
+**Second**, `wire()` constructs the simulated host **once** and reuses that instance for
+`session_host` when the level is simulated:
 
 ```
 simulated_host = SimulatedSessionHost(audit)

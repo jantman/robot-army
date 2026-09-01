@@ -12,9 +12,9 @@ already populated by ordinary operation:
 | Column | Type | Written where | Role here |
 |---|---|---|---|
 | `pid` | `INTEGER` (nullable) | `dispatch.py:925`, at confirmation | The value that must be validated before anything is signalled. |
-| `proc_start` | `TEXT` (nullable) | `dispatch.py:926`, same transaction | The identity that makes a pid signallable. Absent ⇒ refuse. |
+| `proc_start` | `TEXT` (nullable) | `dispatch.py:926`, same transaction | The identity that makes a pid **signallable**. Absent ⇒ the signal rung is refused; the scope rung still runs. Genuinely nullable: the registration treats it as optional. |
 | `scope` | `TEXT` (nullable) | `dispatch.py:927` | Unchanged. The scope rung is #67's territory. |
-| `dry_run` | `INTEGER NOT NULL` | `db.insert_session`, at row creation | Selects the session host at termination time (FR-011). |
+| `dry_run` | `INTEGER NOT NULL` | `db.insert_session`, at row creation | One of **three** fields that together select the session host at termination time (FR-011). Alone it is not sufficient: it means "not created at `live`", and `no-remote` rows are dry-run records with real processes. |
 | `state` | `TEXT NOT NULL` | `states.transition_session` | Unchanged by a refusal (FR-005). |
 
 The feature is a set of guards over data the system already records. That is the point: the

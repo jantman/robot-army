@@ -258,24 +258,6 @@ class DtachHost:
                 if impossible is not None:
                     return refuse(impossible)
 
-            # And is it *identified*? A pid with no recorded start time is a bare number.
-            # ``procinfo.is_alive`` degrades to a plain "/proc/<pid> exists" check when the
-            # start time is ``None``; that degradation is documented and fine for liveness,
-            # and it is exactly what carried a recorded pid of 1 past the pre-check below
-            # and into ``killpg`` on 2026-08-31. Termination gets the stricter rule (069
-            # S1), and it lives here rather than in ``procinfo`` because the other callers
-            # are only ever *reading* — this one is about to act.
-            #
-            # No legitimate row is lost to this: ``pid`` and ``proc_start`` are written in
-            # the same transaction at session confirmation, so a row carrying one carries
-            # the other. A row that does not was never safely cancellable.
-            if handle.pid is not None and expected_start is None:
-                return refuse(
-                    f"the session row records pid {handle.pid} but no process start time, "
-                    "so there is no way to tell that pid apart from any other process that "
-                    "happens to hold the number"
-                )
-
             # Ask before acting. A session that already died on its own needs no signal,
             # and a *recycled* pid — one whose start time no longer matches — means our
             # process is gone and that a stranger now holds its number. Signalling that
@@ -340,6 +322,28 @@ class DtachHost:
                 outcome["method"] = "none"
                 raise BoundaryError(
                     "cannot terminate: no systemd scope recorded and no pid known"
+                )
+
+            # The scope stop did not take, so the signal is next — and a signal needs an
+            # identity. A pid with no recorded start time is a bare number:
+            # ``procinfo.is_alive`` degrades to a plain "/proc/<pid> exists" check when the
+            # start time is ``None``, which is documented and fine for *liveness* and is
+            # exactly what carried a recorded pid of 1 into ``killpg`` on 2026-08-31.
+            # Signalling gets the stricter rule (069 S1).
+            #
+            # This gates the signal rung and not the whole ladder, deliberately. Such a row
+            # is reachable — the session registry requires ``pid`` to be an int but treats
+            # ``procStart`` as optional (``sessions.py``), and ``dispatch`` stores what it
+            # was given — and refusing it outright would make a real session with a real
+            # recorded scope permanently uncancellable, since ``cancel`` has no override.
+            # The scope stop names a unit and touches no pid or process group, so it
+            # carries none of the risk this guard exists for. Refusing it too would be
+            # trading a catastrophe for a dead end.
+            if expected_start is None:
+                return refuse(
+                    f"the session row records pid {handle.pid} but no process start time, "
+                    "so there is no way to tell that pid apart from any other process that "
+                    "happens to hold the number"
                 )
 
             signal_detail: dict[str, object] = {}

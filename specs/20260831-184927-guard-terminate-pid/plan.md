@@ -19,10 +19,14 @@ The fix is three guards over data the system already records, plus one routing c
 2. **Reject an impossible process group** — `pgid <= 1`.
 3. **Refuse to signal anything unidentified** — a recorded pid with no recorded `proc_start` is a
    bare number, and `procinfo.is_alive`'s documented degradation to a bare existence check must not
-   apply here. This is what let pid `1` through: `is_alive(1, None)` is `True` (measured).
-4. **Route a simulated session record to the simulated host** regardless of the configured effect
-   level, closing the one path — dispatch at `local`, raise the level, cancel — that reaches this
-   code through ordinary operation with no hand-edited database.
+   apply here. This is what let pid `1` through: `is_alive(1, None)` is `True` (measured). It gates
+   the **signal rung only**: the scope stop names a unit, touches no pid, and must still run, or a
+   real session whose registration omitted `procStart` becomes permanently uncancellable.
+4. **Route a session hosted by the simulated host** to that host regardless of the configured
+   effect level, closing the one path — dispatch at `local`, raise the level, cancel — that reaches
+   this code through ordinary operation with no hand-edited database. The test is the full
+   signature `dry_run` **and** `pid = 0` **and** no `proc_start`, never `dry_run` alone: rows
+   created at `no-remote` are dry-run records with **real** processes behind them.
 
 None of these three checks is redundant with the others, and research R1 shows why each candidate
 one-liner fails alone: `pgid <= 1` misses pid `0` (whose `getpgid(0)` is the *caller's* group,
@@ -163,6 +167,30 @@ process termination (`boundaries/dtach.py`), the protocol and outcome type it re
 
 One field, one branch, one caller, and the `describe()` entry that keeps the startup record honest.
 The tension is real and is recorded here rather than left for a reader to find.
+
+## Post-implementation corrections (PR #107 review)
+
+Two defects in the design above were found in review and fixed before merge. Both were mine, and
+both are recorded here rather than quietly amended, because the reasoning that produced them is the
+interesting part.
+
+1. **The identity guard was placed ahead of the whole ladder, not ahead of the signal.** It rested
+   on the claim that `pid` and `proc_start` are always written together, so a row with one has the
+   other. False: `sessions.py` requires `pid` to be an `int` but treats `procStart` as optional, and
+   nothing backfills it. A real session with a real recorded scope and no start time was therefore
+   made permanently uncancellable — `cancel` has no override — even though the scope stop names a
+   unit and touches no pid at all. The guard now gates the signal rung only. See research R6.
+2. **The simulated-host routing keyed on `dry_run`.** `EffectLevel.is_simulated` is "not live", so
+   `no-remote` rows are `dry_run` while their host is the *real* `DtachHost` with a real process
+   behind it. Routing those to the simulated host returned `confirmed=True` without signalling and
+   settled the item while the worker ran on — issue #34 again, silently, from the opposite
+   direction, and strictly worse than the refusal this feature was written to produce. The
+   discriminator is now the full signature the simulated host writes. See research R7.
+
+The common shape is worth naming: both came from stating a premise about the data ("these two
+fields move together", "this flag means that host") without checking it against the code that
+writes them. That is the same failure the feature itself is about — trusting a recorded value
+instead of validating it.
 
 ## Post-design re-check (after Phase 1)
 

@@ -23,6 +23,18 @@ from the same session row, matching a live `/proc` entry. A pid with no recorded
 bare number and MUST NOT be signalled. Degrading to a bare existence check is forbidden here, even
 though `procinfo.is_alive` permits it for liveness.
 
+This gates **the signal rung only**, not the whole ladder. A row with a real pid, a real scope and
+no `proc_start` is reachable — `sessions.py` requires `pid` to be an int but treats `procStart` as
+optional, and `dispatch` stores what it was given — and refusing it outright would make a real
+session permanently uncancellable, since `cancel` has no override. The scope stop names a unit and
+touches no pid or process group, so it carries none of the risk this rule exists for and MUST
+still be attempted.
+
+Confirmation after that scope stop remains sound without an identity, for a reason worth stating:
+**absence is conclusive where presence is not.** If `/proc/<pid>` is gone then neither our process
+nor a stranger holds that number, so our session is certainly gone. A pid still present proves
+nothing — which is precisely the case this rule refuses to act on.
+
 **S2 — Impossible pids are rejected on sight.** `None`, `0` and `1` are never session pids and MUST
 be refused before any rung runs, independently of S1. This is not redundant with S1: `/proc/1` has a
 real start time, so a row carrying pid `1` and a matching one would satisfy S1 (research R1).
@@ -57,10 +69,23 @@ and the pgid it resolves, and MUST raise rather than signal if either is rejecte
 unreachable when `terminate` is correct; it exists so that no future path can reach `os.killpg`
 with a catastrophic argument. Belt and braces is the requirement, not an accident of style.
 
-**S8 — Simulated sessions never reach the real host.** Termination of a session whose record says
-it is simulated is handled by the simulated host regardless of the configured effect level, decided
-from the session record and not from the configuration in force at cancel time (FR-011, FR-012).
-Its outcome is the same confirmed simulated stop it would have produced before a go-live (FR-013).
+**S8 — Simulated sessions never reach the real host.** Termination of a session **hosted by the
+simulated host** is handled by that host regardless of the configured effect level, decided from
+the session record and not from the configuration in force at cancel time (FR-011, FR-012). Its
+outcome is the same confirmed simulated stop it would have produced before a go-live (FR-013).
+
+**The discriminator is not `dry_run`**, and the distinction is load-bearing.
+`EffectLevel.is_simulated` is "not live", so rows created at `no-remote` are `dry_run` — while
+`REAL_AT["session_host"]` includes `NO_REMOTE`, so those rows have a **real process** behind a real
+pid. Routing them to the simulated host would return `confirmed=True` without signalling anything
+and settle the item while the worker ran on, unvisited by any sweep: issue #34 again, silently,
+from the opposite direction. "This row is a dry-run record" and "this row's host was simulated" are
+different facts.
+
+What identifies a simulated host is the signature only it writes: `pid = 0` **and**
+`proc_start = NULL` **and** `dry_run`. `SimulatedSessionHost.confirm_session` produces exactly that,
+deliberately, so nothing can mistake it for a real process. A partial match is not a match — a
+`dry_run` row with a real pid is a `no-remote` session whichever other field is missing.
 
 **S9 — Nothing else narrows.** These rules govern *what may be signalled*. They do not change the
 scope rung's blast radius, the confirmation window, or the meaning of `confirmed`. #67 remains
@@ -79,11 +104,15 @@ Extends 014's C1–C10; those keep their numbers and their meanings.
 | S-C3 | `pid=0`, not simulated | **0** | `False` | `refused` | names pid `0` |
 | S-C4 | `pid=None`, no scope | **0** | `False` | — | *(unchanged: `BoundaryError`, 014 T7)* |
 | S-C5 | `pid=None`, scope recorded | **0** | `False` | `none` | *(unchanged: 014 C8)* |
-| S-C6 | live pid, `proc_start` absent | **0** | `False` | `refused` | names the missing start time |
+| S-C6 | live pid, `proc_start` absent, scope stop works | **0** | `True` | `systemd_scope` | `None` |
+| S-C6b | live pid, `proc_start` absent, scope stop does not take | **0** | `False` | `refused` | names the missing start time |
+| S-C6c | live pid, `proc_start` absent, no scope recorded | **0** | `False` | `refused` | names the missing start time |
 | S-C7 | live pid, `proc_start` mismatches | **0** | `True` | `already_gone` | *(unchanged: 014 C5)* |
 | S-C8 | live pid whose pgid resolves to `1` | **0** | `False` | `refused` | names the process group |
 | S-C9 | ordinary live pid + matching `proc_start` | as today | as today | as today | `None` |
-| S-C10 | session record marked simulated, real effect level | **0** | `True` | `simulated` | `None` |
+| S-C10 | `dry_run` + `pid=0` + no `proc_start`, real effect level | **0** | `True` | `simulated` | `None` |
+| S-C11 | `dry_run` + **real** pid (a `no-remote` session) | as S-C9 | as S-C9 | as S-C9 | `None` |
+| S-C12 | `pid=0` on a row that is **not** `dry_run` | **0** | `False` | `refused` | names pid `0` |
 
 `_signal_group` called directly with pid `0` or `1`, or with a pid whose group resolves to `1`,
 raises `BoundaryError` and calls neither `os.killpg` nor anything else (S7).

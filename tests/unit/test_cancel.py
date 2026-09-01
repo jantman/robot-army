@@ -497,3 +497,108 @@ def test_the_decision_comes_from_the_record_not_from_the_configured_level(conn, 
     result = operations.cancel(ctx, item_id, force=True)
 
     assert result.code == operations.EXIT_OK
+
+
+def seed_no_remote_running(conn, audit) -> int:
+    """A `no-remote` row: ``dry_run=1`` **and a real process behind it**.
+
+    ``EffectLevel.is_simulated`` is "not live", so every row created at ``no-remote`` is
+    ``dry_run``. But ``REAL_AT["session_host"]`` includes ``NO_REMOTE``, so the wired host
+    is the real ``DtachHost``, which spawns a real process and records a real pid and start
+    time. ``dry_run`` therefore does **not** mean "hosted by the simulated host" — the two
+    part company at exactly one level, and it is a level people run.
+    """
+    item_id = seed_item(conn, state="active")
+    with db.transaction(conn):
+        row_id = db.insert_session(
+            conn,
+            work_item_id=item_id,
+            session_id=SESSION,
+            attempt=1,
+            dry_run=True,
+            host_socket=SOCKET,
+        )
+        db.update_session_columns(conn, row_id, pid=PID, proc_start=START, scope=SCOPE)
+        transition_session(
+            conn, audit, session_row_id=row_id, target=SessionState.RUNNING, reason="seeded"
+        )
+    return item_id
+
+
+def test_a_no_remote_session_is_not_mistaken_for_a_simulated_one(conn, audit, config):
+    """Routing on ``dry_run`` alone reintroduces issue #34 with the sign flipped.
+
+    A real worker is running. If the cancel goes to the simulated host it returns
+    ``confirmed=True`` without signalling anything, and the item is marked ``interrupted``
+    while the process keeps running unsupervised — visited by no sweep, because
+    reconciliation walks only ``active`` items. That is a *worse* outcome than the refusal
+    this feature was written to produce, because it is silent.
+    """
+    item_id = seed_no_remote_running(conn, audit)
+    host = OutcomeHost(confirmed())
+
+    result = operations.cancel(ctx_with(conn, audit, config, host), item_id, force=True)
+
+    assert host.calls, "a dry_run row with a real pid must still reach the real host"
+    assert host.calls[0]["pid"] == PID
+    assert result.code == operations.EXIT_OK
+
+
+def test_a_dry_run_row_with_a_real_pid_but_no_start_time_still_goes_to_the_real_host(
+    conn, audit, config
+):
+    """The discriminator is the whole signature, not any one field of it.
+
+    A ``dry_run`` row carrying a real pid is a ``no-remote`` session whichever field is
+    missing. Falling back to the simulated host on a partial match would put us back where
+    the previous version was: silently reporting a live worker as stopped.
+    """
+    item_id = seed_item(conn, state="active")
+    with db.transaction(conn):
+        row_id = db.insert_session(
+            conn,
+            work_item_id=item_id,
+            session_id=SESSION,
+            attempt=1,
+            dry_run=True,
+            host_socket=SOCKET,
+        )
+        db.update_session_columns(conn, row_id, pid=PID, proc_start=None, scope=SCOPE)
+        transition_session(
+            conn, audit, session_row_id=row_id, target=SessionState.RUNNING, reason="seeded"
+        )
+    host = OutcomeHost(confirmed())
+
+    operations.cancel(ctx_with(conn, audit, config, host), item_id, force=True)
+
+    assert host.calls, "a real pid means a real process, whatever dry_run says"
+
+
+def test_a_live_row_with_pid_zero_is_refused_rather_than_simulated(conn, audit, config):
+    """The routing must not become a back door around the guards.
+
+    ``pid = 0`` on a row that is *not* a dry-run record is a malformed real session, not a
+    simulated one. It has to reach the real host and be refused there — routing it to the
+    simulated host would hand it a cheerful ``confirmed=True`` and settle the item.
+    """
+    item_id = seed_item(conn, state="active")
+    with db.transaction(conn):
+        row_id = db.insert_session(
+            conn,
+            work_item_id=item_id,
+            session_id=SESSION,
+            attempt=1,
+            dry_run=False,
+            host_socket=SOCKET,
+        )
+        db.update_session_columns(conn, row_id, pid=0, proc_start=None, scope=None)
+        transition_session(
+            conn, audit, session_row_id=row_id, target=SessionState.RUNNING, reason="seeded"
+        )
+    host = OutcomeHost(refused())
+
+    result = operations.cancel(ctx_with(conn, audit, config, host), item_id, force=True)
+
+    assert host.calls, "a non-dry-run row is never the simulated host's business"
+    assert result.code == operations.EXIT_FAILED
+    assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE

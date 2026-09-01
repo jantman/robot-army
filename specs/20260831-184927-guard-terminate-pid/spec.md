@@ -183,6 +183,9 @@ termination path is never entered.
 - **FR-003**: The termination path MUST NOT deliver a signal to a process that has not been
   positively identified as this session's; a recorded pid carrying no recorded process start time
   MUST be treated as unidentified and refused, not signalled on the strength of the pid alone.
+  This MUST gate the signal only: a termination route that names a unit rather than a process —
+  the recorded systemd scope — carries none of this risk and MUST still be attempted, or a real
+  session with no recorded start time becomes permanently uncancellable.
 - **FR-004**: A refusal MUST NOT be reported as a stop, a confirmed stop, or an "already gone"
   session; it MUST be a distinct outcome in both the action record and the terminal output.
 - **FR-005**: A refusal MUST leave the work item and the session row in the state they were in
@@ -201,8 +204,12 @@ termination path is never entered.
 - **FR-011**: Termination of a session recorded as simulated MUST be handled by the simulated
   session host regardless of the configured effect level, so that raising the effect level cannot
   send a pre-existing simulated row down the real termination path.
-- **FR-012**: The routing in FR-011 MUST be decided from the session record's own recorded
-  simulated flag, not from the configuration in force at the moment of cancellation.
+- **FR-012**: The routing in FR-011 MUST be decided from the session record, not from the
+  configuration in force at the moment of cancellation. It MUST identify a session that was
+  *hosted by simulation*, which is not the same fact as a record merely marked as a dry run:
+  levels exist at which a dry-run record has a real process behind it, and routing one of those
+  to the simulated host would report a live worker as stopped. The test MUST be the complete
+  signature the simulated host writes and nothing less.
 - **FR-013**: A simulated session terminated under FR-011 MUST produce the outcome it produces at a
   simulated effect level — a confirmed simulated stop, neither a refusal nor a real stop — so that
   cancelling a simulated session behaves identically before and after a go-live.
@@ -239,10 +246,10 @@ termination path is never entered.
 
 ## Assumptions
 
-- Any session row the orchestrator writes through ordinary operation records the process start time
-  at the same moment it records the pid, so refusing rows that have a pid but no recorded start time
-  rejects only rows that are already malformed. Rows that lose cancellability this way were never
-  safely cancellable.
+- A session row can carry a real pid and no recorded process start time: the start time is optional
+  in the registration the orchestrator reads, and nothing backfills it. Such a row is therefore not
+  necessarily malformed, and must not lose the termination routes that carry no risk — only the
+  signal is withheld from it.
 - Refusing is preferable to guessing. A malformed session row is an operator problem, and stopping
   with a clear message is a better outcome than any attempt to repair or infer the missing identity
   automatically.

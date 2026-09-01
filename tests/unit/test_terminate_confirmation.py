@@ -434,18 +434,18 @@ def test_s_c6_a_pid_with_no_recorded_start_time_is_not_signalled(host, tmp_path,
     is ``None`` — documented, and fine for liveness — and that degradation is precisely
     what carried a recorded pid of 1 past the pre-check on 2026-08-31.
 
-    Any row reaching this state is malformed by construction: ``pid`` and ``proc_start``
-    are written in the same transaction at session confirmation, so nothing that records
-    one records the other.
+    Such a row is reachable rather than merely malformed: the session registry requires
+    ``pid`` to be an int but treats ``procStart`` as optional, so a real session whose
+    registration omitted it lands here. That is why the guard sits in front of the *signal*
+    rather than in front of the whole ladder — see the scope-stop cases below.
     """
-    harness = Harness(monkeypatch, tmp_path)
+    harness = Harness(monkeypatch, tmp_path, stop_returns=5, stop_kills=False)
     outcome = harness.terminate(host, expected_start=None)
 
     assert outcome.confirmed is False
     assert outcome.method == "refused"
     assert "start time" in (outcome.refused_reason or "")
-    assert harness.stop_calls == []
-    assert harness.signal_calls == []
+    assert harness.signal_calls == [], "the one thing that must not happen"
 
 
 def test_a_recycled_pid_is_still_already_gone_and_not_a_refusal(host, tmp_path, monkeypatch):
@@ -510,3 +510,60 @@ def test_the_record_says_what_was_refused_and_that_nothing_was_sent(
     assert "process group" in detail["refused_reason"]
     assert detail["pid"] == 1, "the intent already named the pid; the outcome keeps it"
     assert detail["rungs"] == [], "decided up front, so nothing was attempted at all"
+
+
+def test_a_missing_start_time_still_allows_the_scope_stop(host, tmp_path, monkeypatch):
+    """The identity guard must gate the *signal*, not the whole ladder.
+
+    A row can carry a real pid, a real scope and no ``proc_start``: the session registry
+    requires ``pid`` to be an int but treats ``procStart`` as optional
+    (``sessions.py``), and ``dispatch`` stores whatever the entry had without backfilling.
+    Refusing that row outright makes it permanently uncancellable — ``cancel`` has no force
+    or override path — even though ``systemctl --user stop`` names a scope and touches no
+    pid or process group at all, and so carries none of the ``kill(-1)`` risk this feature
+    is about.
+
+    Note the confirmation is still sound without an identity. Absence is conclusive where
+    presence is not: if ``/proc/<pid>`` is gone then neither our process nor a stranger
+    holds that number, so our session is certainly gone. A pid that is *still there* proves
+    nothing, and that is the case the signal guard below refuses to act on.
+    """
+    harness = Harness(monkeypatch, tmp_path, stop_returns=0, stop_kills=True)
+    outcome = harness.terminate(host, expected_start=None)
+
+    assert harness.stop_calls, "the scope stop is safe and must still be attempted"
+    assert outcome.confirmed is True
+    assert outcome.method == "systemd_scope"
+    assert harness.signal_calls == []
+
+
+def test_a_missing_start_time_still_refuses_the_signal_after_the_scope_stop(
+    host, tmp_path, monkeypatch
+):
+    """The scope stop was tried and did not take. Now identity matters, and there is none.
+
+    So the ladder stops here rather than signalling a pid it cannot tell apart from any
+    other process holding that number — and the record shows the scope rung ran, which is
+    the difference between this refusal and one decided up front (069 S5).
+    """
+    harness = Harness(monkeypatch, tmp_path, stop_returns=0, stop_kills=False)
+    outcome = harness.terminate(host, expected_start=None)
+
+    assert harness.stop_calls, "the scope stop is attempted first"
+    assert outcome.confirmed is False
+    assert outcome.method == "refused"
+    assert "start time" in (outcome.refused_reason or "")
+    assert harness.signal_calls == []
+    assert outcome.detail["rungs"], "the scope rung ran, and the record must say so"
+
+
+def test_a_missing_start_time_with_no_scope_refuses_without_trying_anything(
+    host, tmp_path, monkeypatch
+):
+    """Nothing safe to try, so nothing is tried."""
+    harness = Harness(monkeypatch, tmp_path)
+    outcome = harness.terminate(host, scope=None, expected_start=None)
+
+    assert harness.stop_calls == []
+    assert harness.signal_calls == []
+    assert outcome.method == "refused"

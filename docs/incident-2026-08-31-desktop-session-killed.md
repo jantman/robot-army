@@ -75,12 +75,15 @@ the others:
    that a `pgid <= 1` test does not catch.
 2. **Impossible process groups are refused**: anything resolving to `1` or lower, checked after
    the group is resolved, which is the only place that third route is visible.
-3. **A pid with no recorded `proc_start` is refused**: it is a bare number, not an identity. This
-   is what actually let the incident through — `procinfo.is_alive(1, None)` degrades to "does
-   `/proc/1` exist", and answers `True`.
-4. **A session recorded as simulated is terminated by the simulated host** regardless of the
-   configured effect level, which closes the one route to this code that needs no hand-edited
-   database: dispatch at `local`, raise the level, cancel a row that still says `pid = 0`.
+3. **A pid with no recorded `proc_start` is not signalled**: it is a bare number, not an identity.
+   This is what actually let the incident through — `procinfo.is_alive(1, None)` degrades to "does
+   `/proc/1` exist", and answers `True`. It withholds the *signal* only; the recorded systemd scope
+   names a unit rather than a process, carries none of this risk, and still runs.
+4. **A session hosted by the simulated host is terminated by it** regardless of the configured
+   effect level, which closes the one route to this code that needs no hand-edited database:
+   dispatch at `local`, raise the level, cancel a row that still says `pid = 0`. The test is the
+   full signature that host writes — `dry_run` *and* `pid = 0` *and* no `proc_start` — because
+   `no-remote` rows are dry-run records with real processes behind them.
 
 The guard sits at the boundary and again in the primitive that calls `os.killpg`, deliberately
 redundantly. A refusal is a distinct outcome — `method="refused"` — that settles nothing, exits

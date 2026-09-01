@@ -145,6 +145,81 @@ def test_a_live_session_yields_skipped_rather_than_a_removal(conn, config, audit
     assert db.get_work_item(conn, item.id).cleanup_state == cleanup.SKIPPED
 
 
+def test_the_skipped_routing_still_keys_on_the_reason_wording(conn, config, audit):
+    """A regression pin, not a behaviour test (issue #79 R3).
+
+    ``clean_item`` decides between ``skipped`` and plain ineligibility by matching the
+    substring ``"still live"`` in the reason :func:`cleanup.eligible` just produced. Only
+    ``skipped`` is reconsidered on a later pass, so rewording that sentence would silently
+    convert every live-session skip into a decision nothing revisits — with the whole suite
+    still green. Issue #79 moved the *computation* of the live list into
+    ``cleanup.live_sessions``; this asserts it left the sentence alone.
+    """
+    item = finished(conn, issue_number=11)
+    seed_session(conn, item.id, state=str(SessionState.RUNNING), session_id="s-wording")
+
+    ok, reason = cleanup.eligible(conn, db.get_work_item(conn, item.id))
+    assert ok is False
+    assert "still live" in reason, "clean_item routes on this substring"
+    assert "s-wording" in reason, "the reason names which session held it up"
+
+    decision = run(conn, audit, config, FakeVcs(), db.get_work_item(conn, item.id))
+    assert decision.state == cleanup.SKIPPED
+    assert db.get_work_item(conn, item.id).id in {
+        candidate.id for candidate in db.list_cleanup_candidates(conn)
+    }, "skipped means 'not yet', so the item must still be a candidate"
+
+
+# -- the shared live-session definition (issue #79 FR-014) ------------------
+
+
+def test_live_sessions_is_empty_when_nothing_is_open(conn):
+    item = finished(conn, issue_number=12)
+    seed_session(conn, item.id, state=str(SessionState.EXITED_CLEAN), session_id="s-done")
+    assert cleanup.live_sessions(conn, item.id) == []
+
+
+@pytest.mark.parametrize("state", [SessionState.STARTING, SessionState.RUNNING])
+def test_every_open_state_counts_as_live(conn, state):
+    item = finished(conn, issue_number=13)
+    seed_session(conn, item.id, state=str(state), session_id=f"s-{state}")
+    live = cleanup.live_sessions(conn, item.id)
+    assert [session.session_id for session in live] == [f"s-{state}"]
+
+
+@pytest.mark.parametrize(
+    "state", [SessionState.EXITED_CLEAN, SessionState.EXITED_ERROR, SessionState.LOST]
+)
+def test_no_closed_state_counts_as_live(conn, state):
+    item = finished(conn, issue_number=14)
+    seed_session(conn, item.id, state=str(state), session_id=f"s-{state}")
+    assert cleanup.live_sessions(conn, item.id) == []
+
+
+def test_an_earlier_attempt_still_open_is_found(conn):
+    """The case ``db.latest_session_for_item`` would miss (issue #79 R1).
+
+    A superseded attempt's worker keeps running, reparented — that is what the
+    ``orphan_session`` anomaly exists to report — so asking only about the newest row
+    answers "nothing is running" while a worker is still writing in the directory.
+    """
+    item = finished(conn, issue_number=15)
+    seed_session(conn, item.id, state=str(SessionState.RUNNING), session_id="s-first")
+    seed_session(conn, item.id, state=str(SessionState.EXITED_CLEAN), session_id="s-second")
+
+    assert db.latest_session_for_item(conn, item.id).session_id == "s-second"
+    assert [s.session_id for s in cleanup.live_sessions(conn, item.id)] == ["s-first"]
+
+
+def test_live_sessions_come_back_in_attempt_order(conn):
+    item = finished(conn, issue_number=16)
+    seed_session(conn, item.id, state=str(SessionState.RUNNING), session_id="s-1")
+    seed_session(conn, item.id, state=str(SessionState.STARTING), session_id="s-2")
+    live = cleanup.live_sessions(conn, item.id)
+    assert [s.session_id for s in live] == ["s-1", "s-2"]
+    assert [s.attempt for s in live] == sorted(s.attempt for s in live)
+
+
 def test_skipped_is_revisited_automatically_and_retained_is_not(conn, config):
     """The whole point of distinguishing them: one means "not yet", the other means "we
     looked and decided no"."""

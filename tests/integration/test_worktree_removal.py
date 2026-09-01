@@ -16,21 +16,23 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from tests.conftest import make_boundaries, seed_item
+from tests.conftest import make_boundaries, seed_item, seed_session
 
 from robot_army import db, operations, worktree
 from robot_army.boundaries.hooks import SubprocessHookRunner
 from robot_army.config import RepoConfig
 from robot_army.effects import EffectLevel
-from robot_army.operations import EXIT_FAILED, EXIT_OK, Context
-from robot_army.states import WorkItemState
+from robot_army.operations import EXIT_FAILED, EXIT_OK, EXIT_PRECONDITION, Context
+from robot_army.states import SessionState, WorkItemState
 
 pytestmark = pytest.mark.requires_git
 
 
-def prepared_item(conn, audit, config, layout) -> tuple[int, Path, str]:
+def prepared_item(
+    conn, audit, config, layout, *, state: WorkItemState = WorkItemState.INTERRUPTED
+) -> tuple[int, Path, str]:
     boundaries = make_boundaries(audit, hooks=SubprocessHookRunner(audit))
-    item_id = seed_item(conn, state=str(WorkItemState.INTERRUPTED))
+    item_id = seed_item(conn, state=str(state))
     result = worktree.prepare(
         boundaries=boundaries,
         audit=audit,
@@ -127,6 +129,47 @@ def test_force_with_the_typed_id_removes_a_dirty_worktree(conn, audit, config, l
         force=True,
         confirm=lambda _: str(item_id),
     )
+    assert result.code == EXIT_OK, result.lines
+    assert not path.exists()
+    assert branch not in branches(config.repos["demo"].path)
+
+
+def test_a_live_session_survives_the_removal_directory_branch_and_all(
+    conn, audit, config, layout
+):
+    """Issue #79, against real git rather than a stub.
+
+    A read-only session leaves the tree clean, so git has no objection at all — which is
+    why this defect was reachable through the ordinary lifecycle and why the guard cannot
+    be git's. The item is left ``done`` on purpose: terminal is exactly the state an
+    operator reclaims disk from, and the session keeps running by design.
+    """
+    item_id, path, branch = prepared_item(
+        conn, audit, config, layout, state=WorkItemState.DONE
+    )
+    seed_session(conn, item_id, state=str(SessionState.RUNNING), session_id="s-live")
+
+    result = operations.worktree_remove(
+        make_context(conn, audit, config),
+        item_id,
+        confirm=lambda _: pytest.fail("the refusal is not a question"),
+    )
+
+    assert result.code == EXIT_PRECONDITION, result.lines
+    assert path.exists(), "the worker is still writing in there"
+    assert (path / "README.md").exists()
+    assert branch in branches(config.repos["demo"].path), (
+        "the branch is deleted in the same command, so losing it loses the only copy"
+    )
+    assert db.get_work_item(conn, item_id).worktree_path == str(path)
+
+
+def test_the_same_worktree_is_removed_once_the_session_closes(conn, audit, config, layout):
+    """The other half of the guarantee: no removal that works today becomes a refusal."""
+    item_id, path, branch = prepared_item(conn, audit, config, layout)
+    seed_session(conn, item_id, state=str(SessionState.EXITED_CLEAN), session_id="s-done")
+
+    result = operations.worktree_remove(make_context(conn, audit, config), item_id)
     assert result.code == EXIT_OK, result.lines
     assert not path.exists()
     assert branch not in branches(config.repos["demo"].path)

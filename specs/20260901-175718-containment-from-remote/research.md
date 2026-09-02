@@ -128,9 +128,26 @@ we cannot demonstrate our commits are reachable from it without fetching objects
 objects is the write this design is avoiding. The case only arises when someone else pushed to the
 robot's branch, which is rare, conservative to refuse, and recoverable (the branch is kept).
 
-**Decision**: guard the `commits_ahead` call with `rev_parse(clone, sha)` so the retention reason
+**Decision**: guard the `commits_ahead` call with a `rev_parse` of the sha so the retention reason
 can say *why* — "the remote's branch is at a commit this clone does not have" is a different and
 more useful sentence than "commits exist ahead".
+
+**And the guard has to peel.** Measured after review caught it: `git rev-parse --verify` on a bare
+forty-hex string validates that the argument names a single revision, which is a question about
+syntax, and answers for a commit the clone has never seen.
+
+```
+$ git rev-parse --verify 1234567890123456789012345678901234567890
+1234567890123456789012345678901234567890          # exit 0, and the object is not here
+$ git rev-parse --verify 1234567890123456789012345678901234567890^{commit}
+fatal: Needed a single revision                   # exit 128
+```
+
+Since the value being checked is always a full sha, the unpeeled form can never answer `None`, and
+the guard it protects would never fire — the case would fall through to `commits_ahead`, fail
+there, and be reported as "could not compare" instead of the sentence written for it. The peel is
+`<sha>^{commit}`, and `tests/unit/test_git_boundary.py` pins the distinction at the boundary rather
+than leaving it as a comment two files from the caller.
 
 ---
 

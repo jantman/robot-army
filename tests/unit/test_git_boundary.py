@@ -215,3 +215,28 @@ def test_the_simulation_answers_so_a_planned_cleanup_still_decides(clone_with_re
     simulated = SimulatedVersionControl(audit)
     assert simulated.remote_branch_head(str(clone), "origin", "anything") == "0" * 40
     assert simulated.rev_parse(str(clone), "0" * 40) == "0" * 40
+
+
+def test_rev_parse_does_not_prove_an_object_is_present_unless_it_is_peeled(
+    clone_with_remote, audit
+):
+    """Why cleanup's containment check peels to ``^{commit}`` (PR #112 review).
+
+    ``git rev-parse --verify`` validates that its argument is a single revision. For a
+    bare forty-hex string that is a question about *syntax*: it echoes the string back and
+    exits zero whether or not the object exists. Only peeling forces the lookup.
+
+    This is pinned here, in the boundary's own tests, because the caller that got it wrong
+    is two files away and its unit test used a fake that answered the way the author
+    expected git to rather than the way git does.
+    """
+    clone, _bare = clone_with_remote
+    absent = "1" * 40
+
+    vcs = GitVersionControl(audit)
+    assert vcs.rev_parse(str(clone), absent) == absent, "a bare sha proves nothing"
+    assert vcs.rev_parse(str(clone), f"{absent}^{{commit}}") is None
+
+    present = vcs.rev_parse(str(clone), "refs/heads/main")
+    assert present is not None
+    assert vcs.rev_parse(str(clone), f"{present}^{{commit}}") == present

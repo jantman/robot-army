@@ -72,13 +72,23 @@ class FakeVcs:
         return self.remote_head
 
     def rev_parse(self, clone_path: str, ref: str) -> str | None:
-        # Two callers, and only one of them is being varied. ``_branch_exists`` asks about
-        # ``refs/heads/<branch>`` and must keep getting "yes", or ``clean_item`` concludes
-        # the branch was already gone and never reaches the containment check at all.
-        # ``head_is_local`` is about the commit the *remote* named, and nothing else.
-        if not self.head_is_local and ref == self.remote_head:
+        """Real ``git rev-parse --verify`` semantics, including the awkward one.
+
+        A bare forty-hex string is echoed back and exits zero **whether or not the object
+        is here** — it is a syntax check, not a lookup. Only peeling (``<sha>^{commit}``)
+        forces git to find the object. This fake reproduces that distinction on purpose:
+        a fake that answered ``None`` for an absent bare sha would let a caller that
+        forgot the peel pass its tests and fail against git, which is exactly what
+        happened here before review caught it.
+
+        The other caller, ``_branch_exists``, asks about ``refs/heads/<branch>`` and must
+        keep getting "yes", or ``clean_item`` concludes the branch was already gone and
+        never reaches the containment check at all.
+        """
+        peeled = ref.removesuffix("^{commit}")
+        if peeled != ref and not self.head_is_local and peeled == self.remote_head:
             return None
-        return ref
+        return peeled
 
     def worktree_exists(self, worktree_path: str) -> bool:
         return self.worktree_present

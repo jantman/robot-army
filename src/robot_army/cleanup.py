@@ -390,7 +390,14 @@ def _pushed_to_remote(
         return False, f"{remote} does not have {branch}"
 
     try:
-        local = vcs.rev_parse(clone, head)  # type: ignore[attr-defined]
+        # ``^{commit}`` is load-bearing, not decoration. ``git rev-parse --verify`` on a
+        # bare forty-hex string echoes it back and exits zero **whether or not the object
+        # is here** — it validates the syntax of a revision, not the presence of what it
+        # names. Since ``head`` always is forty hex characters, asking without the peel
+        # made this branch unreachable and sent the case to ``commits_ahead`` instead,
+        # where it failed and produced "could not compare" rather than the sentence that
+        # says what actually happened. Peeling to a commit forces the lookup.
+        local = vcs.rev_parse(clone, f"{head}^{{commit}}")  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - see above
         local = None
     if local is None:
@@ -406,7 +413,14 @@ def _pushed_to_remote(
     if ahead is None:
         return False, f"git could not compare {branch} with {head}, so it is unproven"
     if ahead > 0:
-        return False, f"{ahead} commit(s) on {branch} are not on {remote}, which has {head}"
+        # Named as the remote's branch at the commit that was actually compared. "not on
+        # origin" would be both vaguer and wrong: a remote is not a ref, and those commits
+        # may well be somewhere else on it — under another branch, or an open pull request.
+        # What is true, and what decides this, is that they are not on *this* branch there.
+        return False, (
+            f"{ahead} commit(s) on {branch} are not on {remote}/{branch}, "
+            f"which is at {head}"
+        )
     return True, f"every commit is on {remote}/{branch}, which is at {head} now"
 
 

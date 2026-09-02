@@ -56,14 +56,21 @@ outcomes is a visible `return` rather than a fallthrough:
 |---|---|
 | `remote_branch_head` raised | `(False, "could not ask <remote> whether <branch> is published (<err>)")` |
 | `remote_branch_head` returned `None` | `(False, "<remote> does not have <branch>")` |
-| the sha does not resolve in this clone | `(False, "<remote>/<branch> is at <sha>, which this clone does not have")` |
+| the sha does not resolve in this clone | `(False, "<remote> has <branch> at <sha>, which this clone does not have")` |
 | `commits_ahead` returned `None` | `(False, "git could not compare <branch> with <sha>")` |
-| `commits_ahead` returned `n > 0` | `(False, "<n> commit(s) on <branch> are not on <remote> at <sha>")` |
+| `commits_ahead` returned `n > 0` | `(False, "<n> commit(s) on <branch> are not on <remote>/<branch>, which is at <sha>")` |
 | `commits_ahead` returned `0` | `(True, "every commit is on <remote>/<branch>, which is at <sha> now")` |
 
 Only the last authorises a delete. The sha appears in both the proving and the refusing sentences
 because it is the whole substance of the fix: the record has to show *which* commit the remote
-reported at the moment of the decision, not merely that a ref name was consulted (FR-008, US3).
+reported at the moment of the decision, not merely that a ref name was consulted (FR-008, US3). The
+refusals name `<remote>/<branch>` rather than `<remote>` for the same reason — a remote is not a
+ref, and the commits may well be elsewhere on it; what decides the case is that they are not on
+that branch there.
+
+**Resolving the reported sha must peel it.** `git rev-parse --verify <forty hex>` is a question
+about the syntax of a revision, not about the presence of the object: it echoes the string back and
+exits zero for a commit the clone has never seen. Only `<sha>^{commit}` forces the lookup. See R5.
 
 ### `_branch_is_contained`, after
 

@@ -412,6 +412,11 @@ def test_a_remote_commit_this_clone_does_not_have_proves_nothing(
 
     assert [d.state for d in decisions] == [cleanup.BRANCH_RETAINED]
     assert branch in branches(published)
+    # Against real git, not the fake. The reason is asserted because the decision alone
+    # cannot tell this case apart from "git could not compare them" — and for a while it
+    # really was reaching the wrong one of those, since `rev-parse --verify` on a bare sha
+    # answers about syntax rather than presence (PR #112 review).
+    assert "which this clone does not have" in decisions[0].reason
 
 
 def test_a_branch_merged_into_the_base_is_still_deleted_on_base_evidence(

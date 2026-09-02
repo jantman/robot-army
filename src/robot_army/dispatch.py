@@ -1439,9 +1439,17 @@ def _hold_identity(entry: Any) -> tuple[str, str]:
     returns a pair rather than a reason. A paused system, an unobservable capacity and a
     full machine are facts about the *machine*; the entry carrying one is merely whichever
     item happened to be at the head of the queue, and that head shifts whenever an item is
-    abandoned or the order changes. Keying on its repository would report one uninterrupted
-    condition as a succession of short holds handing over to each other — each with its
-    duration restarted and a ``freed_by`` naming a repository that freed nothing.
+    abandoned or the order changes. Keying on its repository would claim that one
+    uninterrupted condition had *ended* every time the head moved, and blame the ending on
+    a repository that freed nothing.
+
+    What it would **not** have caused, and what this therefore does not fix, is the
+    ``started_at`` reset: a head shift changes the *signature* too, and ``_note_hold`` has
+    always reopened its slot on a signature change. That is pre-existing and deliberate —
+    ``test_a_changed_hold_signature_is_recorded_again`` pins it — so a long global hold
+    still reports as several ``dispatch.at_capacity`` records with their own durations.
+    They are simply no longer punctuated by ``hold_ended`` records asserting something that
+    did not happen.
     """
     if entry.hold in _GLOBAL_HOLDS:
         return (str(entry.hold), MACHINE)

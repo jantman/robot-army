@@ -302,11 +302,17 @@ re-checking what its callers were entitled to assume.
 `(reason, repository)` for every hold, including the global ones — but a global hold is a
 fact about the *machine*, and the entry reporting it is merely whichever item happened to be
 at the head of the queue. That head shifts whenever an item is abandoned or the order
-changes, so one uninterrupted "the machine is full" was reported as a succession of short
-holds handing over to each other, each with its duration restarted and a `freed_by` naming a
-repository that had freed nothing. A global hold's identity now carries a `MACHINE` sentinel
-in place of a repository, which is what makes the pair a pair rather than an over-specified
-reason.
+changes, so one uninterrupted "the machine is full" was reported as a succession of holds
+handing over to each other, each ending blamed on a repository that had freed nothing. A
+global hold's identity now carries a `MACHINE` sentinel in place of a repository, which is
+what makes the pair a pair rather than an over-specified reason.
+
+The fix's own docstring initially over-claimed, and was corrected: identity governs whether
+an *ending* is asserted, and nothing else. A head shift still changes the signature, and
+`_note_hold` has always reopened its slot on a signature change, so a long global hold still
+reports as several `dispatch.at_capacity` records with their own durations. That is
+pre-existing and pinned by a test. What the fix removes is the `hold_ended` records
+asserting something that did not happen.
 
 Two rounds, two bugs, both in the same seam: not in what was added, but in what the addition
 made untrue. That seam is worth naming for whoever changes this next — the hold recorder's

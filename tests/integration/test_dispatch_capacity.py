@@ -347,6 +347,178 @@ def test_a_changed_hold_signature_is_recorded_again(
     assert [r["detail"]["live_sessions"] for r in held] == [2, 3]
 
 
+# -- the wait-for-merge gate, end to end (milestone 047) --------------------
+
+
+def waiting_for_merge(config, repo_key: str = "demo"):
+    section = replace(config.repos[repo_key], wait_for_merge=True)
+    return replace(config, repos={**config.repos, repo_key: section})
+
+
+def test_a_repository_waiting_for_a_merge_dispatches_nothing(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """The feature the issue asks for, through the real dispatcher rather than through
+    ``plan`` alone: an unfinished item stops the next one starting."""
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    queued = ready_item(conn, config, repo_key="demo", issue_number=1)
+
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 0
+    assert db.get_work_item(conn, queued).state is WorkItemState.READY
+
+
+def test_a_waiting_repository_does_not_stall_the_others(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """FR-007, and the reason ``awaiting_merge`` is deliberately absent from
+    ``_GLOBAL_HOLDS``: a ``break`` here would let one repository's wait stop every other
+    repository's work in the same pass."""
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    held = ready_item(conn, config, repo_key="demo", issue_number=1)
+    elsewhere = ready_item(conn, config, repo_key="other", issue_number=3)
+
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
+    assert db.get_work_item(conn, held).state is WorkItemState.READY
+    assert db.get_work_item(conn, elsewhere).state is WorkItemState.ACTIVE
+
+
+def test_the_wait_lifts_when_the_unfinished_item_finishes(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """FR-008. Merging the pull request closes the issue, a closed issue becomes ``done``,
+    and ``done`` is what opens the gate — no new machinery on the release path."""
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    blocker = seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    queued = ready_item(conn, config, repo_key="demo", issue_number=1)
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 0
+
+    conn.execute(
+        "UPDATE work_items SET state = ? WHERE id = ?", (str(WorkItemState.DONE), blocker)
+    )
+    conn.commit()
+
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
+    assert db.get_work_item(conn, queued).state is WorkItemState.ACTIVE
+
+
+# -- per-item holds are recorded too (milestone 047, FR-015) ----------------
+
+
+def test_a_pass_stopped_by_a_per_item_hold_is_recorded(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """Before 047 only the three global holds were recorded, so a queue stopped by a
+    per-repository condition left no trace at all — ``repo_cap`` included."""
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    ready_item(conn, config, repo_key="demo", issue_number=1)
+
+    run_two(conn, audit, config, layout, tmp_path, machine)
+
+    held = records(layout, audit, "dispatch.at_capacity")
+    assert len(held) == 1, held
+    assert held[0]["detail"]["reason"] == "awaiting_merge"
+    assert held[0]["detail"]["repo_key"] == "demo"
+    assert "#41" in held[0]["detail"]["detail"]
+
+
+def test_an_unchanging_per_item_hold_is_recorded_once(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """The de-duplication that makes recording per-item holds affordable at a five-second
+    tick, and the Principle III gap plan.md enumerates: a hold is recorded when it starts
+    and when it ends, not once per pass for as long as it lasts."""
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    ready_item(conn, config, repo_key="demo", issue_number=1)
+
+    for _ in range(5):
+        run_two(conn, audit, config, layout, tmp_path, machine)
+
+    assert len(records(layout, audit, "dispatch.at_capacity")) == 1
+
+
+def test_a_per_item_hold_that_lifts_is_recorded_as_ended(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    blocker = seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    ready_item(conn, config, repo_key="demo", issue_number=1)
+    for _ in range(3):
+        run_two(conn, audit, config, layout, tmp_path, machine)
+
+    conn.execute(
+        "UPDATE work_items SET state = ? WHERE id = ?",
+        (str(WorkItemState.ABANDONED), blocker),
+    )
+    conn.commit()
+    run_two(conn, audit, config, layout, tmp_path, machine)
+
+    ended = records(layout, audit, "dispatch.hold_ended")
+    assert len(ended) == 1, ended
+    assert ended[0]["detail"]["reason"] == "awaiting_merge"
+    assert ended[0]["detail"]["passes_spanned"] == 3
+
+
+def test_a_hold_whose_reason_changes_is_recorded_again(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """The signature carries the reason since 047. A repository whose ``repo_cap`` hold
+    gives way to an ``awaiting_merge`` hold has changed what the author must do about it,
+    and the machine-wide counts alone would not have noticed."""
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    running = seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.ACTIVE)
+    )
+    row = seed_session(conn, running, state=str(SessionState.RUNNING), session_id="s-demo")
+    ready_item(conn, config, repo_key="demo", issue_number=1)
+    run_two(conn, audit, config, layout, tmp_path, machine)
+
+    # The session ends; the item is still unfinished. The cap frees and the gate takes over.
+    conn.execute(
+        "UPDATE sessions SET state = ? WHERE id = ?", (str(SessionState.EXITED_CLEAN), row)
+    )
+    conn.execute(
+        "UPDATE work_items SET state = ? WHERE id = ?",
+        (str(WorkItemState.AWAITING_REVIEW), running),
+    )
+    conn.commit()
+    run_two(conn, audit, config, layout, tmp_path, machine)
+
+    held = records(layout, audit, "dispatch.at_capacity")
+    assert [r["detail"]["reason"] for r in held] == ["repo_cap", "awaiting_merge"]
+
+
+def test_a_pass_that_dispatched_something_is_not_recorded_as_held(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """A pass that started work and then ran out of candidates has not stalled. Calling
+    that a hold would put a record in the log every time the machine filled up normally."""
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    ready_item(conn, config, repo_key="demo", issue_number=1)
+    ready_item(conn, config, repo_key="other", issue_number=3)
+
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
+    assert records(layout, audit, "dispatch.at_capacity") == []
+
+
 # -- SC-006: the queue's "next" is the dispatcher's "next" (T036) ----------
 
 

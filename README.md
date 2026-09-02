@@ -477,10 +477,12 @@ max_concurrent_sessions = 2         # the whole machine, mine included
 [dispatch]
 order = "oldest-first"              # or "repo-priority"
 default_repo_max_sessions = 1       # per repository, unless overridden below
+wait_for_merge = false              # globally; see "Working a repository serially" below
 
 [repos."jantman/example"]           # an override, not a registration — see above
 max_sessions = 2                    # optional; overrides the default above
 priority = 10                       # optional; higher runs first under repo-priority
+wait_for_merge = true               # optional; overrides the default above
 ```
 
 ```bash
@@ -515,6 +517,53 @@ Four things worth knowing:
 `repo-priority` drains higher-priority repositories first and breaks ties oldest-first.
 There is deliberately no aging: a low-priority repository can wait indefinitely while a
 high-priority one keeps producing work, which is what choosing that mode means.
+
+## Working a repository serially
+
+`max_sessions` and `wait_for_merge` answer two different questions and I kept mixing them
+up until I wrote this down.
+
+**`max_sessions` counts live sessions.** The moment a session exits, the slot is free and
+the next issue in that repository starts — from a default branch that does *not* yet
+contain the work that just finished, because that work is sitting in a pull request I have
+not looked at. For a repository where every issue touches the same files, that is the
+collision, and no session cap can express the wait, because there is no session to count.
+
+**`wait_for_merge` waits for the work to land.** With it on, a repository dispatches
+nothing while it has an *unfinished* item — one that has been dispatched at least once and
+has not reached `done` or `abandoned`. Merging the pull request closes the issue, a closed
+issue makes the item `done`, and the next issue goes out on the following pass. Merging is
+entirely mine to do: this never opens, approves or merges anything.
+
+```bash
+uv run robot-army status     # the held item, and "#41 is awaiting_review and has not landed"
+uv run robot-army capacity   # both limits per repository, and where each one came from
+```
+
+Three consequences worth knowing before turning it on:
+
+- **A `failed` item holds the repository too.** It is unfinished work, whatever condition it
+  is in. `robot-army retry <id>` or `robot-army abandon <id>` says which — and the hold names
+  the item, so I am not left guessing what stopped.
+- **It holds one repository, never the queue.** Every other repository dispatches in the
+  same pass, exactly as it does under `max_sessions`.
+- **It fast-forwards my own clone.** Before creating the worktree, the clone's local default
+  branch is advanced to the freshly fetched remote head — see below. Sessions have always
+  branched from `origin/<base>`, so this is for *my* clone rather than for theirs.
+
+### The clone fast-forward
+
+Only for repositories with `wait_for_merge` in force, and only ever a fast-forward. It is
+skipped, with the reason recorded, whenever the clone has uncommitted changes (untracked
+files included), is on another branch or a detached `HEAD`, is mid-rebase, mid-merge,
+mid-cherry-pick or mid-bisect, has no such remote, or holds commits on its default branch
+that the remote does not. There is no `--force` anywhere in it and nothing is ever reset or
+rebased. A skip never fails the dispatch — the worktree comes off the remote-tracking ref
+either way.
+
+```bash
+uv run robot-army log --json | grep git.fast_forward   # outcome, reason, and the shas
+```
 
 ## What it writes on the issue
 

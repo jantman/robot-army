@@ -738,6 +738,120 @@ def test_a_repository_cap_above_the_global_cap_warns_and_takes_the_minimum(
     assert any("exceeds [daemon] max_concurrent_sessions" in w for w in config.warnings)
 
 
+# -- wait-for-merge (milestone 047) -----------------------------------------
+
+
+def test_wait_for_merge_is_off_by_default(repo_clone, layout, tmp_path):
+    """An installation that never asked for it must not discover the change by watching
+    its queue stop."""
+    config = build(repo_clone, layout, tmp_path)
+    assert config.dispatch.wait_for_merge is False
+    assert config.repos["demo"].wait_for_merge is None
+    assert config.effective_wait_for_merge("demo") == (False, False)
+
+
+def test_wait_for_merge_set_globally_is_inherited_not_chosen(repo_clone, layout, tmp_path):
+    config = build(repo_clone, layout, tmp_path, dispatch={"wait_for_merge": True})
+    assert config.effective_wait_for_merge("demo") == (True, False)
+
+
+def test_a_repository_may_turn_wait_for_merge_on(repo_clone, layout, tmp_path):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        repos={
+            "demo": {"path": str(repo_clone), "base_branch": "main", "wait_for_merge": True}
+        },
+    )
+    assert config.repos["demo"].wait_for_merge is True
+    assert config.effective_wait_for_merge("demo") == (True, True)
+
+
+def test_a_repository_may_turn_wait_for_merge_off_against_the_global_setting(
+    repo_clone, layout, tmp_path
+):
+    """The row of contracts/config.md's table that a boolean with no ``min()`` makes
+    possible: a repository opting *out* of a setting the author turned on globally."""
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        dispatch={"wait_for_merge": True},
+        repos={
+            "demo": {"path": str(repo_clone), "base_branch": "main", "wait_for_merge": False}
+        },
+    )
+    assert config.effective_wait_for_merge("demo") == (False, True)
+
+
+def test_an_unconfigured_repository_inherits_the_global_wait_for_merge(
+    repo_clone, layout, tmp_path
+):
+    """A repository with no ``[repos.*]`` section at all still answers the question."""
+    config = build(repo_clone, layout, tmp_path, dispatch={"wait_for_merge": True})
+    assert config.effective_wait_for_merge("owner/never-mentioned") == (True, False)
+
+
+@pytest.mark.parametrize("value", ["yes", 1, "true"])
+def test_a_non_boolean_global_wait_for_merge_refuses_to_load(
+    repo_clone, layout, tmp_path, value
+):
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, dispatch={"wait_for_merge": value})
+    assert any(
+        "[dispatch] wait_for_merge must be true or false" in p for p in caught.value.problems
+    )
+
+
+@pytest.mark.parametrize("value", ["yes", 1, "false"])
+def test_a_non_boolean_repository_wait_for_merge_refuses_to_load(
+    repo_clone, layout, tmp_path, value
+):
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            repos={
+                "demo": {
+                    "path": str(repo_clone),
+                    "base_branch": "main",
+                    "wait_for_merge": value,
+                }
+            },
+        )
+    assert any("wait_for_merge must be true or false" in p for p in caught.value.problems)
+
+
+def test_a_misspelt_wait_for_merge_in_dispatch_is_an_error(repo_clone, layout, tmp_path):
+    """A setting that quietly does nothing while looking applied is worse than one that is
+    missing — which for this setting means a queue that never stops when the author asked
+    it to."""
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, dispatch={"wait_for_merg": True})
+    assert any("[dispatch] unknown key 'wait_for_merg'" in p for p in caught.value.problems)
+
+
+def test_a_misspelt_wait_for_merge_in_a_repository_section_is_an_error(
+    repo_clone, layout, tmp_path
+):
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            repos={
+                "demo": {
+                    "path": str(repo_clone),
+                    "base_branch": "main",
+                    "wait_for_mrege": True,
+                }
+            },
+        )
+    assert any("unknown key 'wait_for_mrege'" in p for p in caught.value.problems)
+
+
 def test_a_repository_priority_defaults_to_zero(repo_clone, layout, tmp_path):
     """Equal priority everywhere makes repo-priority degrade to oldest-first, which is the
     harmless reading of a repository nobody has ranked."""

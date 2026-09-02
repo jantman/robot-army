@@ -240,3 +240,255 @@ def test_rev_parse_does_not_prove_an_object_is_present_unless_it_is_peeled(
     present = vcs.rev_parse(str(clone), "refs/heads/main")
     assert present is not None
     assert vcs.rev_parse(str(clone), f"{present}^{{commit}}") == present
+
+
+# -- fast_forward (milestone 047, T026-T029) --------------------------------
+#
+# The refusals are the point of these tests, not the success. This is the one verb in the
+# protocol that writes to the author's own working clone, so the property being defended is
+# not "it advances the branch" — it is that in every state a clone can be in, nothing the
+# author has is lost and the reason is on the record.
+
+
+@pytest.fixture
+def behind(tmp_path):
+    """A clone on ``main``, clean, with ``origin/main`` one commit ahead of it.
+
+    Built by pushing from a *second* clone, because that is how the real case arises: the
+    author merges a pull request on GitHub and their own clone knows nothing about it until
+    something fetches.
+    """
+    from tests.conftest import make_repo
+
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    git(bare, "init", "--bare", "-q", "-b", "main")
+
+    clone = make_repo(tmp_path / "clones" / "demo")
+    git(clone, "remote", "add", "origin", str(bare))
+    git(clone, "push", "-q", "-u", "origin", "main")
+
+    other = tmp_path / "clones" / "other"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "clone", "-q", str(bare), str(other)], check=True, capture_output=True)
+    (other / "landed.txt").write_text("merged work\n", encoding="utf-8")
+    git(other, "add", "-A")
+    git(
+        other,
+        "-c",
+        "user.email=t@e.com",
+        "-c",
+        "user.name=T",
+        "commit",
+        "-q",
+        "-m",
+        "the previous issue",
+    )
+    git(other, "push", "-q", "origin", "main")
+
+    git(clone, "fetch", "-q", "origin", "main")
+    return clone
+
+
+def head_of(path: Path, ref: str = "HEAD") -> str:
+    return subprocess.run(
+        ["git", "rev-parse", ref], cwd=path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def status_of(path: Path) -> str:
+    return subprocess.run(
+        ["git", "status", "--porcelain"], cwd=path, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def test_a_clean_clone_behind_its_remote_is_fast_forwarded(behind, audit):
+    before = head_of(behind)
+    target = head_of(behind, "origin/main")
+
+    result = GitVersionControl(audit).fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "updated"
+    assert result.before == before
+    assert result.after == target
+    assert head_of(behind) == target
+    assert (behind / "landed.txt").exists()
+
+
+def test_a_clone_already_at_the_remote_head_reports_already_current(behind, audit):
+    """"Declined, and here is why" and "there was nothing to do" are different facts, and
+    only one of them should make the author look at their clone."""
+    vcs = GitVersionControl(audit)
+    vcs.fast_forward(str(behind), "origin", "main")
+
+    result = vcs.fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "already_current"
+    assert result.before == result.after == head_of(behind)
+    assert result.reason is None
+
+
+def test_an_uncommitted_change_is_a_skip_and_the_clone_is_untouched(behind, audit):
+    """The check that protects the author's work. Everything about this feature is a
+    convenience; losing an edit to deliver it would be a bad trade at any price."""
+    (behind / "README.md").write_text("# mine, unsaved\n", encoding="utf-8")
+    before, status = head_of(behind), status_of(behind)
+
+    result = GitVersionControl(audit).fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "skipped"
+    assert "uncommitted" in result.reason
+    assert head_of(behind) == before
+    assert status_of(behind) == status
+
+
+def test_an_untracked_file_is_a_skip_too(behind, audit):
+    """Untracked counts as dirt, for the reason ``worktree remove`` treats it that way: the
+    merge would refuse anyway if it brought in a file of that name, and it would refuse
+    after we had claimed we were only fast-forwarding."""
+    (behind / "scratch.txt").write_text("notes\n", encoding="utf-8")
+    before = head_of(behind)
+
+    result = GitVersionControl(audit).fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "skipped"
+    assert "uncommitted" in result.reason
+    assert head_of(behind) == before
+    assert (behind / "scratch.txt").exists()
+
+
+def test_being_on_another_branch_is_a_skip_that_names_the_branch(behind, audit):
+    git(behind, "checkout", "-q", "-b", "elsewhere")
+    before = head_of(behind)
+
+    result = GitVersionControl(audit).fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "skipped"
+    assert "elsewhere" in result.reason
+    assert head_of(behind) == before
+    assert head_of(behind, "main") == before
+
+
+def test_a_detached_head_is_a_skip(behind, audit):
+    git(behind, "checkout", "-q", "--detach", "HEAD")
+    before = head_of(behind)
+
+    result = GitVersionControl(audit).fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "skipped"
+    assert "detached" in result.reason
+    assert head_of(behind) == before
+
+
+def test_an_interrupted_operation_is_a_skip_even_with_a_clean_tree(behind, audit):
+    """A conflicted merge leaves a dirty tree and is caught by the check above. A *clean*
+    one is not, and moving the branch out from under it would strand it."""
+    git_dir = behind / ".git"
+    (git_dir / "MERGE_HEAD").write_text(head_of(behind) + "\n", encoding="utf-8")
+    before = head_of(behind)
+
+    result = GitVersionControl(audit).fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "skipped"
+    assert "merge" in result.reason
+    assert head_of(behind) == before
+
+
+def test_a_local_commit_the_remote_lacks_is_a_skip_not_a_rebase(behind, audit):
+    """The one case where "catch up" would mean discarding work. Every unresolved doubt
+    leaves the clone alone, and this is not even a doubt."""
+    (behind / "mine.txt").write_text("my own commit\n", encoding="utf-8")
+    git(behind, "add", "-A")
+    git(behind, "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-q", "-m", "mine")
+    before = head_of(behind)
+
+    result = GitVersionControl(audit).fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "skipped"
+    assert "not a fast-forward" in result.reason
+    assert head_of(behind) == before
+    assert (behind / "mine.txt").exists()
+
+
+def test_a_clone_with_no_such_remote_is_a_skip(behind, audit):
+    git(behind, "remote", "remove", "origin")
+    before = head_of(behind)
+
+    result = GitVersionControl(audit).fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "skipped"
+    assert "no remote" in result.reason
+    assert head_of(behind) == before
+
+
+def test_a_remote_tracking_ref_that_does_not_exist_is_a_skip(behind, audit):
+    """A fetch that produced nothing to advance to is not a failure.
+
+    The branch is checked out here — otherwise the *previous* check would answer first, and
+    the test would prove nothing about this one.
+    """
+    git(behind, "checkout", "-q", "-b", "local-only")
+
+    result = GitVersionControl(audit).fast_forward(str(behind), "origin", "local-only")
+
+    assert result.outcome == "skipped"
+    assert "does not exist" in result.reason
+
+
+def test_a_failing_merge_is_reported_rather_than_raised(behind, audit, monkeypatch):
+    """FR-019: the caller is mid-dispatch and must proceed. ``--ff-only`` is the last line
+    of defence behind the six checks, and when it fires the result is an outcome, not an
+    exception."""
+    vcs = GitVersionControl(audit)
+    real = vcs._run
+
+    def refuse(args, **kwargs):
+        if args[:1] == ["merge"]:
+            return real(["merge", "--ff-only", "refs/heads/no-such-thing"], **kwargs)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(vcs, "_run", refuse)
+    before = head_of(behind)
+
+    result = vcs.fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "failed"
+    assert result.reason
+    assert head_of(behind) == before
+
+
+def test_the_outcome_is_on_the_record(behind, audit, layout):
+    """Principle III: the clone's default branch moving is a change to state outside this
+    process, so it is written down with the shas that bracket it."""
+    import json
+
+    GitVersionControl(audit).fast_forward(str(behind), "origin", "main")
+    audit.close()
+
+    records = [
+        json.loads(line)
+        for path in sorted(layout.log_dir.glob("audit-*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    # The *outcome* half of the intent/outcome pair: the intent is written before the work
+    # happens and so cannot carry what happened.
+    entry = [
+        r
+        for r in records
+        if r["action"] == "git.fast_forward" and r["outcome"] != "pending"
+    ][-1]
+    assert entry["detail"]["outcome"] == "updated"
+    assert entry["detail"]["before"] != entry["detail"]["after"]
+
+
+def test_the_simulated_implementation_changes_nothing(behind, audit):
+    """Unlike ``remote_url``, this cannot answer honestly by doing the real thing — it is
+    the one verb that writes to the author's clone, and a simulation that performed it
+    would be simulating nothing."""
+    before = head_of(behind)
+
+    result = SimulatedVersionControl(audit).fast_forward(str(behind), "origin", "main")
+
+    assert result.outcome == "skipped"
+    assert "simulated" in result.reason
+    assert head_of(behind) == before

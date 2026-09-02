@@ -79,6 +79,11 @@ WRAPPER_NAME = "robot-army-session-wrapper"
 #: because no *later* item could fit into a slot this one could not. Anything else is a
 #: condition of one item, and a queue that stops on one item's condition is a queue where
 #: one blocked repository stalls every other.
+#:
+#: ``awaiting_merge`` is deliberately absent for exactly that reason (milestone 047, FR-007):
+#: a repository waiting for its work to land must leave every other repository free to
+#: dispatch in the same pass. Being outside this set does not mean going unrecorded — see
+#: ``_HOLD`` below, which since 047 records a pass stopped by a per-item hold too.
 _GLOBAL_HOLDS: frozenset[HoldReason] = frozenset(
     {HoldReason.PAUSED, HoldReason.CAPACITY_UNOBSERVABLE, HoldReason.GLOBAL_CAP}
 )
@@ -1375,15 +1380,40 @@ def _safe_comment(boundaries: Boundaries, audit: AuditLog, item: Any, body: str)
 #: Deliberately volatile. Losing it across a restart costs exactly one extra record, which
 #: is far less than a table costs to keep correct.
 _HOLD: dict[str, Any] = {}
+#: Records **any** hold that stops a pass, not only the three global ones.
+#:
+#: Until milestone 047 this mechanism fired only when a ``_GLOBAL_HOLDS`` reason broke the
+#: loop, which meant ``repo_cap`` — a reason that has existed since milestone 004 — never
+#: appeared in the log at all. The wait-for-merge gate is per-item for the same reason
+#: ``repo_cap`` is (FR-007: one waiting repository must not stall the others), so making it
+#: loggable by promoting it to a global hold was never available. Widening the recorder was,
+#: and it covers ``repo_cap`` on the way past.
+#:
+#: The single slot and its signature are what keep this affordable at a five-second tick.
+#: plan.md enumerates and justifies the resulting Principle III gap: a hold is recorded when
+#: it *starts* and when it *ends*, not once per pass for as long as it lasts.
 
 
 def _hold_signature(entry: Any, snap: Any) -> tuple[Any, ...]:
     """What makes this hold *the same hold* as the last pass's.
 
-    The counts, the cap, and which item is at the head. Any of those changing is news; none
-    of them changing is the same sentence repeated.
+    The counts, the cap, which item is at the head — and, since milestone 047, *why* it is
+    held and in which repository. Any of those changing is news; none of them changing is
+    the same sentence repeated.
+
+    The reason had to join the signature once per-item holds started being recorded. A
+    repository whose ``repo_cap`` hold gives way to an ``awaiting_merge`` hold has changed
+    what the author must do about it, and under the old signature — same item, same
+    machine-wide counts — that change would have been swallowed as a repeat.
     """
-    return (snap.total, snap.others, snap.global_cap, entry.item.id)
+    return (
+        snap.total,
+        snap.others,
+        snap.global_cap,
+        entry.item.id,
+        str(entry.hold),
+        entry.item.repo_key,
+    )
 
 
 def _note_hold(audit: AuditLog, entry: Any, snap: Any) -> None:
@@ -1404,6 +1434,7 @@ def _note_hold(audit: AuditLog, entry: Any, snap: Any) -> None:
         detail={
             "reason": str(entry.hold),
             "detail": entry.detail,
+            "repo_key": entry.item.repo_key,
             "live_sessions": snap.total,
             "cap": snap.global_cap,
             "ours": len(snap.ours),
@@ -1498,6 +1529,10 @@ def select_and_dispatch(
         )
         selected = None
         blocked = None
+        # The first *per-item* hold seen this pass, kept only so that a pass which
+        # dispatches nothing can say what stopped it. A global hold, when there is one,
+        # always wins the report: it is the reason nothing else was even considered.
+        first_held = None
         for entry in ordering.plan(conn, config=config, capacity=snap):
             if entry.item.id in attempted:
                 continue
@@ -1505,6 +1540,8 @@ def select_and_dispatch(
                 blocked = entry
                 break
             if entry.hold is not None:
+                if first_held is None:
+                    first_held = entry
                 continue
             selected = entry
             break
@@ -1513,7 +1550,18 @@ def select_and_dispatch(
             _note_hold(audit, blocked, snap)
             return dispatched
         if selected is None:
-            _clear_hold(audit, snap, freed_by="the queue drained")
+            # Two different silences, and collapsing them would leave the log unable to tell
+            # an idle machine from a stalled one. Nothing eligible at all is the queue
+            # draining; everything eligible held is a hold, recorded as one even though it
+            # skipped items rather than breaking the pass (R5, FR-015).
+            #
+            # ``dispatched == 0`` because a pass that started something and then ran out of
+            # candidates has not stalled — it has done its work and stopped, and calling that
+            # a hold would put a record in the log every time the machine filled up normally.
+            if first_held is not None and dispatched == 0:
+                _note_hold(audit, first_held, snap)
+            else:
+                _clear_hold(audit, snap, freed_by="the queue drained")
             return dispatched
 
         _clear_hold(audit, snap, freed_by=f"item {selected.item.id} became dispatchable")

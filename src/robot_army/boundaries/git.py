@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from robot_army.boundaries import (
     BoundaryError,
+    FastForwardResult,
     RemovalResult,
     WorktreeHandle,
     WorktreeInfo,
@@ -235,6 +236,169 @@ class GitVersionControl:
             outcome["note"] = "the remote answered and does not have this branch"
             return None
 
+    def fast_forward(
+        self, clone_path: str, remote: str, branch: str
+    ) -> FastForwardResult:
+        """Advance the clone's own ``branch`` to ``remote/branch``, or say why not.
+
+        The six preconditions are checked *before* anything is attempted, and each one that
+        fails yields ``skipped`` with a reason naming it. That is not defensive
+        over-engineering of ``git merge --ff-only``: the merge alone would refuse a
+        divergent history, but it would refuse it as a non-zero exit carrying prose, and it
+        would not have told us which branch was checked out or that the tree was dirty.
+        The author wondering why their clone is still behind needs *dirty working tree*,
+        not *exit 128*.
+
+        ``--ff-only`` is still passed, as the last line of defence behind the checks.
+
+        Nothing here raises. The caller is mid-dispatch and this is a convenience for the
+        author's own clone; the session's worktree is built from ``remote/branch``
+        regardless, so a failure here must not become a failed work item (FR-019).
+        """
+        with self._audit.action(
+            "git.fast_forward",
+            target=f"{clone_path}:{branch}",
+            detail={"remote": remote, "branch": branch},
+        ) as outcome:
+            result = self._fast_forward(clone_path, remote, branch)
+            outcome["outcome"] = result.outcome
+            outcome["reason"] = result.reason
+            outcome["before"] = result.before
+            outcome["after"] = result.after
+            return result
+
+    def _fast_forward(
+        self, clone_path: str, remote: str, branch: str
+    ) -> FastForwardResult:
+        """The decision itself, so the audit wrapper above stays one readable block."""
+        # 1. A remote to advance to at all.
+        if remote not in self.list_remotes(clone_path):
+            return FastForwardResult(
+                outcome="skipped", reason=f"the clone has no remote named {remote!r}"
+            )
+
+        # 2. On the branch, and *symbolically* — which is the check that also catches a
+        #    detached HEAD and an interrupted rebase, because neither has one.
+        checked_out = self._symbolic_head(clone_path)
+        if checked_out is None:
+            return FastForwardResult(
+                outcome="skipped",
+                reason="the clone has no branch checked out (detached HEAD or an "
+                "interrupted rebase)",
+            )
+        if checked_out != branch:
+            return FastForwardResult(
+                outcome="skipped",
+                reason=f"the clone is on {checked_out!r}, not {branch!r}",
+            )
+
+        # 3. The check that protects uncommitted work. Untracked files count: git's own
+        #    `worktree remove` treats them as dirt for the same reason, and a merge that
+        #    brought in a file the author already had untracked would refuse anyway —
+        #    loudly, and after we had claimed we were only fast-forwarding.
+        if self.status_porcelain(clone_path).strip():
+            return FastForwardResult(
+                outcome="skipped", reason="the clone has uncommitted changes"
+            )
+
+        # 4. Nothing half-finished. A conflicted merge leaves a dirty tree and is caught
+        #    above, but a *clean* one — `merge --no-commit`, a cherry-pick paused with
+        #    nothing to resolve — is not, and moving the branch under it would strand it.
+        in_progress = self._operation_in_progress(clone_path)
+        if in_progress is not None:
+            return FastForwardResult(
+                outcome="skipped", reason=f"an operation is in progress ({in_progress})"
+            )
+
+        # 5. Something to advance to. A fetch that produced nothing is not a failure.
+        target = self.rev_parse(clone_path, f"{remote}/{branch}")
+        if not target:
+            return FastForwardResult(
+                outcome="skipped",
+                reason=f"{remote}/{branch} does not exist in the clone after fetching",
+            )
+        before = self.rev_parse(clone_path, branch)
+        if before == target:
+            return FastForwardResult(
+                outcome="already_current", before=before, after=target
+            )
+
+        # 6. It is genuinely a fast-forward. A local branch holding commits the remote does
+        #    not is the one case where "catch up" would mean discarding work, and this
+        #    boundary never does that — it declines and says so.
+        ancestor = self._run(
+            ["merge-base", "--is-ancestor", branch, f"{remote}/{branch}"],
+            cwd=clone_path,
+            timeout=QUICK_TIMEOUT,
+            action="git.subprocess",
+            check=False,
+        )
+        if not ancestor.ok:
+            return FastForwardResult(
+                outcome="skipped",
+                reason=f"{branch} has commits {remote}/{branch} does not — this would be a "
+                "merge or a rebase, not a fast-forward",
+                before=before,
+            )
+
+        merged = self._run(
+            ["merge", "--ff-only", f"{remote}/{branch}"],
+            cwd=clone_path,
+            timeout=QUICK_TIMEOUT,
+            action="git.subprocess",
+            check=False,
+        )
+        if not merged.ok:
+            return FastForwardResult(
+                outcome="failed",
+                reason=(merged.stderr or merged.stdout or "git merge --ff-only failed").strip(),
+                before=before,
+            )
+        return FastForwardResult(
+            outcome="updated", before=before, after=self.rev_parse(clone_path, branch)
+        )
+
+    def _symbolic_head(self, clone_path: str) -> str | None:
+        """The checked-out branch name, or ``None`` when HEAD is not a symbolic ref."""
+        result = self._run(
+            ["symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=clone_path,
+            timeout=QUICK_TIMEOUT,
+            action="git.subprocess",
+            check=False,
+        )
+        name = result.stdout.strip()
+        return name if result.ok and name else None
+
+    #: The marker each interrupted operation leaves in the git directory, and the word for
+    #: it. A list rather than a single "is anything in progress?" query because git has no
+    #: such query, and because the record is more useful naming which one.
+    _IN_PROGRESS_MARKERS: tuple[tuple[str, str], ...] = (
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("BISECT_LOG", "bisect"),
+    )
+
+    def _operation_in_progress(self, clone_path: str) -> str | None:
+        result = self._run(
+            ["rev-parse", "--absolute-git-dir"],
+            cwd=clone_path,
+            timeout=QUICK_TIMEOUT,
+            action="git.subprocess",
+            check=False,
+        )
+        if not result.ok or not result.stdout.strip():
+            # Cannot tell, so decline. Every unresolved doubt leaves the clone alone.
+            return "the git directory could not be located"
+        git_dir = Path(result.stdout.strip())
+        for marker, name in self._IN_PROGRESS_MARKERS:
+            if (git_dir / marker).exists():
+                return name
+        return None
+
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None:
         """Read a file from the git object store, not the filesystem.
 
@@ -383,6 +547,23 @@ class SimulatedVersionControl:
         # here would mean "the remote does not have this branch", so every branch would be
         # retained at ``plan`` level and the simulation would stop describing the product.
         return "0" * 40
+
+    def fast_forward(
+        self, clone_path: str, remote: str, branch: str
+    ) -> FastForwardResult:
+        """Logs and changes nothing.
+
+        Unlike ``remote_url`` and ``list_remotes`` above, this is not a cheap read that can
+        answer honestly — it is the one verb in this protocol that writes to the author's
+        own clone, and a simulation that performed it would be simulating nothing at all.
+        ``skipped`` rather than ``updated`` because the caller records the outcome, and a
+        dry run claiming it moved a branch it did not move is the kind of lie the effect
+        levels exist to prevent.
+        """
+        self._log("git.fast_forward", clone=clone_path, remote=remote, branch=branch)
+        return FastForwardResult(
+            outcome="skipped", reason="simulated boundary makes no change to the clone"
+        )
 
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None:
         self._log("git.show_file_at_ref", clone=clone_path, ref=ref, path=path)

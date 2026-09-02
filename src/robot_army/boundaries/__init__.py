@@ -184,6 +184,37 @@ class RemovalResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FastForwardResult:
+    """What happened when the clone's own default branch was asked to catch up.
+
+    Four outcomes, and **they must stay four**, for the reason
+    :meth:`VersionControl.remote_branch_head` gives about its own three. *Declined, and
+    here is why* and *did nothing* are different facts, and only the first answers the
+    question the author actually asks — why is my clone still behind?
+
+    ``outcome`` is one of:
+
+    * ``updated`` — the branch moved. ``before`` and ``after`` are both set and differ.
+    * ``already_current`` — it was already at the remote head. Both set, and equal.
+    * ``skipped`` — a precondition failed and **nothing was attempted**. ``reason`` says
+      which one.
+    * ``failed`` — git was invoked and refused or errored. ``reason`` carries its message.
+
+    Nothing here is stored. It is written into the ``worktree.prepare`` audit record beside
+    ``fetch_skipped``, which is the record that already exists for this step.
+    """
+
+    outcome: str
+    reason: str | None = None
+    before: str | None = None
+    after: str | None = None
+
+    @property
+    def changed(self) -> bool:
+        return self.outcome == "updated"
+
+
+@dataclass(frozen=True, slots=True)
 class HookResult:
     ok: bool
     step_index: int | None = None
@@ -457,6 +488,33 @@ class VersionControl(Protocol):
         """
         ...
 
+    def fast_forward(
+        self, clone_path: str, remote: str, branch: str
+    ) -> FastForwardResult:
+        """Advance the clone's **local** ``branch`` to ``remote/branch``, or decline and say why.
+
+        The one verb in this protocol that writes to the author's own working clone rather
+        than to a worktree the system created, which is why every guarantee below is a
+        guarantee rather than an intention:
+
+        * **Never forces.** No ``--force``, no ``reset --hard``, and no ``update-ref`` on a
+          branch that is checked out — that last one being the only thing here that could
+          actually destroy uncommitted work.
+        * **Never discards a commit.** A local branch holding commits the remote does not
+          is a skip, never a rebase and never a reset.
+        * **Never touches a file the author changed.** A dirty working tree — untracked
+          files included — is a skip.
+        * **Never raises.** Every failure is an outcome, because the caller's dispatch must
+          proceed regardless: the session's worktree is created from ``remote/branch``
+          whatever happens here.
+
+        Preconditions are checked *before* anything is attempted, in the order
+        contracts/version-control.md lists them, so the record can say *dirty working tree*
+        rather than *exit 128*. ``--ff-only`` is still passed to the merge as the last line
+        of defence behind them.
+        """
+        ...
+
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None: ...
 
     def rev_parse(self, clone_path: str, ref: str) -> str | None:
@@ -656,6 +714,7 @@ __all__ = [
     "CardWriteResult",
     "Display",
     "DisplayHandle",
+    "FastForwardResult",
     "HookResult",
     "HookRunner",
     "HostCapabilities",

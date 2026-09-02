@@ -134,6 +134,11 @@ class RepoConfig:
     #: Zero by default, which makes that mode degrade to oldest-first — the harmless
     #: reading of an unconfigured repository.
     priority: int = 0
+    #: Whether this repository waits for its previous issue to land before starting the
+    #: next one. ``None`` inherits ``[dispatch] wait_for_merge``, and the distinction is
+    #: kept rather than resolved at parse time for the reason ``max_sessions`` keeps its
+    #: own: a surface reporting "waiting" should be able to say *which* setting said so.
+    wait_for_merge: bool | None = None
     #: Whether this repository's sessions are told it uses Spec Kit. ``None`` inherits
     #: ``[speckit] enabled``; the distinction is kept rather than resolved at parse time so
     #: the record can say *which* setting suppressed a dispatch (milestone 007, FR-011).
@@ -339,10 +344,17 @@ class DispatchConfig:
     ``default_repo_max_sessions`` defaults to ``1`` because every collision risk planning
     §6 measured is per-clone: two sessions under one repository share its ports, its dev
     server, and its submodule fetches. A repository that genuinely tolerates two says so.
+
+    ``wait_for_merge`` defaults to ``False`` because it changes when work starts, and an
+    installation that never asked for it must not discover the change by watching its
+    queue stop. It is the *global* value rather than a default the per-repository setting
+    falls back to computing something from — which is why it is not named
+    ``default_wait_for_merge``: unlike a session count, there is nothing to default.
     """
 
     order: str = "oldest-first"
     default_repo_max_sessions: int = 1
+    wait_for_merge: bool = False
 
 
 #: The four things worth saying out loud (contracts/notifications.md). A closed set: an
@@ -573,6 +585,24 @@ class Config:
         )
         return min(requested, self.daemon.max_concurrent_sessions), explicit
 
+    def effective_wait_for_merge(self, key: str) -> tuple[bool, bool]:
+        """Whether this repository waits for its work to land, and whether the author said so.
+
+        Returns ``(value, explicit)``, shaped exactly like :meth:`effective_repo_cap` and
+        for the same second-element reason: a surface saying "waiting for #41" should be
+        able to tell the author which file to edit to stop waiting.
+
+        There is deliberately no ``min()`` counterpart. ``[daemon] max_concurrent_sessions``
+        is a machine-wide *ceiling* that a per-repository count could over-specify, so the
+        cap has two numbers to reconcile; ``[dispatch] wait_for_merge`` is simply the same
+        boolean at a wider scope, and a repository that overrides it is not exceeding
+        anything.
+        """
+        repo = self.repos.get(key)
+        if repo is not None and repo.wait_for_merge is not None:
+            return repo.wait_for_merge, True
+        return self.dispatch.wait_for_merge, False
+
 
 # -- loading ---------------------------------------------------------------
 
@@ -631,7 +661,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "web": {"bind", "port", "refresh_seconds"},
     # Unknown keys here are an **error** too — see _STRICT_KEY_SECTIONS. An ordering the
     # author thought they configured and did not is the failure this prevents.
-    "dispatch": {"order", "default_repo_max_sessions"},
+    "dispatch": {"order", "default_repo_max_sessions", "wait_for_merge"},
     "cleanup": {"on_issue_close"},
     "notifications": {"events", "max_per_cycle"},
     "speckit": {"enabled", "commands"},
@@ -669,6 +699,7 @@ _REPO_KEYS = {
     "model",
     "max_sessions",
     "priority",
+    "wait_for_merge",
 }
 _STEP_KEYS = {"run", "link", "copy", "timeout"}
 
@@ -937,9 +968,16 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             f"[dispatch] order must be one of {', '.join(VALID_ORDER_MODES)}; got {order!r}"
         )
         order = "oldest-first"
+    wait_for_merge = dispatch_raw.get("wait_for_merge", False)
+    if not isinstance(wait_for_merge, bool):
+        problems.append(
+            f"[dispatch] wait_for_merge must be true or false, got {wait_for_merge!r}"
+        )
+        wait_for_merge = False
     dispatch = DispatchConfig(
         order=order,
         default_repo_max_sessions=_int("dispatch", "default_repo_max_sessions", 1, minimum=1),
+        wait_for_merge=wait_for_merge,
     )
 
     # -- [cleanup] ---------------------------------------------------------
@@ -1113,6 +1151,17 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             )
             priority = 0
 
+        repo_wait_for_merge = section.get("wait_for_merge")
+        if repo_wait_for_merge is not None and not isinstance(repo_wait_for_merge, bool):
+            # ``None`` rather than ``False`` on the failure path: the author wrote
+            # *something*, and inheriting is the reading that does not silently pick a side
+            # in a config the loader is about to refuse anyway.
+            problems.append(
+                f"[repos.{key}] wait_for_merge must be true or false, "
+                f"got {repo_wait_for_merge!r}"
+            )
+            repo_wait_for_merge = None
+
         repo_speckit = section.get("speckit")
         if repo_speckit is not None and not isinstance(repo_speckit, bool):
             problems.append(
@@ -1142,6 +1191,7 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             model=str(section["model"]) if section.get("model") else None,
             max_sessions=max_sessions,
             priority=priority,
+            wait_for_merge=repo_wait_for_merge,
             speckit=repo_speckit,
             speckit_commands=repo_speckit_commands,
         )

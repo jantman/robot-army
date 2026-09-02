@@ -348,6 +348,28 @@ def test_a_held_items_reason_is_visible_on_the_page_itself(web, conn):
     assert "ours" in text and "other" in text
 
 
+def test_the_queue_renders_the_wait_for_merge_hold(web, conn):
+    """FR-012's single-source claim, proved on the surface that does not share the
+    terminal's rendering code: both read ``ordering.plan``, so a reason that appears in one
+    appears in the other by identity rather than by agreement."""
+    from dataclasses import replace
+
+    section = replace(web.app.config.repos["demo"], wait_for_merge=True)
+    web.app.config = replace(
+        web.app.config, repos={**web.app.config.repos, "demo": section}
+    )
+    seed_item(conn, issue_number=41, state="awaiting_review")
+    queued = seed_item(conn, issue_number=1, state="ready")
+
+    payload = web.get_json("/queue").json()
+    row = {r["id"]: r for r in payload["ready"]}[queued]
+    assert row["hold"] == "awaiting_merge"
+    assert "#41" in row["hold_detail"]
+
+    text = web.get("/queue").text
+    assert "#41" in text
+
+
 def test_an_unheld_queue_says_which_item_is_next(web, conn):
     seed_item(conn, issue_number=1, state="ready")
     assert "next to dispatch" in web.get("/queue").text

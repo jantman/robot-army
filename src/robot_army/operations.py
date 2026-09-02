@@ -431,6 +431,7 @@ def capacity(
     )
     order = ctx.config.dispatch.order
 
+    settings = _repo_settings(ctx, snap)
     result.data = {
         "observable": snap.observable,
         "degraded": snap.degraded,
@@ -438,7 +439,11 @@ def capacity(
         "global_cap": snap.global_cap,
         "ours": len(snap.ours),
         "others": snap.others,
+        # Unchanged in key and in meaning: the live-session count per repository. Anything
+        # reading it today keeps reading exactly what it read before (milestone 047).
         "per_repo": dict(sorted(snap.per_repo.items())),
+        "repos": settings,
+        "wait_for_merge": ctx.config.dispatch.wait_for_merge,
         "order": order,
         "reason": snap.reason,
     }
@@ -462,14 +467,55 @@ def capacity(
             "ceiling rather than a fact"
         )
     result.say(f"order        : {order}")
+    result.say(
+        f"wait-merge   : {'on' if ctx.config.dispatch.wait_for_merge else 'off'} globally"
+    )
     result.say()
-    if snap.per_repo:
+    if settings:
         result.say("per repository:")
-        for key in sorted(snap.per_repo):
-            result.say(f"  {key:<28} {snap.per_repo[key]}")
+        for row in settings:
+            cap = f"{row['sessions']} of {row['cap']} sessions"
+            source = "configured" if row["cap_explicit"] else "default"
+            wait = "on" if row["wait_for_merge"] else "off"
+            wait_source = "configured" if row["wait_explicit"] else "default"
+            result.say(
+                f"  {row['repo_key']:<28} {cap:<18} {f'({source})':<13}"
+                f"wait-for-merge: {wait:<3} ({wait_source})"
+            )
     else:
-        result.say("no repository has a live session")
+        result.say("no repository is onboarded")
     return result
+
+
+def _repo_settings(ctx: Context, snap: Any) -> list[dict[str, Any]]:
+    """Every onboarded repository's two limits, and where each of them came from.
+
+    Widened in milestone 047 from *repositories with a live session*, and the widening is
+    the point: a repository holding its queue for a merge has **no** live session, so the
+    old listing omitted exactly the repository the author had come to ask about. An
+    onboarded repository with nothing running is now a row reading zero rather than an
+    absence.
+
+    ``repos.known`` rather than ``config.repos`` supplies the universe, because a
+    repository needs no ``[repos.*]`` section to be onboarded and inherits both settings
+    when it has none — and those are precisely the rows where "where did this come from?"
+    is worth answering.
+    """
+    rows: list[dict[str, Any]] = []
+    for key in sorted(set(repos_mod.known(ctx.conn)) | set(snap.per_repo)):
+        cap, cap_explicit = ctx.config.effective_repo_cap(key)
+        wait, wait_explicit = ctx.config.effective_wait_for_merge(key)
+        rows.append(
+            {
+                "repo_key": key,
+                "sessions": snap.per_repo.get(key, 0),
+                "cap": cap,
+                "cap_explicit": cap_explicit,
+                "wait_for_merge": wait,
+                "wait_explicit": wait_explicit,
+            }
+        )
+    return rows
 
 
 def _capacity_dict(snap: Any, order: str) -> dict[str, Any]:

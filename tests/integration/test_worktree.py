@@ -465,3 +465,157 @@ def test_a_repository_with_no_section_prepares_with_the_shared_steps(
 
     assert result.ok, result.failure_reason
     assert marker.exists(), "the shared step ran in the prepared worktree"
+
+
+# -- the clone's own default branch catches up (milestone 047, T031) --------
+
+
+def clone_behind_its_remote(tmp_path: Path) -> Path:
+    """A clone on a clean ``main`` with ``origin/main`` one commit ahead.
+
+    The real shape of the case: the author merged the previous issue's pull request on
+    GitHub and their own clone knows nothing about it until something fetches.
+    """
+    import subprocess
+
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    subprocess.run(
+        ["git", "init", "--bare", "-q", "-b", "main", str(bare)], check=True, capture_output=True
+    )
+    clone = make_repo(tmp_path / "clones" / "behind")
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(bare)], cwd=clone, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "push", "-q", "-u", "origin", "main"], cwd=clone, check=True, capture_output=True
+    )
+
+    other = tmp_path / "clones" / "pusher"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(other)], check=True, capture_output=True
+    )
+    (other / "landed.txt").write_text("the previous issue\n", encoding="utf-8")
+    for args in (
+        ["add", "-A"],
+        ["-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-q", "-m", "landed"],
+        ["push", "-q", "origin", "main"],
+    ):
+        subprocess.run(["git", *args], cwd=other, check=True, capture_output=True)
+    return clone
+
+
+def head_of(path: Path, ref: str) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", "rev-parse", ref], cwd=path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def waiting_config(config, clone: Path):
+    from dataclasses import replace
+
+    section = replace(config.repos["demo"], path=clone, wait_for_merge=True)
+    return replace(config, repos={**config.repos, "demo": section})
+
+
+def test_a_wait_for_merge_repository_has_its_clone_fast_forwarded(config, audit, tmp_path):
+    """FR-016. The gate waited for the work to land; starting the next issue from a clone
+    that still knows nothing about it would waste the wait."""
+    clone = clone_behind_its_remote(tmp_path)
+    before = head_of(clone, "main")
+
+    result = worktree.prepare(
+        boundaries=make_boundaries(audit, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=waiting_config(config, clone),
+        repo=repo_with(clone, wait_for_merge=True),
+        item_id=1,
+        issue_number=42,
+        title="next",
+        dry_run=False,
+    )
+
+    assert result.ok, result.failure_reason
+    assert head_of(clone, "main") != before
+    assert head_of(clone, "main") == head_of(clone, "origin/main")
+    assert (clone / "landed.txt").exists()
+
+
+def test_a_repository_without_the_setting_never_has_its_clone_touched(config, audit, tmp_path):
+    """FR-020. This is the one step here that writes to a directory the author works in,
+    and the Operating Constraints make such actions unreachable without configuration."""
+    clone = clone_behind_its_remote(tmp_path)
+    before = head_of(clone, "main")
+
+    result = worktree.prepare(
+        boundaries=make_boundaries(audit, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=config,
+        repo=repo_with(clone),
+        item_id=1,
+        issue_number=42,
+        title="next",
+        dry_run=False,
+    )
+
+    assert result.ok, result.failure_reason
+    assert head_of(clone, "main") == before
+
+
+def test_a_dirty_clone_is_skipped_and_the_dispatch_still_succeeds(config, audit, tmp_path):
+    """FR-019. The fast-forward is a convenience for the author's clone; the worktree is
+    built from ``origin/main`` either way, so failing the item here would punish the wrong
+    thing entirely."""
+    clone = clone_behind_its_remote(tmp_path)
+    (clone / "README.md").write_text("# mine, unsaved\n", encoding="utf-8")
+    before = head_of(clone, "main")
+
+    result = worktree.prepare(
+        boundaries=make_boundaries(audit, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=waiting_config(config, clone),
+        repo=repo_with(clone, wait_for_merge=True),
+        item_id=1,
+        issue_number=42,
+        title="next",
+        dry_run=False,
+    )
+
+    assert result.ok, result.failure_reason
+    assert head_of(clone, "main") == before
+    assert (clone / "README.md").read_text(encoding="utf-8") == "# mine, unsaved\n"
+    # The session still starts from the merged code, which is the point the skip does not
+    # cost anything: the worktree branches from the remote-tracking ref, not from the clone.
+    assert (Path(result.worktree_path) / "landed.txt").exists()
+
+
+def test_the_outcome_is_written_into_the_preparation_record(config, audit, tmp_path, layout):
+    """One more key in a record that already exists, beside ``fetch_skipped`` — not a
+    second record for a step that is part of preparation."""
+    import json
+
+    clone = clone_behind_its_remote(tmp_path)
+    worktree.prepare(
+        boundaries=make_boundaries(audit, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=waiting_config(config, clone),
+        repo=repo_with(clone, wait_for_merge=True),
+        item_id=1,
+        issue_number=42,
+        title="next",
+        dry_run=False,
+    )
+    audit.close()
+
+    entries = [
+        json.loads(line)
+        for path in sorted(layout.log_dir.glob("audit-*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    prepare = [
+        e for e in entries if e["action"] == "worktree.prepare" and e["outcome"] != "pending"
+    ][-1]
+    assert prepare["detail"]["fast_forward"] == "updated"
+    assert prepare["detail"]["fast_forward_before"] != prepare["detail"]["fast_forward_after"]

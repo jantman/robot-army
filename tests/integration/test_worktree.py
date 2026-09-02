@@ -619,3 +619,72 @@ def test_the_outcome_is_written_into_the_preparation_record(config, audit, tmp_p
     ][-1]
     assert prepare["detail"]["fast_forward"] == "updated"
     assert prepare["detail"]["fast_forward_before"] != prepare["detail"]["fast_forward_after"]
+
+
+def prepare_record(layout, audit) -> dict:
+    """The outcome half of the ``worktree.prepare`` intent/outcome pair."""
+    import json
+
+    audit.close()
+    entries = [
+        json.loads(line)
+        for path in sorted(layout.log_dir.glob("audit-*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    return [
+        e for e in entries if e["action"] == "worktree.prepare" and e["outcome"] != "pending"
+    ][-1]["detail"]
+
+
+def test_a_remoteless_wait_for_merge_repository_records_why_nothing_was_attempted(
+    config, audit, repo_clone, layout
+):
+    """"It asked to wait and had no remote" must not read the same as "it never asked".
+
+    ``fetch_skipped`` exists three lines above this step to keep exactly that distinction
+    for the fetch, and the first version of this code reproduced the ambiguity one step
+    down: with no remote, the ``fast_forward`` key was simply absent — which is also what
+    a repository with the setting off produces.
+
+    ``repo_clone`` has no remote, deliberately and permanently.
+    """
+    from dataclasses import replace
+
+    section = replace(config.repos["demo"], wait_for_merge=True)
+    waiting = replace(config, repos={**config.repos, "demo": section})
+
+    result = worktree.prepare(
+        boundaries=make_boundaries(audit, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=waiting,
+        repo=repo_with(repo_clone, wait_for_merge=True),
+        item_id=1,
+        issue_number=42,
+        title="next",
+        dry_run=False,
+    )
+
+    assert result.ok, result.failure_reason
+    detail = prepare_record(layout, audit)
+    assert detail["fast_forward"] == "skipped"
+    assert "no configured remote" in detail["fast_forward_reason"]
+
+
+def test_a_repository_without_the_setting_records_no_fast_forward_key_at_all(
+    config, audit, repo_clone, layout
+):
+    """The other side of the same distinction, which is what makes the key meaningful:
+    absent means "never asked", and only that."""
+    result = worktree.prepare(
+        boundaries=make_boundaries(audit, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=config,
+        repo=repo_with(repo_clone),
+        item_id=1,
+        issue_number=42,
+        title="next",
+        dry_run=False,
+    )
+
+    assert result.ok, result.failure_reason
+    assert "fast_forward" not in prepare_record(layout, audit)

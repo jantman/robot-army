@@ -57,6 +57,18 @@ and its refusal is caught as `failed` rather than as a crash.
 - **Only for repositories that asked.** A repository without `wait_for_merge` in force never
   has this called on it (FR-020).
 
+## What the caller records
+
+`worktree.prepare` writes `fast_forward` into its own audit outcome for **every**
+wait-for-merge repository, including the ones where nothing was attempted — a clone with no
+configured remote is recorded as `skipped` with that reason rather than left out.
+
+The invariant matters because the alternative is ambiguous: an absent key would mean both
+*this repository never asked to wait* and *it asked, and there was no remote to catch up
+to*. That is the distinction `fetch_skipped` already draws for the fetch three lines above,
+and it has to hold one step down too. Absent therefore means exactly one thing — the setting
+was off.
+
 ## The simulated implementation
 
 `SimulatedVersionControl.fast_forward` logs the call and returns

@@ -307,6 +307,173 @@ def test_an_interrupted_pass_leaves_no_half_written_row(
     assert conn.in_transaction is False
 
 
+# -- containment is asked of the remote, not of a local ref (issue #105) ---
+#
+# Every test in this block stages its hazard **in the bare repository**, never through the
+# clone. Deleting or rewinding a branch with `git push origin --delete` or `git push -f`
+# updates the clone's remote-tracking ref as a side effect, which is exactly the state the
+# defect cannot occur in — a test written that way passes against the broken code and
+# proves nothing. What a real clone sees when someone deletes a branch on GitHub is a
+# tracking ref that nobody has touched, and that is what these reproduce.
+
+
+def test_a_branch_deleted_on_the_remote_is_not_treated_as_pushed(
+    conn, audit, config, boundaries, published, tmp_path
+):
+    """The reported case, and the reason issue #105 was opened.
+
+    The branch was pushed, so `refs/remotes/origin/<branch>` names its tip. The branch is
+    then gone from the remote — a pull request closed without merging and its branch
+    tidied away, an administrator clearing up. Nothing local changed, so the tracking ref
+    still says "up to date", and reading it as the remote's answer force-deletes the only
+    remaining copy of the work.
+    """
+    bare = tmp_path / "remote.git"
+    _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=20)
+    commit_in(path, "invention.py", "# the only copy, once the remote drops it\n")
+    sha = git(path, "rev-parse", "HEAD").strip()
+    git(path, "push", "-q", "origin", f"{branch}:{branch}")
+
+    git(bare, "update-ref", "-d", f"refs/heads/{branch}")
+    assert git(published, "rev-parse", f"refs/remotes/origin/{branch}").strip() == sha, (
+        "the tracking ref must still be stale, or this test proves nothing"
+    )
+
+    decisions = sweep(conn, audit, config, boundaries)
+
+    assert [d.state for d in decisions] == [cleanup.BRANCH_RETAINED]
+    assert branch in branches(published)
+    assert sha in git(published, "rev-parse", branch), "the commit is still on the branch"
+    assert "does not have" in decisions[0].reason
+
+
+def test_a_rewound_remote_branch_is_not_treated_as_pushed(
+    conn, audit, config, boundaries, published, tmp_path
+):
+    """The same stale ref, reached by force-push instead of deletion. The remote has the
+    branch, at an earlier commit; the commits between are published nowhere."""
+    bare = tmp_path / "remote.git"
+    _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=21)
+    commit_in(path, "first.py", "# published\n")
+    published_sha = git(path, "rev-parse", "HEAD").strip()
+    git(path, "push", "-q", "origin", f"{branch}:{branch}")
+    commit_in(path, "second.py", "# never published\n")
+    git(path, "push", "-q", "origin", f"{branch}:{branch}")
+    unpublished_sha = git(path, "rev-parse", "HEAD").strip()
+
+    git(bare, "update-ref", f"refs/heads/{branch}", published_sha)
+
+    decisions = sweep(conn, audit, config, boundaries)
+
+    assert [d.state for d in decisions] == [cleanup.BRANCH_RETAINED]
+    assert branch in branches(published)
+    assert git(published, "cat-file", "-t", unpublished_sha).strip() == "commit"
+    assert unpublished_sha in git(published, "rev-parse", branch)
+
+
+def test_a_branch_still_on_the_remote_is_deleted_and_the_commit_is_named(
+    conn, audit, config, boundaries, published
+):
+    """The other side of the same check: unchanged behaviour, better evidence.
+
+    The reason has to name the commit the remote reported, not only the ref consulted —
+    "pushed and up to date with origin/<branch>" is precisely what the defective code said
+    while reading a ref the remote had not been asked about.
+    """
+    _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=22)
+    commit_in(path, "feature.py", "# real work, really pushed\n")
+    sha = git(path, "rev-parse", "HEAD").strip()
+    git(path, "push", "-q", "origin", f"{branch}:{branch}")
+
+    decisions = sweep(conn, audit, config, boundaries)
+
+    assert [d.state for d in decisions] == [cleanup.DONE]
+    assert branch not in branches(published)
+    assert sha in decisions[0].reason
+
+
+def test_a_remote_commit_this_clone_does_not_have_proves_nothing(
+    conn, audit, config, boundaries, published, tmp_path
+):
+    """Someone else pushed to the branch. The remote's tip is a commit we have never seen,
+    so we cannot demonstrate our commits are reachable from it — and cannot is not proof."""
+    bare = tmp_path / "remote.git"
+    _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=23)
+    commit_in(path, "ours.py", "# ours\n")
+    git(path, "push", "-q", "origin", f"{branch}:{branch}")
+
+    elsewhere = tmp_path / "elsewhere"
+    git(tmp_path, "clone", "-q", str(bare), str(elsewhere))
+    git(elsewhere, "checkout", "-q", "-b", branch, f"origin/{branch}")
+    commit_in(elsewhere, "theirs.py", "# theirs\n")
+    git(elsewhere, "push", "-q", "origin", f"{branch}:{branch}")
+
+    decisions = sweep(conn, audit, config, boundaries)
+
+    assert [d.state for d in decisions] == [cleanup.BRANCH_RETAINED]
+    assert branch in branches(published)
+    # Against real git, not the fake. The reason is asserted because the decision alone
+    # cannot tell this case apart from "git could not compare them" — and for a while it
+    # really was reaching the wrong one of those, since `rev-parse --verify` on a bare sha
+    # answers about syntax rather than presence (PR #112 review).
+    assert "which this clone does not have" in decisions[0].reason
+
+
+def test_a_branch_merged_into_the_base_is_still_deleted_on_base_evidence(
+    conn, audit, config, boundaries, published
+):
+    """The first containment test is untouched by this feature (FR-005). A branch whose
+    commits reached the published base is deleted without the remote being asked about the
+    branch at all."""
+    _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=24)
+    commit_in(path, "merged.py", "# went in via a pull request\n")
+    git(path, "push", "-q", "origin", f"{branch}:main")
+
+    decisions = sweep(conn, audit, config, boundaries)
+
+    assert [d.state for d in decisions] == [cleanup.DONE]
+    assert branch not in branches(published)
+    assert "origin/main" in decisions[0].reason
+
+
+def test_a_clone_with_no_remote_at_all_keeps_the_branch(
+    conn, audit, config, boundaries, published
+):
+    """Nothing can be proved published without a remote to publish to. The existing rule —
+    a fetch that fails leaves containment unproven — already covers this, and it is
+    asserted here so that adding a second question about the remote did not open a route
+    round it."""
+    _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=25)
+    commit_in(path, "work.py", "# unpublished\n")
+    git(published, "remote", "remove", "origin")
+
+    decisions = sweep(conn, audit, config, boundaries)
+
+    assert [d.state for d in decisions] == [cleanup.BRANCH_RETAINED]
+    assert branch in branches(published)
+
+
+def test_the_remote_is_asked_before_the_branch_is_deleted(
+    conn, audit, config, boundaries, published, tmp_path
+):
+    """Constitution III, and US3: the record alone must show that the evidence came from
+    the remote, and must show it arriving *before* the deletion it authorised."""
+    _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=26)
+    commit_in(path, "feature.py", "# real work\n")
+    git(path, "push", "-q", "origin", f"{branch}:{branch}")
+
+    assert [d.state for d in sweep(conn, audit, config, boundaries)] == [cleanup.DONE]
+
+    audit.close()
+    actions = [
+        json.loads(line)["action"]
+        for log in sorted(config.layout.log_dir.glob("audit-*.jsonl"))
+        for line in log.read_text(encoding="utf-8").splitlines()
+    ]
+    assert "git.ls_remote" in actions
+    assert actions.index("git.ls_remote") < actions.index("git.delete_branch")
+
+
 # -- effect levels (T063, FR-039) ------------------------------------------
 
 

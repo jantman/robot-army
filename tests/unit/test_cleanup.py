@@ -40,18 +40,55 @@ class FakeVcs:
         fetch_raises: bool = False,
         delete_ok: bool = True,
         worktree_present: bool = True,
+        remote_head: str | None = None,
+        remote_raises: bool = False,
+        head_is_local: bool = True,
     ) -> None:
         self.removal = removal or RemovalResult(worktree_removed=True, branch_deleted=False)
         self.worktree_present = worktree_present
         self.ahead = ahead or {}
         self.fetch_raises = fetch_raises
         self.delete_ok = delete_ok
+        #: What the remote says it has at ``refs/heads/<branch>``, right now. ``None`` is a
+        #: real answer — "the remote does not have this branch" — and is the default,
+        #: because a branch nobody pushed is the ordinary case (issue #105).
+        self.remote_head = remote_head
+        self.remote_raises = remote_raises
+        #: Whether the commit the remote named is in this clone. ``False`` is the
+        #: someone-else-pushed case, where containment cannot be shown without fetching.
+        self.head_is_local = head_is_local
         self.removals: list[tuple[str, bool]] = []
         self.deletes: list[tuple[str, bool]] = []
         self.fetches: list[tuple[str, str]] = []
+        self.asked_remote: list[tuple[str, str]] = []
 
     def default_remote(self, clone_path: str) -> str | None:
         return "origin"
+
+    def remote_branch_head(self, clone_path: str, remote: str, branch: str) -> str | None:
+        if self.remote_raises:
+            raise BoundaryError("the remote could not be reached")
+        self.asked_remote.append((remote, branch))
+        return self.remote_head
+
+    def rev_parse(self, clone_path: str, ref: str) -> str | None:
+        """Real ``git rev-parse --verify`` semantics, including the awkward one.
+
+        A bare forty-hex string is echoed back and exits zero **whether or not the object
+        is here** — it is a syntax check, not a lookup. Only peeling (``<sha>^{commit}``)
+        forces git to find the object. This fake reproduces that distinction on purpose:
+        a fake that answered ``None`` for an absent bare sha would let a caller that
+        forgot the peel pass its tests and fail against git, which is exactly what
+        happened here before review caught it.
+
+        The other caller, ``_branch_exists``, asks about ``refs/heads/<branch>`` and must
+        keep getting "yes", or ``clean_item`` concludes the branch was already gone and
+        never reaches the containment check at all.
+        """
+        peeled = ref.removesuffix("^{commit}")
+        if peeled != ref and not self.head_is_local and peeled == self.remote_head:
+            return None
+        return peeled
 
     def worktree_exists(self, worktree_path: str) -> bool:
         return self.worktree_present
@@ -319,20 +356,81 @@ def test_a_branch_contained_in_the_published_base_is_deleted(conn, config, audit
 
 def test_a_branch_pushed_and_up_to_date_is_deleted(conn, config, audit):
     """The other way for the work to be safe: it lives on the remote under its own name,
-    even though it was never merged."""
+    even though it was never merged.
+
+    Note what the ``ahead`` key is. Since issue #105 the comparison is against the commit
+    the remote just reported, not against a ``origin/<branch>`` ref name — that ref is a
+    local cache, and reading it was how a deleted remote branch went on proving itself
+    published.
+    """
     item = finished(conn)
-    vcs = FakeVcs(ahead={"origin/main": 3, "origin/robot-army/42-fix": 0})
+    vcs = FakeVcs(ahead={"origin/main": 3, "sha-on-the-remote": 0},
+                  remote_head="sha-on-the-remote")
     decision = run(conn, audit, config, vcs, item)
 
     assert decision.state == cleanup.DONE
     assert vcs.deletes == [(item.branch, True)]
-    assert "pushed and up to date" in decision.reason
+    assert vcs.asked_remote == [("origin", item.branch)]
+    assert "sha-on-the-remote" in decision.reason, "the record names the commit, not a ref"
+
+
+def test_a_branch_the_remote_no_longer_has_is_retained(conn, config, audit):
+    """Issue #105's reported case, at the decision table.
+
+    The remote answered, and it has no such branch. That is information — distinct from
+    "could not ask" — and the two must reach the same decision by visibly different
+    sentences, because they send the operator to different places.
+    """
+    item = finished(conn)
+    vcs = FakeVcs(ahead={"origin/main": 1}, remote_head=None)
+    decision = run(conn, audit, config, vcs, item)
+
+    assert decision.state == cleanup.BRANCH_RETAINED
+    assert vcs.deletes == []
+    assert "does not have" in decision.reason
+
+
+def test_a_remote_that_cannot_be_asked_is_not_an_answer(conn, config, audit):
+    """The failure direction, for the new question as for the old one."""
+    item = finished(conn)
+    vcs = FakeVcs(ahead={"origin/main": 1}, remote_raises=True)
+    decision = run(conn, audit, config, vcs, item)
+
+    assert decision.state == cleanup.BRANCH_RETAINED
+    assert vcs.deletes == []
+    assert "could not ask" in decision.reason
+
+
+def test_a_remote_commit_this_clone_lacks_proves_nothing(conn, config, audit):
+    """Someone else pushed to the branch. Their commit is not here, so nothing can be shown
+    reachable from it — and this check is a question, never a synchronisation."""
+    item = finished(conn)
+    vcs = FakeVcs(
+        ahead={"origin/main": 1, "theirs": 0}, remote_head="theirs", head_is_local=False
+    )
+    decision = run(conn, audit, config, vcs, item)
+
+    assert decision.state == cleanup.BRANCH_RETAINED
+    assert vcs.deletes == []
+    assert "which this clone does not have" in decision.reason
+
+
+def test_commits_ahead_of_the_remote_commit_retains(conn, config, audit):
+    """The remote has the branch, behind us — a force-push that rewound it, or a push that
+    never carried the last commits. What is here is not published."""
+    item = finished(conn)
+    vcs = FakeVcs(ahead={"origin/main": 2, "older": 2}, remote_head="older")
+    decision = run(conn, audit, config, vcs, item)
+
+    assert decision.state == cleanup.BRANCH_RETAINED
+    assert vcs.deletes == []
+    assert "2 commit(s)" in decision.reason
 
 
 def test_a_branch_that_is_neither_contained_nor_pushed_is_retained(conn, config, audit):
     """SC-009's counted outcome. These commits exist nowhere else."""
     item = finished(conn)
-    vcs = FakeVcs(ahead={"origin/main": 2, "origin/robot-army/42-fix": 2})
+    vcs = FakeVcs(ahead={"origin/main": 2}, remote_head=None)
     decision = run(conn, audit, config, vcs, item)
 
     assert decision.state == cleanup.BRANCH_RETAINED
@@ -349,12 +447,13 @@ def test_commits_ahead_returning_none_never_satisfies_either_test(conn, config, 
     would have authorised destroying commits that exist nowhere else.
     """
     item = finished(conn)
-    vcs = FakeVcs(ahead={"origin/main": None, "origin/robot-army/42-fix": None})
+    vcs = FakeVcs(ahead={"origin/main": None, "sha": None}, remote_head="sha")
     decision = run(conn, audit, config, vcs, item)
 
     assert decision.state == cleanup.BRANCH_RETAINED
     assert vcs.deletes == []
-    assert "could not determine" in decision.reason
+    assert "could not compare it with the base" in decision.reason
+    assert "could not compare robot-army/42-fix with sha" in decision.reason
 
 
 def test_a_failed_fetch_leaves_containment_unproven(conn, config, audit):

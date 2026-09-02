@@ -273,3 +273,27 @@ document promised, and each is recorded rather than quietly absorbed:
 
 Nothing was added to Complexity Tracking. Everything built here was already justified by the
 Constitution Check above.
+
+### One defect found in review, and what it changes
+
+Widening the hold recorder (R5) carried a consequence the plan did not follow through on.
+Before this milestone, `_HOLD` could only ever contain a `_GLOBAL_HOLDS` reason, and a pass
+carrying one returned before dispatching anything — so *"a dispatch happened"* and *"the
+recorded hold ended"* were the same fact, and clearing unconditionally on a successful
+selection was sound. Making per-item holds recordable broke that equivalence in exactly the
+way the feature intends: a repository waiting for its work to land stays held while an item
+in a different repository dispatches. The unconditional clear then wrote a `hold_ended` for
+a repository still waiting, attributed it to an unrelated item, and left the next quiet pass
+to reopen the hold with its duration restarted from zero.
+
+The fix separates two questions that had been one. A hold's **signature** answers *has
+anything about this changed?* and suppresses a repeat; its new **identity** —
+`(reason, repository)` — answers *is this the same hold at all?* and decides whether an
+ending has occurred. `_resolve_hold` now asks the plan rather than the dispatch: if any
+entry in this pass is still held by the recorded identity, nothing is cleared. A change of
+identity is also bracketed with an ending, so the log closes holds rather than leaving each
+closing to be inferred from the next opening.
+
+Worth recording because the mistake is instructive: the bug was not in the new gate, it was
+in an old invariant that the new gate quietly invalidated. Widening a mechanism means
+re-checking what its callers were entitled to assume.

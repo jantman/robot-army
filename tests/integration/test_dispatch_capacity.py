@@ -501,6 +501,68 @@ def test_a_hold_whose_reason_changes_is_recorded_again(
 
     held = records(layout, audit, "dispatch.at_capacity")
     assert [r["detail"]["reason"] for r in held] == ["repo_cap", "awaiting_merge"]
+    # And the first one is *closed* rather than left open for the reader to infer its
+    # ending from the next opening.
+    ended = records(layout, audit, "dispatch.hold_ended")
+    assert [r["detail"]["reason"] for r in ended] == ["repo_cap"]
+
+
+def test_a_dispatch_elsewhere_does_not_end_a_waiting_repositorys_hold(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """"A dispatch happened" stopped being proof that the recorded hold ended.
+
+    It was proof while only global holds were recorded: a pass carrying one returned before
+    dispatching anything, so the two facts were the same fact. A per-repository hold breaks
+    that — ``demo`` stays held while ``other`` dispatches, which is the entire point of the
+    hold being per-item — and clearing on that evidence would write a ``hold_ended`` for a
+    repository that is still waiting, blame it on an unrelated item, and restart the
+    duration from zero on the next quiet pass.
+    """
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    ready_item(conn, config, repo_key="demo", issue_number=1)
+    run_two(conn, audit, config, layout, tmp_path, machine)
+
+    ready_item(conn, config, repo_key="other", issue_number=3)
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
+
+    assert records(layout, audit, "dispatch.hold_ended") == []
+
+
+def test_the_hold_survives_an_unrelated_dispatch_and_ends_on_its_own_terms(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """The whole arc, in the order it happens on a real machine.
+
+    A quiet pass opens ``demo``'s hold. A later pass dispatches ``other`` — which must not
+    touch it. Only when ``demo``'s own wait is over is the ending written, once, and
+    attributed to ``demo``'s item rather than to whatever happened to move last.
+    """
+    config = waiting_for_merge(capped_at(two_repos, 4))
+    blocker = seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    queued = ready_item(conn, config, repo_key="demo", issue_number=1)
+    run_two(conn, audit, config, layout, tmp_path, machine)
+    assert len(records(layout, audit, "dispatch.at_capacity")) == 1
+
+    ready_item(conn, config, repo_key="other", issue_number=3)
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
+    assert records(layout, audit, "dispatch.hold_ended") == []
+
+    conn.execute(
+        "UPDATE work_items SET state = ? WHERE id = ?", (str(WorkItemState.DONE), blocker)
+    )
+    conn.commit()
+    assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
+
+    ended = records(layout, audit, "dispatch.hold_ended")
+    assert len(ended) == 1, ended
+    assert ended[0]["detail"]["reason"] == "awaiting_merge"
+    assert str(queued) in ended[0]["detail"]["freed_by"]
 
 
 def test_a_pass_that_dispatched_something_is_not_recorded_as_held(

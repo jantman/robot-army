@@ -1416,14 +1416,41 @@ def _hold_signature(entry: Any, snap: Any) -> tuple[Any, ...]:
     )
 
 
+def _hold_identity(entry: Any) -> tuple[str, str]:
+    """Which hold this *is*, as distinct from what its numbers were.
+
+    ``(reason, repository)``, and it had to become a second concept the moment per-item
+    holds started being recorded. The *signature* answers "has anything about this hold
+    changed?" and is what suppresses a repeat. The identity answers "is this the same hold
+    at all?" and is what decides whether one has **ended**.
+
+    Before per-item holds, the two questions collapsed: only a ``_GLOBAL_HOLDS`` reason
+    could be recorded, a pass carrying one returned before dispatching anything, and so "a
+    dispatch happened" was proof that the recorded hold was over. That is no longer true. A
+    repository waiting for its work to land stays held while an item in a *different*
+    repository dispatches in the same pass — which is the entire point of the hold being
+    per-item — so a dispatch is evidence about the item that moved and about nothing else.
+    """
+    return (str(entry.hold), entry.item.repo_key)
+
+
 def _note_hold(audit: AuditLog, entry: Any, snap: Any) -> None:
     signature = _hold_signature(entry, snap)
     if _HOLD.get("signature") == signature:
         _HOLD["passes"] = _HOLD.get("passes", 0) + 1
         return
+    identity = _hold_identity(entry)
+    if _HOLD and _HOLD.get("identity") != identity:
+        # A *different* condition is holding now — the previous one ended, whether or not
+        # the queue moved. Without this the log would only ever open holds and leave the
+        # reader to infer each closing from the next opening.
+        _clear_hold(
+            audit, snap, freed_by=f"{identity[0]} in {identity[1]} took over"
+        )
     _HOLD.clear()
     _HOLD.update(
         signature=signature,
+        identity=identity,
         passes=1,
         started_at=utc_now_iso(),
         reason=str(entry.hold),
@@ -1443,6 +1470,38 @@ def _note_hold(audit: AuditLog, entry: Any, snap: Any) -> None:
             "held_in_ready": entry.item.id,
         },
     )
+
+
+def _resolve_hold(audit: AuditLog, entries: list[Any], snap: Any, *, selected: Any) -> None:
+    """Close the recorded hold **if it is genuinely over**, and leave it alone if it is not.
+
+    The check that replaces "a dispatch happened, therefore the hold ended". That inference
+    was sound while only global holds were recorded and is not any more: since milestone
+    047 a hold on one repository coexists with a dispatch in another, and clearing on that
+    evidence would write a ``hold_ended`` for a repository still waiting, attribute the
+    ending to an unrelated item, and restart the duration from zero on the next quiet pass.
+
+    So the question is asked of the plan rather than of the dispatch: is anything in this
+    pass still held by the *same* condition? The plan is the authority on that, and it has
+    already been computed.
+    """
+    if not _HOLD:
+        return
+    identity = _HOLD.get("identity")
+    if identity is not None and any(
+        entry.hold is not None and _hold_identity(entry) == identity for entry in entries
+    ):
+        return
+    if not entries:
+        freed_by = "the queue drained"
+    elif selected is not None:
+        freed_by = f"item {selected.item.id} became dispatchable"
+    else:
+        # Every candidate is still held, but not by the condition that was recorded — the
+        # held item was abandoned, say, and a different repository's condition is now the
+        # one in force. ``_note_hold`` will open that one on the pass it stops.
+        freed_by = "the recorded condition no longer applies"
+    _clear_hold(audit, snap, freed_by=freed_by)
 
 
 def _clear_hold(audit: AuditLog, snap: Any, *, freed_by: str) -> None:
@@ -1527,15 +1586,21 @@ def select_and_dispatch(
             registry_dir=registry_dir,
             proc_root=proc_root,
         )
+        # Materialised, because the terminal handling below asks the plan a second
+        # question — whether the *recorded* hold is still in force — and re-planning to
+        # answer it would ask a snapshot that has since moved on.
+        entries = [
+            entry
+            for entry in ordering.plan(conn, config=config, capacity=snap)
+            if entry.item.id not in attempted
+        ]
         selected = None
         blocked = None
         # The first *per-item* hold seen this pass, kept only so that a pass which
         # dispatches nothing can say what stopped it. A global hold, when there is one,
         # always wins the report: it is the reason nothing else was even considered.
         first_held = None
-        for entry in ordering.plan(conn, config=config, capacity=snap):
-            if entry.item.id in attempted:
-                continue
+        for entry in entries:
             if entry.hold in _GLOBAL_HOLDS:
                 blocked = entry
                 break
@@ -1561,10 +1626,10 @@ def select_and_dispatch(
             if first_held is not None and dispatched == 0:
                 _note_hold(audit, first_held, snap)
             else:
-                _clear_hold(audit, snap, freed_by="the queue drained")
+                _resolve_hold(audit, entries, snap, selected=None)
             return dispatched
 
-        _clear_hold(audit, snap, freed_by=f"item {selected.item.id} became dispatchable")
+        _resolve_hold(audit, entries, snap, selected=selected)
         attempted.add(selected.item.id)
         if dispatch_item(
             conn,

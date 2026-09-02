@@ -1416,6 +1416,10 @@ def _hold_signature(entry: Any, snap: Any) -> tuple[Any, ...]:
     )
 
 
+#: The "repository" of a hold that is not about a repository. See :func:`_hold_identity`.
+MACHINE = "<machine>"
+
+
 def _hold_identity(entry: Any) -> tuple[str, str]:
     """Which hold this *is*, as distinct from what its numbers were.
 
@@ -1430,7 +1434,17 @@ def _hold_identity(entry: Any) -> tuple[str, str]:
     repository waiting for its work to land stays held while an item in a *different*
     repository dispatches in the same pass — which is the entire point of the hold being
     per-item — so a dispatch is evidence about the item that moved and about nothing else.
+
+    **A global hold carries no repository**, and that asymmetry is the whole reason this
+    returns a pair rather than a reason. A paused system, an unobservable capacity and a
+    full machine are facts about the *machine*; the entry carrying one is merely whichever
+    item happened to be at the head of the queue, and that head shifts whenever an item is
+    abandoned or the order changes. Keying on its repository would report one uninterrupted
+    condition as a succession of short holds handing over to each other — each with its
+    duration restarted and a ``freed_by`` naming a repository that freed nothing.
     """
+    if entry.hold in _GLOBAL_HOLDS:
+        return (str(entry.hold), MACHINE)
     return (str(entry.hold), entry.item.repo_key)
 
 
@@ -1444,9 +1458,12 @@ def _note_hold(audit: AuditLog, entry: Any, snap: Any) -> None:
         # A *different* condition is holding now — the previous one ended, whether or not
         # the queue moved. Without this the log would only ever open holds and leave the
         # reader to infer each closing from the next opening.
-        _clear_hold(
-            audit, snap, freed_by=f"{identity[0]} in {identity[1]} took over"
+        took_over = (
+            identity[0]
+            if identity[1] == MACHINE
+            else f"{identity[0]} in {identity[1]}"
         )
+        _clear_hold(audit, snap, freed_by=f"{took_over} took over")
     _HOLD.clear()
     _HOLD.update(
         signature=signature,

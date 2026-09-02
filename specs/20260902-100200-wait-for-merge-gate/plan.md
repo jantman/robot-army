@@ -297,3 +297,17 @@ closing to be inferred from the next opening.
 Worth recording because the mistake is instructive: the bug was not in the new gate, it was
 in an old invariant that the new gate quietly invalidated. Widening a mechanism means
 re-checking what its callers were entitled to assume.
+
+**And the fix had a defect of its own, found in the next review round.** Identity was
+`(reason, repository)` for every hold, including the global ones — but a global hold is a
+fact about the *machine*, and the entry reporting it is merely whichever item happened to be
+at the head of the queue. That head shifts whenever an item is abandoned or the order
+changes, so one uninterrupted "the machine is full" was reported as a succession of short
+holds handing over to each other, each with its duration restarted and a `freed_by` naming a
+repository that had freed nothing. A global hold's identity now carries a `MACHINE` sentinel
+in place of a repository, which is what makes the pair a pair rather than an over-specified
+reason.
+
+Two rounds, two bugs, both in the same seam: not in what was added, but in what the addition
+made untrue. That seam is worth naming for whoever changes this next — the hold recorder's
+correctness rests on which facts its identity is allowed to depend on.

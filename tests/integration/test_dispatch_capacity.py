@@ -565,6 +565,65 @@ def test_the_hold_survives_an_unrelated_dispatch_and_ends_on_its_own_terms(
     assert str(queued) in ended[0]["detail"]["freed_by"]
 
 
+def test_a_global_hold_does_not_hand_over_when_the_queue_head_moves(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """A global hold is a fact about the *machine*, so it carries no repository.
+
+    The entry that reports it is merely whichever item happened to be at the head, and the
+    head shifts whenever an item is abandoned or the order changes. If identity keyed on
+    that item's repository, one uninterrupted "the machine is full" would be reported as a
+    succession of short holds handing over to each other — each with its duration restarted
+    and a ``freed_by`` naming a repository that freed nothing.
+    """
+    registry, proc = machine
+    config = capped_at(two_repos, 1)
+    out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
+    first = ready_item(conn, config, repo_key="demo", issue_number=1)
+    ready_item(conn, config, repo_key="other", issue_number=2)
+    run_two(conn, audit, config, layout, tmp_path, machine)
+
+    conn.execute(
+        "UPDATE work_items SET state = ? WHERE id = ?",
+        (str(WorkItemState.ABANDONED), first),
+    )
+    conn.commit()
+    run_two(conn, audit, config, layout, tmp_path, machine)
+
+    assert records(layout, audit, "dispatch.hold_ended") == []
+    # The machine never stopped being full, so the condition never ended — even though the
+    # queue head moved to a different repository between the two passes.
+    assert {r["detail"]["reason"] for r in records(layout, audit, "dispatch.at_capacity")} == {
+        "global_cap"
+    }
+
+
+def test_a_global_hold_giving_way_to_a_per_repository_one_is_bracketed(
+    conn, audit, two_repos, layout, tmp_path, machine
+):
+    """The other side of the same rule: when the condition genuinely *does* change, the
+    ending is written rather than left to be inferred from the next opening."""
+    registry, proc = machine
+    config = waiting_for_merge(capped_at(two_repos, 1))
+    entry = out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
+    seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    ready_item(conn, config, repo_key="demo", issue_number=1)
+    run_two(conn, audit, config, layout, tmp_path, machine)
+
+    entry.unlink()
+    run_two(conn, audit, config, layout, tmp_path, machine)
+
+    assert [r["detail"]["reason"] for r in records(layout, audit, "dispatch.at_capacity")] == [
+        "global_cap",
+        "awaiting_merge",
+    ]
+    ended = records(layout, audit, "dispatch.hold_ended")
+    assert [r["detail"]["reason"] for r in ended] == ["global_cap"]
+    assert ended[0]["detail"]["freed_by"] == "awaiting_merge in demo took over"
+
+
 def test_a_pass_that_dispatched_something_is_not_recorded_as_held(
     conn, audit, two_repos, layout, tmp_path, machine
 ):

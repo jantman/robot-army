@@ -287,6 +287,7 @@ def test_an_onboarded_repository_with_no_section_resolves_entirely_from_defaults
     assert resolved.model is None
     assert resolved.max_sessions is None
     assert resolved.priority == 0
+    assert resolved.wait_for_merge is None
 
 
 @pytest.mark.parametrize(
@@ -297,6 +298,11 @@ def test_an_onboarded_repository_with_no_section_resolves_entirely_from_defaults
         ("model", "sonnet", "sonnet"),
         ("max_sessions", 3, 3),
         ("priority", 7, 7),
+        # A resolved config that silently dropped a field the author set would be a trap
+        # for the next reader, even though the gate reads it via
+        # ``Config.effective_wait_for_merge`` rather than from here.
+        ("wait_for_merge", True, True),
+        ("wait_for_merge", False, False),
     ],
 )
 def test_a_section_overrides_each_field_in_turn(

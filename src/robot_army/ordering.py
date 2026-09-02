@@ -51,14 +51,22 @@ class HoldReason(StrEnum):
       are not trustworthy, and showing an untrustworthy number is worse than showing none.
     * ``global_cap`` outranks ``repo_cap`` because the machine-wide limit binds before any
       one repository's does.
+    * ``repo_cap`` outranks ``awaiting_merge`` for the same reason one step down: while a
+      session is still running there is a slot to free, and sending the author off to merge
+      a pull request when what is actually missing is a session slot points at the wrong
+      fix. In practice the two hand over rather than overlap — the cap holds while the
+      session runs, and this takes over the moment it exits.
     * ``not_onboarded`` and ``preparation_failed`` come last because they are conditions of
       the item rather than of the queue — they would hold it on an empty machine too.
+      ``awaiting_merge`` sits above them because it is a condition of the *queue*: an empty
+      machine does not clear it.
     """
 
     PAUSED = "paused"
     CAPACITY_UNOBSERVABLE = "capacity_unobservable"
     GLOBAL_CAP = "global_cap"
     REPO_CAP = "repo_cap"
+    AWAITING_MERGE = "awaiting_merge"
     NOT_ONBOARDED = "not_onboarded"
     PREPARATION_FAILED = "preparation_failed"
 
@@ -86,6 +94,50 @@ class QueueEntry:
         return self.hold is None
 
 
+#: What "unfinished" means for the wait-for-merge gate (milestone 047, FR-005).
+#:
+#: The complement is the load-bearing half. ``discovered`` and ``ready`` are **excluded**
+#: because they are pre-dispatch: an item that has never run has produced no branch, no
+#: pull request and no code to land, and counting it would make a repository hold itself —
+#: two queued issues, each waiting on the other, forever. ``done`` and ``abandoned`` are
+#: excluded because they are terminal, and their exclusion *is* the release mechanism: a
+#: merged pull request that says *closes #N* closes the issue, and
+#: ``reconcile._resolve_closed_issues`` already turns a closed issue into ``done``.
+#:
+#: ``failed`` and ``interrupted`` are included. They are non-terminal work in a repository
+#: that asked to run one thing at a time, and ``robot-army retry`` and ``robot-army
+#: abandon`` are how the author says which.
+UNFINISHED_STATES: frozenset[WorkItemState] = frozenset(
+    {
+        WorkItemState.DISPATCHING,
+        WorkItemState.ACTIVE,
+        WorkItemState.AWAITING_REVIEW,
+        WorkItemState.INTERRUPTED,
+        WorkItemState.FAILED,
+    }
+)
+
+
+def unfinished_by_repo(conn: sqlite3.Connection) -> dict[str, list[WorkItem]]:
+    """``repo_key`` → the items in it that have been dispatched and have not finished.
+
+    One scan, not one per candidate repository (R3). ``plan`` runs on every dispatch tick
+    *and* on every web page render, and the module already establishes that a fact needed
+    by many items is resolved once for the whole plan rather than per item.
+
+    Simulated rows are included for the reason ``capacity.snapshot`` includes them in its
+    own count: a dry run exists to rehearse the real behaviour, and a gate that ignored
+    simulated work would rehearse the wrong thing. No outward request is made either way,
+    so nothing about dry-run isolation changes.
+    """
+    grouped: dict[str, list[WorkItem]] = {}
+    for item in db.list_work_items(
+        conn, include_simulated=True, states=sorted(UNFINISHED_STATES)
+    ):
+        grouped.setdefault(item.repo_key, []).append(item)
+    return grouped
+
+
 def plan(
     conn: sqlite3.Connection,
     *,
@@ -106,6 +158,11 @@ def plan(
     # Resolved once for the whole plan rather than per item: this function runs on every
     # web page render, and one query beats one per queued item.
     resolved = repos.resolved_all(conn, config)
+    # Same reasoning, same shape: one query for the whole plan rather than one per queued
+    # item (R3). Computed unconditionally rather than only when some repository has the
+    # setting on, because deciding *that* would itself mean walking every repository's
+    # configuration, and this is one scan of a table `plan` is already reading.
+    unfinished = unfinished_by_repo(conn)
     items = sorted(
         db.list_work_items(conn, include_simulated=True, states=[WorkItemState.READY]),
         key=lambda item: order_key(item, resolved.get(item.repo_key), config.dispatch.order),
@@ -120,6 +177,7 @@ def plan(
             capacity=capacity,
             paused=control.paused,
             resolved=resolved,
+            unfinished=unfinished,
         )
         entries.append(
             QueueEntry(item=item, position=position, hold=hold, detail=detail)
@@ -160,6 +218,7 @@ def _hold_for(
     capacity: CapacitySnapshot,
     paused: bool,
     resolved: dict[str, RepoConfig],
+    unfinished: dict[str, list[WorkItem]],
 ) -> tuple[HoldReason | None, str]:
     """The first applicable reason, in ``HoldReason``'s declaration order (R9).
 
@@ -194,6 +253,29 @@ def _hold_for(
             HoldReason.REPO_CAP,
             f"repository {item.repo_key}: {running} of {cap} sessions ({source})",
         )
+
+    # The wait-for-merge gate (milestone 047, FR-005). Per-item like ``repo_cap`` above and
+    # for the same reason: it is a statement about one repository, and a queue that stopped
+    # on it would let one waiting repository stall every other one.
+    #
+    # ``item.id`` is excluded so an item can never hold itself. In practice a candidate here
+    # is always ``ready``, which is not an unfinished state at all, so this is belt to
+    # braces — but the alternative is a rule whose correctness depends on a caller's filter.
+    if config.effective_wait_for_merge(item.repo_key)[0]:
+        blockers = [
+            other for other in unfinished.get(item.repo_key, ()) if other.id != item.id
+        ]
+        if blockers:
+            # The oldest is named rather than all of them: one sentence the author can act
+            # on beats a list they have to read, and the oldest is the one whose landing
+            # will most likely free the queue.
+            first = min(blockers, key=lambda other: other.id)
+            more = f" (and {len(blockers) - 1} more)" if len(blockers) > 1 else ""
+            return (
+                HoldReason.AWAITING_MERGE,
+                f"repository {item.repo_key}: #{first.issue_number} is {first.state} and "
+                f"has not landed on {config.base_branch_for(item.repo_key)} yet{more}",
+            )
 
     # Milestone 001's gate, reported through this milestone's vocabulary so the two
     # surfaces speak one language. Only one of its three halves is *checkable* here, and

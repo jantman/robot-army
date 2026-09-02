@@ -9,6 +9,7 @@ stable, the positions are honest, and computing it changes nothing.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 
 import pytest
 from tests.conftest import seed_item
@@ -151,6 +152,7 @@ def test_the_precedence_is_declared_in_one_readable_place():
         ordering.HoldReason.CAPACITY_UNOBSERVABLE,
         ordering.HoldReason.GLOBAL_CAP,
         ordering.HoldReason.REPO_CAP,
+        ordering.HoldReason.AWAITING_MERGE,
         ordering.HoldReason.NOT_ONBOARDED,
         ordering.HoldReason.PREPARATION_FAILED,
     ]
@@ -238,6 +240,238 @@ def test_exactly_one_reason_is_ever_reported(conn, config):
     )[0]
     assert entry.hold is ordering.HoldReason.PAUSED
     assert isinstance(entry.hold, ordering.HoldReason)
+
+
+# -- the wait-for-merge gate (milestone 047) --------------------------------
+
+
+def waiting(config, *, globally: bool = False, repo_key: str = "demo"):
+    """``config`` with wait-for-merge in force, either globally or for one repository."""
+    if globally:
+        return replace(config, dispatch=replace(config.dispatch, wait_for_merge=True))
+    section = config.repos[repo_key]
+    return replace(
+        config, repos={**config.repos, repo_key: replace(section, wait_for_merge=True)}
+    )
+
+
+def test_an_unfinished_item_holds_the_rest_of_its_repository(conn, config):
+    """The feature the issue asks for: the next issue does not start until the last one
+    has landed."""
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW))
+    ready(conn, 1, repo_key="demo")
+
+    entry = ordering.plan(
+        conn, config=waiting(config), capacity=snapshot(global_cap=9)
+    )[0]
+
+    assert entry.hold is ordering.HoldReason.AWAITING_MERGE
+    # SC-003: actionable without opening the log.
+    assert "demo" in entry.detail
+    assert "#41" in entry.detail
+    assert "awaiting_review" in entry.detail
+
+
+def test_the_global_setting_holds_a_repository_with_no_section_of_its_own(conn, config):
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.ACTIVE))
+    ready(conn, 1, repo_key="demo")
+
+    entry = ordering.plan(
+        conn, config=waiting(config, globally=True), capacity=snapshot(global_cap=9)
+    )[0]
+
+    assert entry.hold is ordering.HoldReason.AWAITING_MERGE
+
+
+@pytest.mark.parametrize("terminal", [WorkItemState.DONE, WorkItemState.ABANDONED])
+def test_the_hold_lifts_when_the_unfinished_item_reaches_a_terminal_state(
+    conn, config, terminal
+):
+    """FR-008. Merging a pull request that says *closes #N* closes the issue, and a closed
+    issue already becomes ``done`` — so the release needs no new machinery."""
+    blocker = seed_item(
+        conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW)
+    )
+    ready(conn, 1, repo_key="demo")
+    held = waiting(config)
+    assert ordering.plan(conn, config=held, capacity=snapshot(global_cap=9))[0].hold
+
+    conn.execute("UPDATE work_items SET state = ? WHERE id = ?", (str(terminal), blocker))
+
+    entry = ordering.plan(conn, config=held, capacity=snapshot(global_cap=9))[0]
+    assert entry.hold is None
+    assert entry.dispatchable
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        WorkItemState.DISPATCHING,
+        WorkItemState.ACTIVE,
+        WorkItemState.AWAITING_REVIEW,
+        WorkItemState.INTERRUPTED,
+        WorkItemState.FAILED,
+    ],
+)
+def test_every_dispatched_non_terminal_state_holds(conn, config, state):
+    """``failed`` and ``interrupted`` count too: a repository asked to run one thing at a
+    time has one thing in flight whatever condition it is in, and ``retry`` and ``abandon``
+    are how the author says which."""
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(state))
+    ready(conn, 1, repo_key="demo")
+
+    entry = ordering.plan(
+        conn, config=waiting(config), capacity=snapshot(global_cap=9)
+    )[0]
+    assert entry.hold is ordering.HoldReason.AWAITING_MERGE
+
+
+def test_ready_items_do_not_hold_each_other(conn, config):
+    """The load-bearing exclusion. Counting ``ready`` would make two queued issues wait on
+    each other forever, which is a deadlock rather than a gate."""
+    ready(conn, 3, repo_key="demo")
+
+    entries = ordering.plan(conn, config=waiting(config), capacity=snapshot(global_cap=9))
+
+    assert [e.hold for e in entries] == [None, None, None]
+
+
+def test_a_discovered_item_does_not_hold_either(conn, config):
+    """Pre-dispatch in the other direction: an item polling found but nothing has prepared
+    has produced no branch and no pull request, so there is nothing to wait for."""
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.DISCOVERED))
+    ready(conn, 1, repo_key="demo")
+
+    entry = ordering.plan(
+        conn, config=waiting(config), capacity=snapshot(global_cap=9)
+    )[0]
+    assert entry.hold is None
+
+
+def test_the_gate_holds_one_repository_and_leaves_the_others_moving(conn, config):
+    """FR-007. One waiting repository must not stall every other one."""
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW))
+    ready(conn, 1, repo_key="demo")
+    seed_item(conn, repo_key="other", issue_number=7, state=str(WorkItemState.AWAITING_REVIEW))
+    seed_item(conn, repo_key="other", issue_number=8, state=str(WorkItemState.READY))
+
+    entries = ordering.plan(
+        conn, config=waiting(config), capacity=snapshot(global_cap=9)
+    )
+    holds = {e.item.repo_key: e.hold for e in entries}
+
+    assert holds["demo"] is ordering.HoldReason.AWAITING_MERGE
+    # "other" has no section, so it holds for its own unrelated reason — but it holds for a
+    # *different* one, which is the point: demo's wait is not contagious.
+    assert holds["other"] is not ordering.HoldReason.AWAITING_MERGE
+
+
+def test_the_setting_off_changes_nothing(conn, config):
+    """The default. An installation that never asked for this must behave exactly as it
+    did before the feature existed."""
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW))
+    ready(conn, 1, repo_key="demo")
+
+    entry = ordering.plan(conn, config=config, capacity=snapshot(global_cap=9))[0]
+    assert entry.hold is None
+
+
+def test_a_repository_may_opt_out_of_a_global_setting(conn, config):
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW))
+    ready(conn, 1, repo_key="demo")
+    opted_out = replace(
+        replace(config, dispatch=replace(config.dispatch, wait_for_merge=True)),
+        repos={**config.repos, "demo": replace(config.repos["demo"], wait_for_merge=False)},
+    )
+
+    entry = ordering.plan(conn, config=opted_out, capacity=snapshot(global_cap=9))[0]
+    assert entry.hold is None
+
+
+def test_the_repository_cap_outranks_the_merge_gate(conn, config):
+    """R4. While a session is still running there is a slot to free, and sending the author
+    off to merge a pull request points at the wrong fix."""
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.ACTIVE))
+    ready(conn, 1, repo_key="demo")
+
+    entry = ordering.plan(
+        conn,
+        config=waiting(config),
+        capacity=snapshot(total=1, global_cap=9, per_repo={"demo": 1}),
+    )[0]
+    assert entry.hold is ordering.HoldReason.REPO_CAP
+
+
+def test_the_merge_gate_outranks_a_residual_preparation_failure(conn, config):
+    """It is a condition of the queue rather than of the item: an empty machine does not
+    clear it, and the residue would still be there once it did."""
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW))
+    item = seed_item(conn, repo_key="demo", issue_number=1, state=str(WorkItemState.READY))
+    conn.execute(
+        "UPDATE work_items SET blocked_reason = 'trust check failed' WHERE id = ?", (item,)
+    )
+
+    entry = ordering.plan(
+        conn, config=waiting(config), capacity=snapshot(global_cap=9)
+    )[0]
+    assert entry.hold is ordering.HoldReason.AWAITING_MERGE
+
+
+def test_a_pause_still_outranks_the_merge_gate(conn, config):
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW))
+    ready(conn, 1, repo_key="demo")
+    with db.transaction(conn):
+        db.set_dispatch_paused(conn, paused=True, by="test")
+
+    entry = ordering.plan(
+        conn, config=waiting(config), capacity=snapshot(global_cap=9)
+    )[0]
+    assert entry.hold is ordering.HoldReason.PAUSED
+
+
+def test_a_simulated_item_is_gated_exactly_as_a_real_one_is(conn, config):
+    """Both directions. A dry run exists to rehearse the real behaviour, and no outward
+    request is made either way — so there is nothing here for dry-run isolation to protect."""
+    seed_item(
+        conn,
+        repo_key="demo",
+        issue_number=41,
+        dry_run=True,
+        state=str(WorkItemState.AWAITING_REVIEW),
+    )
+    seed_item(
+        conn, repo_key="demo", issue_number=1, dry_run=True, state=str(WorkItemState.READY)
+    )
+
+    entry = ordering.plan(
+        conn, config=waiting(config), capacity=snapshot(global_cap=9)
+    )[0]
+    assert entry.hold is ordering.HoldReason.AWAITING_MERGE
+
+
+def test_several_blockers_name_the_oldest_and_count_the_rest(conn, config):
+    """One sentence the author can act on beats a list they have to read."""
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW))
+    seed_item(conn, repo_key="demo", issue_number=42, state=str(WorkItemState.FAILED))
+    ready(conn, 1, repo_key="demo")
+
+    entry = ordering.plan(
+        conn, config=waiting(config), capacity=snapshot(global_cap=9)
+    )[0]
+    assert "#41" in entry.detail
+    assert "and 1 more" in entry.detail
+
+
+def test_the_gate_still_writes_nothing(conn, config):
+    """FR-013. It runs on every web page render, so the extra query must stay a read."""
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW))
+    ready(conn, 1, repo_key="demo")
+    versions = conn.execute("PRAGMA data_version").fetchone()[0]
+
+    ordering.plan(conn, config=waiting(config), capacity=snapshot(global_cap=9))
+
+    assert conn.execute("PRAGMA data_version").fetchone()[0] == versions
+    assert conn.in_transaction is False
 
 
 # -- FR-020 and FR-021 (T043) -----------------------------------------------

@@ -570,6 +570,7 @@ def resolve(conn: sqlite3.Connection, config: Config, key: str) -> RepoConfig | 
             model=section.model,
             max_sessions=section.max_sessions,
             priority=section.priority,
+            wait_for_merge=section.wait_for_merge,
             speckit=section.speckit,
         )
     return RepoConfig(

@@ -140,6 +140,38 @@ def prepare(
                 failure_reason=f"git fetch failed for {repo.key}: {exc}",
             )
 
+        # The author's own clone catches up too, for repositories that asked to wait for
+        # their work to land (milestone 047, FR-016). Only for those: this is the one step
+        # here that writes to a directory the author works in, and the Operating
+        # Constraints' rule for such actions is that they are reachable only by explicit
+        # configuration.
+        #
+        # Recorded into this action's outcome beside ``fetch_skipped`` rather than as a
+        # record of its own, and **never** fatal (FR-019). The worktree below is created
+        # from ``<remote>/<base_ref>`` whichever way this goes, so the session starts from
+        # the merged code regardless; failing a work item because the clone happened to be
+        # dirty would punish the wrong thing.
+        #
+        # The key is written for **every** wait-for-merge repository, including the ones
+        # where nothing was attempted. That invariant is the whole point: without it, an
+        # absent ``fast_forward`` would mean both "this repository never asked to wait" and
+        # "it asked, and there was no remote to catch up to" — the very ambiguity
+        # ``fetch_skipped`` exists three lines above to prevent, reproduced one step down.
+        if config.effective_wait_for_merge(repo.key)[0]:
+            if remote is None:
+                outcome["fast_forward"] = "skipped"
+                outcome["fast_forward_reason"] = "the repository has no configured remote"
+            else:
+                try:
+                    ff = vcs.fast_forward(clone, remote, base_ref)
+                    outcome["fast_forward"] = ff.outcome
+                    outcome["fast_forward_reason"] = ff.reason
+                    outcome["fast_forward_before"] = ff.before
+                    outcome["fast_forward_after"] = ff.after
+                except Exception as exc:  # noqa: BLE001 - a convenience step never fails the item
+                    outcome["fast_forward"] = "failed"
+                    outcome["fast_forward_reason"] = str(exc)
+
         # Prefer the remote-tracking ref: the primary clone's local base branch may be
         # behind, and a worktree created from a stale base is a subtle, silent problem.
         start_point = base_ref

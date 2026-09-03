@@ -319,6 +319,19 @@ def check_project(
         checks.append(ProjectCheck(f"{repo_key} project", False, str(exc)))
         return checks
 
+    if resolution.absent:
+        # Passing, not failing. `doctor` exits non-zero on any failed check, so reporting
+        # absence as a failure would make the command fail on every installation that has
+        # no project board — which is most of them, and is not a problem. Still reported
+        # rather than skipped: `doctor` is the command that says everything it knows.
+        checks.append(
+            ProjectCheck(
+                f"{repo_key} project",
+                True,
+                f"{resolution.reason} — board ordering has no effect here",
+            )
+        )
+        return checks
     if not resolution.resolved:
         checks.append(ProjectCheck(f"{repo_key} project", False, resolution.reason or ""))
         return checks
@@ -440,8 +453,8 @@ def read_board(
 
     now = utcnow()
     if resolution.absent and state.resolved_at is None and state.last_read_at is None:
-        # A repository that has never had a board and does not have one now. Nothing is
-        # persisted and nothing is recorded, and both halves matter (review, round 2).
+        # A repository with no board and no history of one. Nothing is persisted and
+        # nothing is recorded, and both halves matter (review, round 2).
         #
         # Persisting would put a `repo_projects` row under every onboarded repository,
         # which `_say_projects` then prints as "not ordered by a board" — for every
@@ -449,10 +462,38 @@ def read_board(
         # own promise to skip them. Recording would write an error a minute for the
         # ordinary condition of most repositories.
         #
-        # The condition is narrow on purpose. A repository that *did* have a board and no
-        # longer does falls through to the branch below, because a board going away is a
-        # real change and the author should hear about it.
-        return state
+        # **"No history" means no stale problem on record either** (review, round 3).
+        # `resolved_at` and `last_read_at` are both `None` for a genuinely untouched
+        # repository *and* for one carrying an `unresolved_reason` from an earlier
+        # ambiguity or a `last_error` from an earlier transport failure — neither of which
+        # ever set them. Returning early on those would freeze the stale reason in place
+        # and `status` would keep printing "two projects are linked" long after the author
+        # unlinked both. That is the same stale-surface failure this short-circuit was
+        # added to avoid, reached from a different prior state.
+        if state.unresolved_reason is None and state.last_error is None:
+            return state
+        # There is stale state, and it is no longer true. Clear it back to pristine rather
+        # than replacing it with "no project is linked": the repository never had a
+        # working board, so what is left is not news — it is the absence of the problem.
+        # A blank row reads identically to no row at all through `get_repo_project` and
+        # `_project_rows`, so this needs no delete accessor. It also resets the failure
+        # counter and the backoff, which no longer have anything to describe.
+        cleared = RepoProject(repo_key=repo_key)
+        with db.transaction(conn):
+            db.save_repo_project(conn, cleared)
+        audit.record(
+            "poll.board",
+            outcome="ok",
+            entity_type="repo",
+            entity_id=repo_key,
+            detail={
+                "absent": True,
+                "cleared": state.unresolved_reason or state.last_error,
+                "consequence": "the recorded problem no longer applies; this repository "
+                "has no board and is ordered by the configured order",
+            },
+        )
+        return cleared
     if snapshot is None:
         # Resolution failed but the request succeeded. Not a transport failure, so the
         # failure counter is *not* advanced — backing off would delay recovery from a

@@ -241,6 +241,68 @@ def test_a_repository_that_never_had_a_board_persists_nothing(conn, config, audi
     assert "poll.board" not in written
 
 
+def test_a_stale_ambiguity_is_cleared_when_the_projects_are_unlinked(conn, config, audit):
+    """Found in review, round three. The short-circuit's condition matched two different
+    situations and only one of them was safe.
+
+    `resolved_at` and `last_read_at` are both NULL for a genuinely untouched repository
+    *and* for one carrying an `unresolved_reason` from an earlier ambiguity — nothing on
+    that path ever sets them. Returning early on the second froze the stale reason in
+    place, and `status` would keep printing "two projects are linked" long after the author
+    had unlinked both. That is the same stale-surface failure the short-circuit exists to
+    avoid, reached from a different prior state.
+    """
+    onboard(conn)
+    reader = reader_with(res=ProjectResolution(reason="two projects are linked"))
+    stale = run(conn, config, audit, reader)
+    assert stale.unresolved_reason == "two projects are linked"
+
+    reader.resolution = ProjectResolution(absent=True, reason="no project is linked")
+    cleared = run(conn, config, audit, reader)
+
+    assert cleared.unresolved_reason is None, "the reason is no longer true"
+    assert not cleared.governs
+
+
+def test_a_stale_transport_error_and_its_backoff_are_cleared_too(conn, config, audit):
+    """Same guard, the other prior state. A repository whose reads were failing and which
+    now simply has no board must not keep its error and its backoff forever."""
+    onboard(conn)
+    reader = reader_with(raise_on_resolve=TransportError("GitHub is down"))
+    failed = run(conn, config, audit, reader)
+    assert failed.last_error == "GitHub is down"
+    assert failed.backoff_until is not None
+
+    with db.transaction(conn):
+        db.save_repo_project(conn, replace(failed, backoff_until=None))
+    reader.raise_on_resolve = None
+    reader.resolution = ProjectResolution(absent=True, reason="no project is linked")
+    cleared = run(conn, config, audit, reader)
+
+    assert cleared.last_error is None
+    assert cleared.consecutive_failures == 0
+    assert cleared.backoff_until is None
+
+
+def test_clearing_stale_state_is_recorded_once_then_goes_quiet(
+    conn, config, audit, layout
+):
+    """The clearing is a change and is recorded. The passes after it are not, because by
+    then the repository is simply one of the many that have no board."""
+    onboard(conn)
+    reader = reader_with(res=ProjectResolution(reason="two projects are linked"))
+    run(conn, config, audit, reader)
+    reader.resolution = ProjectResolution(absent=True, reason="no project is linked")
+    run(conn, config, audit, reader)
+
+    for path in layout.log_dir.glob("*.jsonl"):
+        path.write_text("")
+    run(conn, config, audit, reader)
+
+    written = "".join(p.read_text() for p in layout.log_dir.glob("*.jsonl"))
+    assert "poll.board" not in written
+
+
 def test_a_board_that_goes_away_is_reported_as_a_change(conn, config, audit, layout):
     """The narrow other half. A repository that *did* have a board and no longer does has
     genuinely changed, and the author should hear about it — so it is persisted and

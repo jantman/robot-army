@@ -94,6 +94,42 @@ def test_a_failing_token_stops_the_remaining_questions(conn, config, audit):
     assert [c.name.split()[-1] for c in checks] == ["token"]
 
 
+def test_an_absent_board_passes_rather_than_failing_the_command(conn, config, audit):
+    """Found in review, round three. `doctor` exits non-zero on any failed check, so
+    reporting absence as a failure would make the command fail on every installation that
+    has no project board — which is most of them, and is not a problem."""
+    onboard(conn)
+    reader = FakeIssueReader()  # the default: absent, nothing linked
+
+    checks = check(conn, config, audit, reader)
+
+    project = named(checks, "project")
+    assert project.ok
+    assert "no project is linked" in project.detail
+    assert "no effect here" in project.detail
+    assert all(c.ok for c in checks)
+
+
+def test_doctor_exits_zero_on_an_installation_with_no_boards(conn, config, monkeypatch):
+    from robot_army import operations
+
+    onboard(conn)
+    reader = FakeIssueReader()
+    monkeypatch.setattr(
+        operations,
+        "wire",
+        lambda level, cfg, log: make_boundaries(log, level=level, reader=reader),
+    )
+    ctx = operations.build_context(config)
+    try:
+        result = operations.doctor(ctx)
+    finally:
+        ctx.close()
+
+    board_failures = [f for f in result.data["failures"] if f.startswith("project:")]
+    assert board_failures == []
+
+
 def test_an_unresolved_project_is_reported_with_its_reason(conn, config, audit):
     onboard(conn)
     reader = FakeIssueReader()

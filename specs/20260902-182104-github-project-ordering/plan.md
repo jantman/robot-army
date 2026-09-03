@@ -477,6 +477,37 @@ snapshot on disk, and whether that snapshot is currently governing anything — 
 the same. Anything that says *what will happen* has to consult `governs`; only something
 describing the database should consult the row.
 
+### A third round, on the second round's own fix
+
+Two more, both correct, and the first is the sharper lesson of the three rounds.
+
+1. **The absent-board short-circuit swallowed stale problem state.** Its guard was
+   `absent and resolved_at is None and last_read_at is None` — which is true of a genuinely
+   untouched repository *and* of one carrying an `unresolved_reason` from an earlier
+   ambiguity or a `last_error` from an earlier transport failure, because nothing on either
+   of those paths ever sets those two columns. So a repository that had two linked projects
+   and then had both unlinked returned early, its row untouched, and `status` went on
+   printing *"two projects are linked"* forever.
+
+   That is **the same stale-surface failure the short-circuit was written to avoid**, reached
+   from a different prior state, in the fix for it. The guard now also requires no problem on
+   record, and a repository that has one falls through to a branch that clears it back to
+   pristine — reason, error, failure count and backoff — rather than replacing it with "no
+   project is linked", because a repository that never had a working board has no news to
+   report once the problem is gone.
+
+2. **`check_project` failed on an absent board**, and `doctor` exits non-zero on any failed
+   check — so the command would have failed on every installation without a project board,
+   which is most of them. Absence is now a passing, informative row.
+
+**What three rounds in the same feature actually taught.** Every finding was the same shape:
+a place where *stored state* and *current effect* had come apart, and the code or the prose
+described the storage. The fix for the second instance introduced the third. That is the
+signature of a missing distinction rather than a run of unrelated slips — this module holds a
+snapshot on disk and a separate question of whether that snapshot governs anything, and every
+guard, message and surface has to be explicit about which one it means. Anything added here
+later should be read against that question first.
+
 ### One thing not done
 
 **T043's live walk-through is not complete.** The read-only half was run against the real API

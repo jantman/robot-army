@@ -335,3 +335,71 @@ def test_a_cross_site_post_over_the_wire_is_refused(live_server, conn):
     )
     assert status == 403
     assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED
+
+
+def test_the_queue_renders_without_ever_asking_github(config, conn, layout, monkeypatch):
+    """FR-005 and SC-004, asserted rather than eyeballed.
+
+    ``ordering.plan`` runs on every page render, and the whole reason the board is read at
+    poll time and stored is that a render must never make a network call. A reader that
+    raises on *any* attribute access turns a regression here into a failure rather than
+    into a page that is merely slower.
+    """
+    from tests.conftest import WebHarness, make_boundaries, seed_item
+
+    from robot_army import db, operations
+    from robot_army.models import RepoProject
+    from robot_army.web.server import WebApp
+
+    class ExplodingReader:
+        def __getattr__(self, name):
+            def boom(*args, **kwargs):
+                raise AssertionError(f"rendering must not reach GitHub ({name})")
+
+            return boom
+
+    monkeypatch.setattr(
+        operations,
+        "wire",
+        lambda level, cfg, log: make_boundaries(
+            log, level=level, reader=ExplodingReader()
+        ),
+    )
+    operations.clear_resume_signal_cache()
+
+    ranked = seed_item(conn, issue_number=1, state="ready")
+    parked = seed_item(conn, issue_number=2, state="ready")
+    with db.transaction(conn):
+        db.save_repo_project(
+            conn,
+            RepoProject(
+                repo_key="demo",
+                project_id="PVT_3",
+                project_number=3,
+                project_title="robot-army",
+                column_name="Ready",
+                project_source="discovered",
+                column_source="discovered",
+                resolved_at="2026-09-02T00:00:00Z",
+                last_read_at="2026-09-02T00:00:00Z",
+            ),
+        )
+    conn.execute(
+        "UPDATE work_items SET board_column = 'Ready', board_position = 1 WHERE id = ?",
+        (ranked,),
+    )
+    conn.execute(
+        "UPDATE work_items SET board_column = 'Backlog' WHERE id = ?", (parked,)
+    )
+
+    harness = WebHarness(WebApp(config), reader=None, display=None, host=None, vcs=None)
+    try:
+        page = harness.get("/queue").text
+        payload = harness.get_json("/queue").json()
+        harness.get("/")
+    finally:
+        operations.clear_resume_signal_cache()
+
+    assert "not the dispatch column" in page
+    assert payload["held_off_column"] == 1
+    assert payload["ready"][0]["id"] == ranked

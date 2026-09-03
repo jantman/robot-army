@@ -391,6 +391,28 @@ that decides a typo fix does not need four phases produces exactly this. `robot-
 explains the one case where silence is otherwise mysterious: a Spec Kit worktree whose
 baseline was never recorded, which can never report a phase and says so.
 
+## The issue #48 actions
+
+Reading a GitHub project board. Five records, and none of them is an intent/outcome pair —
+the bracket exists for calls that change something outside the process, and every one of
+these is a read. The board is never written to.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `github.project.discover` | Every resolution attempt, resolved or not | Candidate projects seen, the project and column chosen, and whether each was `discovered` or `configured`. On failure, the `reason` a surface shows — which is why "why is this repository not ordered by its board?" is answerable from the log as well as from `status` |
+| `github.project.read` | Every successful board read | Project, column, how many items were ranked, how many were parked elsewhere, and the total the project holds |
+| `github.project.partial` | A GraphQL response carrying **both** data and errors | The error type and count, written immediately before the read is failed. A partly believed board is worse than no board: the missing half is invisible, so the order would be confidently wrong rather than absent |
+| `poll.board` | Once per repository per pass | `ok` with the counts, `ok` with a `skipped` reason when the repository is in backoff, or `error` with the failure and the new backoff. A skip is recorded rather than silent — "the board was not read this pass" is a fact about the order being shown |
+| `poll.board.fallback` | A read failed or a resolution was lost, and a previous snapshot exists | How old that snapshot is, and that its order **remains in force**. The consequence is stated in the record rather than left to be inferred from an absence |
+
+A resolution failure is not a transport failure and does not advance the backoff counter.
+There is nothing to retry away: only the author can clear an ambiguity, and backing off would
+delay recovery once they had.
+
+**No credential reaches this log.** The token is read at the moment it is needed and never
+stored; the scope *names* appear in `doctor` output when a check fails, which is the whole
+point of that check, and scope names are not secrets.
+
 ## What is deliberately not logged
 
 Principle III permits gaps only when they are named and justified in the feature plan. The
@@ -409,6 +431,7 @@ the log knows what its silence means:
 | A **passing** dispatch-time clone re-verification | The worktree-creation record that follows on the same item milliseconds later already implies it passed, so a record here would be one line per dispatch answering a question the next line answers anyway. Every **failure** is logged, and the two that mean the machine changed under an approval also raise an anomaly. See the milestone 005 section above |
 | A reconciliation pass in which **no lifecycle phase changed** | Same disproportion as the heartbeat: a 60-second cycle against work that moves every few hours. Every transition is recorded individually, and the pass summary counts the changes, so nothing about the progression is unreconstructable. See the milestone 007 section above |
 | The individual **file reads** behind Spec Kit detection and phase observation | Four `stat` calls per dispatch and a handful per active item per cycle. They change no state outside the process, and the *decision* they support is logged — logging each read would bury it |
+| The project board's **item sequence** on every read — the counts and the outcome are recorded instead | The order itself is recoverable from `work_items.board_position` at any instant, and it is not a question about an action the system *took*. Writing the same list every 60 seconds per repository would be ~1,440 copies a day drowning the records that matter. What is genuinely lost is history: from the log alone you cannot say what order the board was in three days ago. Every read, every failure, every fallback and every dispatch **is** recorded, so nothing the system did is unreconstructable |
 | **Read-only web requests** — every `GET` the interface serves | They change no state outside the process, so Principle III's own scope does not reach them. The exception is written down because the *volume* makes the omission visible: a page auto-refreshing every 10 seconds issues a `GET` every 10 seconds, and logging those would bury the record this project exists to keep readable. Nothing a `GET` does is unreconstructable — the data it read is in the database and in this log. **Every `POST` is logged**, without exception |
 
 ## Silent failure is forbidden

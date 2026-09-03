@@ -802,12 +802,36 @@ def queue_view(
             )
         )
 
+    # Issue #48. A repository whose last board read failed is still dispatching, in the
+    # order the previous read produced — which is right (FR-025), and which the author
+    # must be able to see, because an order silently frozen days ago is indistinguishable
+    # from a current one.
+    project_rows = operations._project_rows(ctx, plan)
+    stale = [row for row in project_rows if row["consecutive_failures"]]
+    board_note: list[Any] = []
+    for row in stale:
+        age = row["last_read_age_seconds"]
+        last_read = f"{age}s ago" if age is not None else "never"
+        board_note.append(
+            div(
+                f"{row['repo_key']}: the project board could not be read "
+                f"({row['last_error']}). The order shown is the one last read "
+                f"successfully, {last_read}.",
+                class_="banner error",
+            )
+        )
+    off_column = sum(row["held_off_column"] for row in project_rows)
+    # FR-030: a repository whose whole backlog is parked has ready items and dispatches
+    # none of them, which without this count reads exactly like having no work.
+    parked_note = f" · {off_column} held off-column" if off_column else ""
+
     body = join(
         [
             h(1, "queue"),
             *pause_note,
+            *board_note,
             dispatch_controls(current, include_simulated=include_simulated),
-            h(2, f"ready ({len(ready)}) — in dispatch order"),
+            h(2, f"ready ({len(ready)}) — in dispatch order{parked_note}"),
             _nothing(
                 "Nothing is ready.",
                 withheld_ready,
@@ -914,6 +938,10 @@ def queue_view(
             },
             "dispatching_max_age_seconds": max_age,
             "capacity": operations._capacity_dict(snap, ctx.config.dispatch.order),
+            # The same facts the banner and the heading render, so `?json` and the page
+            # never disagree about why the queue looks the way it does.
+            "projects": project_rows,
+            "held_off_column": off_column,
             "withheld_simulated": withheld,
         },
         body=body,

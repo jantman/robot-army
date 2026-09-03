@@ -318,3 +318,95 @@ reporting success. `_graphql()` exists solely to make that impossible, it must n
 and its 200-with-errors test is not optional.
 
 No entry in Complexity Tracking. Nothing needed justifying.
+
+
+## Post-implementation reconciliation (T045)
+
+Re-read against the code as built. **The Constitution Check above still holds**, and the
+enumerated Principle III gap is unchanged in substance and is now written into
+`docs/logging.md` where the author will actually find it. Seven things differ from what this
+document promised, and each is recorded rather than quietly absorbed.
+
+**First, the validation that matters most.** The GraphQL documents were run against the live
+API for `jantman/robot-army`, read-only, and every part of the design held:
+
+```
+project_access     ok, classic token, scopes include 'project'
+resolve_project    #3 'robot-army', column 'Ready', discovered/discovered — no configuration
+read_board         39 items; ranked [48, 1, 41, 20, 22, 21, 23, 30, 32, 44]
+view_sort_conflicts ()
+```
+
+That ranked list is **exactly** the order the author reported seeing in the browser, which is
+the end-to-end confirmation no mocked test can give: the documents are right, `POSITION`
+really is what a drag writes to, and discovery resolves this board with an empty config
+section. `view_sort_conflicts` returning empty is the check correctly staying quiet — view 1
+does sort by `Priority`, and no card in `Ready` has one set.
+
+### The deviations
+
+1. **Two requests per repository per poll, not one.** R4 designed a single combined document
+   carrying discovery and the board read together. The built code calls `resolve_project` then
+   `read_board`, because combining them means the caller must already hold a project id, which
+   turns two clean protocol methods into one method with a mode flag. The cost is real and
+   small: ~120 rate-limit points per hour per repository against a 5,000 budget, measured at
+   1 point per request. The benefit kept is that the *link* is re-verified on every pass, which
+   is what FR-015 and FR-018 need in order to notice a project being unlinked or a second one
+   being added. R4's arithmetic is therefore doubled and its conclusion unchanged.
+
+2. **Four reader methods, not two.** `project_access` and `view_sort_conflicts` were added for
+   `doctor` only. `project_access` cannot be derived from a failed `resolve_project`: the
+   fine-grained-token diagnosis depends on the `x-oauth-scopes` header, which `_graphql` throws
+   away, and that diagnosis is the single most useful line the check produces — no
+   configuration fixes it, so an author who is not told will chase settings that cannot help.
+   `view_sort_conflicts` is the R2 check, and it is what makes "manual position only" an
+   honest choice rather than a silent one.
+
+3. **`ProjectAccess.credential_kind`, not `token_kind`.** The lint rule that flags hardcoded
+   passwords fires on any argument whose name contains `token`. Renaming the field was better
+   than a `noqa`, which would have suppressed a real rule at the one boundary that handles
+   credentials.
+
+4. **`check_project` lives in `poll.py`**, mirroring `intake.check_board`'s placement rather
+   than adding a module for one function. `doctor` wraps each repository's checks in a
+   `try` — it exists to report problems, so one unreachable board must not stop it reporting
+   on everything else.
+
+5. **A resolution failure does not advance the backoff counter.** The plan did not distinguish
+   the two, and the code does: a transport failure backs off, an ambiguous board does not.
+   Backing off on ambiguity would delay recovery from a condition only the author can clear,
+   and there is nothing to retry away.
+
+6. **`resolve_project` was split into a recorder and a decision.** The decision has eight
+   exits and every one of them must be logged; wrapping it was better than eight copies of the
+   recording call, which is the shape a missed exit hides in.
+
+7. **`status` prints only the board rows worth printing.** A repository with ordering enabled
+   and no board is skipped, because most installations have none and a line on every one of
+   them would bury the rows that matter. A repository the author switched **off** is shown —
+   that is a choice they made and may have forgotten making.
+
+### One test premise that was wrong, and what it taught
+
+Two ordering tests failed on first run, and both were the test's fault rather than the code's.
+The first asserted that a repository with no `[repos.*]` section and no recorded clone path
+holds nothing; it holds `not_onboarded`, as every such repository in the suite already did.
+The second set `clone_path = NULL` expecting `not_onboarded` and got `OFF_COLUMN`, because
+`repos.resolve` falls back to the section's `path` — so nulling the record does not make a
+repository unresolvable when a section still names it.
+
+Worth recording because the second one is a real property of `resolve` that is easy to forget:
+**the record wins `path` only when it has one**, and a configured section is a second source
+for it. A test that wants an unresolvable repository has to use a key with neither.
+
+### One thing not done
+
+**T043's live walk-through is not complete.** The read-only half was run against the real API
+and is quoted above. The half that needs a human — dragging a card and watching the order
+follow, parking a card and watching it be held, and a live dispatch — has not been performed,
+because it requires the author's running daemon and a browser. The quickstart is written to be
+walked in that order and the failure scenarios in its steps 6 and 7 are covered by unit tests
+in the meantime.
+
+No entry in Complexity Tracking. Nothing built here needed justifying beyond the Constitution
+Check above.

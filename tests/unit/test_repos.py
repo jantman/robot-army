@@ -608,3 +608,69 @@ def test_the_listing_makes_no_network_call(conn, audit, config, tmp_path):
 
     rows = {entry["repo_key"]: entry for entry in result.data["repos"]}
     assert rows["jantman/sk"]["speckit"]["detected"] is True
+
+
+# -- project board settings (issue #48) --------------------------------------
+
+
+def test_resolve_carries_the_three_project_fields(conn, repo_clone, layout, tmp_path):
+    """Dropping ``project_ordering`` would silently pin every repository to the global
+    value and make the per-repository override do nothing at all — a setting that looks
+    applied and is not, which is the failure the strict key tables exist to prevent."""
+    monkey_token()
+    config = parse(
+        config_dict(
+            repo_clone,
+            layout,
+            tmp_path / "worktrees",
+            repos={
+                "jantman/demo": {
+                    "path": str(repo_clone),
+                    "project_ordering": False,
+                    "project": "https://github.com/users/jantman/projects/3",
+                    "project_column": "In Review",
+                }
+            },
+        ),
+        tmp_path / "config.toml",
+    )
+    onboard_row(conn, "jantman/demo", repo_clone)
+
+    resolved = repos.resolve(conn, config, "jantman/demo")
+
+    assert resolved.project_ordering is False
+    assert resolved.project == "https://github.com/users/jantman/projects/3"
+    assert resolved.project_column == "In Review"
+
+
+def test_a_repository_with_no_section_inherits_all_three(conn, config, repo_clone):
+    """``None`` on each, which is *inherit* — the state a repository with no opinion
+    should be in, and distinguishable from having chosen the global value."""
+    onboard_row(conn, "jantman/demo", repo_clone)
+
+    resolved = repos.resolve(conn, config, "jantman/demo")
+
+    assert resolved.project_ordering is None
+    assert resolved.project is None
+    assert resolved.project_column is None
+
+
+def test_the_record_still_wins_only_the_path(conn, repo_clone, layout, tmp_path):
+    """The asymmetry migration 005 established is unchanged by these three: they are
+    policy the author may edit at any moment, not a location a human approved."""
+    monkey_token()
+    config = parse(
+        config_dict(
+            repo_clone,
+            layout,
+            tmp_path / "worktrees",
+            repos={"jantman/demo": {"path": str(repo_clone), "project_column": "Ready"}},
+        ),
+        tmp_path / "config.toml",
+    )
+    onboard_row(conn, "jantman/demo", repo_clone)
+
+    resolved = repos.resolve(conn, config, "jantman/demo")
+
+    assert resolved.path == repo_clone
+    assert resolved.project_column == "Ready"

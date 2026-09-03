@@ -1295,3 +1295,176 @@ def test_an_incomplete_pushover_section_never_loads_silently(repo_clone, layout,
     )
     assert config.pushover is not None
     assert not any("no notification channel" in w for w in config.warnings)
+
+
+# -- project board ordering (issue #48) --------------------------------------
+
+
+def test_project_ordering_defaults_to_on(repo_clone, layout, tmp_path):
+    """FR-019: a board that resolves without ambiguity takes effect without being switched
+    on. This is the one default here that changes behaviour on upgrade, which is why the
+    per-repository off switch below exists."""
+    config = build(repo_clone, layout, tmp_path)
+    assert config.dispatch.project_ordering is True
+    assert config.effective_project_ordering("demo") == (True, False)
+
+
+def test_an_absent_dispatch_section_still_enables_board_ordering(
+    repo_clone, layout, tmp_path
+):
+    raw = config_dict(repo_clone, layout, tmp_path / "worktrees")
+    assert "dispatch" not in raw
+    monkey_token()
+    config = parse(raw, tmp_path / "config.toml")
+    assert config.dispatch.project_ordering is True
+
+
+def test_a_repository_can_switch_board_ordering_off(repo_clone, layout, tmp_path):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        repos={"demo": {"path": str(repo_clone), "project_ordering": False}},
+    )
+    assert config.effective_project_ordering("demo") == (False, True)
+
+
+def test_the_global_switch_reaches_a_repository_with_no_opinion(
+    repo_clone, layout, tmp_path
+):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        dispatch={"project_ordering": False},
+        repos={"demo": {"path": str(repo_clone)}},
+    )
+    assert config.effective_project_ordering("demo") == (False, False)
+    assert config.repos["demo"].project_ordering is None
+
+
+def test_a_repository_override_beats_the_global_switch(repo_clone, layout, tmp_path):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        dispatch={"project_ordering": False},
+        repos={"demo": {"path": str(repo_clone), "project_ordering": True}},
+    )
+    assert config.effective_project_ordering("demo") == (True, True)
+
+
+def test_a_non_boolean_project_ordering_is_refused(repo_clone, layout, tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, dispatch={"project_ordering": "yes"})
+    assert any("project_ordering" in p for p in caught.value.problems)
+
+
+def test_a_misspelled_dispatch_key_is_an_error_not_a_warning(repo_clone, layout, tmp_path):
+    """An ordering the author thought they configured and did not is the failure the
+    strict section exists to prevent."""
+    with pytest.raises(ConfigError) as caught:
+        build(repo_clone, layout, tmp_path, dispatch={"project_odering": True})
+    assert any("project_odering" in p for p in caught.value.problems)
+
+
+def test_a_misspelled_repo_project_key_is_an_error(repo_clone, layout, tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            repos={"demo": {"path": str(repo_clone), "project_colum": "Ready"}},
+        )
+    assert any("unknown key 'project_colum'" in p for p in caught.value.problems)
+
+
+@pytest.mark.parametrize("value", [3, "3", "https://github.com/users/jantman/projects/3"])
+def test_project_accepts_a_number_or_a_url(repo_clone, layout, tmp_path, value):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        repos={"demo": {"path": str(repo_clone), "project": value}},
+    )
+    assert config.repos["demo"].project == str(value)
+
+
+@pytest.mark.parametrize(
+    "value", ["not-a-project", "https://example.com/users/x/projects/1", 0, -2, True]
+)
+def test_an_unusable_project_value_is_refused(repo_clone, layout, tmp_path, value):
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            repos={"demo": {"path": str(repo_clone), "project": value}},
+        )
+    assert any("project must be" in p for p in caught.value.problems)
+
+
+def test_a_project_url_with_a_view_segment_is_accepted(repo_clone, layout, tmp_path):
+    """That is what the browser address bar actually holds when the author copies it."""
+    from robot_army.config import parse_project_reference
+
+    reference = parse_project_reference(
+        "https://github.com/users/jantman/projects/3/views/1"
+    )
+    assert reference is not None
+    assert (reference.number, reference.owner_type, reference.login) == (3, "users", "jantman")
+
+
+def test_an_orgs_url_records_its_owner_type(repo_clone, layout, tmp_path):
+    from robot_army.config import parse_project_reference
+
+    reference = parse_project_reference("https://github.com/orgs/acme/projects/9")
+    assert (reference.number, reference.owner_type, reference.login) == (9, "orgs", "acme")
+
+
+def test_a_bare_number_carries_no_owner(repo_clone, layout, tmp_path):
+    """Which means *this repository's owner* — the reading a bare number can have."""
+    from robot_army.config import parse_project_reference
+
+    reference = parse_project_reference(7)
+    assert reference.number == 7
+    assert reference.owner_type is None and reference.login is None
+
+
+def test_an_empty_project_column_is_refused(repo_clone, layout, tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            repos={"demo": {"path": str(repo_clone), "project_column": "  "}},
+        )
+    assert any("project_column" in p for p in caught.value.problems)
+
+
+def test_a_project_column_is_stripped_but_otherwise_untouched(repo_clone, layout, tmp_path):
+    """Stored as the author wrote it. Matching folds case and spacing; storage does not,
+    so a surface can echo the value back verbatim."""
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        repos={"demo": {"path": str(repo_clone), "project_column": "  In Review  "}},
+    )
+    assert config.repos["demo"].project_column == "In Review"
+
+
+@pytest.mark.parametrize(
+    ("written", "folded"),
+    [("Ready", "ready"), ("To Do", "to do"), ("  TODO ", "todo"), ("To  Do", "to do")],
+)
+def test_column_folding_ignores_case_and_spacing(written, folded):
+    from robot_army.config import normalise_column
+
+    assert normalise_column(written) == folded
+
+
+def test_the_recognised_columns_are_the_two_github_templates_offer():
+    from robot_army.config import RECOGNISED_DISPATCH_COLUMNS
+
+    assert RECOGNISED_DISPATCH_COLUMNS == ("ready", "todo", "to do")

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from robot_army import db, repos
 from robot_army.boundaries import Issue, PollResult, TransportError
-from robot_army.models import PollState
+from robot_army.models import PollState, RepoProject
 from robot_army.states import WorkItemState, dumps_labels, transition_work_item, utcnow
 
 if TYPE_CHECKING:
@@ -228,6 +228,19 @@ def poll_repo(
         if not verdict.eligible:
             rejected += 1
 
+    # After the per-issue loop and before the poll state is saved, deliberately (issue
+    # #48): items discovered in *this* pass already have rows by now, so they get their
+    # board facts immediately rather than spending a cycle misclassified as "not on the
+    # board" and jumping the tail of their repository's queue.
+    read_board(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        repo_key=repo_key,
+        onboarded=onboarded,
+    )
+
     with db.transaction(conn):
         db.save_poll_state(
             conn,
@@ -248,6 +261,305 @@ def poll_repo(
         created=created,
         rejected=rejected,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectCheck:
+    """One ``doctor`` finding about a repository's project board (issue #48)."""
+
+    name: str
+    ok: bool
+    detail: str
+
+
+def check_project(
+    conn: sqlite3.Connection,
+    *,
+    boundaries: Boundaries,
+    config: Config,
+    repo_key: str,
+) -> list[ProjectCheck]:
+    """Everything about one repository's board that can be verified without dispatching.
+
+    Performed by ``doctor`` rather than at startup for the reason the Trello board checks
+    already are: the author should learn that their token cannot read projects *before*
+    they wait a minute watching an order fail to change (FR-027).
+
+    Returns an empty list when board ordering is switched off for the repository — an
+    installation that asked for none has nothing to check, and inventing a passing check
+    for it would say something about a board that does not exist.
+    """
+    enabled, explicit = config.effective_project_ordering(repo_key)
+    if not enabled:
+        source = "configured" if explicit else "default"
+        return [
+            ProjectCheck(
+                f"{repo_key} ordering", True, f"board ordering off ({source})"
+            )
+        ]
+
+    checks: list[ProjectCheck] = []
+    access = boundaries.issue_reader.project_access()
+    checks.append(ProjectCheck(f"{repo_key} token", access.ok, access.detail))
+    if not access.ok:
+        # No point asking further questions whose answers would all be the same refusal.
+        return checks
+
+    repo = config.repos.get(repo_key)
+    try:
+        resolution = boundaries.issue_reader.resolve_project(
+            repo_key,
+            project=repo.project if repo else None,
+            column=repo.project_column if repo else None,
+        )
+    except TransportError as exc:
+        checks.append(ProjectCheck(f"{repo_key} project", False, str(exc)))
+        return checks
+
+    if not resolution.resolved:
+        checks.append(ProjectCheck(f"{repo_key} project", False, resolution.reason or ""))
+        return checks
+    checks.append(
+        ProjectCheck(
+            f"{repo_key} project",
+            True,
+            f"#{resolution.project_number} {resolution.project_title} "
+            f"({resolution.project_source})",
+        )
+    )
+    checks.append(
+        ProjectCheck(
+            f"{repo_key} column",
+            True,
+            f"{resolution.column_name!r} ({resolution.column_source})",
+        )
+    )
+
+    try:
+        conflicts = boundaries.issue_reader.view_sort_conflicts(
+            repo_key,
+            project_id=resolution.project_id,
+            column_name=resolution.column_name,
+        )
+    except TransportError as exc:
+        conflicts = ()
+        checks.append(ProjectCheck(f"{repo_key} view sort", False, str(exc)))
+    else:
+        checks.append(
+            ProjectCheck(
+                f"{repo_key} view sort",
+                not conflicts,
+                "; ".join(conflicts)
+                if conflicts
+                else "no board view sorts the dispatch column",
+            )
+        )
+
+    state = db.get_repo_project(conn, repo_key)
+    if state.consecutive_failures:
+        checks.append(
+            ProjectCheck(
+                f"{repo_key} freshness",
+                False,
+                f"last read failed ({state.last_error}); showing the snapshot from "
+                f"{state.last_read_at or 'never'}",
+            )
+        )
+    else:
+        checks.append(
+            ProjectCheck(
+                f"{repo_key} freshness",
+                True,
+                f"last read {state.last_read_at or 'never'}",
+            )
+        )
+    return checks
+
+
+def read_board(
+    conn: sqlite3.Connection,
+    *,
+    boundaries: Boundaries,
+    audit: AuditLog,
+    config: Config,
+    repo_key: str,
+    onboarded: bool,
+) -> RepoProject:
+    """Resolve and read one repository's project board, and store what it said (issue #48).
+
+    Returns the state it stored, so a caller can report without a second read.
+
+    **A failure here never stops dispatch** (FR-023, FR-025). The previous snapshot stays
+    in force and becomes visibly stale, because an order the author arranged yesterday is
+    a far better answer than no order at all — and a repository that stalled because
+    GitHub was briefly unreachable would be a worse failure than the one being avoided.
+    ``last_read_at`` therefore records the last **success**, never the last attempt.
+    """
+    state = db.get_repo_project(conn, repo_key)
+    if not onboarded:
+        # No row can be written: repo_projects references repos. A resolution for a
+        # repository nobody onboarded is a row about nothing.
+        return state
+    enabled, _ = config.effective_project_ordering(repo_key)
+    if not enabled:
+        return state
+    if state.backoff_until and state.backoff_until > utcnow():
+        # Recorded rather than silent: "the board was not read this pass" is a fact about
+        # the order being shown, and a reader of the log should not have to infer it from
+        # an absence.
+        audit.record(
+            "poll.board",
+            outcome="ok",
+            entity_type="repo",
+            entity_id=repo_key,
+            detail={"skipped": f"in backoff until {state.backoff_until}"},
+        )
+        return state
+
+    repo = config.repos.get(repo_key)
+    try:
+        resolution = boundaries.issue_reader.resolve_project(
+            repo_key,
+            project=repo.project if repo else None,
+            column=repo.project_column if repo else None,
+        )
+        snapshot = (
+            boundaries.issue_reader.read_board(
+                repo_key,
+                project_id=resolution.project_id,
+                column_name=resolution.column_name,
+            )
+            if resolution.resolved
+            else None
+        )
+    except TransportError as exc:
+        return _board_failed(conn, audit, state, repo_key=repo_key, error=str(exc))
+
+    now = utcnow()
+    if snapshot is None:
+        # Resolution failed but the request succeeded. Not a transport failure, so the
+        # failure counter is *not* advanced — backing off would delay recovery from a
+        # condition only the author can clear, and there is nothing to retry away.
+        stored = RepoProject(
+            repo_key=repo_key,
+            unresolved_reason=resolution.reason,
+            last_read_at=state.last_read_at,
+            consecutive_failures=0,
+        )
+        with db.transaction(conn):
+            db.save_repo_project(conn, stored)
+        audit.record(
+            "poll.board",
+            outcome="error",
+            entity_type="repo",
+            entity_id=repo_key,
+            detail={"unresolved": resolution.reason},
+        )
+        if state.last_read_at is not None:
+            audit.record(
+                "poll.board.fallback",
+                outcome="ok",
+                entity_type="repo",
+                entity_id=repo_key,
+                detail={
+                    "snapshot_from": state.last_read_at,
+                    "consequence": "the last board read stays in force and is now stale",
+                },
+            )
+        return stored
+
+    stored = RepoProject(
+        repo_key=repo_key,
+        project_id=resolution.project_id,
+        project_number=resolution.project_number,
+        project_title=resolution.project_title,
+        project_url=resolution.project_url,
+        project_source=resolution.project_source,
+        column_name=resolution.column_name,
+        column_source=resolution.column_source,
+        resolved_at=now,
+        unresolved_reason=None,
+        last_read_at=now,
+        last_error=None,
+        consecutive_failures=0,
+        backoff_until=None,
+    )
+    # One transaction over both, so a process killed mid-write rolls back to the previous
+    # snapshot whole rather than leaving half of one board beside half of another.
+    with db.transaction(conn):
+        db.apply_board_facts(
+            conn,
+            repo_key,
+            ranked={entry.issue_number: entry.position for entry in snapshot.ranked},
+            elsewhere=dict(snapshot.elsewhere),
+            column_name=snapshot.column_name,
+        )
+        db.save_repo_project(conn, stored)
+    audit.record(
+        "poll.board",
+        outcome="ok",
+        entity_type="repo",
+        entity_id=repo_key,
+        detail={
+            "project": resolution.project_number,
+            "column": snapshot.column_name,
+            "ranked": len(snapshot.ranked),
+            "elsewhere": len(snapshot.elsewhere),
+        },
+    )
+    return stored
+
+
+def _board_failed(
+    conn: sqlite3.Connection,
+    audit: AuditLog,
+    state: RepoProject,
+    *,
+    repo_key: str,
+    error: str,
+) -> RepoProject:
+    """Record a failed board read and back off. The previous snapshot is left alone."""
+    failures = state.consecutive_failures + 1
+    backoff = min(2**failures, MAX_BACKOFF_SECONDS)
+    stored = RepoProject(
+        repo_key=repo_key,
+        project_id=state.project_id,
+        project_number=state.project_number,
+        project_title=state.project_title,
+        project_url=state.project_url,
+        project_source=state.project_source,
+        column_name=state.column_name,
+        column_source=state.column_source,
+        resolved_at=state.resolved_at,
+        unresolved_reason=state.unresolved_reason,
+        # Untouched. This is the whole of FR-025: the order the last successful read
+        # produced stays in force, and its age is what makes the staleness visible.
+        last_read_at=state.last_read_at,
+        last_error=error,
+        consecutive_failures=failures,
+        backoff_until=_plus_seconds(backoff),
+    )
+    with db.transaction(conn):
+        db.save_repo_project(conn, stored)
+    audit.error(
+        "poll.board",
+        error=error,
+        entity_type="repo",
+        entity_id=repo_key,
+        detail={"consecutive_failures": failures, "backoff_s": backoff},
+    )
+    if state.last_read_at is not None:
+        audit.record(
+            "poll.board.fallback",
+            outcome="ok",
+            entity_type="repo",
+            entity_id=repo_key,
+            detail={
+                "snapshot_from": state.last_read_at,
+                "consequence": "the last board read stays in force and is now stale",
+            },
+        )
+    return stored
 
 
 def _settle(

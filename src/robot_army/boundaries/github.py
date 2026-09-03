@@ -15,14 +15,19 @@ from __future__ import annotations
 
 import random
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import httpx
 
 from robot_army.boundaries import (
+    BoardEntry,
+    BoardSnapshot,
     Issue,
     PollResult,
+    ProjectAccess,
+    ProjectResolution,
     PullRequest,
     RepoInfo,
     TransportError,
@@ -42,6 +47,148 @@ SIMULATED_ISSUE_BASE = 900_000
 #: Cap on a single backoff sleep, so honouring a far-future X-RateLimit-Reset cannot
 #: wedge the daemon's whole tick loop for an hour.
 _MAX_BACKOFF_SECONDS = 120.0
+
+#: Hard bound on how many 100-item pages one board read will fetch (issue #48).
+#:
+#: 2,000 items is far beyond any board this is for. Exceeding it **raises** rather than
+#: truncating, and the difference matters: a truncated board is not a partial answer, it
+#: is a *wrong order* that looks complete, because the cards that fell off the end would
+#: silently become "not on the board" and jump the queue's tail.
+_MAX_BOARD_PAGES = 20
+
+#: What a card with no Status set is reported as. It is on the board and in no column,
+#: which is parked rather than absent — the author put it there and has not said where.
+NO_STATUS_COLUMN = "(no status)"
+
+#: Discovery. ``repository.projectsV2`` is *linked* projects only — a filter, not a
+#: superset — which is why a project the repository is not linked to can be named only by
+#: URL. Each node carries its own Status options, so candidate selection and column
+#: selection cost one request between them rather than one each.
+_PROJECTS_FOR_REPO = """
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    projectsV2(first: 20) {
+      nodes {
+        id
+        number
+        title
+        url
+        field(name: "Status") {
+          ... on ProjectV2SingleSelectField { id name options { id name } }
+        }
+      }
+    }
+  }
+}
+"""
+
+#: A project named explicitly by URL, which carries its own owner and so cannot be found
+#: through the repository at all when the two are not linked.
+_PROJECT_BY_OWNER = """
+query($login: String!, $number: Int!) {
+  owner: %s(login: $login) {
+    projectV2(number: $number) {
+      id
+      number
+      title
+      url
+      field(name: "Status") {
+        ... on ProjectV2SingleSelectField { id name options { id name } }
+      }
+    }
+  }
+}
+"""
+
+#: A capability probe rather than a scope guess: it asks for the one thing the feature
+#: needs, so a token that answers it can do the job whatever its shape.
+_VIEWER_PROJECTS = """
+query { viewer { login projectsV2(first: 1) { totalCount } } }
+"""
+
+#: A project's views and what each one sorts by. ``sortByFields`` yields
+#: ``ProjectV2SortByField``, whose ``field`` is the union — spreading the field types
+#: directly on it is a schema error, which is the first thing this query got wrong.
+_PROJECT_VIEWS = """
+query($pid: ID!) {
+  node(id: $pid) {
+    ... on ProjectV2 {
+      views(first: 20) {
+        nodes {
+          number
+          name
+          layout
+          sortByFields(first: 5) {
+            nodes {
+              direction
+              field {
+                ... on ProjectV2Field { name }
+                ... on ProjectV2SingleSelectField { name }
+                ... on ProjectV2IterationField { name }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+#: Whether a given field actually has a value on any card in one column. The server-side
+#: ``query:`` filter keeps this to the column in question rather than the whole board.
+_COLUMN_FIELD_VALUES = """
+query($pid: ID!, $filter: String!, $field: String!) {
+  node(id: $pid) {
+    ... on ProjectV2 {
+      items(first: 100, query: $filter) {
+        nodes {
+          type
+          fieldValueByName(name: $field) {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+            ... on ProjectV2ItemFieldNumberValue { number }
+            ... on ProjectV2ItemFieldDateValue { date }
+            ... on ProjectV2ItemFieldTextValue { text }
+            ... on ProjectV2ItemFieldIterationValue { title }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+#: The board itself. Every item rather than the dispatch column alone, and that is
+#: deliberate: ``items(query: 'status:"Ready"')`` would filter server-side and preserve
+#: order, but it cannot distinguish "parked in Backlog" from "not on the board", and
+#: FR-012 needs exactly that distinction. One unfiltered read answers both questions.
+#:
+#: ``orderBy`` is passed explicitly even though it matches the observed default, because
+#: the default is undocumented and this feature is entirely about the order.
+_BOARD_ITEMS = """
+query($pid: ID!, $after: String) {
+  node(id: $pid) {
+    ... on ProjectV2 {
+      number
+      title
+      url
+      items(first: 100, after: $after, orderBy: {field: POSITION, direction: ASC}) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          type
+          content {
+            ... on Issue { number state repository { nameWithOwner } }
+          }
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 class GitHubReader:
@@ -191,6 +338,49 @@ class GitHubReader:
         """A repo key is ``owner/name``; percent-encode each segment, not the slash."""
         return "/".join(quote(part, safe="") for part in repo_key.split("/", 1))
 
+    def _graphql(self, document: str, variables: dict[str, Any]) -> dict[str, Any]:
+        """POST one GraphQL document and return ``data``. Raises rather than hollowing out.
+
+        **This must not be bypassed, and the reason is invisible from the call site.**
+        ``_request`` raises only on HTTP ``>= 400``, and every GraphQL failure that
+        matters here arrives as **HTTP 200 with an ``errors`` array**: a missing
+        ``read:project`` scope (``INSUFFICIENT_SCOPES``), a project the token may not see
+        (``FORBIDDEN``), a field name that no longer exists. Reading ``payload["data"]``
+        directly would turn each of those into an empty board — indistinguishable from a
+        board with nothing on it — and the system would quietly stop ordering anything
+        while reporting success. That is the silent failure Principle III forbids, wearing
+        a 200.
+
+        A response carrying **both** data and errors is treated as failure too. A partly
+        believed board is worse than no board: the half that is missing is invisible, so
+        the order would be confidently wrong rather than absent.
+        """
+        response = self._request(
+            "POST", "/graphql", json_body={"query": document, "variables": variables}
+        )
+        payload = response.json()
+        errors = payload.get("errors")
+        if errors:
+            first = errors[0] if isinstance(errors, list) and errors else {}
+            kind = first.get("type", "GRAPHQL_ERROR")
+            message = first.get("message", "no message")
+            self._audit.record(
+                "github.project.partial" if payload.get("data") else "github.graphql",
+                outcome="error",
+                target="/graphql",
+                detail={
+                    "error_type": kind,
+                    "errors": len(errors) if isinstance(errors, list) else 1,
+                    "message": message[:400],
+                    "had_data": payload.get("data") is not None,
+                },
+            )
+            raise TransportError(f"GraphQL {kind}: {message[:400]}")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise TransportError("GraphQL response carried no data")
+        return data
+
     # -- reads --------------------------------------------------------------
 
     def poll(self, repo_key: str, etag: str | None) -> PollResult:
@@ -322,6 +512,353 @@ class GitHubReader:
                 continue
             issues.append(issue)
         return issues
+
+    def resolve_project(
+        self, repo_key: str, *, project: str | None, column: str | None
+    ) -> ProjectResolution:
+        """Which board and column govern this repository (issue #48, FR-011 to FR-018).
+
+        Configured values win over discovery. An answer that is ambiguous or missing comes
+        back as a resolution carrying ``reason`` rather than as an exception, because
+        FR-023 requires the repository to keep dispatching under its configured order —
+        a board nobody can identify is a reason to order the old way, not to stop.
+
+        Every outcome is recorded, resolved or not. "Why is this repository not ordered by
+        its board?" must be answerable from the log as well as from `status`, and a
+        resolution that failed silently is the case where the log is the only witness.
+        """
+        return self._record_resolution(
+            repo_key, self._resolve_project(repo_key, project=project, column=column)
+        )
+
+    def _record_resolution(
+        self, repo_key: str, resolution: ProjectResolution
+    ) -> ProjectResolution:
+        self._audit.record(
+            "github.project.discover",
+            outcome="ok" if resolution.resolved else "error",
+            entity_type="repo",
+            entity_id=repo_key,
+            detail={
+                "project_number": resolution.project_number,
+                "project_title": resolution.project_title,
+                "project_source": resolution.project_source,
+                "column": resolution.column_name,
+                "column_source": resolution.column_source,
+                "candidates": list(resolution.candidates),
+                "reason": resolution.reason,
+            },
+        )
+        return resolution
+
+    def _resolve_project(
+        self, repo_key: str, *, project: str | None, column: str | None
+    ) -> ProjectResolution:
+        """The decision itself. Split from :meth:`resolve_project` only so every one of
+        its eight exits is recorded without eight copies of the recording call."""
+        from robot_army.config import (
+            RECOGNISED_DISPATCH_COLUMNS,
+            normalise_column,
+            parse_project_reference,
+        )
+
+        candidates: list[dict[str, Any]] = []
+        chosen: dict[str, Any] | None = None
+        project_source = "configured" if project else "discovered"
+
+        reference = parse_project_reference(project) if project else None
+        if project and reference is None:
+            # The loader already refuses this shape, so reaching here means a value that
+            # parsed at load time and does not now. Reported rather than guessed at.
+            return ProjectResolution(reason=f"project {project!r} is not a number or a URL")
+
+        if reference is not None and reference.login:
+            owner_field = "organization" if reference.owner_type == "orgs" else "user"
+            data = self._graphql(
+                _PROJECT_BY_OWNER % owner_field,
+                {"login": reference.login, "number": reference.number},
+            )
+            owner = data.get("owner") or {}
+            chosen = owner.get("projectV2")
+            if chosen is None:
+                return ProjectResolution(
+                    reason=(
+                        f"configured project {project!r} was not found — no project "
+                        f"number {reference.number} for {reference.login}"
+                    )
+                )
+        else:
+            owner_name, _, repo_name = repo_key.partition("/")
+            data = self._graphql(
+                _PROJECTS_FOR_REPO, {"owner": owner_name, "name": repo_name}
+            )
+            repository = data.get("repository") or {}
+            candidates = [
+                node
+                for node in ((repository.get("projectsV2") or {}).get("nodes") or [])
+                if node
+            ]
+            names = tuple(f"#{n.get('number')} {n.get('title')}" for n in candidates)
+            if reference is not None:
+                chosen = next(
+                    (n for n in candidates if n.get("number") == reference.number), None
+                )
+                if chosen is None:
+                    return ProjectResolution(
+                        candidates=names,
+                        reason=(
+                            f"configured project {project!r} is not linked to {repo_key}; "
+                            f"linked projects are {', '.join(names) or 'none'}"
+                        ),
+                    )
+            elif len(candidates) == 1:
+                chosen = candidates[0]
+            elif not candidates:
+                return ProjectResolution(
+                    reason=f"no project is linked to {repo_key}"
+                )
+            else:
+                # Two linked projects is not a tie to break. Picking one would choose the
+                # author's workflow for them, and they would find out by watching the
+                # wrong issue start (FR-018).
+                return ProjectResolution(
+                    candidates=names,
+                    reason=(
+                        f"{len(candidates)} projects are linked to {repo_key} "
+                        f"({', '.join(names)}); set project in [repos.\"{repo_key}\"]"
+                    ),
+                )
+
+        field = chosen.get("field") or {}
+        options = [
+            str(option.get("name", ""))
+            for option in (field.get("options") or [])
+            if option
+        ]
+        base = ProjectResolution(
+            project_id=str(chosen.get("id")),
+            project_number=chosen.get("number"),
+            project_title=str(chosen.get("title") or ""),
+            project_url=str(chosen.get("url") or ""),
+            project_source=project_source,
+            candidates=tuple(options),
+        )
+        if not options:
+            return replace(
+                base,
+                reason=(
+                    f"project #{base.project_number} has no single-select Status field, "
+                    "so it has no columns to dispatch from"
+                ),
+            )
+
+        if column:
+            wanted = normalise_column(column)
+            match = next((o for o in options if normalise_column(o) == wanted), None)
+            if match is None:
+                return replace(
+                    base,
+                    reason=(
+                        f"configured column {column!r} is not on project "
+                        f"#{base.project_number}; it offers {', '.join(options)}"
+                    ),
+                )
+            return replace(base, column_name=match, column_source="configured")
+
+        recognised = [o for o in options if normalise_column(o) in RECOGNISED_DISPATCH_COLUMNS]
+        if len(recognised) == 1:
+            return replace(base, column_name=recognised[0], column_source="discovered")
+
+        if not recognised:
+            return replace(
+                base,
+                reason=(
+                    f"project #{base.project_number} has no recognised dispatch column "
+                    f"(it offers {', '.join(options)}); set project_column in "
+                    f'[repos."{repo_key}"]'
+                ),
+            )
+        return replace(
+            base,
+            reason=(
+                f"project #{base.project_number} offers more than one recognised dispatch "
+                f"column ({', '.join(recognised)}); set project_column in "
+                f'[repos."{repo_key}"]'
+            ),
+        )
+
+    def project_access(self) -> ProjectAccess:
+        """Whether these credentials can read projects, and which kind they are.
+
+        Returns rather than raises, because "your token cannot do this" is a finding for
+        ``doctor`` to report, not a crash. The probe asks for the capability itself rather
+        than inspecting scopes and guessing, so a token that answers it can do the job
+        whatever shape it has — and the scope header is used only to *explain* a failure.
+        """
+        try:
+            response = self._request(
+                "POST", "/graphql", json_body={"query": _VIEWER_PROJECTS, "variables": {}}
+            )
+        except TransportError as exc:
+            return ProjectAccess(ok=False, credential_kind="unknown", detail=str(exc))
+        raw = response.headers.get("x-oauth-scopes", "")
+        scopes = tuple(part.strip() for part in raw.split(",") if part.strip())
+        kind = "classic" if scopes else "fine-grained or app"
+        payload = response.json()
+        errors = payload.get("errors") or []
+        if not errors and (payload.get("data") or {}).get("viewer"):
+            return ProjectAccess(
+                ok=True,
+                credential_kind=kind,
+                scopes=scopes,
+                detail=f"{kind} token can read projects",
+            )
+        first = errors[0] if errors else {}
+        error_type = first.get("type", "UNKNOWN")
+        if kind == "classic":
+            detail = (
+                f"classic token cannot read projects ({error_type}); it holds "
+                f"[{', '.join(scopes) or 'no scopes'}] and needs read:project"
+            )
+        else:
+            # The wall worth naming explicitly. No amount of configuration fixes it.
+            detail = (
+                f"this looks like a fine-grained token or GitHub App ({error_type}). "
+                "GitHub has no account-level Projects permission for fine-grained "
+                "tokens, so one cannot read a user-owned board at all — use a classic "
+                "token with read:project"
+            )
+        return ProjectAccess(ok=False, credential_kind=kind, scopes=scopes, detail=detail)
+
+    def view_sort_conflicts(
+        self, repo_key: str, *, project_id: str, column_name: str
+    ) -> tuple[str, ...]:
+        """Views whose sort would show an order this system cannot reproduce.
+
+        Only where the sort field **has a value on a card in the dispatch column**. A view
+        that sorts by a field nobody has filled in displays manual position unchanged, so
+        warning about it would be noise — and a check that cries wolf is a check the
+        author stops reading.
+        """
+        data = self._graphql(_PROJECT_VIEWS, {"pid": project_id})
+        views = ((data.get("node") or {}).get("views") or {}).get("nodes") or []
+        wanted: dict[str, list[str]] = {}
+        for view in views:
+            if not view or view.get("layout") != "BOARD_LAYOUT":
+                continue
+            for sort in (view.get("sortByFields") or {}).get("nodes") or []:
+                name = ((sort or {}).get("field") or {}).get("name")
+                if name:
+                    wanted.setdefault(name, []).append(
+                        f"#{view.get('number')} {view.get('name')!r}"
+                    )
+        if not wanted:
+            return ()
+
+        conflicts: list[str] = []
+        for field_name, view_names in sorted(wanted.items()):
+            values = self._graphql(
+                _COLUMN_FIELD_VALUES,
+                {
+                    "pid": project_id,
+                    "filter": f'status:"{column_name}"',
+                    "field": field_name,
+                },
+            )
+            nodes = ((values.get("node") or {}).get("items") or {}).get("nodes") or []
+            if any(
+                node and node.get("type") == "ISSUE" and node.get("fieldValueByName")
+                for node in nodes
+            ):
+                conflicts.append(
+                    f"view {' and '.join(view_names)} sorts by {field_name!r}, and cards "
+                    f"in {column_name!r} have that field set — what you see there is not "
+                    f"the order dispatched"
+                )
+        return tuple(conflicts)
+
+    def read_board(
+        self, repo_key: str, *, project_id: str, column_name: str
+    ) -> BoardSnapshot:
+        """Where this repository's issues sit on the board, in board order (issue #48).
+
+        Raises rather than returning an empty snapshot on failure — see :meth:`_graphql`.
+        """
+        from robot_army.config import normalise_column
+
+        wanted = normalise_column(column_name)
+        ranked: list[BoardEntry] = []
+        elsewhere: dict[int, str] = {}
+        after: str | None = None
+        total = 0
+        project: dict[str, Any] = {}
+
+        for page in range(1, _MAX_BOARD_PAGES + 1):
+            data = self._graphql(_BOARD_ITEMS, {"pid": project_id, "after": after})
+            project = data.get("node") or {}
+            items = project.get("items") or {}
+            total = int(items.get("totalCount") or 0)
+            for node in items.get("nodes") or []:
+                if not node or node.get("type") != "ISSUE":
+                    # Draft issues, pull requests, and REDACTED items — content the token
+                    # cannot see — contribute nothing. REDACTED is the one that bites:
+                    # its `content` is null, so a naive read crashes rather than skips.
+                    continue
+                content = node.get("content") or {}
+                number = content.get("number")
+                owner = (content.get("repository") or {}).get("nameWithOwner")
+                if number is None or owner != repo_key:
+                    # A project may span repositories; only this one's items take part in
+                    # its order (FR-011).
+                    continue
+                value = node.get("fieldValueByName") or {}
+                status = str(value.get("name") or "") or NO_STATUS_COLUMN
+                if normalise_column(status) == wanted:
+                    # Dense per repository: the position is this repository's rank in the
+                    # column, not the card's index in a project it may share.
+                    ranked.append(
+                        BoardEntry(
+                            issue_number=int(number),
+                            repo_key=repo_key,
+                            position=len(ranked) + 1,
+                        )
+                    )
+                else:
+                    elsewhere[int(number)] = status
+            info = items.get("pageInfo") or {}
+            if not info.get("hasNextPage"):
+                break
+            after = info.get("endCursor")
+            if page == _MAX_BOARD_PAGES:
+                raise TransportError(
+                    f"project board for {repo_key} exceeds {_MAX_BOARD_PAGES} pages "
+                    f"({total} items); refusing to dispatch from a truncated order"
+                )
+
+        snapshot = BoardSnapshot(
+            project_id=project_id,
+            project_number=int(project.get("number") or 0),
+            project_title=str(project.get("title") or ""),
+            project_url=str(project.get("url") or ""),
+            column_name=column_name,
+            ranked=tuple(ranked),
+            elsewhere=elsewhere,
+            total_items=total,
+        )
+        self._audit.record(
+            "github.project.read",
+            outcome="ok",
+            entity_type="repo",
+            entity_id=repo_key,
+            detail={
+                "project_id": project_id,
+                "column": column_name,
+                "ranked": len(ranked),
+                "elsewhere": len(elsewhere),
+                "total_items": total,
+            },
+        )
+        return snapshot
 
     def get_repo(self, repo_key: str) -> RepoInfo:
         """One repository, in **one** request (research R5, SC-009).

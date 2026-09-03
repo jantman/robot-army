@@ -154,6 +154,7 @@ def test_the_precedence_is_declared_in_one_readable_place():
         ordering.HoldReason.REPO_CAP,
         ordering.HoldReason.AWAITING_MERGE,
         ordering.HoldReason.NOT_ONBOARDED,
+        ordering.HoldReason.OFF_COLUMN,
         ordering.HoldReason.PREPARATION_FAILED,
     ]
 
@@ -630,3 +631,232 @@ def test_a_negative_priority_sorts_a_repository_last(conn, config):
 
     config = with_order(config, "repo-priority", {"demo": -5, "other": 0})
     assert order_of(conn, config) == [normal, background]
+
+
+# -- board ordering (issue #48, T024) ---------------------------------------
+
+
+def govern(conn, repo_key="demo", *, column="Ready", read=True, resolved=True):
+    """Mark a repository as governed by a board, or partly so.
+
+    The two timestamps are separately controllable because the gate needs both, and the
+    interesting failures are the states where only one is present.
+    """
+    from robot_army.models import RepoProject
+
+    with db.transaction(conn):
+        db.save_repo_project(
+            conn,
+            RepoProject(
+                repo_key=repo_key,
+                project_id="PVT_3",
+                project_number=3,
+                column_name=column,
+                resolved_at="2026-09-02T00:00:00Z" if resolved else None,
+                last_read_at="2026-09-02T00:00:00Z" if read else None,
+            ),
+        )
+
+
+def place(conn, item_id: int, column: str | None, position: int | None = None) -> None:
+    conn.execute(
+        "UPDATE work_items SET board_column = ?, board_position = ? WHERE id = ?",
+        (column, position, item_id),
+    )
+
+
+def test_the_board_decides_the_order_within_a_repository(conn, config):
+    first, second, third = ready(conn, 3)
+    discovered(conn, first, "2026-01-01T00:00:00Z")
+    discovered(conn, second, "2026-01-02T00:00:00Z")
+    discovered(conn, third, "2026-01-03T00:00:00Z")
+    govern(conn)
+    place(conn, third, "Ready", 1)
+    place(conn, first, "Ready", 2)
+    place(conn, second, "Ready", 3)
+
+    assert order_of(conn, config) == [third, first, second]
+
+
+def test_an_item_the_board_does_not_mention_sorts_after_the_ranked_ones(conn, config):
+    """FR-008. The board expresses no opinion about it, so it dispatches — but it does not
+    jump ahead of cards the author actually arranged."""
+    absent, ranked = ready(conn, 2)
+    discovered(conn, absent, "2026-01-01T00:00:00Z")
+    discovered(conn, ranked, "2026-01-09T00:00:00Z")
+    govern(conn)
+    place(conn, ranked, "Ready", 1)
+
+    entries = ordering.plan(conn, config=config, capacity=snapshot(global_cap=99))
+
+    assert [e.item.id for e in entries] == [ranked, absent]
+    assert all(e.hold is None for e in entries)
+
+
+def test_board_ordering_leaves_a_repositorys_queue_positions_alone(conn, config):
+    """FR-002, and the reason board ordering is a permutation rather than a sort key.
+
+    Under `repo-priority` the repositories interleave in a particular way. Reordering one
+    repository's cards must change *which* of its items sits at each of its positions and
+    nothing else — a key mixing board rank with discovery time would silently redefine
+    what the mode means.
+    """
+    demo_a = seed_item(conn, repo_key="demo", issue_number=1, state=str(WorkItemState.READY))
+    demo_b = seed_item(conn, repo_key="demo", issue_number=2, state=str(WorkItemState.READY))
+    other = seed_item(conn, repo_key="other", issue_number=3, state=str(WorkItemState.READY))
+    discovered(conn, demo_a, "2026-01-01T00:00:00Z")
+    discovered(conn, other, "2026-01-02T00:00:00Z")
+    discovered(conn, demo_b, "2026-01-03T00:00:00Z")
+    prioritised = with_order(config, "repo-priority", {"demo": 0, "other": 5})
+
+    before = order_of(conn, prioritised)
+    demo_slots = [i for i, item in enumerate(before) if item in (demo_a, demo_b)]
+
+    govern(conn)
+    place(conn, demo_b, "Ready", 1)
+    place(conn, demo_a, "Ready", 2)
+    after = order_of(conn, prioritised)
+
+    assert [i for i, item in enumerate(after) if item in (demo_a, demo_b)] == demo_slots
+    assert after.index(other) == before.index(other)
+    assert [after[i] for i in demo_slots] == [demo_b, demo_a]
+
+
+def test_another_repository_is_untouched_by_a_governed_one(conn, config):
+    mine = seed_item(conn, repo_key="demo", issue_number=1, state=str(WorkItemState.READY))
+    theirs = seed_item(conn, repo_key="other", issue_number=2, state=str(WorkItemState.READY))
+    discovered(conn, mine, "2026-01-02T00:00:00Z")
+    discovered(conn, theirs, "2026-01-01T00:00:00Z")
+    govern(conn)
+    place(conn, mine, "Ready", 1)
+
+    entries = ordering.plan(conn, config=config, capacity=snapshot(global_cap=99))
+
+    # Order only: `other` has no section and no recorded clone, so it carries the
+    # pre-existing `not_onboarded` hold that every such repository in these tests carries.
+    # What matters here is that a governed repository does not disturb its position.
+    assert [e.item.id for e in entries] == [theirs, mine]
+    assert next(e for e in entries if e.item.id == mine).hold is None
+
+
+def test_board_key_is_total(conn, config):
+    """Two renders of unchanged state must produce one list. `board_position` is dense but
+    not unique across the ranked and unranked groups, so the id tail is what makes it so."""
+    ids = ready(conn, 4)
+    govern(conn)
+    place(conn, ids[0], "Ready", 1)
+    place(conn, ids[1], "Ready", 1)
+
+    keys = [ordering.board_key(db.get_work_item(conn, i)) for i in ids]
+
+    assert len(set(keys)) == len(keys)
+    assert order_of(conn, config) == order_of(conn, config)
+
+
+def test_an_item_parked_in_another_column_is_held(conn, config):
+    ranked, parked = ready(conn, 2)
+    govern(conn)
+    place(conn, ranked, "Ready", 1)
+    place(conn, parked, "Backlog")
+
+    entries = {e.item.id: e for e in ordering.plan(
+        conn, config=config, capacity=snapshot(global_cap=99)
+    )}
+
+    assert entries[ranked].hold is None
+    assert entries[parked].hold is ordering.HoldReason.OFF_COLUMN
+    assert "'Backlog'" in entries[parked].detail
+    assert "'Ready'" in entries[parked].detail
+
+
+def test_nothing_is_held_before_a_board_has_ever_been_read(conn, config):
+    """FR-014. With no board knowledge the system has no business inventing a hold — and a
+    resolution that has never produced a read is exactly that state."""
+    item = ready(conn, 1)[0]
+    govern(conn, read=False)
+    place(conn, item, "Backlog")
+
+    entries = ordering.plan(conn, config=config, capacity=snapshot(global_cap=99))
+
+    assert entries[0].hold is None
+
+
+def test_nothing_is_held_when_the_repository_has_ordering_off(conn, config):
+    """FR-020: switching it off restores today's behaviour exactly, holds included."""
+    from dataclasses import replace as _replace
+
+    item = ready(conn, 1)[0]
+    govern(conn)
+    place(conn, item, "Backlog")
+    off = _replace(config, dispatch=_replace(config.dispatch, project_ordering=False))
+
+    entries = ordering.plan(conn, config=off, capacity=snapshot(global_cap=99))
+
+    assert entries[0].hold is None
+
+
+def test_an_item_absent_from_a_read_board_is_not_held(conn, config):
+    """The distinction that makes the split rule a split rule: not on the board is no
+    signal, and holding it would invent an instruction the author never gave."""
+    ready(conn, 1)
+    govern(conn)
+
+    entries = ordering.plan(conn, config=config, capacity=snapshot(global_cap=99))
+
+    assert entries[0].hold is None
+
+
+def test_a_missing_clone_outranks_a_parked_card(conn, config):
+    """R11's precedence: telling the author to move a card while the clone is gone points
+    at the wrong fix."""
+    # A repository with no `[repos.*]` section and no recorded clone path resolves to
+    # nothing, which is the state `not_onboarded` exists for.
+    item = seed_item(conn, repo_key="ghost", issue_number=1, state=str(WorkItemState.READY))
+    govern(conn, "ghost")
+    place(conn, item, "Backlog")
+
+    entries = ordering.plan(conn, config=config, capacity=snapshot(global_cap=99))
+
+    assert entries[0].hold is ordering.HoldReason.NOT_ONBOARDED
+
+
+def test_a_parked_card_outranks_stale_preparation_residue(conn, config):
+    """Parking is a deliberate, more recent statement than residue from an attempt the
+    author has since stepped back from."""
+    item = ready(conn, 1)[0]
+    govern(conn)
+    place(conn, item, "Backlog")
+    conn.execute(
+        "UPDATE work_items SET failure_reason = 'an old failure' WHERE id = ?", (item,)
+    )
+
+    entries = ordering.plan(conn, config=config, capacity=snapshot(global_cap=99))
+
+    assert entries[0].hold is ordering.HoldReason.OFF_COLUMN
+
+
+def test_a_null_board_position_never_behaves_as_zero(conn, config):
+    """The mistake `commits_ahead` records: folding "could not determine" into 0 would
+    promote every item of an unread board to the head of its repository's queue."""
+    unranked, ranked = ready(conn, 2)
+    discovered(conn, unranked, "2026-01-01T00:00:00Z")
+    discovered(conn, ranked, "2026-01-09T00:00:00Z")
+    govern(conn)
+    place(conn, ranked, "Ready", 1)
+
+    assert ordering.board_key(db.get_work_item(conn, unranked))[0] == 1
+    assert ordering.board_key(db.get_work_item(conn, ranked))[0] == 0
+    assert order_of(conn, config)[0] == ranked
+
+
+def test_plan_still_writes_nothing_with_a_board_in_play(conn, config):
+    ids = ready(conn, 2)
+    govern(conn)
+    place(conn, ids[0], "Ready", 1)
+    place(conn, ids[1], "Backlog")
+    versions = conn.execute("PRAGMA data_version").fetchone()[0]
+
+    ordering.plan(conn, config=config, capacity=snapshot(global_cap=99))
+
+    assert conn.execute("PRAGMA data_version").fetchone()[0] == versions
+    assert conn.in_transaction is False

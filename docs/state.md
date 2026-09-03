@@ -333,6 +333,66 @@ sqlite3 -header -column ~/.local/state/robot-army/state.db \
   "SELECT * FROM poll_state WHERE repo_key LIKE 'trello:%'"
 ```
 
+### `repo_projects` — which project board governs a repository
+
+Added by migration 009 (issue #48). One row per repository, written by the poll and deleted
+by nothing.
+
+A table rather than columns on `repos`, and the reason is the same one that shaped `cards`:
+`repos` is an **approval** record. It stores what a human approved at a verified location and
+nothing re-derives after approval. This is the opposite — discovered, refreshed every poll,
+carrying its own failure state — so putting it there would blur the one record whose value is
+that it does not change on its own. It is not `poll_state` either, whose columns are fixed
+(`etag`, `last_status`, `backoff`) with nowhere to hold a project id, a column name, or which
+of the two the author chose.
+
+**`resolved_at` and `last_read_at` answer different questions and both are load-bearing.** A
+project can be resolved and never yet read — the pass that resolved it failed, or has not run
+— and in that state nothing is reordered and nothing is held. Only `last_read_at` opens the
+gate, and it records the last **success**, never the last attempt: a failed read leaves the
+previous snapshot in force and visibly stale rather than discarding it. A board nobody can
+currently read still governs; a board nobody has *ever* read governs nothing.
+
+`unresolved_reason` is non-`NULL` exactly when `resolved_at` is `NULL`, and holds the sentence
+`robot-army status` prints. That is why "why is this repository not ordered by its board?" is
+answerable with the network unplugged.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  'SELECT repo_key, project_number, column_name, resolved_at, last_read_at,
+          unresolved_reason, consecutive_failures FROM repo_projects'
+```
+
+### `work_items` board columns — where the board puts each item
+
+Also migration 009. Two columns, and **the pair must stay a pair**, because four states have
+to remain distinguishable and collapsing any two of them is a real bug:
+
+| `board_column` | `repo_projects.last_read_at` | Means |
+|---|---|---|
+| `NULL` | `NULL` | No board knowledge. Nothing is gated, and the repository orders exactly as it always did |
+| `NULL` | set | Read, and this item is not on the board: dispatchable, ordered after everything the board ranked |
+| the dispatch column | set | `board_position` is its rank, 1-based |
+| anything else | set | Parked by the author. Held, with `board_position` `NULL` |
+
+The difference between the first two rows lives in `repo_projects`, not here, so "never read"
+stays one fact about a repository instead of a fact repeated on every one of its rows.
+
+`board_position` is `NULL` for everything outside the dispatch column and is **never written
+as 0** to mean "unknown". `boundaries/__init__.py` records what that mistake cost the last time
+it was made — `commits_ahead` folding "could not determine" into `0` — and here it would
+silently promote every item of an unread board to the head of its queue.
+
+Nothing is backfilled. Every pre-009 row means *no board knowledge*, which is exactly what
+`NULL` says; an upgrade that wrote board facts would be changing dispatch order from
+information it does not have.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  'SELECT id, issue_number, state, board_column, board_position FROM work_items
+   WHERE board_column IS NOT NULL'
+```
+
 ### The card creation sequence, and where it can be killed
 
 Creating an issue from a card is four steps, each in its own transaction, because every seam
@@ -398,6 +458,10 @@ summary:
 | During worktree creation or a preparation step | Item in `dispatching`; failed at max age with whatever output exists. The partial worktree is reported, never reused blindly |
 | After the session row insert, before launch | Confirmation window elapses; session `lost`, item `failed` |
 | After launch, before confirmation | Either the registry scan confirms it late, or the window elapses and the orphan sweep catches the live process |
+| During a project board read | Nothing has changed. The read is a read, the previous snapshot still stands, and the next poll re-reads it |
+| Between the board read and its write | The snapshot is lost, costing one rate-limit point. The previous one stays in force |
+| During the board write | One transaction covers the `work_items` update and the `repo_projects` upsert, so it rolls back whole — never half of one board beside half of another |
+| During migration 009 | `user_version` is advanced last, so the whole migration re-runs |
 | After the worker exits, before the spool drains | The file persists and is applied on the next tick or next startup |
 | After applying a spool record, before unlinking it | Reapplied; application is idempotent |
 | Mid-migration | The migration re-runs; `user_version` never advanced |

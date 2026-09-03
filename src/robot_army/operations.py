@@ -315,6 +315,10 @@ def status(
         "dispatch_paused_by": control_state.paused_by,
         "capacity": _capacity_dict(snap, ctx.config.dispatch.order),
         "queue": [_queue_dict(entry) for entry in queue],
+        # Issue #48. Built from stored rows and configuration only — no network call —
+        # which is what makes "why is this repository not ordered by its board?"
+        # answerable with the board unreachable, and what keeps `status` free.
+        "projects": _project_rows(ctx, queue),
         # Keyed to the two sections it explains, and always present: a consumer must never
         # have to tell "nothing was withheld" apart from "this build does not report it",
         # which is the absent-versus-zero ambiguity this milestone removes from the text.
@@ -340,6 +344,7 @@ def status(
     result.say()
 
     _say_queue(result, queue)
+    _say_projects(result, result.data["projects"])
     if counts:
         result.say("counts by state:")
         for name in sorted(counts):
@@ -478,13 +483,108 @@ def capacity(
             source = "configured" if row["cap_explicit"] else "default"
             wait = "on" if row["wait_for_merge"] else "off"
             wait_source = "configured" if row["wait_explicit"] else "default"
+            board = "on" if row["project_ordering"] else "off"
+            board_source = "configured" if row["project_explicit"] else "default"
             result.say(
                 f"  {row['repo_key']:<28} {cap:<18} {f'({source})':<13}"
-                f"wait-for-merge: {wait:<3} ({wait_source})"
+                f"wait-for-merge: {wait:<3} ({wait_source})  "
+                f"board-order: {board:<3} ({board_source})"
             )
     else:
         result.say("no repository is onboarded")
     return result
+
+
+def _project_rows(ctx: Context, queue: list[Any]) -> list[dict[str, Any]]:
+    """Every onboarded repository's board state, and why it is or is not governed.
+
+    Shaped like :func:`_repo_settings` and for the same reason: each value travels with
+    where it came from, so a surface can tell the author whether they chose it and
+    therefore which file to edit.
+
+    ``held_off_column`` is FR-030. A repository whose entire backlog is parked has ready
+    items and dispatches none of them, and without a count that reads exactly like a
+    repository with no work at all.
+    """
+    from robot_army import ordering as ordering_mod
+
+    boards = db.list_repo_projects(ctx.conn)
+    parked: dict[str, int] = {}
+    for entry in queue:
+        if entry.hold is ordering_mod.HoldReason.OFF_COLUMN:
+            parked[entry.item.repo_key] = parked.get(entry.item.repo_key, 0) + 1
+
+    rows: list[dict[str, Any]] = []
+    for key in sorted(set(repos_mod.known(ctx.conn)) | set(boards)):
+        enabled, explicit = ctx.config.effective_project_ordering(key)
+        board = boards.get(key)
+        rows.append(
+            {
+                "repo_key": key,
+                "enabled": enabled,
+                "enabled_explicit": explicit,
+                "governs": bool(board and board.governs) and enabled,
+                "project_number": getattr(board, "project_number", None),
+                "project_title": getattr(board, "project_title", None),
+                "project_url": getattr(board, "project_url", None),
+                "project_source": getattr(board, "project_source", None),
+                "column": getattr(board, "column_name", None),
+                "column_source": getattr(board, "column_source", None),
+                "last_read_at": getattr(board, "last_read_at", None),
+                # `health._age` rather than a second parser: one spelling of "how old is
+                # this timestamp" is enough, and the two would drift on the format.
+                "last_read_age_seconds": health._age(
+                    getattr(board, "last_read_at", None)
+                ),
+                "unresolved_reason": getattr(board, "unresolved_reason", None),
+                "last_error": getattr(board, "last_error", None),
+                "consecutive_failures": getattr(board, "consecutive_failures", 0) or 0,
+                "held_off_column": parked.get(key, 0),
+            }
+        )
+    return rows
+
+
+def _say_projects(result: Result, rows: list[dict[str, Any]]) -> None:
+    """One line per repository whose board state is worth stating.
+
+    Repositories with board ordering enabled and no board are skipped: most installations
+    have none, and a line saying so on every one of them would bury the rows that matter.
+    A repository the author switched **off** is shown, because that is a choice they made
+    and may have forgotten.
+    """
+    interesting = [
+        row
+        for row in rows
+        if row["governs"]
+        or row["unresolved_reason"]
+        or row["last_error"]
+        or row["enabled_explicit"]
+    ]
+    if not interesting:
+        return
+    result.say("project boards:")
+    for row in interesting:
+        if not row["enabled"]:
+            result.say(f"  {row['repo_key']:<28} board ordering off (configured)")
+            continue
+        if row["governs"]:
+            age = row["last_read_age_seconds"]
+            stale = f", read {age}s ago" if age is not None else ""
+            held = (
+                f", {row['held_off_column']} held off-column"
+                if row["held_off_column"]
+                else ""
+            )
+            result.say(
+                f"  {row['repo_key']:<28} #{row['project_number']} "
+                f"{row['project_title']} -> {row['column']!r} "
+                f"({row['project_source']}/{row['column_source']}{stale}{held})"
+            )
+        else:
+            why = row["unresolved_reason"] or row["last_error"] or "never read"
+            result.say(f"  {row['repo_key']:<28} not ordered by a board: {why}")
+    result.say()
 
 
 def _repo_settings(ctx: Context, snap: Any) -> list[dict[str, Any]]:
@@ -505,6 +605,7 @@ def _repo_settings(ctx: Context, snap: Any) -> list[dict[str, Any]]:
     for key in sorted(set(repos_mod.known(ctx.conn)) | set(snap.per_repo)):
         cap, cap_explicit = ctx.config.effective_repo_cap(key)
         wait, wait_explicit = ctx.config.effective_wait_for_merge(key)
+        ordering_on, ordering_explicit = ctx.config.effective_project_ordering(key)
         rows.append(
             {
                 "repo_key": key,
@@ -513,6 +614,8 @@ def _repo_settings(ctx: Context, snap: Any) -> list[dict[str, Any]]:
                 "cap_explicit": cap_explicit,
                 "wait_for_merge": wait,
                 "wait_explicit": wait_explicit,
+                "project_ordering": ordering_on,
+                "project_explicit": ordering_explicit,
             }
         )
     return rows
@@ -3248,6 +3351,22 @@ def doctor(ctx: Context, *, trust_file: Path | None = None) -> Result:
     # leaving them to startup. Absent entirely when no board is configured: an
     # unconfigured installation has nothing to check, and inventing a passing check for it
     # would say something about a board that does not exist.
+    # The project board's checks (issue #48, contracts/config.md), for the reason the
+    # board block below performs its own: the author should learn that their token cannot
+    # read projects before they wait a poll interval watching an order fail to change.
+    # Only for onboarded repositories — a board belongs to a repository, and an
+    # installation with none has nothing to check.
+    for key in repos_mod.known(ctx.conn):
+        try:
+            for check in poll.check_project(
+                ctx.conn, boundaries=ctx.boundaries, config=ctx.config, repo_key=key
+            ):
+                checks.append((f"project: {check.name}", check.ok, check.detail))
+        except Exception as exc:  # noqa: BLE001 - doctor reports, it never raises
+            # `doctor` exists to report problems; one repository's unreachable board must
+            # not stop it reporting on everything else.
+            checks.append((f"project: {key}", False, f"could not be checked: {exc}"))
+
     if ctx.config.trello is not None:
         status = intake.check_board(
             boundaries=ctx.boundaries, audit=ctx.audit, config=ctx.config

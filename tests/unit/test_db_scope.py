@@ -200,3 +200,22 @@ def test_the_count_equals_what_including_simulated_would_reveal(conn, kwargs):
         db.list_work_items(conn, **kwargs)
     )
     assert db.count_simulated_work_items(conn, **kwargs) == revealed
+
+
+# ``list_repo_projects`` is deliberately absent from LISTING_ACCESSORS above, and the
+# absence is a decision rather than an oversight (issue #48). ``repo_projects`` has no
+# ``dry_run`` column and holds one row per repository: a simulated run and a live run of
+# the same repository read the same board, because reading a board makes no outward change
+# and there is therefore nothing to withhold. Giving it an ``include_simulated`` parameter
+# would be a flag with no meaning, and a flag with no meaning is one a caller will
+# eventually pass expecting it to do something.
+
+
+def test_repo_projects_is_not_scoped_by_dry_run(conn):
+    parameter = inspect.signature(db.list_repo_projects).parameters.get("include_simulated")
+    assert parameter is None, (
+        "repo_projects has no dry_run column; an include_simulated flag here would be "
+        "inert, and an inert flag invites a caller to rely on it"
+    )
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(repo_projects)")}
+    assert "dry_run" not in columns

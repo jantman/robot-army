@@ -133,6 +133,100 @@ class PullRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class BoardEntry:
+    """One issue's place in a project board's dispatch column (issue #48).
+
+    ``position`` is 1-based and **dense per repository**, not per project. GitHub exposes
+    order but never a rank — ``ProjectV2Item`` has no position field, only an ``orderBy``
+    — so the number is assigned here from the sequence the API returned. Making it dense
+    per repository means a board shared by two repositories gives each its own ``1..n``
+    rather than a sparse global count with gaps where the other repository's cards sat.
+    """
+
+    issue_number: int
+    repo_key: str
+    position: int
+
+
+@dataclass(frozen=True, slots=True)
+class BoardSnapshot:
+    """One successful read of one project board (issue #48).
+
+    ``ranked`` and ``elsewhere`` are **separate** rather than one list with a nullable
+    rank, and they must stay separate. "In the dispatch column at position 3" and "parked
+    in Backlog" are different facts with opposite consequences — one dispatches, one is
+    held — and a single representation invites the second to be read as the first. This is
+    the lesson :class:`FastForwardResult` records for its own four outcomes.
+
+    An issue in neither collection is not on the board at all, which is a third thing
+    again: no signal, so it dispatches, after everything the board ranked (FR-008).
+    """
+
+    project_id: str
+    project_number: int
+    project_title: str
+    project_url: str
+    column_name: str
+    #: The dispatch column, in board order, for the repository this was read against.
+    ranked: tuple[BoardEntry, ...] = ()
+    #: Issue number → the column it is parked in, for every other column of the board.
+    elsewhere: dict[int, str] = field(default_factory=dict)
+    #: How many items the project holds in total, across every repository and column.
+    #: Recorded rather than derived: it is what makes a truncated read detectable.
+    total_items: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectResolution:
+    """Which board and column govern a repository, and how each was decided (issue #48).
+
+    ``reason`` is non-``None`` exactly when the resolution failed, and carries the sentence
+    a surface shows the author — which projects were found, which columns the board
+    offers, or which configured value does not exist on it. ``candidates`` carries what was
+    actually seen, so a message can name it rather than assert an ambiguity the author has
+    no way to check.
+
+    A failed resolution is **not** an error: FR-023 requires the repository to keep
+    dispatching under the configured global order. So this is returned, never raised.
+    """
+
+    project_id: str | None = None
+    project_number: int | None = None
+    project_title: str | None = None
+    project_url: str | None = None
+    #: ``'discovered'`` or ``'configured'``.
+    project_source: str | None = None
+    column_name: str | None = None
+    column_source: str | None = None
+    candidates: tuple[str, ...] = ()
+    reason: str | None = None
+
+    @property
+    def resolved(self) -> bool:
+        return self.project_id is not None and self.column_name is not None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectAccess:
+    """Whether these credentials can read projects at all, and what kind they are.
+
+    Its reason for existing is a wall the author would otherwise hit with a confusing
+    error: GitHub has **no account-level Projects permission for fine-grained tokens**, so
+    a fine-grained token cannot read a user-owned board however it is configured. That is
+    not something a failed board read can explain — it looks like any other refusal — so
+    the token kind is reported rather than left to be inferred (FR-027).
+
+    ``scopes`` is empty for a fine-grained token or a GitHub App, which is precisely how
+    the two kinds are told apart.
+    """
+
+    ok: bool
+    credential_kind: str
+    scopes: tuple[str, ...] = ()
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class RepoInfo:
     """One repository as the source system describes it (milestone 005, research R5).
 
@@ -347,6 +441,54 @@ class IssueSourceReader(Protocol):
         A 404 is a *fact about the repository*, not a transport failure, so it is returned
         rather than raised — the distinction milestone 005's allowlist needs in order to
         say "no such repository" differently from "you may not onboard that one".
+        """
+        ...
+
+    def resolve_project(
+        self, repo_key: str, *, project: str | None, column: str | None
+    ) -> ProjectResolution:
+        """Which project board and column govern this repository (issue #48).
+
+        Configured values win over discovery; discovery resolves only when exactly one
+        candidate exists. An ambiguous or missing answer comes back as a
+        :class:`ProjectResolution` carrying ``reason``, **not** as an exception — the
+        repository must keep dispatching under its configured order (FR-023). A transport
+        failure is still a transport failure and raises.
+        """
+        ...
+
+    def project_access(self) -> ProjectAccess:
+        """Can these credentials read projects, and what kind of token are they?
+
+        Used by ``doctor`` only, so the author learns this before the daemon needs it
+        rather than by watching an order fail to change (FR-027). Returns rather than
+        raises: "your token cannot do this" is a fact worth reporting, not a crash.
+        """
+        ...
+
+    def view_sort_conflicts(
+        self, repo_key: str, *, project_id: str, column_name: str
+    ) -> tuple[str, ...]:
+        """Board views whose sort would show a different order than the one dispatched.
+
+        GitHub exposes one manual ordering per project and no per-view order, so a view
+        with its own sort displays something this system cannot reproduce. Reported only
+        when the sort field **has a value on at least one card in the dispatch column** —
+        the precise condition under which the screen and the queue can disagree. A sort
+        that changes nothing produces nothing, which is what keeps the check from crying
+        wolf on a board where the field is simply unused.
+        """
+        ...
+
+    def read_board(
+        self, repo_key: str, *, project_id: str, column_name: str
+    ) -> BoardSnapshot:
+        """Where this repository's issues sit on an already-resolved board (issue #48).
+
+        Raises rather than returning an empty snapshot when the read fails. That
+        distinction is the whole point: an empty board and an unreadable one look
+        identical downstream, and treating the second as the first would silently stop
+        ordering anything while reporting success.
         """
         ...
 
@@ -706,7 +848,9 @@ class Display(Protocol):
 
 
 __all__ = [
+    "BoardEntry",
     "BoardInfo",
+    "BoardSnapshot",
     "BoundaryError",
     "Card",
     "CardSourceReader",
@@ -725,6 +869,8 @@ __all__ = [
     "NotificationEvent",
     "Notifier",
     "PollResult",
+    "ProjectAccess",
+    "ProjectResolution",
     "PullRequest",
     "RemovalResult",
     "RepoInfo",

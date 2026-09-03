@@ -563,3 +563,90 @@ def test_each_withheld_row_is_disclosed_exactly_once(web_at, conn) -> None:
     # One beneath the rendered interrupted cards, one in place of the awaiting empty text.
     assert body.count("1 simulated row") == 2
     assert "2 simulated" not in body
+
+
+# -- project board state on the queue (issue #48, T038) ----------------------
+
+
+def _govern(conn, repo_key="demo", **overrides):
+    from robot_army.models import RepoProject
+
+    fields = {
+        "repo_key": repo_key,
+        "project_id": "PVT_3",
+        "project_number": 3,
+        "project_title": "robot-army",
+        "column_name": "Ready",
+        "project_source": "discovered",
+        "column_source": "discovered",
+        "resolved_at": "2026-09-02T00:00:00Z",
+        "last_read_at": "2026-09-02T00:00:00Z",
+    }
+    fields.update(overrides)
+    with db.transaction(conn):
+        db.save_repo_project(conn, RepoProject(**fields))
+
+
+def test_the_queue_renders_the_off_column_reason(web, conn):
+    item = seed_item(conn, issue_number=1, state="ready")
+    _govern(conn)
+    conn.execute(
+        "UPDATE work_items SET board_column = 'Backlog' WHERE id = ?", (item,)
+    )
+
+    page = web.get("/queue").text
+
+    assert "not the dispatch column" in page
+    assert "Backlog" in page
+
+
+def test_the_ready_heading_counts_items_held_off_column(web, conn):
+    """FR-030. Without the count, a repository whose whole backlog is parked reads
+    exactly like a repository with no work at all."""
+    first = seed_item(conn, issue_number=1, state="ready")
+    second = seed_item(conn, issue_number=2, state="ready")
+    _govern(conn)
+    conn.execute(
+        "UPDATE work_items SET board_column = 'Backlog' WHERE id IN (?, ?)",
+        (first, second),
+    )
+
+    page = web.get("/queue").text
+    payload = web.get_json("/queue").json()
+
+    assert "2 held off-column" in page
+    assert payload["held_off_column"] == 2
+
+
+def test_a_failed_board_read_is_visible_with_its_age(web, conn):
+    """The order shown is still the last one read successfully, which is right — and an
+    order silently frozen days ago is indistinguishable from a current one."""
+    seed_item(conn, issue_number=1, state="ready")
+    _govern(conn, consecutive_failures=2, last_error="GitHub is down")
+
+    page = web.get("/queue").text
+
+    assert "could not be read" in page
+    assert "GitHub is down" in page
+
+
+def test_no_banner_when_every_board_is_healthy(web, conn):
+    seed_item(conn, issue_number=1, state="ready")
+    _govern(conn)
+
+    page = web.get("/queue").text
+
+    assert "could not be read" not in page
+    assert "held off-column" not in page
+
+
+def test_the_json_body_carries_the_same_board_facts_as_the_page(web, conn):
+    seed_item(conn, issue_number=1, state="ready")
+    _govern(conn)
+
+    payload = web.get_json("/queue").json()
+
+    row = next(r for r in payload["projects"] if r["repo_key"] == "demo")
+    assert row["governs"] is True
+    assert row["project_number"] == 3
+    assert row["column"] == "Ready"

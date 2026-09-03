@@ -95,6 +95,20 @@ class WorkItem:
     speckit_phase: str | None = None
     speckit_feature_dir: str | None = None
     speckit_phase_at: str | None = None
+    #: Where this item's issue sits on its repository's project board, as the last
+    #: successful board read saw it (issue #48). The pair must stay a pair: four states
+    #: have to remain distinguishable and collapsing any two of them is a real bug.
+    #:
+    #: ``board_column`` NULL means either *no board has been read for this repository*
+    #: or *read, and this item is not on the board* — and those are different. The
+    #: difference lives in ``repo_projects.last_read_at``, because it is one fact about a
+    #: repository rather than a fact repeated on every one of its rows.
+    #:
+    #: ``board_position`` is the 1-based rank inside the dispatch column and is NULL for
+    #: everything outside it. It must never be written as 0 to mean "unknown": that would
+    #: silently promote every item of an unread board to the head of its queue.
+    board_column: str | None = None
+    board_position: int | None = None
 
     @property
     def label_list(self) -> list[str]:
@@ -239,6 +253,54 @@ class PollState:
 
 
 @dataclass(frozen=True, slots=True)
+class RepoProject:
+    """Which project board governs a repository, and how the last read of it went.
+
+    Shaped like :class:`PollState` and for the same reason: high-churn bookkeeping that
+    has no business in ``repos``, which is an *approval* record that deliberately never
+    re-derives itself.
+
+    ``resolved_at`` and ``last_read_at`` answer different questions and both are needed.
+    A project can be resolved and never yet read — the pass that resolved it failed, or
+    has not run — and in that state nothing is ordered and nothing is held. Only
+    ``last_read_at`` opens the gate (FR-014), and it records the last **success** rather
+    than the last attempt, so a failed read leaves the previous snapshot in force and
+    visibly stale instead of discarding it.
+
+    ``unresolved_reason`` is non-NULL exactly when ``resolved_at`` is NULL and carries the
+    sentence a surface shows, so "why is this repository not ordered by its board?" is
+    answerable without the log and with the board unreachable.
+    """
+
+    repo_key: str
+    project_id: str | None = None
+    project_number: int | None = None
+    project_title: str | None = None
+    project_url: str | None = None
+    #: ``'discovered'`` or ``'configured'`` — which is what lets a surface tell the author
+    #: whether they chose this or inherited it, and therefore which file to edit.
+    project_source: str | None = None
+    column_name: str | None = None
+    column_source: str | None = None
+    resolved_at: str | None = None
+    unresolved_reason: str | None = None
+    last_read_at: str | None = None
+    last_error: str | None = None
+    consecutive_failures: int = 0
+    backoff_until: str | None = None
+
+    @property
+    def governs(self) -> bool:
+        """Whether this repository's order and holds come from its board.
+
+        Both halves are required. A resolution with no successful read has nothing to
+        order by, and a stale read still governs — that is FR-025, and it is why this
+        asks for ``last_read_at`` rather than for freshness.
+        """
+        return self.resolved_at is not None and self.last_read_at is not None
+
+
+@dataclass(frozen=True, slots=True)
 class DispatchControl:
     """Whether dispatch is suspended, since when, and by which front end (FR-033).
 
@@ -328,4 +390,5 @@ ROW_TYPES: dict[str, type[Any]] = {
     "anomalies": Anomaly,
     "poll_state": PollState,
     "cards": Card,
+    "repo_projects": RepoProject,
 }

@@ -203,3 +203,71 @@ def test_suppression_withholds_the_configured_text_too(
         config = build_config(repo_clone, layout, tmp_path, **overrides)
 
         assert call(config, audit, make_speckit_tree(tmp_path / "wt")) is None
+
+
+def test_a_dispatch_keys_its_record_on_the_work_item(
+    repo_clone: Path, layout: Any, audit: Any, tmp_path: Path
+) -> None:
+    """The shape milestone 007 established, unchanged by the preview command's widening."""
+    config = build_config(repo_clone, layout, tmp_path)
+    worktree = make_speckit_tree(tmp_path / "wt")
+
+    call(config, audit, worktree)
+
+    record = records(layout, audit)[-1]
+    assert record["entity_type"] == "work_item"
+    assert record["entity_id"] == 1
+
+
+def test_no_work_item_keys_the_record_on_the_repository(
+    repo_clone: Path, layout: Any, audit: Any, tmp_path: Path
+) -> None:
+    """``robot-army prompt`` previews issues that have no row at all.
+
+    A sentinel id would put a claim about work item 0 into an append-only log, so the
+    record names the repository instead — the same key ``poll.rejected`` already uses when
+    there is nothing to point at.
+    """
+    config = build_config(repo_clone, layout, tmp_path)
+    worktree = make_speckit_tree(tmp_path / "wt")
+
+    assert (
+        dispatch.speckit_block(
+            config=config,
+            audit=audit,
+            repo_key="demo",
+            item_id=None,
+            worktree_path=str(worktree),
+        )
+        == speckit.GUIDANCE
+    )
+
+    record = records(layout, audit)[-1]
+    assert record["entity_type"] == "repo"
+    assert record["entity_id"] == "demo"
+
+
+def test_no_work_item_keys_the_failure_record_on_the_repository(
+    repo_clone: Path, layout: Any, audit: Any, tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The bare-except path keys the same way; a miss must still say what it missed on."""
+    config = build_config(repo_clone, layout, tmp_path)
+    monkeypatch.setattr(
+        speckit, "detect", lambda _root: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+
+    assert (
+        dispatch.speckit_block(
+            config=config,
+            audit=audit,
+            repo_key="demo",
+            item_id=None,
+            worktree_path=str(tmp_path / "wt"),
+        )
+        is None
+    )
+
+    record = records(layout, audit)[-1]
+    assert record["outcome"] == "error"
+    assert record["entity_type"] == "repo"
+    assert record["entity_id"] == "demo"

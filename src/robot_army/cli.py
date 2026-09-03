@@ -105,6 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("repos", help="onboarding, fingerprint, and trust status per repository")
 
+    # Not in READ_COMMANDS and not in the --json list below, deliberately: stdout carries
+    # the prompt and nothing else, and a machine-readable mode whose entire content is that
+    # same string would be a second rendering to keep correct with no caller (research R7).
+    preview = sub.add_parser(
+        "prompt", help="print the prompt a dispatch of this issue would compose"
+    )
+    preview.add_argument("repo_key", metavar="owner/repo")
+    preview.add_argument("issue_number", type=int)
+
     worktree = sub.add_parser("worktree", help="worktree listing and removal")
     worktree_sub = worktree.add_subparsers(dest="worktree_command", required=True)
     worktree_sub.add_parser("list", help="worktrees with size, branch, and condition")
@@ -443,6 +452,12 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "restart": lambda: operations.restart(ctx, args.item_id),
         "abandon": lambda: operations.abandon(ctx, args.item_id),
         "retry": lambda: operations.retry(ctx, args.item_id),
+        # `notes` is stderr so that stdout carries the prompt alone and stays diffable
+        # across runs (FR-003/FR-004). Failures need nothing here: they come back with a
+        # non-zero code and `main` already routes those lines to stderr.
+        "prompt": lambda: operations.prompt_preview(
+            ctx, args.repo_key, args.issue_number, notes=sys.stderr
+        ),
         "onboard": lambda: operations.onboard(
             ctx,
             args.repo_key,

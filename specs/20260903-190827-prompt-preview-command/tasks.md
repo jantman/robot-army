@@ -40,7 +40,7 @@ repository root. Run everything from `/home/jantman/GIT/robot-army`.
 **Purpose**: Establish that the starting point is clean, so any later failure is this
 feature's.
 
-- [ ] T001 Confirm a green baseline: run `uv run pytest` and `uv run ruff check` at the
+- [X] T001 Confirm a green baseline: run `uv run pytest` and `uv run ruff check` at the
       repository root and record that both pass before any file is edited
 
 ---
@@ -52,16 +52,16 @@ below depends on.
 
 **⚠️ CRITICAL**: No user story work can begin until T002 and T003 are complete.
 
-- [ ] T002 Widen `speckit_block`'s `item_id: int` to `int | None` in
+- [X] T002 Widen `speckit_block`'s `item_id: int` to `int | None` in
       `src/robot_army/dispatch.py`, and when it is `None` key the `speckit.detect` record
       `entity_type="repo"`, `entity_id=repo_key` instead of `entity_type="work_item"`. Leave
       `build_launch_plan`'s call site untouched so dispatch's record shape is unchanged. Per
       [R3](research.md) and [contracts/audit-records.md](contracts/audit-records.md)
-- [ ] T003 [P] Add a `raise_on_get_issue: Exception | None = None` attribute to
+- [X] T003 [P] Add a `raise_on_get_issue: Exception | None = None` attribute to
       `FakeIssueReader` in `tests/conftest.py` and honour it at the top of `get_issue`, so a
       test can exercise the transport-failure path. Mirror the existing `raise_on_remote`
       attribute's shape
-- [ ] T004 Add two cases to `tests/unit/test_speckit_dispatch_prompt.py`: one asserting that
+- [X] T004 Add two cases to `tests/unit/test_speckit_dispatch_prompt.py`: one asserting that
       `speckit_block(item_id=None, ...)` writes a record keyed on the repository, and one
       asserting a dispatch's record is still keyed on the work item (depends on T002)
 
@@ -81,7 +81,7 @@ worktree, branch, work item or session is created.
 
 ### Implementation for User Story 1
 
-- [ ] T005 [US1] Implement `prompt_preview(ctx, repo_key, issue_number, *, notes=None)` in
+- [X] T005 [US1] Implement `prompt_preview(ctx, repo_key, issue_number, *, notes=None)` in
       `src/robot_army/operations.py`, following [data-model.md](data-model.md): reject a slug
       that is not `owner/name` and a non-positive issue number with `EXIT_USAGE`; resolve the
       repository with `repos_mod.resolve` and return `EXIT_PRECONDITION` when it is `None`;
@@ -91,42 +91,46 @@ worktree, branch, work item or session is created.
       `dispatch.speckit_block(..., item_id=None, ...)`; call `prompt.compose`; and return a
       `Result` whose single line is the composed prompt. Add `prompt` to the module's bulk
       `from robot_army import ...` import
-- [ ] T006 [US1] Write one `prompt.preview` audit record on **every** exit path of
+- [X] T006 [US1] Write one `prompt.preview` audit record on **every** exit path of
       `prompt_preview` in `src/robot_army/operations.py` — success and all three refusals —
       with the fields and keying in
       [contracts/audit-records.md](contracts/audit-records.md). Never record the prompt text,
       the issue body, or the contents of either optional section ([R4](research.md))
-- [ ] T007 [US1] Build the context note in `prompt_preview` naming the directory the
+- [X] T007 [US1] Build the context note in `prompt_preview` naming the directory the
       contextual sections were read from and which of the three cases applies, put it in
       `Result.data["notes"]`, and write it to the `notes` stream when one was passed
       (`src/robot_army/operations.py`, wording in [contracts/cli.md](contracts/cli.md))
-- [ ] T008 [US1] Add the `prompt` subparser to `build_parser` in `src/robot_army/cli.py` with
+- [X] T008 [US1] Add the `prompt` subparser to `build_parser` in `src/robot_army/cli.py` with
       positionals `repo_key` and `issue_number` (`type=int`), and a `"prompt"` entry in
       `_dispatch`'s table passing `notes=sys.stderr`. Do **not** add it to `READ_COMMANDS` or
       to the `--json` list in the universal-flags loop ([R7](research.md))
 
 ### Tests for User Story 1
 
-- [ ] T009 [US1] Create `tests/unit/test_prompt_preview.py` covering the happy path for an
+- [X] T009 [US1] Create `tests/unit/test_prompt_preview.py` covering the happy path for an
       untracked issue: the delivery block is present unconditionally; the title, URL, labels
       and body appear; the branch is the derived `robot-army/issue-<n>-<slug>`; a clone
       carrying `.claude/robot-army.md` puts those instructions first; the Spec Kit block
       appears when the clone is a Spec Kit project and is absent when the repository is
       suppressed; an empty body yields the placeholder; an over-long body is truncated with
       the URL pointer
-- [ ] T010 [US1] Add the audit assertions to `tests/unit/test_prompt_preview.py`: one
+- [X] T010 [US1] Add the audit assertions to `tests/unit/test_prompt_preview.py`: one
       `prompt.preview` record per invocation on each of the four paths, with the keying and
       `detail` fields [contracts/audit-records.md](contracts/audit-records.md) specifies, and
       no prompt or body text anywhere in the record (depends on T006, T009)
-- [ ] T011 [P] [US1] Create
+- [X] T011 [P] [US1] Create
       `tests/integration/test_prompt_preview_matches_dispatch.py` asserting that
       `prompt_preview`'s text is exactly the prompt argument `dispatch.build_launch_plan`
       places in the worker argv for the same issue, repository and directory — the proof of
       FR-002 and SC-002
-- [ ] T012 [P] [US1] Extend `tests/unit/test_cli_exit_codes.py` with `prompt`'s four codes
-      through `cli.main()`: `0` on success, `2` for a malformed slug and for a non-positive
-      issue number, `3` for a repository that is not onboarded, and `1` for both an issue
-      that returns `None` and one whose read raises (uses T003's hook)
+- [X] T012 [P] [US1] Cover `prompt`'s four exit codes through `cli.main()`: `0` on success,
+      `2` for a malformed slug and for a non-positive issue number, `3` for a repository that
+      is not onboarded, and `1` for both an issue that returns `None` and one whose read
+      raises (uses T003's hook). **Landed in `tests/unit/test_prompt_preview.py` rather than
+      `tests/unit/test_cli_exit_codes.py`**: that module's fixture keys its repository
+      `demo`, and a key with no owner is one of the failures this command is *about*, so the
+      cases need their own config. A pointer was added to that module's docstring, and the
+      assertions there are stricter — each also proves stdout stayed empty
 
 **Checkpoint**: the MVP. Any issue in an onboarded repository can be previewed, and nothing
 is created by doing so.
@@ -144,24 +148,24 @@ the worktree rather than the clone.
 
 ### Implementation for User Story 2
 
-- [ ] T013 [US2] Extend `prompt_preview` in `src/robot_army/operations.py` to look the row up
+- [X] T013 [US2] Extend `prompt_preview` in `src/robot_army/operations.py` to look the row up
       with `db.find_work_item(source="github", source_id=f"{repo_key}#{issue_number}",
       dry_run=False)` and, when it exists: prefer `item.branch` over the derived name, prefer
       `Path(item.worktree_path)` as the context root when that directory exists, and pass
       `item.id` to `speckit_block`. A dry-run row is deliberately not consulted
       ([R8](research.md))
-- [ ] T014 [US2] Extend the `prompt.preview` record's `detail` in
+- [X] T014 [US2] Extend the `prompt.preview` record's `detail` in
       `src/robot_army/operations.py` with `item_id`, `branch_source` (`recorded`/`derived`)
       and `context_source` (`worktree`/`clone`/`none`), and extend T007's note so it names
       which of the three the run used (depends on T013)
 
 ### Tests for User Story 2
 
-- [ ] T015 [US2] Add cases to `tests/unit/test_prompt_preview.py`: a recorded branch beats the
+- [X] T015 [US2] Add cases to `tests/unit/test_prompt_preview.py`: a recorded branch beats the
       derived one; an existing worktree beats the clone; a recorded `worktree_path` whose
       directory is gone falls back to the clone and says so in the note and the record; a
       `dry_run` row is ignored and the derived branch is used
-- [ ] T016 [P] [US2] Add the worktree case to
+- [X] T016 [P] [US2] Add the worktree case to
       `tests/integration/test_prompt_preview_matches_dispatch.py`: the same string equality
       when the context root is a real worktree carrying its own `.claude/robot-army.md`
 
@@ -185,7 +189,7 @@ output.
 
 ### Implementation for User Story 3
 
-- [ ] T017 [US3] Verify and, where needed, correct the stream discipline across
+- [X] T017 [US3] Verify and, where needed, correct the stream discipline across
       `src/robot_army/operations.py` and `src/robot_army/cli.py`: notes reach only the `notes`
       stream and `Result.data`, never `Result.lines`; every refusal puts its message in
       `Result.lines` with a non-zero code so `main`'s existing routing sends it to stderr; on
@@ -193,7 +197,7 @@ output.
 
 ### Tests for User Story 3
 
-- [ ] T018 [US3] Add `capsys`-driven cases to `tests/unit/test_prompt_preview.py` running
+- [X] T018 [US3] Add `capsys`-driven cases to `tests/unit/test_prompt_preview.py` running
       through `cli.main()`: stdout equals the prompt plus one trailing newline and nothing
       more; the context note appears on stderr and never on stdout; stdout is empty for each
       of the malformed-argument, not-onboarded and issue-unavailable failures; two successive
@@ -205,17 +209,17 @@ output.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T019 [P] Document the command in `README.md` under "What every session is told" — the
+- [X] T019 [P] Document the command in `README.md` under "What every session is told" — the
       section that describes what goes into a prompt is where a reader will look for how to
       read one. A short paragraph and the invocation; mention that it creates nothing
-- [ ] T020 [P] Add a `prompt.preview` entry to `docs/logging.md` beside the other per-action
+- [X] T020 [P] Add a `prompt.preview` entry to `docs/logging.md` beside the other per-action
       tables, naming the record's fields and the two justified omissions from
       [R4](research.md), so the log's format stays documented as the Operating Constraints
       require
-- [ ] T021 Work through `specs/20260903-190827-prompt-preview-command/quickstart.md` against
+- [X] T021 Work through `specs/20260903-190827-prompt-preview-command/quickstart.md` against
       a real onboarded repository and a real issue, including the state-unchanged check in
       step 4 and the exit-code checks in step 6
-- [ ] T022 Run `uv run pytest` and `uv run ruff check`; both must pass. The feature is not
+- [X] T022 Run `uv run pytest` and `uv run ruff check`; both must pass. The feature is not
       complete until they do (constitution, Development Workflow)
 
 ---

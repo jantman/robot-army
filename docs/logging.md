@@ -562,6 +562,45 @@ a pid of `1` through the termination guard in #69.
 
 Nothing this feature added goes unlogged, and no Principle III exception is claimed.
 
+## The `prompt.preview` action
+
+`robot-army prompt <owner/repo> <number>` prints the prompt a dispatch of that issue would
+compose, and creates nothing. It still writes, because it reaches GitHub and reads a
+repository's files, and because a question asked of the system is part of what the record has
+to be able to answer.
+
+| Action | When | What it carries |
+|---|---|---|
+| `prompt.preview` | Once per invocation, on **every** path | The repository, the issue, the branch and whether it was recorded or derived, which directory the contextual sections were read from, and whether each optional section was included |
+
+Keyed `entity_type: issue`, `entity_id: <owner>/<repo>#<number>` — the same shape
+`poll.rejected` uses for an issue with no row. Refusals carry `refused: true` and a `cause` of
+`malformed_arguments`, `not_onboarded`, or `issue_unavailable`, which is the same distinction
+the exit code makes.
+
+`speckit.detect` is written too, by the same function a dispatch uses. When the issue has no
+work item it is keyed on the repository rather than the row, because a sentinel id would put a
+claim about work item 0 into an append-only file. `component` separates the two callers
+otherwise: `daemon` for a dispatch, `cli` for a preview.
+
+### What a preview does not record, and why
+
+**The composed prompt itself.** Not the text, not the issue body, not the contents of
+`.claude/robot-army.md`, not the Spec Kit block. This is the same gap dispatch already has and
+already justifies — the log has never reconstructed a composed prompt — and closing it here
+alone would leave the record describing the rehearsal in more detail than the performance,
+while writing up to 60,000 characters of issue body per invocation. A unit test asserts the
+gap stays open.
+
+**A successful issue read.** `GitHubReader` logs every retry and every failure but takes the
+aggregate-read exception for successes, as it has since milestone 001. The `prompt.preview`
+record names what was asked for and whether it was answered, which is what the reconstruction
+standard needs.
+
+One invocation shape goes entirely unrecorded: a non-numeric issue number, which argparse
+rejects before the log is open. Nothing was read and nothing was reached, so there is no
+action to reconstruct — that is a malformed invocation, not an event.
+
 ## Reconstructing an item's history
 
 ```bash

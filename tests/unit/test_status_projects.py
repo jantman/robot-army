@@ -102,12 +102,20 @@ def test_an_unresolved_repository_reports_why(ctx, conn, idle_machine):
 
 def test_a_repository_with_no_board_says_nothing(ctx, conn, idle_machine):
     """Most installations have none. A line on every one of them would bury the rows that
-    matter."""
+    matter.
+
+    The poll is what keeps this true: a repository that has never had a board persists no
+    `repo_projects` row at all, so there is nothing here for the filter to have to skip.
+    """
     ready(conn, 1)
 
-    _, text = render(ctx, idle_machine)
+    result, text = render(ctx, idle_machine)
 
     assert "project boards:" not in text
+    row = next(r for r in result.data["projects"] if r["repo_key"] == "demo")
+    assert row["unresolved_reason"] is None, (
+        "a repository that never had a board must not carry a reason for not having one"
+    )
 
 
 def test_a_repository_switched_off_is_still_shown(ctx, conn, idle_machine, config):

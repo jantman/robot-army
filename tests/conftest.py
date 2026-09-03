@@ -356,7 +356,12 @@ class FakeIssueReader:
             raise self.raise_on_resolve
         if self.resolution is not None:
             return self.resolution
-        return ProjectResolution(reason=f"no project is linked to {repo_key}")
+        # `absent=True` mirrors the real reader: a repository with no board is a third
+        # state, not a failure, and a fake that reported it as one would let the product
+        # treat the ordinary case as an error without any test noticing.
+        return ProjectResolution(
+            absent=True, reason=f"no project is linked to {repo_key}"
+        )
 
     def project_access(self) -> Any:
         from robot_army.boundaries import ProjectAccess

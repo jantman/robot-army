@@ -200,6 +200,15 @@ class ProjectResolution:
     column_source: str | None = None
     candidates: tuple[str, ...] = ()
     reason: str | None = None
+    #: No project is associated with this repository at all, and none was configured.
+    #:
+    #: A **third** state, not a shade of failure, and keeping it distinct is the whole
+    #: point: "two projects are linked and I cannot choose" is a problem the author must
+    #: fix, while "this repository has no board" is the ordinary condition of most
+    #: repositories forever. Collapsing them makes the normal case shout — an error record
+    #: a minute, and a line in `status` for every repository that has no board — which is
+    #: how a surface teaches its reader to stop looking at it.
+    absent: bool = False
 
     @property
     def resolved(self) -> bool:

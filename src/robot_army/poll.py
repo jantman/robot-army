@@ -439,6 +439,20 @@ def read_board(
         return _board_failed(conn, audit, state, repo_key=repo_key, error=str(exc))
 
     now = utcnow()
+    if resolution.absent and state.resolved_at is None and state.last_read_at is None:
+        # A repository that has never had a board and does not have one now. Nothing is
+        # persisted and nothing is recorded, and both halves matter (review, round 2).
+        #
+        # Persisting would put a `repo_projects` row under every onboarded repository,
+        # which `_say_projects` then prints as "not ordered by a board" — for every
+        # repository that has no board, forever, directly contradicting that function's
+        # own promise to skip them. Recording would write an error a minute for the
+        # ordinary condition of most repositories.
+        #
+        # The condition is narrow on purpose. A repository that *did* have a board and no
+        # longer does falls through to the branch below, because a board going away is a
+        # real change and the author should hear about it.
+        return state
     if snapshot is None:
         # Resolution failed but the request succeeded. Not a transport failure, so the
         # failure counter is *not* advanced — backing off would delay recovery from a
@@ -453,10 +467,12 @@ def read_board(
             db.save_repo_project(conn, stored)
         audit.record(
             "poll.board",
-            outcome="error",
+            # A board that has gone away is reported as a change, not as a fault: the
+            # author unlinked it, or it was deleted, and neither is an error on our part.
+            outcome="ok" if resolution.absent else "error",
             entity_type="repo",
             entity_id=repo_key,
-            detail={"unresolved": resolution.reason},
+            detail={"unresolved": resolution.reason, "absent": resolution.absent},
         )
         if state.last_read_at is not None:
             # NOT the same consequence as a transport failure, and the difference is the

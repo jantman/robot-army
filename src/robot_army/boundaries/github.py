@@ -536,7 +536,11 @@ class GitHubReader:
     ) -> ProjectResolution:
         self._audit.record(
             "github.project.discover",
-            outcome="ok" if resolution.resolved else "error",
+            # `absent` is an ``ok``: nothing went wrong, this repository simply has no
+            # board. Recording it as an error would put a minute-by-minute error in the
+            # log for the ordinary state of most repositories, burying the ones that mean
+            # something — the failure `docs/logging.md`'s gap list exists to argue against.
+            outcome="ok" if resolution.resolved or resolution.absent else "error",
             entity_type="repo",
             entity_id=repo_key,
             detail={
@@ -614,8 +618,9 @@ class GitHubReader:
             elif len(candidates) == 1:
                 chosen = candidates[0]
             elif not candidates:
+                # Not a failure. Most repositories have no board and never will.
                 return ProjectResolution(
-                    reason=f"no project is linked to {repo_key}"
+                    absent=True, reason=f"no project is linked to {repo_key}"
                 )
             else:
                 # Two linked projects is not a tie to break. Picking one would choose the

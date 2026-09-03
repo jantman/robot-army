@@ -220,6 +220,68 @@ def test_a_first_ever_failure_leaves_the_repository_ungoverned(conn, config, aud
 # -- resolution failures are not transport failures -------------------------
 
 
+def test_a_repository_that_never_had_a_board_persists_nothing(conn, config, audit, layout):
+    """Found in review. Most repositories have no board and never will, so this is the
+    ordinary case — and it must leave no row and no record.
+
+    A row would make `_say_projects` print "not ordered by a board" for every repository
+    that has none, forever, contradicting that function's own promise to skip them. A
+    record would put an error a minute in the log for the normal state of the system,
+    burying the ones that mean something.
+    """
+    onboard(conn)
+    reader = reader_with()  # the fake's default: absent, nothing linked
+
+    stored = run(conn, config, audit, reader)
+
+    assert stored.last_read_at is None
+    assert stored.unresolved_reason is None
+    assert conn.execute("SELECT COUNT(*) FROM repo_projects").fetchone()[0] == 0
+    written = "".join(p.read_text() for p in layout.log_dir.glob("*.jsonl"))
+    assert "poll.board" not in written
+
+
+def test_a_board_that_goes_away_is_reported_as_a_change(conn, config, audit, layout):
+    """The narrow other half. A repository that *did* have a board and no longer does has
+    genuinely changed, and the author should hear about it — so it is persisted and
+    recorded, unlike the never-had-one case above."""
+    onboard(conn)
+    reader = reader_with(res=resolution(), board=snapshot([]))
+    run(conn, config, audit, reader)
+
+    reader.resolution = ProjectResolution(
+        absent=True, reason="no project is linked to demo"
+    )
+    stored = run(conn, config, audit, reader)
+
+    assert stored.unresolved_reason == "no project is linked to demo"
+    assert not stored.governs
+    written = "".join(p.read_text() for p in layout.log_dir.glob("*.jsonl"))
+    assert "poll.board" in written
+
+
+def test_an_absent_board_is_never_recorded_as_an_error(conn, config, audit, layout):
+    """An `outcome="error"` a minute for a repository with no board is how an error grep
+    stops being useful."""
+    import json
+
+    onboard(conn)
+    reader = reader_with(res=resolution(), board=snapshot([]))
+    run(conn, config, audit, reader)
+    reader.resolution = ProjectResolution(absent=True, reason="no project is linked")
+    run(conn, config, audit, reader)
+
+    records = [
+        json.loads(line)
+        for path in layout.log_dir.glob("*.jsonl")
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+    board = [r for r in records if r.get("action") == "poll.board"]
+    assert board, "the change must still be recorded"
+    assert all(r["outcome"] == "ok" for r in board)
+
+
 def test_an_unresolved_board_is_recorded_without_backing_off(conn, config, audit):
     """There is nothing to retry away: only the author can clear an ambiguity, and backing
     off would delay recovery once they had."""

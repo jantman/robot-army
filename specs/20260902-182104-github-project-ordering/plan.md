@@ -442,6 +442,41 @@ it returns one passing check.
    one who benefits from the reminder. The contract is the artifact now slightly behind the
    code; this entry is the record of that.
 
+### A second review round, and the pattern it exposed
+
+Three more findings, all correct, and two of them the **same defect as the first round in a
+different place**: a surface describing what is *stored* rather than what is *in force*.
+
+1. **The queue's staleness banner keyed off `consecutive_failures` alone**, so a repository
+   with board ordering switched off could be told "the order shown is the one last read
+   successfully" — describing a snapshot nothing is reading. It now requires `governs`.
+
+2. **A repository with no board was treated as a failure.** `resolve_project` returned an
+   unresolved result, which the poll persisted and logged as an error — for every onboarded
+   repository, every minute, forever. Two consequences, both bad: a `repo_projects` row under
+   every repository, which `_say_projects` then printed as "not ordered by a board" in direct
+   contradiction of its own docstring promising to skip exactly those; and an `outcome=error`
+   record a minute for the ordinary condition of most repositories, which is how an error grep
+   stops being useful.
+
+   The fix is a **third state** rather than a shade of failure. `ProjectResolution.absent`
+   distinguishes "there is no board here" from "I cannot choose between two". A repository
+   that has never had a board and does not have one now persists nothing and records nothing.
+   A board that *goes away* still does both, because that is a real change. `docs/logging.md`
+   carries the gap.
+
+3. **`apply_board_facts`'s docstring claimed one statement** where the code does a clearing
+   `UPDATE` plus one per item. The implementation is right for boards of tens; the words were
+   wrong, and they invited a reader to rely on a per-statement atomicity the function does not
+   provide. The docstring now says the atomicity that matters is the caller's transaction.
+
+**The pattern is worth naming, because it recurred three times across two rounds in three
+unrelated files.** Every one was a place where a stored value and its effect had come apart,
+and the prose described the value. This module has two distinct notions of "the board" — the
+snapshot on disk, and whether that snapshot is currently governing anything — and they are not
+the same. Anything that says *what will happen* has to consult `governs`; only something
+describing the database should consult the row.
+
 ### One thing not done
 
 **T043's live walk-through is not complete.** The read-only half was run against the real API

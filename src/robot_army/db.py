@@ -866,10 +866,14 @@ def apply_board_facts(
     items it saw would leave yesterday's answer in place for exactly the items whose
     answer changed.
 
-    Every row of the repository is rewritten in one statement rather than one statement
-    per item: the counts are tens, and a single pass cannot leave the repository half in
-    one snapshot and half in another even before the surrounding transaction is
-    considered.
+    One clearing statement, then one statement per item the snapshot mentions. Not a
+    single `CASE` expression, and the docstring said otherwise until review caught it:
+    the counts here are tens, so the loop costs nothing measurable, and a `CASE` over a
+    dict of issue numbers is harder to read than the thing it replaces. **The atomicity
+    that matters is the caller's transaction, not this function's statement count** — the
+    repository cannot be observed half in one snapshot and half in another because the
+    whole call is inside one `BEGIN IMMEDIATE`. Do not read a per-statement guarantee
+    into this that it does not provide.
 
     ``dry_run`` is not filtered. A simulated item occupies a queue position like any
     other, so it is ordered like any other; the board read that produced this made no

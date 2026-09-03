@@ -618,6 +618,28 @@ def test_the_ready_heading_counts_items_held_off_column(web, conn):
     assert payload["held_off_column"] == 2
 
 
+def test_no_staleness_banner_when_board_ordering_is_off(web, conn, monkeypatch):
+    """Found in review. A repository not using a stored snapshot must not be told that
+    "the order shown is the one last read successfully" — that describes a snapshot
+    nothing is reading."""
+    from robot_army import operations
+
+    seed_item(conn, issue_number=1, state="ready")
+    _govern(conn, consecutive_failures=2, last_error="GitHub is down")
+    original = operations._project_rows
+    monkeypatch.setattr(
+        operations,
+        "_project_rows",
+        lambda ctx, queue: [
+            _r | {"governs": False, "enabled": False} for _r in original(ctx, queue)
+        ],
+    )
+
+    page = web.get("/queue").text
+
+    assert "could not be read" not in page
+
+
 def test_a_failed_board_read_is_visible_with_its_age(web, conn):
     """The order shown is still the last one read successfully, which is right — and an
     order silently frozen days ago is indistinguishable from a current one."""

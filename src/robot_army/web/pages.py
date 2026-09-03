@@ -807,7 +807,13 @@ def queue_view(
     # must be able to see, because an order silently frozen days ago is indistinguishable
     # from a current one.
     project_rows = operations._project_rows(ctx, plan)
-    stale = [row for row in project_rows if row["consecutive_failures"]]
+    # `governs`, not merely `consecutive_failures`. A repository whose board ordering is
+    # switched off is not using any stored snapshot, so "the order shown is the one last
+    # read successfully" would be describing a snapshot nothing is reading — the same
+    # storage-versus-effect confusion the fallback record carried, in a second place.
+    stale = [
+        row for row in project_rows if row["governs"] and row["consecutive_failures"]
+    ]
     board_note: list[Any] = []
     for row in stale:
         age = row["last_read_age_seconds"]

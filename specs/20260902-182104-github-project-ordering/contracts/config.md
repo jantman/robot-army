@@ -87,13 +87,29 @@ the common case configuration-free.
 
 ## What `doctor` checks
 
-Appended as `project: <name>` rows, only when a project is configured or discovered — an
-installation with no board has nothing to check, and inventing a passing check for it would
-say something about a board that does not exist. This mirrors the board block's existing rule
-exactly.
+Appended as `project: <name>` rows, for **every onboarded repository**.
+
+This is not what this contract originally said, and the difference is recorded rather than
+quietly reconciled. The first version mirrored the Trello board block — checks only when a
+board exists, on the reasoning that inventing a passing check says something about a board
+that does not exist. Implementation disagreed on two counts and the implementation won:
+
+- **A repository with no board gets one passing row**, naming that fact. `doctor` is the
+  command that says everything it knows, and silence here reads identically to "this build
+  has no board checks" — which is the wrong answer for the person running it to find out
+  whether boards work at all. `status` still stays quiet about such repositories, because
+  that command answers "what is happening now" rather than "what is configured".
+- **It is a *passing* row, not a failing one.** `doctor` exits non-zero on any failed check,
+  so reporting absence as a failure would have made the command fail on every installation
+  without a project board — most of them — and it is the command the README tells the author
+  to run first, every time.
+
+A repository with board ordering switched off likewise gets one passing row saying so, naming
+whether that came from its own setting or the global one.
 
 | Check | Fails when |
 |---|---|
+| `project` (absent) | **Never.** A repository with no linked project passes, with `no project is linked to <repo> — board ordering has no effect here` |
 | `token` | The credentials cannot read projects. Distinguishes the three shapes R7 measured: `INSUFFICIENT_SCOPES` (classic token missing `read:project`), `FORBIDDEN` (permission), and an empty `x-oauth-scopes` (a **fine-grained** token, which cannot read user-owned projects at all — reported with that explanation, not as a generic failure) |
 | `project` | No project resolved: none linked, more than one linked, or a configured project not found |
 | `column` | No dispatch column resolved: none recognised, more than one recognised, or a configured column absent from the board |

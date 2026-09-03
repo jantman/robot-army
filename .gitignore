@@ -21,6 +21,10 @@ venv/
 .env.*
 github-token
 
+# A security analysis names unfixed weaknesses and the conditions to reach them.
+# Publishing it hands a reader the attack paths before the fixes land.
+docs/security-analysis.md
+
 # Editor / OS
 .vscode/
 .idea/

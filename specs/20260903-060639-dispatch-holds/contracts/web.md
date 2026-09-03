@@ -71,16 +71,35 @@ Messages: `held` and `released`.
 occupy anyway, marked with its reason and detail (FR-014). No special case: the existing
 `row["hold"]` / `row["hold_detail"]` rendering already covers it.
 
-**Repository holds get their own notice on the queue page** (FR-019). A repository hold matching
-no currently queued item has no row to attach to, and without a notice it would be invisible —
-suppressing every future item in that repository while the page looked completely normal. This
-is the same problem `held_off_column` solved for parked boards, where a repository with ready
-items dispatching none of them *reads exactly like a repository with no work at all*, and it
-takes the same shape: a repository-level summary beside the queue rather than a hidden fact.
+**Repository holds get their own section on the queue page**, and it lists the **union** of two
+sets — every repository with queued work, and every held repository — for two separate reasons.
 
-**Controls.** Each queue row carries hold or release for that item, whichever applies. The
-repository-level control lives with the repository notice, so holding a repository is one action
-from the page that shows the problem.
+*Every repository with queued work*, so a repository can be **held** from the page that shows the
+problem. Listing only held repositories would make release reachable from the page and leave
+`POST /repos/hold` with no control anywhere in the rendered HTML — a route working perfectly with
+nothing offering it. (This is not hypothetical: the first implementation did exactly that, and
+review caught it.)
+
+*Every held repository*, queued work or not, which is FR-019. A hold matching no currently queued
+item has no row of its own to attach to, and without the section it would be invisible —
+suppressing every future item in that repository while the page looked completely normal. This is
+the same problem `held_off_column` solved for parked boards, where a repository with ready items
+dispatching none of them *reads exactly like a repository with no work at all*, and it takes the
+same shape.
+
+The section is absent only when both sets are empty, since a heading over an empty table is noise
+on the page whose subject is what dispatch is doing.
+
+**Controls.** Each queue row carries hold or release for that item, whichever applies; each
+repository row carries hold or release for that repository, whichever applies. Never both — an
+item is held or it is not, and offering the inapplicable control invites a tap that reports a
+no-op.
+
+**Where the checks run.** Every check — the item's existence, the repository key's validity —
+runs **inside** `_perform`'s body, never before it, matching every other handler. `_perform`
+writes and flushes the intent record before calling the body, so a refusal leaves a record saying
+a request arrived and passes through the same-origin check on the way. A check placed before
+`_perform` would make these the only POSTs whose refusals were invisible.
 
 **No confirmation page.** Holds are trivially reversible and outward-facing in no sense; the
 confirm-then-act flow is for `cancel` and the destructive verbs. Holding is one tap, which is

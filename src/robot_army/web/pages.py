@@ -875,48 +875,64 @@ def queue_view(
     off_column = sum(1 for row in ready if row.get("hold") == "off_column")
     parked_note = f" · {off_column} held off-column" if off_column else ""
 
-    # FR-019, and the one place this feature can quietly fail. A repository hold matching
-    # **no queued item** has no row to attach to: without this notice it would suppress
-    # every future item in that repository while the page looked entirely normal. That is
-    # the same failure `held_off_column` above was added to prevent — a repository with
-    # ready items dispatching none of them reads exactly like a repository with no work —
-    # so this borrows its shape rather than inventing one.
+    # The repository-level section (issue #117), and it is the **union** of two sets for two
+    # separate reasons.
     #
-    # Rendered for every held repository, whether or not it currently holds anything.
-    # Splitting the zero case out would be exactly the omission the notice exists to stop.
-    held_repos = [
+    # *Every repository with queued work*, so a repository can be held from the page that
+    # shows the problem — which is what contracts/web.md promises and what the README
+    # describes. The first review of this feature caught that promise being false: the
+    # section listed only repositories that were *already* held, so release was reachable
+    # from the page and `POST /repos/hold` had no control anywhere in the rendered HTML.
+    #
+    # *Every held repository*, queued work or not, which is FR-019 and the place this
+    # feature can otherwise fail silently. A hold matching no queued item has no row of its
+    # own to attach to, so without this it would suppress every future item in that
+    # repository while the page looked entirely normal — the same failure
+    # `held_off_column` above exists to prevent, which is why this borrows its shape.
+    #
+    # Counted from the rows this page is **showing**, following the rule stated for
+    # `off_column` directly above: a view may not make claims about rows it has just
+    # declined to render.
+    queued_by_repo: dict[str, int] = {}
+    for row in ready:
+        key = row.get("repo_key")
+        if key:
+            queued_by_repo[key] = queued_by_repo.get(key, 0) + 1
+    repo_rows = [
         {
             "repo_key": key,
-            "held_at": hold.held_at,
-            "held_by": hold.held_by,
-            "queued": sum(1 for row in ready if row.get("repo_key") == key),
+            "hold": repo_holds.get(key),
+            "queued": queued_by_repo.get(key, 0),
         }
-        for key, hold in sorted(repo_holds.items())
+        for key in sorted(set(queued_by_repo) | set(repo_holds))
     ]
+    held_count = sum(1 for row in repo_rows if row["hold"] is not None)
     hold_note = (
         [
             div(
-                h(2, f"held repositories ({len(held_repos)})"),
+                h(2, f"repositories ({len(repo_rows)}, {held_count} held)"),
                 table(
-                    ["repo", "held since", "by", "queued", ""],
+                    ["repo", "queued", "held since", "by", ""],
                     [
                         [
                             row["repo_key"],
-                            when(row["held_at"]),
-                            row["held_by"],
                             str(row["queued"]),
+                            when(row["hold"].held_at)
+                            if row["hold"]
+                            else span("not held", class_="meta"),
+                            row["hold"].held_by if row["hold"] else "",
                             _repo_hold_control(
                                 row["repo_key"],
-                                holding=False,
+                                holding=row["hold"] is None,
                                 include_simulated=include_simulated,
                             ),
                         ]
-                        for row in held_repos
+                        for row in repo_rows
                     ],
                 ),
             )
         ]
-        if held_repos
+        if repo_rows
         else []
     )
 

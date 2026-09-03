@@ -928,13 +928,22 @@ def _item_hold_action(holding: bool) -> Callable[..., Redirect]:
     Not ``require_daemon`` either: a hold is meaningful against a stopped daemon, because
     it takes effect when it starts (FR-022). ``resume`` and ``restart`` need the daemon
     because something must drain the spool afterwards; nothing here launches anything.
+
+    What checks there are run **inside** ``_perform``'s body, matching every other handler,
+    so a refusal is recorded rather than silently returned.
     """
 
     def handler(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> Redirect:
         item_id = params["id"]
-        require_item(ctx, item_id)
 
         def body(outcome: dict[str, Any]) -> dict[str, Any]:
+            # Inside the body, not before it, because `_perform` writes and flushes the
+            # intent record before it calls this — so a refusal for an unknown item leaves
+            # a record saying one arrived, and passes through the same-origin check on the
+            # way. Checking first would have made this the one POST whose refusals were
+            # invisible, which is exactly what `_perform` exists to prevent. Every other
+            # handler puts its checks here for the same reason.
+            require_item(ctx, item_id)
             operation = operations.hold_item if holding else operations.unhold_item
             return _report(operation(ctx, item_id, by="web"))
 
@@ -968,16 +977,17 @@ def _repo_hold_action(holding: bool) -> Callable[..., Redirect]:
 
     def handler(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> Redirect:
         repo_key = request.first("repo") or ""
-        if repo_key not in repos_mod.known(ctx.conn):
-            raise Refusal(
-                f"repository {repo_key!r} is not onboarded, so holding it would hold "
-                f"nothing",
-                status=404,
-                code=EXIT_FAILED,
-                extra={"repo": repo_key},
-            )
 
         def body(outcome: dict[str, Any]) -> dict[str, Any]:
+            # Validated inside the body for the reason above: a forged or mistyped `repo`
+            # that is refused must still leave the record that says a request arrived.
+            if repo_key not in repos_mod.known(ctx.conn):
+                raise Refusal(
+                    f"repository {repo_key!r} is not onboarded",
+                    status=404,
+                    code=EXIT_FAILED,
+                    extra={"repo": repo_key},
+                )
             operation = operations.hold_repo if holding else operations.unhold_repo
             return _report(operation(ctx, repo_key, by="web"), extra={"repo": repo_key})
 

@@ -2562,11 +2562,15 @@ def _no_such_repo(ctx: Context, repo_key: str, *, action: str) -> Result:
         entity_id=repo_key,
         detail={"refused": True, "cause": "repository not onboarded"},
     )
+    # Action-agnostic, because both `hold` and `unhold` land here: "holding it would hold
+    # nothing" reads as a non-sequitur on the release path, where the author is trying to
+    # undo something rather than do it. What is wrong is the same either way — this is not
+    # a repository the system watches — so that is what it says.
     return Result(
         code=EXIT_FAILED,
         lines=[
-            f"repository {repo_key!r} is not onboarded, so holding it would hold nothing "
-            f"— run `robot-army repos` to see which repositories this system watches"
+            f"repository {repo_key!r} is not onboarded, so it holds no work and can hold "
+            f"none — run `robot-army repos` to see which repositories this system watches"
         ],
     )
 

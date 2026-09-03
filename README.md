@@ -814,8 +814,10 @@ down is honoured on its first pass. They are also *runtime state*, deliberately 
 configuration: `[repos.*].priority` with `order = "repo-priority"` is the standing preference I
 edit in a file, and a hold is the temporary statement I make from whichever surface is to hand.
 
-A repository hold that currently matches no queued item is still shown, on the queue view and
-in `robot-army holds`. That is the failure mode worth guarding: a hold holding nothing looks
+The queue view carries a repositories section listing everything with queued work **and**
+everything held, each with its own hold or release control. Both halves matter. Without the
+first there is nothing on the page that can *place* a repository hold; without the second, a
+hold that currently matches no queued item is invisible — and a hold holding nothing looks
 exactly like no hold at all, right up until it silently suppresses the next issue I file.
 
 ## Trying it without consequences

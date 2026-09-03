@@ -265,6 +265,25 @@ def test_every_hold_route_is_recorded_before_it_acts(web, conn, layout):
     assert web_records(layout, action="web.hold.repo")
 
 
+def test_a_refused_hold_route_still_leaves_a_record(web, conn, layout):
+    """Caught in review. Both checks used to run *before* ``_perform``, so a 404 for an
+    unknown item or a mistyped ``repo`` returned without the ``web.*`` audit pair — and
+    without passing the same-origin check on the way. That made these the only POSTs whose
+    refusals were invisible, which is precisely what ``_perform`` exists to prevent, and it
+    contradicted this feature's own contract.
+
+    Every other handler puts its checks inside the body for the same reason.
+    """
+    from tests.unit.test_web_actions import web_records
+
+    seed_item(conn, repo_key="demo")
+    assert web.post("/item/999999/hold").status == 404
+    assert web.post("/repos/hold", form={"repo": "owner/typo"}).status == 404
+
+    assert web_records(layout, action="web.hold.item"), "the item refusal left no record"
+    assert web_records(layout, action="web.hold.repo"), "the repo refusal left no record"
+
+
 def test_onboarding_is_still_terminal_only(web, conn):
     """``/repos/hold`` is two path segments and ``/repos/demo/onboard`` is three, so adding
     the former must not have opened the latter. Asserted here as well as in
@@ -307,31 +326,62 @@ def test_a_held_row_is_never_omitted_or_moved(web, conn):
 
 
 def test_the_queue_page_shows_a_held_repository_that_is_holding_nothing(web, conn):
-    """FR-019, and the one place this feature can quietly fail. Without this notice a
-    repository hold matching no queued item would suppress every future item in it while
-    the page looked entirely normal."""
+    """FR-019, and one of the two places this feature can quietly fail. A hold matching no
+    queued item has no row of its own, and without the section it would suppress every
+    future item in that repository while the page looked entirely normal."""
     seed_item(conn, repo_key="demo", state=str(WorkItemState.DONE))
     web.post("/repos/hold", form={"repo": "demo"})
 
     rendered = web.get("/queue").text
 
-    assert "held repositories (1)" in rendered
+    assert "repositories (1, 1 held)" in rendered
     assert "/repos/unhold" in rendered
 
 
-def test_the_held_repository_notice_counts_what_it_is_holding(web, conn):
+def test_a_repository_with_queued_work_can_be_held_from_the_page(web, conn):
+    """The other place, caught in review: the section listed only repositories that were
+    *already* held, so release was reachable from the page and ``POST /repos/hold`` had no
+    control anywhere in the rendered HTML — while contracts/web.md and the README both said
+    holding a repository was one action from the page that shows the problem.
+
+    Asserted on the rendered page rather than by posting the route, which is exactly the
+    gap that let it through: the route worked all along; nothing offered it.
+    """
+    seed_item(conn, repo_key="demo", state=str(WorkItemState.READY))
+
+    rendered = web.get("/queue").text
+
+    assert "/repos/hold" in rendered
+    assert "/repos/unhold" not in rendered, "one control, not both"
+    assert "repositories (1, 0 held)" in rendered
+
+
+def test_the_repository_section_swaps_hold_for_release_once_held(web, conn):
+    seed_item(conn, repo_key="demo", state=str(WorkItemState.READY))
+    assert "/repos/hold" in web.get("/queue").text
+
+    web.post("/repos/hold", form={"repo": "demo"})
+
+    rendered = web.get("/queue").text
+    assert "/repos/unhold" in rendered
+    assert 'action="/repos/hold"' not in rendered
+
+
+def test_the_repository_section_counts_what_each_row_is_holding(web, conn):
     """"Holding nothing" and "holding three items" are very different facts."""
     for n in range(1, 4):
         seed_item(conn, repo_key="demo", issue_number=n, state=str(WorkItemState.READY))
     web.post("/repos/hold", form={"repo": "demo"})
 
     rendered = web.get("/queue").text
-    assert "held repositories (1)" in rendered
+    assert "repositories (1, 1 held)" in rendered
 
 
-def test_no_held_repository_notice_when_none_is_held(web, conn):
-    seed_item(conn, repo_key="demo", state=str(WorkItemState.READY))
-    assert "held repositories" not in web.get("/queue").text
+def test_the_repository_section_is_absent_when_there_is_nothing_to_say(web, conn):
+    """No queued work and no holds means no rows, and a heading over an empty table is
+    noise on the page whose subject is what dispatch is doing."""
+    seed_item(conn, repo_key="demo", state=str(WorkItemState.DONE))
+    assert "repositories (" not in web.get("/queue").text
 
 
 # -- the status summary line ------------------------------------------------

@@ -312,7 +312,10 @@ def _hold_for(
     the content: reading it top to bottom is reading the precedence.
     """
     if paused:
-        return HoldReason.PAUSED, "dispatch is paused; resume it with `robot-army resume`"
+        # `unpause`, not `resume`. `robot-army resume <item>` starts a new session for one
+        # work item — a different command entirely — so the old wording sent the author at
+        # something that would not lift the pause and would fail for want of an item id.
+        return HoldReason.PAUSED, "dispatch is paused; lift it with `robot-army unpause`"
 
     # Second, and above every capacity reason (issue #117). The author said not this one,
     # and nothing the queue could do — free a slot, land a pull request, fix the item —

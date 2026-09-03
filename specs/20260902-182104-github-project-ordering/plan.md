@@ -399,6 +399,49 @@ Worth recording because the second one is a real property of `resolve` that is e
 **the record wins `path` only when it has one**, and a configured section is a second source
 for it. A test that wants an unresolvable repository has to use a key with neither.
 
+### One defect found in review, and what it changes
+
+Review caught the log asserting something that did not happen, and it is worth recording
+because the mistake is a class rather than a slip.
+
+`read_board` has two failure paths that look alike and are not. `_board_failed` — the
+transport path — carries `resolved_at` forward, so its repository stays governed by a stale
+snapshot: order and off-column holds intact, which is FR-025's first option. The
+resolution-failure path does **not** carry `resolved_at`, so `governs` goes false, the
+repository leaves `ordering.plan`'s governed set, and both the permutation and the holds are
+released — FR-025's second option. Both are permitted. What is not permitted is recording one
+and doing the other, and both paths emitted the same sentence: *"the last board read stays in
+force and is now stale."*
+
+The behaviour was right in both branches. The record was wrong in one, which is worse than it
+sounds: a log that describes a neighbouring branch's effect has stopped being evidence, and
+Principle III's standard is reconstruction from the log alone.
+
+Two things travel with the fix. `docs/logging.md` now describes `poll.board.fallback` as
+having two distinct consequences rather than one. And the new test asserts the consequence
+through `ordering.plan` — that the holds disappear and the order reverts to discovery time —
+rather than through the stored row, because the row is not what the author experiences.
+
+**A test name was making the same false claim.** It read
+`test_a_repository_that_becomes_ambiguous_keeps_its_last_order` while asserting only that the
+stored `board_position` survived. That is true and irrelevant: nothing reads those columns
+while the repository is ungoverned. Both the name and the log had drifted into describing the
+storage instead of the effect, independently, which is the seam worth naming for whoever
+changes this next — **in this module, what is stored and what is in force are different
+questions, and the second one is the only one anybody experiences.**
+
+Review also found two smaller things, both correct. `_say_projects` printed
+`board ordering off (configured)` for a repository that had inherited the global setting,
+sending the author to look for a line that is not in their file — the exact failure the
+`explicit` flag exists to prevent. And `check_project`'s docstring claimed an empty list where
+it returns one passing check.
+
+8. **`check_project` reports a repository with ordering switched off** rather than staying
+   silent about it, which `contracts/config.md` did not anticipate. Silence reads identically
+   to "this build has no board checks", and the author who turned it off six weeks ago is the
+   one who benefits from the reminder. The contract is the artifact now slightly behind the
+   code; this entry is the record of that.
+
 ### One thing not done
 
 **T043's live walk-through is not complete.** The read-only half was run against the real API

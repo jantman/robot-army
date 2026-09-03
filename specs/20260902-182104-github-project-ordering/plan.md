@@ -508,6 +508,23 @@ snapshot on disk and a separate question of whether that snapshot governs anythi
 guard, message and surface has to be explicit about which one it means. Anything added here
 later should be read against that question first.
 
+### A fourth round: the same rule, applied to a number
+
+One finding, and it belongs to a rule this repository already wrote down. `/queue`'s
+"N held off-column" heading was summed from `project_rows`, which is built from the **plan** —
+and the plan includes simulated rows because they occupy slots. `_visible` then withholds those
+rows unless the viewer asked for them. So the heading could say *"2 held off-column"* above a
+table showing one, or none.
+
+That is milestone 008's rule — *no single invocation may both display work item rows and claim
+there are none* — applied to a count rather than to a listing, and it is the reason
+`tests/unit/test_status_withheld.py` exists. The count now comes from the rendered rows, and
+`withheld_simulated` remains what explains any difference.
+
+`projects[].held_off_column` in the JSON still counts the whole plan, deliberately: that one is
+a fact about a repository's board rather than about this page's filter. The two differ only
+while simulated rows are being withheld, and the comment at the call site says so.
+
 ### One thing not done
 
 **T043's live walk-through is not complete.** The read-only half was run against the real API

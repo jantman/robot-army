@@ -640,6 +640,30 @@ def test_no_staleness_banner_when_board_ordering_is_off(web, conn, monkeypatch):
     assert "could not be read" not in page
 
 
+def test_the_off_column_count_never_names_rows_the_page_is_hiding(web, conn):
+    """Found in review, round four. Milestone 008's rule applied to a number: a view may
+    not make claims about rows it has just declined to render.
+
+    The plan includes simulated rows because they occupy slots, and `_visible` then
+    withholds them unless the viewer asked. Counting the plan would let the heading say
+    "2 held off-column" above a table showing none of them.
+    """
+    live = seed_item(conn, issue_number=1, state="ready")
+    simulated = seed_item(conn, issue_number=2, state="ready", dry_run=True)
+    _govern(conn)
+    conn.execute(
+        "UPDATE work_items SET board_column = 'Backlog' WHERE id IN (?, ?)",
+        (live, simulated),
+    )
+
+    hidden = web.get_json("/queue").json()
+    assert hidden["held_off_column"] == 1, "the withheld simulated row is not claimed"
+    assert "1 held off-column" in web.get("/queue").text
+
+    shown = web.get_json("/queue?include_simulated=1").json()
+    assert shown["held_off_column"] == 2
+
+
 def test_a_failed_board_read_is_visible_with_its_age(web, conn):
     """The order shown is still the last one read successfully, which is right — and an
     order silently frozen days ago is indistinguishable from a current one."""

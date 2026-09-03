@@ -826,9 +826,16 @@ def queue_view(
                 class_="banner error",
             )
         )
-    off_column = sum(row["held_off_column"] for row in project_rows)
     # FR-030: a repository whose whole backlog is parked has ready items and dispatches
     # none of them, which without this count reads exactly like having no work.
+    #
+    # Counted from the rows this page is **showing**, not from the plan. The plan includes
+    # simulated rows because they occupy slots; `_visible` then withholds them unless the
+    # viewer asked. Counting the plan would let the heading say "3 held off-column" above a
+    # table showing none of them — milestone 008's rule, that a view may not make claims
+    # about rows it has just declined to render, applied to a number rather than to a
+    # listing. The withheld rows are still accounted for, by `withheld_ready`.
+    off_column = sum(1 for row in ready if row.get("hold") == "off_column")
     parked_note = f" · {off_column} held off-column" if off_column else ""
 
     body = join(
@@ -945,7 +952,11 @@ def queue_view(
             "dispatching_max_age_seconds": max_age,
             "capacity": operations._capacity_dict(snap, ctx.config.dispatch.order),
             # The same facts the banner and the heading render, so `?json` and the page
-            # never disagree about why the queue looks the way it does.
+            # never disagree about why the queue looks the way it does. `held_off_column`
+            # counts the rendered rows; `projects[].held_off_column` counts the whole plan,
+            # because that one is a fact about a repository's board rather than about this
+            # page's filter. They differ only when simulated rows are being withheld, and
+            # `withheld_simulated` is what explains the difference.
             "projects": project_rows,
             "held_off_column": off_column,
             "withheld_simulated": withheld,

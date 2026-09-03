@@ -290,7 +290,11 @@ def test_a_missing_clone_directory_omits_the_sections_and_says_so(
     assert outcome.data["context_source"] == "none"
     assert outcome.data["instructions"] is False
     assert outcome.data["speckit"] is False
-    assert "no readable directory" in capsys.readouterr().err
+    # The path is still named, in the note and in the record. Dropping it would make "this
+    # repository has no instructions" indistinguishable from "the wrong directory was read",
+    # which is the whole reason the note exists.
+    assert outcome.data["context_root"] == str(gone)
+    assert f"no readable directory at {gone}" in capsys.readouterr().err
 
 
 def test_the_note_is_recorded_even_when_no_stream_was_given(preview):

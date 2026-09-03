@@ -1202,8 +1202,11 @@ def prompt_preview(
     # for an issue that has never been dispatched, and it is an approximation: it may sit on
     # another branch or carry uncommitted changes, which is why the source is always named
     # rather than left to be inferred (research R1, R2).
-    context_root: Path | None = None
-    context_source = "none"
+    #
+    # Always a concrete path, never ``None``, including when nothing could be read from it:
+    # the note and the record have to say *where* was looked at, or "this repository has no
+    # instructions" is indistinguishable from "the wrong directory was read". Which of the
+    # three happened is ``context_source``'s job, not the path's.
     if item is not None and item.worktree_path and Path(item.worktree_path).is_dir():
         context_root = Path(item.worktree_path)
         context_source = "worktree"

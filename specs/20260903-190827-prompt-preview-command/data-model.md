@@ -16,7 +16,7 @@ existing ones, and the value of this document is the *rules* by which each input
 | repository | `RepoConfig` | `repos.resolve(conn, config, repo_key)` | `None` means **not onboarded** — refuse, exit `3` |
 | issue | `Issue` | `boundaries.issue_reader.get_issue(repo_key, number)` | `None` (HTTP 404) means unavailable — refuse, exit `1` |
 | work item | `WorkItem \| None` | `db.find_work_item(source="github", source_id=f"{repo_key}#{number}", dry_run=False)` | `None` is ordinary: the issue has never been dispatched |
-| context root | `Path \| None` | see below | `None` means no instructions and no Spec Kit block |
+| context root | `Path` | see below | never absent — a directory that could not be read is still named, and `context_source` says so |
 | branch | `str` | see below | never absent |
 
 ### Context root
@@ -24,12 +24,19 @@ existing ones, and the value of this document is the *rules* by which each input
 The directory `.claude/robot-army.md` and `speckit.detect` are read from ([R1](research.md)):
 
 1. `Path(item.worktree_path)` when the work item exists, records a worktree path, and that
-   path is a directory that exists.
-2. Otherwise `repository.path` — the onboarded clone — when that is a directory that exists.
-3. Otherwise `None`.
+   path is a directory that exists — `context_source` is `worktree`.
+2. Otherwise `repository.path`, the onboarded clone — `context_source` is `clone`.
+3. If that clone path is not a directory that exists, the path is still the one recorded and
+   named, and `context_source` is `none`. Both optional sections are omitted.
 
-Each of the three is reported on the diagnostic stream by a note naming the path and which
-case it is ([R2](research.md)), and each is recorded in the `prompt.preview` audit record.
+**The path is never `None`.** Step 3 is a statement about `context_source`, not about the
+path: a directory that could not be read is still the directory that was looked at, and a
+record or a note that dropped it would make "this repository has no instructions"
+indistinguishable from "the wrong directory was read". Which of the three happened is
+`context_source`'s job.
+
+Each case is reported on the diagnostic stream by a note naming the path and which case it is
+([R2](research.md)), and each is recorded in the `prompt.preview` audit record.
 
 ### Branch
 

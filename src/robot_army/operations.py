@@ -1070,6 +1070,13 @@ def _preview_refusal(
     routing puts it on stderr and leaves stdout empty. That is the whole of FR-014: there is
     no path that both fails and says something on stdout, because the routing is one
     expression in ``main`` rather than a branch here.
+
+    ``detail`` carries **every field the caller had resolved by the time it refused**, and a
+    refusal added below must pass its own. A reader reconstructing a run should not have to
+    split ``entity_id`` on ``#`` to learn which repository was asked about: that string is an
+    identifier, not a pair of fields, and for a malformed key it is not even a valid one.
+    The single exception is the malformed-key refusal itself, which genuinely has no
+    repository key to record — contracts/audit-records.md says so.
     """
     ctx.audit.record(
         "prompt.preview",
@@ -1126,6 +1133,10 @@ def prompt_preview(
             cause="malformed_arguments",
             message=f"{issue_number} is not an issue number — expected a positive integer",
             code=EXIT_USAGE,
+            # The key survived validation above, so it is a resolved field and belongs in
+            # the record; the number is the value that was rejected, which is the one thing
+            # a reader of this record wants to see.
+            detail={"repo_key": repo_key, "issue_number": issue_number},
         )
 
     # Onboarding is the gate, inherited rather than reinvented: composing this prompt means
@@ -1142,6 +1153,7 @@ def prompt_preview(
                 f"first, or `robot-army repos` to see which repositories are known"
             ),
             code=EXIT_PRECONDITION,
+            detail={"repo_key": repo_key, "issue_number": issue_number},
         )
 
     try:

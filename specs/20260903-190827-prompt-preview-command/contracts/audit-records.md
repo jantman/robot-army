@@ -36,9 +36,22 @@ saying whether each optional section was included — **never the text of either
 reason [R4](../research.md) gives.
 
 `detail` on failure carries `refused: true` and a `cause` naming which of the four conditions
-in [cli.md](cli.md) applied, with whatever of the fields above had been resolved by then. A
-malformed slug has no `repo_key` and no `issue_number`; `entity_id` is the raw argument pair
-so the record still says what was asked for.
+in [cli.md](cli.md) applied, plus every field above that had been resolved by the time it
+refused. "Whatever had been resolved" proved too loose to check against — the first
+implementation carried the pair on the transport failures only, and the divergence was caught
+in review rather than by a test — so the rule is now stated per cause:
+
+| `cause` | Fields carried beyond `refused` and `cause` |
+|---|---|
+| `malformed_arguments` (bad key) | none — there is no repository key, which is the fault being reported |
+| `malformed_arguments` (bad number) | `repo_key`, `issue_number` |
+| `not_onboarded` | `repo_key`, `issue_number` |
+| `issue_unavailable` | `repo_key`, `issue_number`, and `error` when a boundary raised |
+
+`entity_id` carries the raw argument pair in every case, including the malformed key, so the
+record always says what was asked for. It is an identifier, though, not a pair of fields:
+reconstruction must never require splitting it on `#`, which is why the fields are recorded
+separately wherever they exist.
 
 ## `speckit.detect`
 

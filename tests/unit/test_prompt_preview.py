@@ -437,6 +437,39 @@ def test_every_refusal_is_recorded_too(preview, layout, repo_key, number, cause)
     assert record["entity_id"] == f"{repo_key}#{number}"
 
 
+@pytest.mark.parametrize(
+    ("repo_key", "number"),
+    [(REPO, 0), ("jantman/other", 7), (REPO, 404)],
+)
+def test_a_refusal_records_the_fields_it_had_already_resolved(preview, layout, repo_key, number):
+    """Every refusal past the key check names the repository and issue as *fields*.
+
+    Reconstruction must not require splitting ``entity_id`` on ``#``: that string is an
+    identifier, and treating it as a pair is exactly the kind of parsing the detail fields
+    exist to make unnecessary. Caught by review — the code carried these on the transport
+    failures only, while the contract promised them on every refusal that had resolved them.
+    """
+    operations.prompt_preview(preview(), repo_key, number)
+
+    detail = records(layout, "prompt.preview")[-1]["detail"]
+    assert detail["repo_key"] == repo_key
+    assert detail["issue_number"] == number
+
+
+def test_a_malformed_key_records_no_repository_field(preview, layout):
+    """The one documented exception, and it is not an oversight.
+
+    There is no repository key here — that is what was wrong with the invocation — so a
+    ``repo_key`` field would assert something false. ``entity_id`` still carries the raw
+    argument pair, so the record says what was asked for.
+    """
+    operations.prompt_preview(preview(), "demo", 7)
+
+    detail = records(layout, "prompt.preview")[-1]["detail"]
+    assert "repo_key" not in detail
+    assert "issue_number" not in detail
+
+
 def test_the_record_never_carries_the_prompt_or_the_issue_body(preview, layout, repo_clone):
     """The gap research R4 enumerates, held open on purpose.
 

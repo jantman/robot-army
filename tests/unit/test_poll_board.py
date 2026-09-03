@@ -234,18 +234,82 @@ def test_an_unresolved_board_is_recorded_without_backing_off(conn, config, audit
     assert not stored.governs
 
 
-def test_a_repository_that_becomes_ambiguous_keeps_its_last_order(conn, config, audit):
+def test_a_repository_that_becomes_ambiguous_is_released_not_frozen(conn, config, audit):
+    """The board stops governing — it does not keep governing with a stale snapshot.
+
+    Found in review, and the distinction is the one this branch gets wrong most easily.
+    A *transport* failure keeps `resolved_at`, so its repository stays governed by an old
+    snapshot (FR-025's first option). A *resolution* failure does not carry `resolved_at`
+    forward, so `governs` goes false and the repository falls back to the configured order
+    with nothing held (FR-025's second option). Both are permitted; recording the wrong
+    one is not.
+
+    The stored board columns survive, and that is deliberate rather than sloppy: they cost
+    nothing while the repository is ungoverned, nothing reads them, and they are overwritten
+    whole by the next successful read.
+    """
     onboard(conn)
     seed_item(conn, issue_number=48, state=str(WorkItemState.READY))
     reader = reader_with(res=resolution(), board=snapshot([48]))
     first = run(conn, config, audit, reader)
+    assert first.governs
 
     reader.resolution = ProjectResolution(reason="two projects are linked")
     stored = run(conn, config, audit, reader)
 
     assert stored.last_read_at == first.last_read_at
     assert stored.unresolved_reason == "two projects are linked"
+    assert not stored.governs, "an unresolvable board governs nothing"
     assert db.list_work_items(conn)[0].board_position == 1
+
+
+def test_losing_a_resolution_releases_the_order_and_the_holds(conn, config, audit):
+    """The consequence the log now claims, asserted through `ordering.plan` itself rather
+    than through the row — because the row is not what the author experiences."""
+    from robot_army import capacity, ordering
+
+    onboard(conn)
+    ranked = seed_item(conn, issue_number=48, state=str(WorkItemState.READY))
+    parked = seed_item(conn, issue_number=20, state=str(WorkItemState.READY))
+    reader = reader_with(res=resolution(), board=snapshot([48], {20: "Backlog"}))
+    run(conn, config, audit, reader)
+
+    snap = capacity.CapacitySnapshot(
+        observable=True, degraded=False, total=0, ours=(), others=0, global_cap=9
+    )
+    held = ordering.plan(conn, config=config, capacity=snap)
+    assert any(e.hold is ordering.HoldReason.OFF_COLUMN for e in held)
+
+    reader.resolution = ProjectResolution(reason="two projects are linked")
+    run(conn, config, audit, reader)
+
+    entries = ordering.plan(conn, config=config, capacity=snap)
+    assert all(e.hold is not ordering.HoldReason.OFF_COLUMN for e in entries), (
+        "an ungoverned repository holds nothing for its column"
+    )
+    assert [e.item.id for e in entries] == [ranked, parked], (
+        "and orders by discovery time again, not by the board it can no longer identify"
+    )
+
+
+def test_the_fallback_record_names_the_right_consequence(conn, config, audit, layout):
+    """Two failure paths, two different consequences, and the log must not confuse them."""
+    onboard(conn)
+    reader = reader_with(res=resolution(), board=snapshot([]))
+    run(conn, config, audit, reader)
+
+    reader.resolution = ProjectResolution(reason="two projects are linked")
+    run(conn, config, audit, reader)
+    written = "".join(p.read_text() for p in layout.log_dir.glob("*.jsonl"))
+    assert "now ungoverned" in written
+    assert "stays in force" not in written
+
+    reader.resolution = resolution()
+    run(conn, config, audit, reader)
+    reader.raise_on_board = TransportError("down")
+    run(conn, config, audit, reader)
+    written = "".join(p.read_text() for p in layout.log_dir.glob("*.jsonl"))
+    assert "stays in force" in written
 
 
 # -- the configured values reach the reader ---------------------------------

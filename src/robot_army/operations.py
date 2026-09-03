@@ -566,7 +566,12 @@ def _say_projects(result: Result, rows: list[dict[str, Any]]) -> None:
     result.say("project boards:")
     for row in interesting:
         if not row["enabled"]:
-            result.say(f"  {row['repo_key']:<28} board ordering off (configured)")
+            # The source, not a guess at it. A repository reaches this line either by its
+            # own setting or by the global one, and telling the author "configured" when
+            # they inherited it sends them looking for a line that is not in their file —
+            # which is the exact failure the explicit flag exists to prevent.
+            source = "configured" if row["enabled_explicit"] else "default"
+            result.say(f"  {row['repo_key']:<28} board ordering off ({source})")
             continue
         if row["governs"]:
             age = row["last_read_age_seconds"]

@@ -285,9 +285,12 @@ def check_project(
     already are: the author should learn that their token cannot read projects *before*
     they wait a minute watching an order fail to change (FR-027).
 
-    Returns an empty list when board ordering is switched off for the repository — an
-    installation that asked for none has nothing to check, and inventing a passing check
-    for it would say something about a board that does not exist.
+    A repository with board ordering switched off returns exactly one passing check saying
+    so, and naming whether that came from its own setting or the global one. Silence was
+    the first design and is worse: "no board rows" would read identically to "this build
+    has no board checks", and the author who turned it off six weeks ago is precisely the
+    one who needs reminding. Nothing further is asked about such a repository, because
+    every remaining answer would be about a board it has said it does not want.
     """
     enabled, explicit = config.effective_project_ordering(repo_key)
     if not enabled:
@@ -456,6 +459,13 @@ def read_board(
             detail={"unresolved": resolution.reason},
         )
         if state.last_read_at is not None:
+            # NOT the same consequence as a transport failure, and the difference is the
+            # whole point of recording it. `_board_failed` carries `resolved_at` forward,
+            # so its repository stays governed by a stale snapshot. This branch does not:
+            # without `resolved_at`, `RepoProject.governs` is false, the repository leaves
+            # `ordering.plan`'s governed set, and **both** the board permutation and the
+            # off-column holds are released. Saying "stays in force" here would describe
+            # the other branch's behaviour, which is how a log stops being evidence.
             audit.record(
                 "poll.board.fallback",
                 outcome="ok",
@@ -463,7 +473,10 @@ def read_board(
                 entity_id=repo_key,
                 detail={
                     "snapshot_from": state.last_read_at,
-                    "consequence": "the last board read stays in force and is now stale",
+                    "consequence": (
+                        "the repository is now ungoverned; board order and off-column "
+                        "holds are released until resolution succeeds again"
+                    ),
                 },
             )
         return stored

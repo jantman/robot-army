@@ -126,6 +126,22 @@ def test_a_repository_switched_off_is_still_shown(ctx, conn, idle_machine, confi
     assert "board ordering off" in text
 
 
+def test_an_inherited_off_switch_is_not_reported_as_configured(ctx, conn, idle_machine, config):
+    """Found in review. Telling the author "configured" when they inherited the value
+    sends them looking for a line that is not in their file — the exact failure the
+    explicit flag exists to prevent."""
+    ready(conn, 1)
+    govern(conn, resolved_at=None, last_read_at=None, unresolved_reason="two are linked")
+    ctx.config = replace(config, dispatch=replace(config.dispatch, project_ordering=False))
+
+    result, text = render(ctx, idle_machine)
+
+    row = next(r for r in result.data["projects"] if r["repo_key"] == "demo")
+    assert (row["enabled"], row["enabled_explicit"]) == (False, False)
+    assert "board ordering off (default)" in text
+    assert "(configured)" not in text
+
+
 def test_the_off_column_count_is_reported(ctx, conn, idle_machine):
     """FR-030. A repository whose entire backlog is parked has ready items and dispatches
     none of them, which without a count reads exactly like having no work."""

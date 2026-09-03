@@ -407,8 +407,15 @@ def parse_project_reference(value: object) -> ProjectRef | None:
     match = _PROJECT_URL_RE.match(text)
     if match is None:
         return None
+    number = int(match.group(3))
+    # The same positivity rule the two numeric forms above apply. ``\d+`` happily matches
+    # ``0``, and without this a ``/projects/0`` URL loaded cleanly and then failed at the
+    # first poll with "was not found" — pushing a typo the loader could have caught into a
+    # runtime failure the author sees a minute later, in a different place.
+    if number <= 0:
+        return None
     return ProjectRef(
-        number=int(match.group(3)), owner_type=match.group(1), login=match.group(2)
+        number=number, owner_type=match.group(1), login=match.group(2)
     )
 
 

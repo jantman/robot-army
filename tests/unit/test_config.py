@@ -1415,6 +1415,31 @@ def test_a_project_url_with_a_view_segment_is_accepted(repo_clone, layout, tmp_p
     assert (reference.number, reference.owner_type, reference.login) == (3, "users", "jantman")
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/users/jantman/projects/0",
+        "https://github.com/orgs/acme/projects/0",
+    ],
+)
+def test_a_url_naming_project_zero_is_refused(repo_clone, layout, tmp_path, url):
+    """Found in review. The numeric forms already rejected non-positive numbers; the URL
+    form did not, so `/projects/0` loaded cleanly and failed at the first poll instead —
+    a typo the loader could have caught, surfacing a minute later somewhere else."""
+    from robot_army.config import parse_project_reference
+
+    assert parse_project_reference(url) is None
+
+    with pytest.raises(ConfigError) as caught:
+        build(
+            repo_clone,
+            layout,
+            tmp_path,
+            repos={"demo": {"path": str(repo_clone), "project": url}},
+        )
+    assert any("project must be" in p for p in caught.value.problems)
+
+
 def test_an_orgs_url_records_its_owner_type(repo_clone, layout, tmp_path):
     from robot_army.config import parse_project_reference
 

@@ -265,6 +265,26 @@ def test_every_hold_route_is_recorded_before_it_acts(web, conn, layout):
     assert web_records(layout, action="web.hold.repo")
 
 
+def test_holding_from_the_web_actually_shows_a_confirmation(web, conn):
+    """Caught in review. The redirect carried ``msg=held``, ``html.BANNERS`` had no entry
+    for it, and ``banner()`` returns empty markup for an unknown key — so the action
+    succeeded and the author was shown nothing at all. Silent on both sides: no error and
+    no confirmation, which is the worst of the two.
+
+    Asserted by following the redirect, because the bug lived in the gap between the route
+    and the page and neither half was wrong on its own.
+    """
+    item_id = seed_item(conn, state=str(WorkItemState.READY))
+
+    location = web.post(f"/item/{item_id}/hold").headers["Location"]
+    assert "msg=held" in location
+    assert "Held." in web.get(location).text
+
+    location = web.post(f"/item/{item_id}/unhold").headers["Location"]
+    assert "msg=released" in location
+    assert "Hold released." in web.get(location).text
+
+
 def test_a_refused_hold_route_still_leaves_a_record(web, conn, layout):
     """Caught in review. Both checks used to run *before* ``_perform``, so a 404 for an
     unknown item or a mistyped ``repo`` returned without the ``web.*`` audit pair — and

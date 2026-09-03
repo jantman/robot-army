@@ -7,7 +7,7 @@ XDG variables are honoured when set; these are the defaults.
 | Path | Contents | Survives reboot |
 |---|---|---|
 | `~/.config/robot-army/config.toml` | Configuration. **Read-only to the daemon** | yes |
-| `~/.local/state/robot-army/state.db` | SQLite: work items, sessions, repos, anomalies, poll state | yes |
+| `~/.local/state/robot-army/state.db` | SQLite: work items, sessions, repos, anomalies, poll state, holds | yes |
 | `~/.local/state/robot-army/logs/audit-*.jsonl` | The audit log | yes |
 | `~/.local/state/robot-army/logs/sessions/<item>.log` | Per-session wrapper log | yes |
 | `~/.local/state/robot-army/spool/exits/` | Exit records awaiting the daemon | **yes — deliberately** |
@@ -163,6 +163,41 @@ It is in the database rather than in a config key or a marker file because durab
 restart and reboot is the entire point: a pause that lapses when the daemon restarts is worse
 than no pause, because I would believe work was held when it was not. It is also an
 *operational act* rather than something I declare, which is the line the section above draws.
+
+### `item_holds` and `repo_holds` — what I have taken out of dispatch
+
+Added by migration 010 (issue #117). Two tables rather than one with a scope column, and the
+reason is the foreign key: **a hold must never outlive the thing it holds**, and
+`ON DELETE CASCADE` makes that a constraint rather than a rule every future deletion site has
+to remember. A single table could not express it — its target would point at `work_items` for
+one scope and `repos` for the other, and no foreign key says "one of these two depending on a
+sibling column".
+
+| Column | Meaning |
+|---|---|
+| `work_item_id` / `repo_key` | The target, and the **primary key** — so holding something twice collides with itself and is a reported no-op rather than a second row |
+| `held_at` | When it was placed. Never rewritten by a repeated hold |
+| `held_by` | `web` or `cli`. `NOT NULL`, unlike `dispatch_control.paused_by`, because a hold has no cleared state: the row exists or it does not |
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db 'SELECT * FROM item_holds'
+sqlite3 -header -column ~/.local/state/robot-army/state.db 'SELECT * FROM repo_holds'
+robot-army holds                      # both, with ages, including ones holding nothing
+robot-army hold 42                    # and `unhold 42`
+robot-army hold --repo owner/name     # and `unhold --repo owner/name`
+```
+
+A held item stays in the queue, in the position it would occupy anyway, reported with a `held`
+reason that ranks directly below `paused` — every reason beneath it would name a fix that
+cannot work while I am the one holding it. Holding a repository holds that repository's work
+and **never the queue**: every other repository dispatches in the same pass.
+
+**Nothing sweeps a hold.** It is released by `unhold` and by nothing else — not by time, and
+not by the item finishing. Clearing on a state transition would be expiry under another name,
+and expiry would silently restart work I stopped. A hold left on a finished item is visible in
+`robot-army holds`, which shows each held item's state, rather than being tidied away where I
+could not see it. What does remove one is the cascade: purging simulated rows takes their
+holds with them, so `purge-simulated` needs no knowledge of holds at all.
 
 ### `cards` — the intake board, and the mapping to what each card became
 

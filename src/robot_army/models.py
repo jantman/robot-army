@@ -314,6 +314,27 @@ class DispatchControl:
     paused_by: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class Hold:
+    """One deliberate statement that some work must not be dispatched (issue #117).
+
+    Carries no target. The two accessors return ``{target: Hold}``, so the key *is* the
+    target and the value is everything else — which is why one dataclass serves both
+    ``item_holds`` and ``repo_holds`` despite their key columns differing.
+
+    There is no level, no expiry, and no note (FR-026). Presence is the whole fact, so a
+    ``Hold`` that exists always applies and the only question a reader ever asks of one is
+    when it was placed and by which surface.
+
+    Deliberately **not** in ``ROW_TYPES``. That mapping exists so ``db.py`` can pick a row
+    factory per *table* for queries returning whole rows; both hold queries select two
+    columns into a dict keyed by the target, so an entry there would be one nothing reads.
+    """
+
+    held_at: str
+    held_by: str
+
+
 #: Every anomaly kind the system can raise. Named here so ``status`` and ``anomalies``
 #: can surface all of them (FR-065, T135) rather than only the ones seen so far.
 ANOMALY_KINDS: tuple[str, ...] = (

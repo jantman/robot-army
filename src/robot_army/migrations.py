@@ -429,6 +429,69 @@ CREATE TABLE repo_projects (
 """
 
 
+SCHEMA_010_SQL = """
+-- One work item the author has taken out of dispatch until they say otherwise (issue #117).
+--
+-- The work item id is the PRIMARY KEY, which does two jobs at once. It makes "at most one
+-- hold per item" a constraint rather than a convention, so a repeated hold collides with
+-- itself and becomes a reported no-op instead of a second row that would have to be
+-- deduplicated on read (FR-004). And it is the whole row apart from the two provenance
+-- columns -- a hold has no levels, no expiry and no note (FR-026) -- so presence *is* the
+-- fact, and there is no state in which a hold exists but does not apply.
+--
+-- ON DELETE CASCADE is FR-025, and it is the reason this is two tables rather than one
+-- table with a scope column. `PRAGMA foreign_keys` is ON -- db.py's docstring says the
+-- schema relies on it and test_migrations asserts it -- so a hold cannot outlive the item
+-- it holds and cannot reattach itself to a recycled id. A single polymorphic table could
+-- not express that: its target would point at work_items for one scope and repos for the
+-- other, and no foreign key says "one of these two depending on a sibling column". FR-025
+-- would then be maintained by hand at every deletion site, and the site that forgot would
+-- be the bug. `db.purge_simulated` is the only such site today and needs no change: the
+-- cascade is the cleanup.
+--
+-- Simulated rows are covered with no special case, because they are work_items rows like
+-- any other. A dry-run item occupies a queue slot, so it can be held; a hold that ignored
+-- simulated work would rehearse the wrong behaviour. No outward request is made either way.
+--
+-- No backfill, and none is possible: no hold existed before this migration, so an upgraded
+-- database is correct the instant the table exists.
+CREATE TABLE item_holds (
+    work_item_id INTEGER PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE,
+    held_at      TEXT NOT NULL,
+    held_by      TEXT NOT NULL
+);
+
+-- Every work item in one repository, taken out of dispatch until released (issue #117).
+--
+-- Keyed on repos(repo_key), not on a bare string, and that is the point: FR-006 refuses a
+-- hold on a repository that was never onboarded, and the foreign key makes a typo
+-- impossible to store rather than merely unlikely. A hold on a repository the system does
+-- not watch would hold nothing and report nothing wrong, which is the worst available
+-- outcome -- it looks exactly like a hold that works.
+--
+-- A separate table rather than a column on `repos` for the reason migration 009 gave for
+-- `repo_projects`: `repos` is an *approval* record, and migration 005 is emphatic that it
+-- stores what a human approved at a verified location and that nothing re-derives after
+-- approval. A hold is the opposite -- temporary, toggled often, and meaningless a week
+-- later -- so putting it there would blur the one record whose value is that it does not
+-- change on its own.
+--
+-- This shape is what makes FR-012 free. The hold is a fact about the repository rather
+-- than about any item, so an item discovered tomorrow in a held repository is held on
+-- arrival, with nothing to backfill and no event to hook.
+--
+-- held_by is NOT NULL here and in item_holds, unlike dispatch_control.paused_by, which is
+-- nullable because it is cleared when dispatch resumes. A hold has no cleared state: the
+-- row exists or it does not, so every row that exists was placed by something and can say
+-- which.
+CREATE TABLE repo_holds (
+    repo_key TEXT PRIMARY KEY REFERENCES repos(repo_key) ON DELETE CASCADE,
+    held_at  TEXT NOT NULL,
+    held_by  TEXT NOT NULL
+);
+"""
+
+
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
         conn.execute(statement)
@@ -474,6 +537,11 @@ def _migration_009(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_010(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_010_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -485,6 +553,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_007,
     _migration_008,
     _migration_009,
+    _migration_010,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

@@ -399,3 +399,31 @@ def test_rescanning_a_linked_card_is_refused_by_the_same_rule_as_the_verb(
         )
     response = board_web.post_json("/card/abc123def456abc123def456/rescan")
     assert response.json()["code"] == 2
+
+
+def test_every_redirect_message_has_a_banner_to_render():
+    """A ``?msg=`` value with no ``BANNERS`` entry redirects successfully and shows the
+    author **nothing** — ``banner()`` returns empty markup for an unknown key, so the
+    failure is silent on both sides: no error, no confirmation.
+
+    Caught in review, where ``held`` and ``released`` had been added as redirect messages
+    and not as banners, contradicting the feature's own contract. Enumerated from the
+    source rather than asserted per route because the point is to catch the *next* one:
+    ``message=`` is passed inside handler bodies, so there is no table to walk, and a list
+    maintained by hand here would go stale the same way ``BANNERS`` just did.
+    """
+    import re
+    from pathlib import Path
+
+    from robot_army.web import html, server
+
+    source = Path(server.__file__).read_text(encoding="utf-8")
+    messages = set(re.findall(r'message="([^"]+)"', source))
+    assert messages, "the scan found no message= literals; the pattern has drifted"
+
+    missing = sorted(m for m in messages if m not in html.BANNERS)
+    assert not missing, (
+        f"these redirect messages have no BANNERS entry and would render nothing: "
+        f"{missing}"
+    )
+

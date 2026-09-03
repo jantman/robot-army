@@ -255,6 +255,32 @@ def _say_queue(result: Result, queue: list[Any]) -> None:
     result.say()
 
 
+def _say_holds_summary(result: Result, ctx: Context) -> None:
+    """One line naming how much is held, and **only when something is** (issue #117).
+
+    Conditional on purpose. A hold set and forgotten is the failure US3 is about, so
+    ``status`` — the command the author actually types when wondering why nothing is
+    running — has to mention holds. But a permanent "no holds in force" line would be
+    noise on the overwhelmingly common runs where nothing is held, and noise is how a
+    surface stops being read: it would cost exactly the discoverability it is here to buy.
+    Saying something only when there is something to say gives both.
+
+    The full listing is ``robot-army holds``, which can show what this line and the queue
+    table structurally cannot — a repository hold matching no queued item, and a hold on an
+    item that is no longer eligible.
+    """
+    items = len(db.list_item_holds(ctx.conn))
+    repositories = len(db.list_repo_holds(ctx.conn))
+    if not items and not repositories:
+        return
+    parts = []
+    if items:
+        parts.append(f"{items} item{'' if items == 1 else 's'}")
+    if repositories:
+        parts.append(f"{repositories} repositor{'y' if repositories == 1 else 'ies'}")
+    result.say(f"holds        : {' and '.join(parts)} held — `robot-army holds` lists them")
+
+
 def status(
     ctx: Context,
     *,
@@ -340,6 +366,7 @@ def status(
     )
     result.say(f"capacity     : {snap.describe()}")
     result.say(f"order        : {ctx.config.dispatch.order}")
+    _say_holds_summary(result, ctx)
     result.say(f"database     : {ctx.layout.db_path} (schema {SCHEMA_VERSION})")
     result.say()
 
@@ -2318,6 +2345,353 @@ def pause_dispatch(ctx: Context, *, by: str = "cli") -> Result:
 
 def unpause_dispatch(ctx: Context, *, by: str = "cli") -> Result:
     return _set_pause(ctx, paused=False, by=by)
+
+
+# -- dispatch holds (issue #117) --------------------------------------------
+#
+# The sibling of pause, and shaped like it deliberately: one transaction, one audit pair,
+# and a redundant request reported rather than refused. What differs is scope — a pause
+# stops the queue, a hold stops named work and leaves every other repository moving.
+
+
+def hold_item(ctx: Context, item_id: int, *, by: str = "cli") -> Result:
+    """Take one work item out of dispatch until it is released (FR-001, FR-009).
+
+    Works whether or not the daemon is running, for the reason ``pause_dispatch`` does: it
+    writes to the database, which the daemon reads before each dispatch decision, so
+    holding against a stopped daemon takes effect when it starts (FR-022).
+
+    **This never touches a session that is already running** (FR-010). A hold governs entry
+    into dispatch; ``cancel`` is what stops a session, and the message says so rather than
+    letting the author infer otherwise from silence.
+    """
+    item = db.get_work_item(ctx.conn, item_id)
+    if item is None:
+        return _no_such_item(ctx, item_id, action="hold.item")
+
+    before = db.list_item_holds(ctx.conn).get(item_id)
+    with (
+        ctx.audit.action(
+            "hold.item",
+            entity_type="work_item",
+            entity_id=item_id,
+            detail={"by": by, "was_held": before is not None},
+        ) as outcome,
+        db.transaction(ctx.conn),
+    ):
+        hold, placed = db.set_item_hold(ctx.conn, item_id, by=by)
+        outcome.update({"held_at": hold.held_at, "held_by": hold.held_by, "placed": placed})
+
+    result = Result(
+        data={
+            "item_id": item_id,
+            "held": True,
+            "held_at": hold.held_at,
+            "held_by": hold.held_by,
+            "redundant": not placed,
+        }
+    )
+    if not placed:
+        # FR-004: a redundant hold is a reported no-op, and the hold *already in force* —
+        # with its original timestamp — is the useful answer. ``set_dispatch_paused`` makes
+        # the same judgement for the same reason.
+        result.say(
+            f"work item {item_id} was already held, since "
+            f"{timefmt.local(hold.held_at)} by {hold.held_by}"
+        )
+        return result
+    result.say(
+        f"work item {item_id} (#{item.issue_number} {item.repo_key}) held at "
+        f"{timefmt.local(hold.held_at)} by {by}"
+    )
+    result.say(
+        "It stays in the queue in the position it would occupy anyway, and dispatches "
+        "nothing until released. Every other item is unaffected."
+    )
+    result.say("Release it with `robot-army unhold " + str(item_id) + "`.")
+    return result
+
+
+def unhold_item(ctx: Context, item_id: int, *, by: str = "cli") -> Result:
+    """Release one item's hold (FR-003). Releasing what is not held is a no-op (FR-005)."""
+    item = db.get_work_item(ctx.conn, item_id)
+    if item is None:
+        return _no_such_item(ctx, item_id, action="unhold.item")
+
+    with (
+        ctx.audit.action(
+            "unhold.item",
+            entity_type="work_item",
+            entity_id=item_id,
+            detail={"by": by},
+        ) as outcome,
+        db.transaction(ctx.conn),
+    ):
+        removed = db.clear_item_hold(ctx.conn, item_id)
+        outcome.update(
+            {
+                "released": removed is not None,
+                "was_held_at": removed.held_at if removed else None,
+            }
+        )
+
+    result = Result(data={"item_id": item_id, "held": False, "released": removed is not None})
+    if removed is None:
+        # Not a failure. "I already released that" and "that was never held" are the same
+        # outcome to the author, and neither deserves a non-zero exit.
+        result.say(f"work item {item_id} was not held; nothing to release")
+        return result
+    result.say(
+        f"work item {item_id} released; it was held since {timefmt.local(removed.held_at)} "
+        f"by {removed.held_by}"
+    )
+    return result
+
+
+def hold_repo(ctx: Context, repo_key: str, *, by: str = "cli") -> Result:
+    """Take every work item in one repository out of dispatch (FR-002).
+
+    Present **and future** (FR-012): the hold is a fact about the repository rather than
+    about any item, so an issue discovered tomorrow is held on arrival with nothing to
+    backfill.
+
+    The key is checked against ``repos.known`` rather than ``config.repos``, because a
+    ``[repos.*]`` section for a repository that was never onboarded describes one the
+    system does not watch — and a hold on such a repository would hold nothing while
+    looking exactly like a hold that works.
+    """
+    if repo_key not in repos_mod.known(ctx.conn):
+        return _no_such_repo(ctx, repo_key, action="hold.repo")
+
+    before = db.list_repo_holds(ctx.conn).get(repo_key)
+    with (
+        ctx.audit.action(
+            "hold.repo",
+            entity_type="repo",
+            entity_id=repo_key,
+            detail={"by": by, "was_held": before is not None},
+        ) as outcome,
+        db.transaction(ctx.conn),
+    ):
+        hold, placed = db.set_repo_hold(ctx.conn, repo_key, by=by)
+        outcome.update({"held_at": hold.held_at, "held_by": hold.held_by, "placed": placed})
+
+    queued = _queued_in(ctx, repo_key)
+    result = Result(
+        data={
+            "repo_key": repo_key,
+            "held": True,
+            "held_at": hold.held_at,
+            "held_by": hold.held_by,
+            "redundant": not placed,
+            "queued_items": queued,
+        }
+    )
+    if not placed:
+        result.say(
+            f"repository {repo_key} was already held, since "
+            f"{timefmt.local(hold.held_at)} by {hold.held_by}"
+        )
+        return result
+    result.say(
+        f"repository {repo_key} held at {timefmt.local(hold.held_at)} by {by} "
+        f"({queued} item{'' if queued == 1 else 's'} currently queued)"
+    )
+    result.say(
+        "Work discovered in it later is held on arrival. Every other repository "
+        "dispatches normally in the same pass."
+    )
+    result.say(f"Release it with `robot-army unhold --repo {repo_key}`.")
+    return result
+
+
+def unhold_repo(ctx: Context, repo_key: str, *, by: str = "cli") -> Result:
+    """Release one repository's hold (FR-003)."""
+    if repo_key not in repos_mod.known(ctx.conn):
+        return _no_such_repo(ctx, repo_key, action="unhold.repo")
+
+    with (
+        ctx.audit.action(
+            "unhold.repo",
+            entity_type="repo",
+            entity_id=repo_key,
+            detail={"by": by},
+        ) as outcome,
+        db.transaction(ctx.conn),
+    ):
+        removed = db.clear_repo_hold(ctx.conn, repo_key)
+        outcome.update(
+            {
+                "released": removed is not None,
+                "was_held_at": removed.held_at if removed else None,
+            }
+        )
+
+    result = Result(data={"repo_key": repo_key, "held": False, "released": removed is not None})
+    if removed is None:
+        result.say(f"repository {repo_key} was not held; nothing to release")
+        return result
+    result.say(
+        f"repository {repo_key} released; it was held since "
+        f"{timefmt.local(removed.held_at)} by {removed.held_by}"
+    )
+    return result
+
+
+def _no_such_item(ctx: Context, item_id: int, *, action: str) -> Result:
+    """Refuse, and record the refusal.
+
+    An attempt that leaves no record is one nobody would ever notice, so the audit pair
+    wraps the refusal rather than only the success (Principle III).
+    """
+    ctx.audit.record(
+        action,
+        outcome="error",
+        entity_type="work_item",
+        entity_id=item_id,
+        detail={"refused": True, "cause": "no such work item"},
+    )
+    return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
+
+
+def _no_such_repo(ctx: Context, repo_key: str, *, action: str) -> Result:
+    ctx.audit.record(
+        action,
+        outcome="error",
+        entity_type="repo",
+        entity_id=repo_key,
+        detail={"refused": True, "cause": "repository not onboarded"},
+    )
+    # Action-agnostic, because both `hold` and `unhold` land here: "holding it would hold
+    # nothing" reads as a non-sequitur on the release path, where the author is trying to
+    # undo something rather than do it. What is wrong is the same either way — this is not
+    # a repository the system watches — so that is what it says.
+    return Result(
+        code=EXIT_FAILED,
+        lines=[
+            f"repository {repo_key!r} is not onboarded, so it holds no work and can hold "
+            f"none — run `robot-army repos` to see which repositories this system watches"
+        ],
+    )
+
+
+def _queued_in(ctx: Context, repo_key: str) -> int:
+    """How many of a repository's items are currently eligible. Reported when holding it,
+    because "held, and it was holding nothing" and "held, and it stopped four items" are
+    very different facts to the author."""
+    row = ctx.conn.execute(
+        "SELECT COUNT(*) AS n FROM work_items WHERE repo_key = ? AND state = ?",
+        (repo_key, str(WorkItemState.READY)),
+    ).fetchone()
+    return int(row["n"])
+
+
+def list_holds(ctx: Context) -> Result:
+    """Every hold in force, item and repository (FR-018, FR-020).
+
+    A separate verb rather than a section of ``status`` because it must show two things
+    ``status``'s item-oriented sections structurally cannot:
+
+    * **a repository hold matching no queued item** — the exact shape of a hold set and
+      forgotten, which would otherwise be diagnosed as "polling is broken";
+    * **a hold on an item that is no longer eligible** — held then finished, or held then
+      abandoned. Those are left in place deliberately (nothing sweeps a hold, because
+      clearing on a state transition is expiry under another name), and showing the item's
+      state is what makes them visible rather than mysterious.
+
+    With nothing held it says so in words. An empty table is not an answer to "what is
+    held" — it is the same output a broken query would produce.
+    """
+    item_holds = db.list_item_holds(ctx.conn)
+    repo_holds = db.list_repo_holds(ctx.conn)
+
+    items: list[dict[str, Any]] = []
+    for item_id, hold in sorted(item_holds.items()):
+        item = db.get_work_item(ctx.conn, item_id)
+        items.append(
+            {
+                "item_id": item_id,
+                "repo_key": item.repo_key if item else None,
+                "issue_number": item.issue_number if item else None,
+                "state": str(item.state) if item else None,
+                "held_at": hold.held_at,
+                "held_by": hold.held_by,
+                "age_seconds": health._age(hold.held_at),
+            }
+        )
+
+    repositories: list[dict[str, Any]] = []
+    for repo_key, hold in sorted(repo_holds.items()):
+        repositories.append(
+            {
+                "repo_key": repo_key,
+                "held_at": hold.held_at,
+                "held_by": hold.held_by,
+                "age_seconds": health._age(hold.held_at),
+                "queued_items": _queued_in(ctx, repo_key),
+            }
+        )
+
+    result = Result(data={"items": items, "repositories": repositories})
+    if not items and not repositories:
+        result.say("nothing is held")
+        return result
+
+    if items:
+        result.say(f"held items ({len(items)}):")
+        rows = [
+            [
+                str(row["item_id"]),
+                f"#{row['issue_number']}" if row["issue_number"] else "-",
+                row["repo_key"] or "-",
+                row["state"] or "-",
+                timefmt.local(row["held_at"]) or "-",
+                row["held_by"],
+                _held_for(row["age_seconds"]),
+            ]
+            for row in items
+        ]
+        for line in _table(
+            rows, ["item", "issue", "repo", "state", "held at", "by", "for"]
+        ):
+            result.say("  " + line)
+        result.say()
+
+    if repositories:
+        result.say(f"held repositories ({len(repositories)}):")
+        rows = [
+            [
+                row["repo_key"],
+                timefmt.local(row["held_at"]) or "-",
+                row["held_by"],
+                _held_for(row["age_seconds"]),
+                str(row["queued_items"]),
+            ]
+            for row in repositories
+        ]
+        for line in _table(rows, ["repo", "held at", "by", "for", "queued"]):
+            result.say("  " + line)
+        result.say()
+
+    result.say("Release with `robot-army unhold <item>` or `robot-army unhold --repo <key>`.")
+    return result
+
+
+def _held_for(age_seconds: int | None) -> str:
+    """How long a hold has been in force, coarsely (FR-020).
+
+    Coarse on purpose. The question this answers is "did I set this and forget it", and
+    ``3d`` answers it while ``267413s`` makes the reader do arithmetic to find out.
+    """
+    if age_seconds is None:
+        return "-"
+    if age_seconds < 60:
+        return f"{age_seconds}s"
+    if age_seconds < 3600:
+        return f"{age_seconds // 60}m"
+    if age_seconds < 86400:
+        return f"{age_seconds // 3600}h"
+    return f"{age_seconds // 86400}d"
 
 
 # -- attach (milestone 002) -------------------------------------------------

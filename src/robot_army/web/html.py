@@ -178,6 +178,16 @@ BANNERS: dict[str, tuple[str, str]] = {
     "retried": ("ok", "Item moved back to the queue."),
     "attached": ("ok", "A terminal window was opened onto that session."),
     "acknowledged": ("ok", "Anomaly acknowledged."),
+    "held": (
+        "ok",
+        "Held. Held work stays in the queue, in the position it would occupy anyway, and "
+        "dispatches nothing until it is released. Nothing else is affected.",
+    ),
+    "released": (
+        "ok",
+        "Hold released. The work dispatches on the next tick, exactly as if it had never "
+        "been held.",
+    ),
     "paused": ("ok", "Dispatch paused. Eligible items accumulate in ready."),
     "unpaused": ("ok", "Dispatch resumed."),
     "polled": ("ok", "Poll requested. The result appears in the audit log."),

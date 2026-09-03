@@ -452,7 +452,11 @@ def test_every_web_control_has_a_terminal_verb_here(config_file):
     parser = build_parser()
     verbs = set(parser._subparsers._group_actions[0].choices)
     for verb in ("serve", "pause", "unpause", "attach", "resume", "restart", "abandon",
-                 "cancel", "retry", "anomalies", "poll", "reconcile"):
+                 "cancel", "retry", "anomalies", "poll", "reconcile",
+                 # issue #117. `holds` has no web control of its own — the queue page
+                 # carries the repository notice — but it is the terminal answer to
+                 # "what is held", which the Operating Constraints require to exist.
+                 "hold", "unhold", "holds"):
         assert verb in verbs, verb
 
 

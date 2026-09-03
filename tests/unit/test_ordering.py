@@ -149,6 +149,7 @@ def test_the_precedence_is_declared_in_one_readable_place():
     and drift between them."""
     assert list(ordering.HoldReason) == [
         ordering.HoldReason.PAUSED,
+        ordering.HoldReason.HELD,
         ordering.HoldReason.CAPACITY_UNOBSERVABLE,
         ordering.HoldReason.GLOBAL_CAP,
         ordering.HoldReason.REPO_CAP,

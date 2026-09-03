@@ -173,7 +173,8 @@ refresh_seconds = 10    # how often an open page re-fetches itself
 **There is no authentication, and that is deliberate.** The operating-system user stops being
 the trust boundary the moment this binds to anything but loopback — the network becomes the
 boundary instead. **Anything that can reach that port has full control of robot-army**: it can
-resume sessions, cancel them, abandon work, and pause dispatch.
+resume sessions, cancel them, abandon work, hold and release items and repositories, and
+pause dispatch.
 
 That is the accepted model, so the mitigations are the ones that matter:
 
@@ -204,8 +205,8 @@ published, no tunnel is configured, and no port is forwarded.
 
 Six views — active, queue, interrupted, one item, anomalies, and the audit log — and the
 controls for the decisions I actually make away from the desk: resume, restart, abandon,
-cancel, retry, attach a terminal, acknowledge an anomaly, pause and resume dispatch, and force
-a poll or a reconciliation. Every one of them has a terminal equivalent, verified by a test
+cancel, retry, attach a terminal, acknowledge an anomaly, hold and release an item or a whole
+repository, pause and resume dispatch, and force a poll or a reconciliation. Every one of them has a terminal equivalent, verified by a test
 rather than by intention.
 
 Deliberately **not** there: repository onboarding and permission re-approval, removing a
@@ -774,6 +775,50 @@ The pause is durable: it survives a daemon restart and a reboot, and is cleared 
 `unpause` or the web control. Never by time. It appears in `status`, in `heartbeat.json`, and
 on every web view, because a system that is healthy and deliberately doing nothing must not
 read as one that is healthy and doing nothing for no reason.
+
+## Holding specific work
+
+```bash
+robot-army hold 42                    # one item
+robot-army hold --repo owner/name     # every item in a repository, present and future
+robot-army unhold 42                  # and the two releases
+robot-army unhold --repo owner/name
+robot-army holds                      # everything held, with ages
+```
+
+Pause stops the queue. A hold stops **named work** and leaves everything else moving — which
+is the case I actually hit: four items from a repository I do not care about this week sitting
+in front of one I do. Holding the repository takes all four out and lets the fifth dispatch in
+the same pass.
+
+The target is stated, never guessed from its shape. An item id is an integer and a repository
+key contains a slash, so one argument *could* be classified by looking at it — but a mistyped
+key that happened to parse as something else would silently hold the wrong thing. Giving both
+or neither is a usage error.
+
+A held item **stays in the queue**, in the position it would occupy anyway, reported with a
+`held` reason. It ranks directly below `paused`, because every reason beneath it — a full
+machine, an unmerged pull request, a parked card, stale failure residue — would name a fix that
+cannot work while I am the one holding it. When an item and its repository are both held, the
+one reason says so, and says that releasing one leaves the other in force.
+
+Three things it does **not** do, each on purpose:
+
+- **It never expires.** A hold that lapsed on its own would silently start work I stopped.
+- **It never stops a running session.** A hold governs entry into dispatch; `cancel` is what
+  stops a session, and the two must not be confusable.
+- **It never reorders anything.** Releasing puts an item back exactly where it was.
+
+Holds are durable — they survive a restart and a reboot, and a hold placed while the daemon is
+down is honoured on its first pass. They are also *runtime state*, deliberately not
+configuration: `[repos.*].priority` with `order = "repo-priority"` is the standing preference I
+edit in a file, and a hold is the temporary statement I make from whichever surface is to hand.
+
+The queue view carries a repositories section listing everything with queued work **and**
+everything held, each with its own hold or release control. Both halves matter. Without the
+first there is nothing on the page that can *place* a repository hold; without the second, a
+hold that currently matches no queued item is invisible — and a hold holding nothing looks
+exactly like no hold at all, right up until it silently suppresses the next issue I file.
 
 ## Trying it without consequences
 

@@ -33,7 +33,18 @@ from robot_army.operations import (
 from robot_army.states import WorkItemState
 
 READ_COMMANDS = frozenset(
-    {"status", "show", "repos", "worktree", "log", "anomalies", "health", "doctor", "cards"}
+    {
+        "status",
+        "show",
+        "repos",
+        "worktree",
+        "log",
+        "anomalies",
+        "health",
+        "doctor",
+        "cards",
+        "holds",
+    }
 )
 
 
@@ -204,6 +215,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("unpause", help="resume dispatch")
 
+    # -- issue #117: holds ------------------------------------------------
+    #
+    # Flat verbs rather than a `hold list` group, because `pause`/`unpause` are flat and
+    # holds are their sibling. The target is *stated*, never inferred from its shape: an
+    # item id is an integer and a repository key contains a slash, so one argument could be
+    # classified by looking at it — and this project refuses that class of guess, because a
+    # mistyped key that happened to parse as something else would silently hold the wrong
+    # thing. Both spellings already exist here: per-item verbs take a positional id, and
+    # `poll --repo` already takes a repository key as a flag.
+    for verb, blurb in (
+        ("hold", "take one item, or a whole repository, out of dispatch until released"),
+        ("unhold", "release a hold placed by `hold`"),
+    ):
+        parser_for = sub.add_parser(verb, help=blurb)
+        target = parser_for.add_mutually_exclusive_group(required=True)
+        target.add_argument("item_id", type=int, nargs="?", help="the work item to act on")
+        target.add_argument(
+            "--repo", default=None, help="a repository key, e.g. owner/name"
+        )
+
+    sub.add_parser("holds", help="every hold in force, including ones holding nothing")
+
     attach = sub.add_parser("attach", help="open a terminal window on a running session")
     attach.add_argument("item_id", type=int)
 
@@ -241,6 +274,8 @@ def build_parser() -> argparse.ArgumentParser:
             "purge-simulated",
             "pause",
             "unpause",
+            "hold",
+            "unhold",
             "attach",
             # `onboard` is here because 011 gave it a machine-readable mode to be correct
             # about: its prompt writes to stderr and its approval screen is suppressed so
@@ -422,6 +457,9 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "purge-simulated": lambda: operations.purge_simulated(ctx, assume_yes=args.yes),
         "pause": lambda: operations.pause_dispatch(ctx, by="cli"),
         "unpause": lambda: operations.unpause_dispatch(ctx, by="cli"),
+        "hold": lambda: _hold(args, ctx, holding=True),
+        "unhold": lambda: _hold(args, ctx, holding=False),
+        "holds": lambda: operations.list_holds(ctx),
         "attach": lambda: operations.attach(ctx, args.item_id),
         "cards": lambda: operations.cards(
             ctx, state=args.state, include_simulated=include_simulated
@@ -433,6 +471,22 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
     if handler is None:
         return Result(code=EXIT_USAGE, lines=[f"unknown command {args.command!r}"])
     return handler()
+
+
+def _hold(args: argparse.Namespace, ctx: Context, *, holding: bool) -> Result:
+    """Route ``hold``/``unhold`` to the scope the author named (issue #117).
+
+    argparse has already enforced that exactly one target was given — the mutually
+    exclusive group is ``required=True`` — so this only has to say which one it was. That
+    is deliberate: refusing a missing or doubled target *before* anything is read means the
+    usage error is exit 2 with argparse's own message, rather than a bespoke check that
+    would have to be kept in step with the help text.
+    """
+    if args.repo is not None:
+        operation = operations.hold_repo if holding else operations.unhold_repo
+        return operation(ctx, args.repo, by="cli")
+    operation = operations.hold_item if holding else operations.unhold_item
+    return operation(ctx, args.item_id, by="cli")
 
 
 def _rescan(args: argparse.Namespace, ctx: Context) -> Result:

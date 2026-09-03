@@ -20,6 +20,8 @@ EXPECTED_TABLES = {
     "dispatch_control",
     "cards",
     "repo_projects",
+    "item_holds",
+    "repo_holds",
 }
 
 
@@ -508,7 +510,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 9
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 10
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -1078,4 +1080,59 @@ def test_an_interrupted_009_leaves_the_version_unadvanced(tmp_path, monkeypatch)
     assert current_version(conn) == 8
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
     assert "board_column" not in columns
+    conn.close()
+
+
+# -- migration 010: the hold tables (issue #117) -----------------------------
+
+
+def test_migration_010_creates_both_hold_tables_with_no_backfill(tmp_path):
+    """Two tables, and nothing to backfill: no hold existed before this migration, so an
+    upgraded database is correct the instant the tables exist."""
+    conn, (start, end) = db.open_database(tmp_path / "state.db")
+    assert (start, end) == (0, SCHEMA_VERSION)
+    assert current_version(conn) == 10
+
+    item_columns = {row["name"] for row in conn.execute("PRAGMA table_info(item_holds)")}
+    assert item_columns == {"work_item_id", "held_at", "held_by"}
+    repo_columns = {row["name"] for row in conn.execute("PRAGMA table_info(repo_holds)")}
+    assert repo_columns == {"repo_key", "held_at", "held_by"}
+
+    assert conn.execute("SELECT COUNT(*) FROM item_holds").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM repo_holds").fetchone()[0] == 0
+    conn.close()
+
+
+def test_migration_010_makes_the_target_the_primary_key(tmp_path):
+    """FR-004's idempotence is a constraint, not a convention. A second hold on the same
+    target must collide with itself rather than become a second row."""
+    conn, _ = db.open_database(tmp_path / "state.db")
+    with db.transaction(conn):
+        db.upsert_repo(conn, repo_key="demo", settings_fingerprint=None, trust_verified=True)
+    with db.transaction(conn):
+        conn.execute("INSERT INTO repo_holds VALUES ('demo', 't', 'cli')")
+    with pytest.raises(sqlite3.IntegrityError), db.transaction(conn):
+        conn.execute("INSERT INTO repo_holds VALUES ('demo', 'later', 'web')")
+    conn.close()
+
+
+def test_migration_010_refuses_a_hold_on_a_repository_that_was_never_onboarded(tmp_path):
+    """FR-006 at the schema level: the foreign key makes a typo impossible to store rather
+    than merely unlikely. A hold on a repository the system does not watch would hold
+    nothing and report nothing wrong, which looks exactly like a hold that works."""
+    conn, _ = db.open_database(tmp_path / "state.db")
+    with pytest.raises(sqlite3.IntegrityError), db.transaction(conn):
+        conn.execute("INSERT INTO repo_holds VALUES ('owner/typo', 't', 'cli')")
+    conn.close()
+
+
+def test_migration_010_holds_carry_no_nullable_provenance(tmp_path):
+    """``held_by`` is NOT NULL here, unlike ``dispatch_control.paused_by`` which is
+    nullable because it is *cleared* on resume. A hold has no cleared state: the row exists
+    or it does not, so every row that exists can say what placed it."""
+    conn, _ = db.open_database(tmp_path / "state.db")
+    with db.transaction(conn):
+        db.upsert_repo(conn, repo_key="demo", settings_fingerprint=None, trust_verified=True)
+    with pytest.raises(sqlite3.IntegrityError), db.transaction(conn):
+        conn.execute("INSERT INTO repo_holds VALUES ('demo', 't', NULL)")
     conn.close()

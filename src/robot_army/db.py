@@ -29,6 +29,7 @@ from robot_army.models import (
     Anomaly,
     Card,
     DispatchControl,
+    Hold,
     PollState,
     Repo,
     RepoProject,
@@ -945,6 +946,106 @@ def set_dispatch_paused(
         (int(paused), stamp, actor),
     )
     return DispatchControl(paused=paused, paused_at=stamp, paused_by=actor)
+
+
+# -- dispatch holds (issue #117) --------------------------------------------
+#
+# Two tables rather than one with a scope column, so that "a hold never outlives what it
+# holds" (FR-025) is a foreign key rather than a rule every future deletion site has to
+# remember. See migration 010 for the full argument.
+#
+# Neither listing takes ``include_simulated``, and its absence is a decision rather than an
+# oversight — see ``tests/unit/test_db_scope.py``. Neither table has a ``dry_run`` column,
+# and holds apply to simulated items *by design*: a dry-run item occupies a queue slot, so
+# a hold that skipped it would rehearse the wrong behaviour.
+
+
+def list_item_holds(conn: sqlite3.Connection) -> dict[int, Hold]:
+    """Every item hold in force, keyed by work item id.
+
+    One scan, because ``ordering.plan`` calls this once per plan — on every dispatch tick
+    *and* every web page render — and a query per queued item would multiply by the queue
+    length on every page load.
+
+    An empty table is not an error and never raises: no holds is the overwhelmingly common
+    state.
+    """
+    return {
+        int(row["work_item_id"]): Hold(held_at=row["held_at"], held_by=row["held_by"])
+        for row in conn.execute("SELECT work_item_id, held_at, held_by FROM item_holds")
+    }
+
+
+def list_repo_holds(conn: sqlite3.Connection) -> dict[str, Hold]:
+    """Every repository hold in force, keyed by repository key. Same shape, same reasons."""
+    return {
+        str(row["repo_key"]): Hold(held_at=row["held_at"], held_by=row["held_by"])
+        for row in conn.execute("SELECT repo_key, held_at, held_by FROM repo_holds")
+    }
+
+
+def _set_hold(
+    conn: sqlite3.Connection, *, table: str, column: str, target: Any, by: str
+) -> tuple[Hold, bool]:
+    """Place a hold, or report the one already in force. Returns ``(hold, newly_placed)``.
+
+    ``ON CONFLICT DO NOTHING`` then read back, so holding something already held returns
+    the **existing** row with its **original** ``held_at`` — never a refreshed one. This is
+    the judgement ``set_dispatch_paused`` already makes and states: pausing twice is not a
+    mistake, and the pause that is already in force, with its original timestamp, is the
+    more useful answer than a fresh one (FR-004).
+
+    ``table`` and ``column`` are module-private literals, never caller input, which is why
+    the two interpolations below carry an S608 suppression rather than a rewrite — the same
+    treatment ``_scope`` already gets.
+    """
+    placed = conn.execute(
+        f"INSERT INTO {table} ({column}, held_at, held_by) VALUES (?, ?, ?) "  # noqa: S608
+        f"ON CONFLICT({column}) DO NOTHING",
+        (target, utcnow(), by),
+    ).rowcount
+    row = conn.execute(
+        f"SELECT held_at, held_by FROM {table} WHERE {column} = ?",  # noqa: S608
+        (target,),
+    ).fetchone()
+    return Hold(held_at=row["held_at"], held_by=row["held_by"]), bool(placed)
+
+
+def _clear_hold(
+    conn: sqlite3.Connection, *, table: str, column: str, target: Any
+) -> Hold | None:
+    """Release a hold, returning the one removed, or ``None`` if there was none.
+
+    Returning what was removed is FR-005: the caller distinguishes "released a hold placed
+    at *t*" from "there was nothing to release" without a second query, and reports the
+    second as a no-op rather than a failure.
+    """
+    row = conn.execute(
+        f"SELECT held_at, held_by FROM {table} WHERE {column} = ?",  # noqa: S608
+        (target,),
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (target,))  # noqa: S608
+    return Hold(held_at=row["held_at"], held_by=row["held_by"])
+
+
+def set_item_hold(conn: sqlite3.Connection, item_id: int, *, by: str) -> tuple[Hold, bool]:
+    """Hold one work item. Called inside ``db.transaction`` by its callers."""
+    return _set_hold(conn, table="item_holds", column="work_item_id", target=item_id, by=by)
+
+
+def clear_item_hold(conn: sqlite3.Connection, item_id: int) -> Hold | None:
+    return _clear_hold(conn, table="item_holds", column="work_item_id", target=item_id)
+
+
+def set_repo_hold(conn: sqlite3.Connection, repo_key: str, *, by: str) -> tuple[Hold, bool]:
+    """Hold every work item in one repository, present and future (FR-012)."""
+    return _set_hold(conn, table="repo_holds", column="repo_key", target=repo_key, by=by)
+
+
+def clear_repo_hold(conn: sqlite3.Connection, repo_key: str) -> Hold | None:
+    return _clear_hold(conn, table="repo_holds", column="repo_key", target=repo_key)
 
 
 # -- simulated-row purge (FR-058) -------------------------------------------

@@ -219,3 +219,18 @@ def test_repo_projects_is_not_scoped_by_dry_run(conn):
     )
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(repo_projects)")}
     assert "dry_run" not in columns
+
+
+# The hold listings are absent from LISTING_ACCESSORS for the same kind of reason, and the
+# assertions live beside the rest of the hold tests in ``test_holds.py`` (issue #117).
+# Neither ``item_holds`` nor ``repo_holds`` has a ``dry_run`` column, and holds apply to
+# simulated items *by design*: a dry-run item occupies a queue slot, so a hold that skipped
+# it would rehearse the wrong behaviour. What is asserted here is the schema half — that
+# there is genuinely no column to scope by, so the exemption cannot quietly become wrong.
+
+
+def test_hold_tables_have_no_dry_run_column(conn):
+    for table in ("item_holds", "repo_holds"):
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        assert "dry_run" not in columns, table
+

@@ -489,6 +489,35 @@ def action_bar(
 # -- dispatch controls (FR-023, FR-035, T046, T051) -------------------------
 
 
+def _item_hold_control(
+    item_id: int, *, holding: bool, include_simulated: bool = False
+) -> Markup:
+    """Hold or release one queued item (issue #117), whichever applies.
+
+    One control rather than two, because the two are never both meaningful: an item is
+    held or it is not, and offering the inapplicable one would invite a tap that reports a
+    no-op. The label states which way it goes.
+    """
+    return form(
+        f"/item/{item_id}/{'hold' if holding else 'unhold'}",
+        html.hidden("include_simulated", "1" if include_simulated else "0"),
+        button("hold" if holding else "release", class_=None if holding else "primary"),
+    )
+
+
+def _repo_hold_control(
+    repo_key: str, *, holding: bool, include_simulated: bool = False
+) -> Markup:
+    """Hold or release a whole repository. The key travels in the form body, never in the
+    path — see ``web/server.py``'s ``_repo_hold_action`` for why."""
+    return form(
+        f"/repos/{'hold' if holding else 'unhold'}",
+        html.hidden("repo", repo_key),
+        html.hidden("include_simulated", "1" if include_simulated else "0"),
+        button("hold" if holding else "release", class_=None if holding else "primary"),
+    )
+
+
 def dispatch_controls(chrome: dict[str, Any], *, include_simulated: bool = False) -> Markup:
     """Pause, unpause, force a poll, force a reconciliation.
 
@@ -780,6 +809,14 @@ def queue_view(
                 }
             )
 
+    # Issue #117. Which rows are already held decides whether each carries hold or
+    # release; the repository holds drive their own notice below, because a repository
+    # hold matching no queued item has no row to attach to.
+    item_holds = db.list_item_holds(ctx.conn)
+    repo_holds = db.list_repo_holds(ctx.conn)
+    for row in ready:
+        row["held"] = row["id"] in item_holds
+
     ready, withheld_ready = _visible(ready, include_simulated=include_simulated)
     dispatching, withheld_dispatching = _visible(dispatching, include_simulated=include_simulated)
     blocked, withheld_blocked = _visible(blocked, include_simulated=include_simulated)
@@ -838,12 +875,58 @@ def queue_view(
     off_column = sum(1 for row in ready if row.get("hold") == "off_column")
     parked_note = f" · {off_column} held off-column" if off_column else ""
 
+    # FR-019, and the one place this feature can quietly fail. A repository hold matching
+    # **no queued item** has no row to attach to: without this notice it would suppress
+    # every future item in that repository while the page looked entirely normal. That is
+    # the same failure `held_off_column` above was added to prevent — a repository with
+    # ready items dispatching none of them reads exactly like a repository with no work —
+    # so this borrows its shape rather than inventing one.
+    #
+    # Rendered for every held repository, whether or not it currently holds anything.
+    # Splitting the zero case out would be exactly the omission the notice exists to stop.
+    held_repos = [
+        {
+            "repo_key": key,
+            "held_at": hold.held_at,
+            "held_by": hold.held_by,
+            "queued": sum(1 for row in ready if row.get("repo_key") == key),
+        }
+        for key, hold in sorted(repo_holds.items())
+    ]
+    hold_note = (
+        [
+            div(
+                h(2, f"held repositories ({len(held_repos)})"),
+                table(
+                    ["repo", "held since", "by", "queued", ""],
+                    [
+                        [
+                            row["repo_key"],
+                            when(row["held_at"]),
+                            row["held_by"],
+                            str(row["queued"]),
+                            _repo_hold_control(
+                                row["repo_key"],
+                                holding=False,
+                                include_simulated=include_simulated,
+                            ),
+                        ]
+                        for row in held_repos
+                    ],
+                ),
+            )
+        ]
+        if held_repos
+        else []
+    )
+
     body = join(
         [
             h(1, "queue"),
             *pause_note,
             *board_note,
             dispatch_controls(current, include_simulated=include_simulated),
+            *hold_note,
             h(2, f"ready ({len(ready)}) — in dispatch order{parked_note}"),
             _nothing(
                 "Nothing is ready.",
@@ -853,7 +936,7 @@ def queue_view(
             )
             if not ready
             else table(
-                ["#", "item", "repo", "issue", "title", "status", "ready since"],
+                ["#", "item", "repo", "issue", "title", "status", "ready since", ""],
                 [
                     [
                         row["position"],
@@ -868,6 +951,14 @@ def queue_view(
                         if row["hold"]
                         else span("next to dispatch" if row["position"] == 1 else "waiting"),
                         when(row["updated_at"]),
+                        # No confirmation page: a hold is trivially reversible and
+                        # outward-facing in no sense. Confirm-then-act is for `cancel` and
+                        # the destructive verbs, and one tap is the point on a phone.
+                        _item_hold_control(
+                            row["id"],
+                            holding=not row.get("held"),
+                            include_simulated=include_simulated,
+                        ),
                     ]
                     for row in ready
                 ],

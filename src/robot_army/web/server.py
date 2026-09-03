@@ -42,6 +42,7 @@ from urllib.parse import parse_qs, urlparse
 
 from robot_army import daemon as daemon_mod
 from robot_army import db, effects, health, operations
+from robot_army import repos as repos_mod
 from robot_army.config import Config
 from robot_army.effects import EffectLevel
 from robot_army.migrations import SCHEMA_VERSION
@@ -914,6 +915,86 @@ def _pause_action(paused: bool) -> Callable[..., Redirect]:
     return handler
 
 
+def _item_hold_action(holding: bool) -> Callable[..., Redirect]:
+    """``POST /item/<id>/hold`` and its release (issue #117).
+
+    Deliberately **not** effect-guarded, matching ``_pause_action``. The tempting
+    asymmetry — guard the release because it can lead to a session starting — guards the
+    wrong side of the causal chain: unholding starts nothing, it removes one row, after
+    which the *dispatcher* decides whether to dispatch and applies the effect level itself
+    at the moment it acts. Guarding here would attach a decision to the surface that
+    displays a fact rather than to the code that acts on it.
+
+    Not ``require_daemon`` either: a hold is meaningful against a stopped daemon, because
+    it takes effect when it starts (FR-022). ``resume`` and ``restart`` need the daemon
+    because something must drain the spool afterwards; nothing here launches anything.
+    """
+
+    def handler(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> Redirect:
+        item_id = params["id"]
+        require_item(ctx, item_id)
+
+        def body(outcome: dict[str, Any]) -> dict[str, Any]:
+            operation = operations.hold_item if holding else operations.unhold_item
+            return _report(operation(ctx, item_id, by="web"))
+
+        return _perform(
+            ctx,
+            request,
+            action="hold.item" if holding else "unhold.item",
+            entity_type="work_item",
+            entity_id=item_id,
+            location=_referring_view(request, "/queue"),
+            message="held" if holding else "released",
+            body=body,
+        )
+
+    return handler
+
+
+def _repo_hold_action(holding: bool) -> Callable[..., Redirect]:
+    """``POST /repos/hold`` and its release, taking the key from the **form body**.
+
+    Never from the path. A repository key contains a slash, so a path parameter would mean
+    two segments or an encoded one, and ``_bind`` matches on segment count — while the
+    standing position beside ``_CARD_ID`` is that a route parameter reaching a page is one
+    an attacker would like to control. A two-segment repository parameter would create
+    exactly the shapes (``..``, encoded separators) that the strict card pattern forecloses.
+
+    This is not a workaround: ``_job_action`` already reads ``request.first("repo")`` for
+    ``POST /poll``. The value is validated against the onboarding record before it reaches
+    anything, so an unknown key is a refusal rather than a stored row.
+    """
+
+    def handler(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> Redirect:
+        repo_key = request.first("repo") or ""
+        if repo_key not in repos_mod.known(ctx.conn):
+            raise Refusal(
+                f"repository {repo_key!r} is not onboarded, so holding it would hold "
+                f"nothing",
+                status=404,
+                code=EXIT_FAILED,
+                extra={"repo": repo_key},
+            )
+
+        def body(outcome: dict[str, Any]) -> dict[str, Any]:
+            operation = operations.hold_repo if holding else operations.unhold_repo
+            return _report(operation(ctx, repo_key, by="web"), extra={"repo": repo_key})
+
+        return _perform(
+            ctx,
+            request,
+            action="hold.repo" if holding else "unhold.repo",
+            entity_type="repo",
+            entity_id=repo_key,
+            location=_referring_view(request, "/queue"),
+            message="held" if holding else "released",
+            body=body,
+        )
+
+    return handler
+
+
 def _job_action(name: str) -> Callable[..., Redirect]:
     def handler(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> Redirect:
         repo = request.first("repo") or None
@@ -1053,6 +1134,14 @@ ROUTES: tuple[Route, ...] = (
         terminal="attach",
     ),
     Route(POST, ("anomalies", "<id>", "acknowledge"), action_acknowledge, terminal="anomalies"),
+    Route(
+        POST, ("item", "<id>", "hold"), _item_hold_action(True), terminal="hold"
+    ),
+    Route(
+        POST, ("item", "<id>", "unhold"), _item_hold_action(False), terminal="unhold"
+    ),
+    Route(POST, _seg("/repos/hold"), _repo_hold_action(True), terminal="hold"),
+    Route(POST, _seg("/repos/unhold"), _repo_hold_action(False), terminal="unhold"),
     Route(POST, _seg("/dispatch/pause"), _pause_action(True), terminal="pause"),
     Route(POST, _seg("/dispatch/unpause"), _pause_action(False), terminal="unpause"),
     Route(POST, _seg("/poll"), _job_action("poll"), terminal="poll"),

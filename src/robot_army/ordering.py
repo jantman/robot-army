@@ -25,8 +25,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from robot_army import db, repos
-from robot_army.models import WorkItem
+from robot_army import db, repos, timefmt
+from robot_army.models import Hold, WorkItem
 from robot_army.states import WorkItemState
 
 if TYPE_CHECKING:
@@ -47,6 +47,15 @@ class HoldReason(StrEnum):
 
     * ``paused`` outranks everything because freeing capacity would change nothing. Showing
       a capacity reason to a paused system sends the author to fix the wrong thing (US3 AS4).
+    * ``held`` sits directly below it (issue #117). Every reason beneath ``held`` names a fix
+      that cannot work while the author is holding the item — freeing a session slot, merging
+      a pull request, re-onboarding a clone, moving a card, clearing stale failure residue —
+      because none of them touches the hold. Only ``paused`` outranks it, and only because a
+      paused system dispatches nothing at all, so naming one item's hold would understate
+      what is stopping the queue. It sits **above** ``capacity_unobservable`` deliberately:
+      that reason's justification is that the cap *numbers* are untrustworthy, and ``held``
+      is not a number and is not derived from the observation — a held item is held whether
+      or not ``/proc`` could be read.
     * ``capacity_unobservable`` outranks both caps because when it applies the cap numbers
       are not trustworthy, and showing an untrustworthy number is worse than showing none.
     * ``global_cap`` outranks ``repo_cap`` because the machine-wide limit binds before any
@@ -71,6 +80,7 @@ class HoldReason(StrEnum):
     """
 
     PAUSED = "paused"
+    HELD = "held"
     CAPACITY_UNOBSERVABLE = "capacity_unobservable"
     GLOBAL_CAP = "global_cap"
     REPO_CAP = "repo_cap"
@@ -230,6 +240,12 @@ def plan(
     # never instead of it (FR-002).
     _apply_board_order(items, governed)
     control = db.get_dispatch_control(conn)
+    # One scan for the whole plan, the third time this module makes the same trade and for
+    # the same reason (issue #117): a fact needed by many items is resolved once rather
+    # than queried per item, because this function runs on every dispatch tick *and* every
+    # web page render. Both tables hold a handful of rows for one author.
+    item_holds = db.list_item_holds(conn)
+    repo_holds = db.list_repo_holds(conn)
 
     entries: list[QueueEntry] = []
     for position, item in enumerate(items, start=1):
@@ -242,6 +258,8 @@ def plan(
             unfinished=unfinished,
             governed=governed,
             boards=boards,
+            item_holds=item_holds,
+            repo_holds=repo_holds,
         )
         entries.append(
             QueueEntry(item=item, position=position, hold=hold, detail=detail)
@@ -285,6 +303,8 @@ def _hold_for(
     unfinished: dict[str, list[WorkItem]],
     governed: set[str] | None = None,
     boards: dict[str, Any] | None = None,
+    item_holds: dict[int, Hold] | None = None,
+    repo_holds: dict[str, Hold] | None = None,
 ) -> tuple[HoldReason | None, str]:
     """The first applicable reason, in ``HoldReason``'s declaration order (R9).
 
@@ -293,6 +313,14 @@ def _hold_for(
     """
     if paused:
         return HoldReason.PAUSED, "dispatch is paused; resume it with `robot-army resume`"
+
+    # Second, and above every capacity reason (issue #117). The author said not this one,
+    # and nothing the queue could do — free a slot, land a pull request, fix the item —
+    # changes that. Reporting anything below would name a fix that cannot work.
+    item_hold = (item_holds or {}).get(item.id)
+    repo_hold = (repo_holds or {}).get(item.repo_key)
+    if item_hold is not None or repo_hold is not None:
+        return HoldReason.HELD, _held_detail(item.repo_key, item_hold, repo_hold)
 
     if not capacity.observable:
         return (
@@ -396,6 +424,35 @@ def _hold_for(
         return HoldReason.PREPARATION_FAILED, residue
 
     return None, ""
+
+
+def _held_detail(
+    repo_key: str, item_hold: Hold | None, repo_hold: Hold | None
+) -> str:
+    """The specifics behind a ``held`` reason (issue #117), for one, the other, or both.
+
+    Naming **both** when both apply is FR-017, and it is not decoration. Collapsing to one
+    reason without saying so produces the specific failure the requirement exists to
+    prevent: the author releases the item hold, expects the item to run, and it does not,
+    with the surface still saying ``held`` and appearing to have ignored the release.
+
+    A hold has no level, no expiry and no note, so *when* and *by which surface* is
+    everything there is to report about each one.
+    """
+    clauses = []
+    if item_hold is not None:
+        clauses.append(
+            f"held since {timefmt.local(item_hold.held_at)} by {item_hold.held_by}"
+        )
+    if repo_hold is not None:
+        clauses.append(
+            f"repository {repo_key} is held since {timefmt.local(repo_hold.held_at)} "
+            f"by {repo_hold.held_by}"
+        )
+    detail = "; ".join(clauses)
+    if item_hold is not None and repo_hold is not None:
+        detail += " — releasing one leaves the other in force"
+    return detail
 
 
 def repo_capacity(

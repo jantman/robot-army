@@ -1440,6 +1440,38 @@ def test_a_url_naming_project_zero_is_refused(repo_clone, layout, tmp_path, url)
     assert any("project must be" in p for p in caught.value.problems)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/users/jantman/projects/3",
+        "https://github.com/users/jantman/projects/3/",
+        "https://github.com/users/jantman/projects/3/views/1",
+        "https://github.com/users/jantman/projects/3/views/1?pane=issue&itemId=99",
+    ],
+)
+def test_the_shapes_a_browser_address_bar_actually_produces_are_accepted(url):
+    from robot_army.config import parse_project_reference
+
+    assert parse_project_reference(url).number == 3
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/users/jantman/projects/3/nonsense",
+        "https://github.com/users/jantman/projects/3/views/x",
+        "https://github.com/users/jantman/projects/3extra",
+    ],
+)
+def test_a_trailing_path_that_is_not_a_view_is_refused(url):
+    """Found in review. The pattern used to accept any trailing path, which is broader
+    than the comment above it claimed and let a typo load cleanly and fail at the first
+    poll instead of at the moment it was written."""
+    from robot_army.config import parse_project_reference
+
+    assert parse_project_reference(url) is None
+
+
 def test_an_orgs_url_records_its_owner_type(repo_clone, layout, tmp_path):
     from robot_army.config import parse_project_reference
 

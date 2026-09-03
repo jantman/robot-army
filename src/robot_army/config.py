@@ -365,10 +365,17 @@ def normalise_column(name: str) -> str:
 
 
 #: ``github.com/users/<login>/projects/<n>`` and its ``orgs`` counterpart. Anchored at the
-#: host so a bare path cannot match, and tolerant of a trailing view segment because that
-#: is what the browser address bar actually contains when the author copies it.
+#: host so a bare path cannot match.
+#:
+#: What follows the number is tolerated **specifically**, not generally: an optional
+#: ``/views/<n>`` and an optional query or fragment, because that is what the browser
+#: address bar actually holds when the author copies a board. It used to accept any
+#: trailing path at all, which is broader than the sentence above it claimed and let a
+#: typo — ``/projects/3/nonsense`` — load cleanly and fail at the first poll instead of at
+#: the moment it was written.
 _PROJECT_URL_RE = re.compile(
-    r"^https?://(?:www\.)?github\.com/(users|orgs)/([^/]+)/projects/(\d+)(?:/.*)?$"
+    r"^https?://(?:www\.)?github\.com/(users|orgs)/([^/]+)/projects/(\d+)"
+    r"(?:/views/\d+)?/?(?:[?#].*)?$"
 )
 
 

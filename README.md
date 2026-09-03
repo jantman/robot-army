@@ -36,11 +36,33 @@ uv run pytest                  # the suite must pass
 
 mkdir -p ~/.config/robot-army
 $EDITOR ~/.config/robot-army/config.toml     # see specs/001-minimum-daemon/contracts/config.md
-export ROBOT_ARMY_GITHUB_TOKEN=ghp_...       # or a mode-0600 token_file
+export ROBOT_ARMY_GITHUB_TOKEN=ghp_...       # a CLASSIC PAT; see below
 
 uv run robot-army doctor       # run this first, every time
 uv run robot-army onboard jantman/some-repo
 uv run robot-army run
+```
+
+### The token has to be a classic one
+
+**Use a classic personal access token with `repo` and `read:project`.** Not a fine-grained
+token, and this is not a preference.
+
+GitHub has an *organisation*-level Projects permission for fine-grained tokens and **no
+account-level one**. A user-owned board — anything at `github.com/users/<you>/projects/N`,
+which is what you get by clicking "New project" on your own account — therefore cannot be
+read by a fine-grained token however it is configured. There is no setting that fixes it;
+the permission does not exist. See [community
+#156512](https://github.com/orgs/community/discussions/156512).
+
+Without `read:project` everything still works except [board
+ordering](#ordering-work-from-a-project-board), which is skipped with the reason recorded.
+`doctor` tells you which kind of token you are holding and what it is missing, so this is
+one line of output rather than an afternoon:
+
+```
+[ok]   project: demo token             classic token can read projects
+[FAIL] project: demo token             this looks like a fine-grained token or GitHub App …
 ```
 
 ### Adding a repository
@@ -478,11 +500,13 @@ max_concurrent_sessions = 2         # the whole machine, mine included
 order = "oldest-first"              # or "repo-priority"
 default_repo_max_sessions = 1       # per repository, unless overridden below
 wait_for_merge = false              # globally; see "Working a repository serially" below
+project_ordering = true             # globally; see "Ordering work from a project board"
 
 [repos."jantman/example"]           # an override, not a registration — see above
 max_sessions = 2                    # optional; overrides the default above
 priority = 10                       # optional; higher runs first under repo-priority
 wait_for_merge = true               # optional; overrides the default above
+project_ordering = false            # optional; overrides [dispatch] project_ordering
 ```
 
 ```bash
@@ -564,6 +588,65 @@ either way.
 ```bash
 uv run robot-army log --json | grep git.fast_forward   # outcome, reason, and the shas
 ```
+
+## Ordering work from a project board
+
+If a GitHub project is linked to a repository, **it decides the order that repository's
+issues run in** — the card at the top of the ready column goes first. Drag a card, and the
+next poll follows. Nothing to configure: one linked project with an obvious ready column
+is found and used.
+
+```bash
+uv run robot-army status       # which board governs each repository, and why not
+uv run robot-army doctor       # the token, the project, the column, the freshness
+```
+
+**A card parked in another column is held.** Moving an issue to `Backlog` is you saying
+"not yet", and it stops dispatching until you move it back — with the reason on screen
+naming the column it is in:
+
+```
+demo: #48 is in 'Backlog', not the dispatch column 'Ready' — move it there, or set
+project_ordering = false for this repository
+```
+
+**A labelled issue that is not on the board at all still runs.** That is not an
+oversight — an issue nobody put on the board is no signal either way, so it dispatches
+after everything the board actually ranked. The board says what to do *first*, not what is
+allowed.
+
+Six things worth knowing:
+
+- **The label is still the gate.** Being in the ready column is not enough, and the author
+  check is untouched. The board narrows and orders; it never admits.
+- **Only within a repository.** Board order never changes how repositories interleave —
+  `order` and `priority` keep doing exactly what they did. The set of queue positions a
+  repository holds is unchanged; only which of its issues sits at each one moves.
+- **`Ready` or `Todo`, found automatically.** GitHub's Kanban template offers `Ready` and
+  the simpler board offers `Todo`, so most boards need no configuration. A board with both,
+  or with neither, is reported rather than guessed at — set `project_column`.
+- **Two linked projects is an error, not a coin flip.** `status` names both and the
+  repository keeps dispatching in its configured order until you set `project`.
+- **A board that cannot be read never stalls anything.** The order from the last
+  successful read stays in force and the queue says how old it is. If no board was ever
+  read, nothing is held and nothing is reordered — an unread board grants no authority.
+- **A view with its own sort is a trap, and `doctor` watches for it.** GitHub exposes one
+  manual ordering per project and no per-view order, so a view sorted by `Priority` shows
+  you an order this cannot reproduce. The check fires only when that sort field actually
+  has values on cards in your dispatch column — the condition under which what you see and
+  what runs can genuinely differ.
+
+To name a board that is not linked, or override the column:
+
+```toml
+[repos."jantman/example"]
+project = "https://github.com/users/jantman/projects/3"   # or just: 3
+project_column = "Ready"
+project_ordering = false                                  # or turn it off entirely
+```
+
+Turning it off restores the previous behaviour exactly: no board is contacted for that
+repository, nothing is held, and the order is whatever `[dispatch] order` says.
 
 ## What it writes on the issue
 

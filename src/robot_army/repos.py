@@ -571,6 +571,13 @@ def resolve(conn: sqlite3.Connection, config: Config, key: str) -> RepoConfig | 
             max_sessions=section.max_sessions,
             priority=section.priority,
             wait_for_merge=section.wait_for_merge,
+            # All three carried rather than dropped (issue #48). ``project_ordering`` is
+            # tri-state and ``None`` here means *inherit*, which is what a repository with
+            # no opinion should get; dropping it would silently pin every repository to the
+            # global value and make the per-repository override do nothing.
+            project_ordering=section.project_ordering,
+            project=section.project,
+            project_column=section.project_column,
             speckit=section.speckit,
         )
     return RepoConfig(

@@ -134,6 +134,20 @@ class RepoConfig:
     #: Zero by default, which makes that mode degrade to oldest-first — the harmless
     #: reading of an unconfigured repository.
     priority: int = 0
+    #: Whether this repository's dispatch order comes from its GitHub project board
+    #: (issue #48). ``None`` inherits ``[dispatch] project_ordering``, kept unresolved so a
+    #: surface can say whether the author chose it. Setting it ``False`` is the escape
+    #: hatch for the one behaviour here that changes by default: a repository with a
+    #: linked project starts ordering by it, and starts holding cards parked elsewhere.
+    project_ordering: bool | None = None
+    #: Which project governs this repository, when discovery should not decide. A number,
+    #: or a ``github.com/{users,orgs}/…/projects/N`` URL — the URL form exists because
+    #: discovery reads only *linked* projects, so an unlinked board can be named no other
+    #: way. ``None`` means discover it.
+    project: str | None = None
+    #: The board column to dispatch from. ``None`` means recognise it — see
+    #: :data:`RECOGNISED_DISPATCH_COLUMNS`.
+    project_column: str | None = None
     #: Whether this repository waits for its previous issue to land before starting the
     #: next one. ``None`` inherits ``[dispatch] wait_for_merge``, and the distinction is
     #: kept rather than resolved at parse time for the reason ``max_sessions`` keeps its
@@ -332,6 +346,86 @@ class HooksConfig:
 #: an enum would add a translation in each direction and remove nothing.
 VALID_ORDER_MODES: tuple[str, ...] = ("oldest-first", "repo-priority")
 
+#: Column names automatic discovery will accept as *the* dispatch column (issue #48).
+#:
+#: Compared after lowercasing and collapsing internal whitespace, so ``Ready``, ``Todo``
+#: and ``To do`` all match. GitHub's Kanban template offers exactly one of these
+#: (``Ready``) and the simpler board template exactly one (``Todo``), which is what makes
+#: the common case configuration-free.
+#:
+#: A board offering **two or more** of them, or none, is ambiguous and is reported rather
+#: than guessed at (FR-018): picking one would be choosing the author's workflow for them
+#: in a way they would only discover by watching the wrong issue start.
+RECOGNISED_DISPATCH_COLUMNS: tuple[str, ...] = ("ready", "todo", "to do")
+
+
+def normalise_column(name: str) -> str:
+    """Fold a column name for comparison. Case- and whitespace-insensitive."""
+    return " ".join(name.split()).casefold()
+
+
+#: ``github.com/users/<login>/projects/<n>`` and its ``orgs`` counterpart. Anchored at the
+#: host so a bare path cannot match.
+#:
+#: What follows the number is tolerated **specifically**, not generally: an optional
+#: ``/views/<n>`` and an optional query or fragment, because that is what the browser
+#: address bar actually holds when the author copies a board. It used to accept any
+#: trailing path at all, which is broader than the sentence above it claimed and let a
+#: typo — ``/projects/3/nonsense`` — load cleanly and fail at the first poll instead of at
+#: the moment it was written.
+_PROJECT_URL_RE = re.compile(
+    r"^https?://(?:www\.)?github\.com/(users|orgs)/([^/]+)/projects/(\d+)"
+    r"(?:/views/\d+)?/?(?:[?#].*)?$"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRef:
+    """A configured project, resolved as far as text alone allows.
+
+    ``owner_type`` and ``login`` are ``None`` for a bare number, which means *this
+    repository's owner*. They are populated from a URL, which is the only form that can
+    name a project the repository is not linked to — and an unlinked project is exactly
+    what discovery cannot see, so the URL form is not a convenience.
+    """
+
+    number: int
+    owner_type: str | None = None
+    login: str | None = None
+
+
+def parse_project_reference(value: object) -> ProjectRef | None:
+    """A configured ``project`` value as a reference, or ``None`` if it is neither form.
+
+    Accepts an integer, a string of digits, or a project URL. Returns ``None`` rather than
+    raising so the caller decides whether a bad value is a config problem or a runtime
+    one — the loader treats it as a problem, and nothing else parses these.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return ProjectRef(number=value) if value > 0 else None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.isdigit():
+        number = int(text)
+        return ProjectRef(number=number) if number > 0 else None
+    match = _PROJECT_URL_RE.match(text)
+    if match is None:
+        return None
+    number = int(match.group(3))
+    # The same positivity rule the two numeric forms above apply. ``\d+`` happily matches
+    # ``0``, and without this a ``/projects/0`` URL loaded cleanly and then failed at the
+    # first poll with "was not found" — pushing a typo the loader could have caught into a
+    # runtime failure the author sees a minute later, in a different place.
+    if number <= 0:
+        return None
+    return ProjectRef(
+        number=number, owner_type=match.group(1), login=match.group(2)
+    )
+
+
 
 @dataclass(frozen=True, slots=True)
 class DispatchConfig:
@@ -355,6 +449,13 @@ class DispatchConfig:
     order: str = "oldest-first"
     default_repo_max_sessions: int = 1
     wait_for_merge: bool = False
+    #: Whether a cleanly resolvable project board governs dispatch order (issue #48).
+    #: ``True`` because FR-019 requires a board that resolves without ambiguity to take
+    #: effect without being switched on — discovery being automatic is what the issue
+    #: asked for. This is the one default in this file that changes behaviour on upgrade,
+    #: which is why ``[repos.*] project_ordering`` exists and why `status` reports the
+    #: state rather than leaving it to be noticed.
+    project_ordering: bool = True
 
 
 #: The four things worth saying out loud (contracts/notifications.md). A closed set: an
@@ -564,6 +665,24 @@ class Config:
                 )
         return tuple(resolved)
 
+    def effective_project_ordering(self, key: str) -> tuple[bool, bool]:
+        """Whether this repository's order comes from its board, and who said so.
+
+        Returns ``(value, explicit)``, shaped exactly like :meth:`effective_wait_for_merge`
+        and for the same second-element reason: a surface reporting that a board governs
+        should be able to tell the author whether they chose that or inherited it, which
+        is the difference between a setting they can find and one they cannot.
+
+        Note what this does **not** answer. It says whether the author permits board
+        ordering, not whether a board was found or has ever been read — those live in
+        ``repo_projects`` and are the FR-014 gate. All three must hold before anything is
+        ordered or held.
+        """
+        repo = self.repos.get(key)
+        if repo is not None and repo.project_ordering is not None:
+            return repo.project_ordering, True
+        return self.dispatch.project_ordering, False
+
     def effective_repo_cap(self, key: str) -> tuple[int, bool]:
         """How many sessions this repository may run, and whether the author said so.
 
@@ -661,7 +780,12 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "web": {"bind", "port", "refresh_seconds"},
     # Unknown keys here are an **error** too — see _STRICT_KEY_SECTIONS. An ordering the
     # author thought they configured and did not is the failure this prevents.
-    "dispatch": {"order", "default_repo_max_sessions", "wait_for_merge"},
+    "dispatch": {
+        "order",
+        "default_repo_max_sessions",
+        "wait_for_merge",
+        "project_ordering",
+    },
     "cleanup": {"on_issue_close"},
     "notifications": {"events", "max_per_cycle"},
     "speckit": {"enabled", "commands"},
@@ -700,6 +824,9 @@ _REPO_KEYS = {
     "max_sessions",
     "priority",
     "wait_for_merge",
+    "project_ordering",
+    "project",
+    "project_column",
 }
 _STEP_KEYS = {"run", "link", "copy", "timeout"}
 
@@ -974,10 +1101,17 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             f"[dispatch] wait_for_merge must be true or false, got {wait_for_merge!r}"
         )
         wait_for_merge = False
+    project_ordering = dispatch_raw.get("project_ordering", True)
+    if not isinstance(project_ordering, bool):
+        problems.append(
+            f"[dispatch] project_ordering must be true or false, got {project_ordering!r}"
+        )
+        project_ordering = True
     dispatch = DispatchConfig(
         order=order,
         default_repo_max_sessions=_int("dispatch", "default_repo_max_sessions", 1, minimum=1),
         wait_for_merge=wait_for_merge,
+        project_ordering=project_ordering,
     )
 
     # -- [cleanup] ---------------------------------------------------------
@@ -1162,6 +1296,45 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             )
             repo_wait_for_merge = None
 
+        repo_project_ordering = section.get("project_ordering")
+        if repo_project_ordering is not None and not isinstance(
+            repo_project_ordering, bool
+        ):
+            # ``None`` rather than ``False`` on the failure path, for the reason stated
+            # three lines up: inheriting does not silently pick a side in a config the
+            # loader is about to refuse anyway.
+            problems.append(
+                f"[repos.{key}] project_ordering must be true or false, "
+                f"got {repo_project_ordering!r}"
+            )
+            repo_project_ordering = None
+
+        repo_project = section.get("project")
+        if repo_project is not None:
+            if parse_project_reference(repo_project) is None:
+                problems.append(
+                    f"[repos.{key}] project must be a project number or a "
+                    f"https://github.com/{{users,orgs}}/…/projects/N URL, "
+                    f"got {repo_project!r}"
+                )
+                repo_project = None
+            else:
+                # Stored as text in both forms. The reference is re-parsed where it is
+                # used rather than stored decomposed, so the value a surface shows the
+                # author is the value they wrote.
+                repo_project = str(repo_project).strip()
+
+        repo_project_column = section.get("project_column")
+        if repo_project_column is not None:
+            if not isinstance(repo_project_column, str) or not repo_project_column.strip():
+                problems.append(
+                    f"[repos.{key}] project_column must be a non-empty string, "
+                    f"got {repo_project_column!r}"
+                )
+                repo_project_column = None
+            else:
+                repo_project_column = repo_project_column.strip()
+
         repo_speckit = section.get("speckit")
         if repo_speckit is not None and not isinstance(repo_speckit, bool):
             problems.append(
@@ -1192,6 +1365,9 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             max_sessions=max_sessions,
             priority=priority,
             wait_for_merge=repo_wait_for_merge,
+            project_ordering=repo_project_ordering,
+            project=repo_project,
+            project_column=repo_project_column,
             speckit=repo_speckit,
             speckit_commands=repo_speckit_commands,
         )

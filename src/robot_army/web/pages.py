@@ -802,12 +802,49 @@ def queue_view(
             )
         )
 
+    # Issue #48. A repository whose last board read failed is still dispatching, in the
+    # order the previous read produced — which is right (FR-025), and which the author
+    # must be able to see, because an order silently frozen days ago is indistinguishable
+    # from a current one.
+    project_rows = operations._project_rows(ctx, plan)
+    # `governs`, not merely `consecutive_failures`. A repository whose board ordering is
+    # switched off is not using any stored snapshot, so "the order shown is the one last
+    # read successfully" would be describing a snapshot nothing is reading — the same
+    # storage-versus-effect confusion the fallback record carried, in a second place.
+    stale = [
+        row for row in project_rows if row["governs"] and row["consecutive_failures"]
+    ]
+    board_note: list[Any] = []
+    for row in stale:
+        age = row["last_read_age_seconds"]
+        last_read = f"{age}s ago" if age is not None else "never"
+        board_note.append(
+            div(
+                f"{row['repo_key']}: the project board could not be read "
+                f"({row['last_error']}). The order shown is the one last read "
+                f"successfully, {last_read}.",
+                class_="banner error",
+            )
+        )
+    # FR-030: a repository whose whole backlog is parked has ready items and dispatches
+    # none of them, which without this count reads exactly like having no work.
+    #
+    # Counted from the rows this page is **showing**, not from the plan. The plan includes
+    # simulated rows because they occupy slots; `_visible` then withholds them unless the
+    # viewer asked. Counting the plan would let the heading say "3 held off-column" above a
+    # table showing none of them — milestone 008's rule, that a view may not make claims
+    # about rows it has just declined to render, applied to a number rather than to a
+    # listing. The withheld rows are still accounted for, by `withheld_ready`.
+    off_column = sum(1 for row in ready if row.get("hold") == "off_column")
+    parked_note = f" · {off_column} held off-column" if off_column else ""
+
     body = join(
         [
             h(1, "queue"),
             *pause_note,
+            *board_note,
             dispatch_controls(current, include_simulated=include_simulated),
-            h(2, f"ready ({len(ready)}) — in dispatch order"),
+            h(2, f"ready ({len(ready)}) — in dispatch order{parked_note}"),
             _nothing(
                 "Nothing is ready.",
                 withheld_ready,
@@ -914,6 +951,14 @@ def queue_view(
             },
             "dispatching_max_age_seconds": max_age,
             "capacity": operations._capacity_dict(snap, ctx.config.dispatch.order),
+            # The same facts the banner and the heading render, so `?json` and the page
+            # never disagree about why the queue looks the way it does. `held_off_column`
+            # counts the rendered rows; `projects[].held_off_column` counts the whole plan,
+            # because that one is a fact about a repository's board rather than about this
+            # page's filter. They differ only when simulated rows are being withheld, and
+            # `withheld_simulated` is what explains the difference.
+            "projects": project_rows,
+            "held_off_column": off_column,
             "withheld_simulated": withheld,
         },
         body=body,

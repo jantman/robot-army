@@ -56,10 +56,18 @@ class HoldReason(StrEnum):
       a pull request when what is actually missing is a session slot points at the wrong
       fix. In practice the two hand over rather than overlap — the cap holds while the
       session runs, and this takes over the moment it exits.
-    * ``not_onboarded`` and ``preparation_failed`` come last because they are conditions of
-      the item rather than of the queue — they would hold it on an empty machine too.
-      ``awaiting_merge`` sits above them because it is a condition of the *queue*: an empty
-      machine does not clear it.
+    * ``not_onboarded``, ``off_column`` and ``preparation_failed`` come last because they
+      are conditions of the item rather than of the queue — they would hold it on an empty
+      machine too. ``awaiting_merge`` sits above them because it is a condition of the
+      *queue*: an empty machine does not clear it.
+    * ``off_column`` sits **below** ``not_onboarded`` and **above** ``preparation_failed``
+      (issue #48, research R11). Below the first because a repository that no longer
+      resolves to a clone is broken in a way that blocks all of its work, and telling the
+      author to move a card while the clone is missing points at the wrong fix. Above the
+      second because both are conditions of the item, but parking a card is a deliberate
+      and more recent statement by the author than residue from an attempt they have since
+      stepped back from — "you parked this" is the current truth, the stale failure is
+      history.
     """
 
     PAUSED = "paused"
@@ -68,6 +76,7 @@ class HoldReason(StrEnum):
     REPO_CAP = "repo_cap"
     AWAITING_MERGE = "awaiting_merge"
     NOT_ONBOARDED = "not_onboarded"
+    OFF_COLUMN = "off_column"
     PREPARATION_FAILED = "preparation_failed"
 
 
@@ -138,6 +147,46 @@ def unfinished_by_repo(conn: sqlite3.Connection) -> dict[str, list[WorkItem]]:
     return grouped
 
 
+def board_key(item: WorkItem) -> tuple[Any, ...]:
+    """The within-repository sort key for one item under board ordering (issue #48).
+
+    Two groups, and the split is FR-008. Items the board ranked come first, in board
+    order. Items the board does not mention follow, in the order they would have had
+    anyway — an issue absent from the board is no signal either way, so it dispatches,
+    after everything the board actually ranked.
+
+    Both branches end in ``item.id``, which makes the key **total**. That is what stops
+    two renders of unchanged state producing two different lists, and it matters more here
+    than for ``order_key`` because ``board_position`` is dense but not unique across the
+    two groups.
+    """
+    if item.board_position is not None:
+        return (0, item.board_position, item.id)
+    return (1, item.discovered_at, item.id)
+
+
+def _apply_board_order(
+    items: list[WorkItem], governed: set[str]
+) -> None:
+    """Reorder each governed repository's items **within the slots it already holds**.
+
+    This is FR-002, and it is why board ordering is not a new sort key. A key mixing board
+    rank with ``discovered_at`` would interleave repositories differently and silently
+    change what ``repo-priority`` means. Instead the configured mode decides which
+    positions belong to which repository, exactly as it does today, and only the
+    assignment of a repository's own items to its own positions changes.
+
+    Mutates in place, and is a pure function of its arguments — no I/O, nothing stored.
+    """
+    for repo_key in governed:
+        slots = [index for index, item in enumerate(items) if item.repo_key == repo_key]
+        if len(slots) < 2:
+            continue
+        ordered = sorted((items[index] for index in slots), key=board_key)
+        for index, item in zip(slots, ordered, strict=True):
+            items[index] = item
+
+
 def plan(
     conn: sqlite3.Connection,
     *,
@@ -163,10 +212,23 @@ def plan(
     # setting on, because deciding *that* would itself mean walking every repository's
     # configuration, and this is one scan of a table `plan` is already reading.
     unfinished = unfinished_by_repo(conn)
+    # One scan for the whole plan, same reasoning again (issue #48). A repository is
+    # *governed* only when the author permits board ordering, a project resolved, and a
+    # board has actually been read — all three, which is the FR-014 gate: with no board
+    # knowledge nothing is reordered and nothing is held.
+    boards = db.list_repo_projects(conn)
+    governed = {
+        key
+        for key, board in boards.items()
+        if board.governs and config.effective_project_ordering(key)[0]
+    }
     items = sorted(
         db.list_work_items(conn, include_simulated=True, states=[WorkItemState.READY]),
         key=lambda item: order_key(item, resolved.get(item.repo_key), config.dispatch.order),
     )
+    # After the configured mode has decided which positions belong to which repository,
+    # never instead of it (FR-002).
+    _apply_board_order(items, governed)
     control = db.get_dispatch_control(conn)
 
     entries: list[QueueEntry] = []
@@ -178,6 +240,8 @@ def plan(
             paused=control.paused,
             resolved=resolved,
             unfinished=unfinished,
+            governed=governed,
+            boards=boards,
         )
         entries.append(
             QueueEntry(item=item, position=position, hold=hold, detail=detail)
@@ -219,6 +283,8 @@ def _hold_for(
     paused: bool,
     resolved: dict[str, RepoConfig],
     unfinished: dict[str, list[WorkItem]],
+    governed: set[str] | None = None,
+    boards: dict[str, Any] | None = None,
 ) -> tuple[HoldReason | None, str]:
     """The first applicable reason, in ``HoldReason``'s declaration order (R9).
 
@@ -303,6 +369,25 @@ def _hold_for(
             f"repository {item.repo_key!r} does not resolve to a clone — run "
             f"`robot-army onboard {item.repo_key} --reapprove`, or abandon the item",
         )
+
+    # The board gate (issue #48, FR-012). Three conditions, and all three are load-bearing:
+    # the author permits board ordering for this repository, a board has actually been read
+    # for it, and this item sits on that board somewhere other than the dispatch column.
+    #
+    # ``board_column is None`` is deliberately **not** held. It means the board was read
+    # and does not mention this item at all, which is no signal either way — so it
+    # dispatches, ordered after everything the board ranked (FR-008). Holding it would
+    # invent an instruction the author never gave.
+    if governed and item.repo_key in governed and item.board_column is not None:
+        board = (boards or {}).get(item.repo_key)
+        column = getattr(board, "column_name", None)
+        if column is not None and item.board_column != column:
+            return (
+                HoldReason.OFF_COLUMN,
+                f"repository {item.repo_key}: #{item.issue_number} is in "
+                f"{item.board_column!r}, not the dispatch column {column!r} — move it "
+                f"there, or set project_ordering = false for this repository",
+            )
 
     # Last, because it is not a queueing condition at all: it would hold this item on a
     # completely empty machine, and no amount of freeing capacity changes it.

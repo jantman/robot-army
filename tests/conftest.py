@@ -258,6 +258,18 @@ class FakeIssueReader:
         self.closed_calls: list[tuple[str, int]] = []
         self.pr_calls: list[tuple[str, str]] = []
         self.raise_on_poll: Exception | None = None
+        # Project board answers (issue #48). ``None`` on either means the test has said
+        # nothing about boards, and the reader behaves like a repository with none.
+        self.resolution: Any = None
+        self.board: Any = None
+        self.resolve_calls: list[tuple[str, str | None, str | None]] = []
+        self.board_calls: list[tuple[str, str, str]] = []
+        self.raise_on_resolve: Exception | None = None
+        self.raise_on_board: Exception | None = None
+        self.access: Any = None
+        self.access_calls: list[bool] = []
+        self.view_conflicts: list[str] = []
+        self.view_sort_calls: list[tuple[str, str, str]] = []
         self.raise_on_remote: Exception | None = None
         self.listing_calls: list[tuple[str, str, str | None]] = []
         self.created: dict[int, str] = {}
@@ -326,6 +338,60 @@ class FakeIssueReader:
             name=name,
             default_branch="main",
         )
+
+
+    def resolve_project(
+        self, repo_key: str, *, project: str | None, column: str | None
+    ) -> Any:
+        """Issue #48's resolution, as the test decided it.
+
+        Defaults to *no project is linked*, which is the state of every repository in
+        every test that has never heard of boards — so the ordering those tests assert on
+        stays exactly what it was.
+        """
+        from robot_army.boundaries import ProjectResolution
+
+        self.resolve_calls.append((repo_key, project, column))
+        if self.raise_on_resolve is not None:
+            raise self.raise_on_resolve
+        if self.resolution is not None:
+            return self.resolution
+        # `absent=True` mirrors the real reader: a repository with no board is a third
+        # state, not a failure, and a fake that reported it as one would let the product
+        # treat the ordinary case as an error without any test noticing.
+        return ProjectResolution(
+            absent=True, reason=f"no project is linked to {repo_key}"
+        )
+
+    def project_access(self) -> Any:
+        from robot_army.boundaries import ProjectAccess
+
+        self.access_calls.append(True)
+        if self.access is not None:
+            return self.access
+        return ProjectAccess(
+            ok=True, credential_kind="classic", scopes=("read:project",),
+            detail="classic token can read projects",
+        )
+
+    def view_sort_conflicts(
+        self, repo_key: str, *, project_id: str, column_name: str
+    ) -> tuple[str, ...]:
+        self.view_sort_calls.append((repo_key, project_id, column_name))
+        return tuple(self.view_conflicts)
+
+    def read_board(self, repo_key: str, *, project_id: str, column_name: str) -> Any:
+        """Issue #48's board snapshot. Raises when the test has set no board, because a
+        reader that returned an empty one would be the exact silent failure the real
+        implementation refuses to produce."""
+        from robot_army.boundaries import TransportError
+
+        self.board_calls.append((repo_key, project_id, column_name))
+        if self.raise_on_board is not None:
+            raise self.raise_on_board
+        if self.board is None:
+            raise TransportError(f"no board configured in this fake for {repo_key}")
+        return self.board
 
 
 class RecordingWriter:

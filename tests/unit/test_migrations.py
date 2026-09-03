@@ -19,6 +19,7 @@ EXPECTED_TABLES = {
     "poll_state",
     "dispatch_control",
     "cards",
+    "repo_projects",
 }
 
 
@@ -507,7 +508,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 8
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 9
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -900,7 +901,6 @@ def test_migration_008_runs_on_a_007_era_database(tmp_path):
     start, end = migrate(conn)
 
     assert (start, end) == (7, SCHEMA_VERSION)
-    assert SCHEMA_VERSION == 8
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
     assert "transcript_checked_at" in columns
     conn.close()
@@ -979,4 +979,103 @@ def test_a_killed_migration_008_leaves_user_version_at_seven_and_re_runs(tmp_pat
     assert (start, end) == (7, SCHEMA_VERSION)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
     assert "transcript_checked_at" in columns
+    conn.close()
+
+
+# -- migration 009 (issue #48, T003) ----------------------------------------
+
+
+def _run_only_008(conn: sqlite3.Connection) -> None:
+    """Bring a database to exactly the 008-era schema, as one in the field would be."""
+    conn.execute("BEGIN")
+    for step in migrations.MIGRATIONS[:8]:
+        step(conn)
+    conn.execute("PRAGMA user_version = 8")
+    conn.commit()
+
+
+def test_migration_009_runs_on_an_008_era_database(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_008(conn)
+    assert current_version(conn) == 8
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (8, SCHEMA_VERSION)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
+    assert {"board_column", "board_position"} <= columns
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    assert "repo_projects" in tables
+    conn.close()
+
+
+def test_migration_009_backfills_nothing(tmp_path):
+    """The absence of a backfill is the design, not an omission.
+
+    Every pre-009 row means *no board knowledge*, which is exactly what NULL says. An
+    upgrade that wrote board facts would be changing dispatch order from information it
+    does not have, and would do it before anyone had a chance to look.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_008(conn)
+    conn.execute(
+        "INSERT INTO repos (repo_key, onboarded_at, fingerprint_approved_at) "
+        "VALUES ('jantman/demo', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO work_items (source, source_id, source_url, repo_key, issue_number, "
+        "title, body, labels, state, dry_run, discovered_at, updated_at) "
+        "VALUES ('github', 'jantman/demo#1', 'u', 'jantman/demo', 1, 't', 'b', '[]', "
+        "?, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        (str(WorkItemState.READY),),
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    row = conn.execute(
+        "SELECT board_column, board_position FROM work_items WHERE issue_number = 1"
+    ).fetchone()
+    assert row["board_column"] is None
+    assert row["board_position"] is None
+    assert conn.execute("SELECT COUNT(*) FROM repo_projects").fetchone()[0] == 0
+    conn.close()
+
+
+def test_migration_009_is_idempotent(tmp_path):
+    """A second `migrate` applies nothing. `ALTER TABLE ADD COLUMN` is not idempotent on
+    its own, so this is the assertion that the ladder guard actually holds."""
+    conn = db.connect(tmp_path / "state.db")
+    migrate(conn)
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (SCHEMA_VERSION, SCHEMA_VERSION)
+    conn.close()
+
+
+def test_an_interrupted_009_leaves_the_version_unadvanced(tmp_path, monkeypatch):
+    """Killed mid-migration, nothing is half-applied and the whole step re-runs.
+
+    The transaction is what makes this true, and it is worth pinning rather than
+    assuming: a crash that advanced `user_version` past a partly built schema would be
+    unrecoverable without hand-editing the database.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_008(conn)
+
+    def _boom(_conn):
+        _conn.execute("ALTER TABLE work_items ADD COLUMN board_column TEXT")
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:8], _boom))
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+
+    assert current_version(conn) == 8
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
+    assert "board_column" not in columns
     conn.close()

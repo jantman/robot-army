@@ -364,6 +364,70 @@ UPDATE sessions SET transcript_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'
     WHERE transcript_checked_at IS NULL;
 """
 
+SCHEMA_009_SQL = """
+-- Where the board puts this item, as the last successful board read saw it (issue #48).
+--
+-- Two columns rather than one, and the pair must stay a pair, because four states have to
+-- remain distinguishable and collapsing any two of them is a real bug (research R9):
+--
+--   board_column NULL, repo never read   ->  no board knowledge. Nothing is gated and the
+--                                            repository orders exactly as it always did.
+--   board_column NULL, repo HAS been read ->  read, and this item is not on the board:
+--                                            dispatchable, ordered after everything the
+--                                            board ranked (FR-008).
+--   board_column = the dispatch column   ->  board_position is its rank, 1-based.
+--   board_column = anything else         ->  parked by the author. Held (FR-012), with
+--                                            board_position NULL.
+--
+-- The distinction between the first two lives in repo_projects.last_read_at rather than
+-- here, so "never read" is one fact about a repository instead of a fact repeated on
+-- every one of its rows.
+--
+-- board_position is NULL for every item outside the dispatch column and must NEVER be
+-- written as 0 to mean "unknown". boundaries/__init__.py records what that mistake cost
+-- the last time it was made -- commits_ahead folding "could not determine" into 0 -- and
+-- here it would silently promote every item of an unread board to the head of its queue.
+ALTER TABLE work_items ADD COLUMN board_column   TEXT;
+ALTER TABLE work_items ADD COLUMN board_position INTEGER;
+
+-- Which project governs a repository, how that was decided, and how the last read went.
+--
+-- A table rather than columns on `repos`, because `repos` is an *approval* record:
+-- migration 005 is emphatic that it stores what a human approved at a verified location
+-- and that nothing re-derives after approval. This is the opposite -- discovered,
+-- self-refreshing, and carrying its own failure state -- so putting it there would blur
+-- the one record whose value is that it does not change on its own.
+--
+-- Not `poll_state` either. That table's columns are fixed (etag, last_status, backoff)
+-- with nowhere to put a project id, a column name, or which of the two the author chose.
+--
+-- One row per repository, written by the poll and deleted by nothing. A repository whose
+-- project is later unlinked keeps its row with resolved_at NULL and unresolved_reason
+-- set, which is what lets `status` say *why* a board stopped governing rather than simply
+-- going quiet.
+--
+-- last_read_at is the FR-014 gate. It records the last SUCCESSFUL read, never the last
+-- attempt, so a failed read leaves the previous snapshot in force and visibly stale
+-- rather than discarded. While it is NULL no item is ever held for its column, because
+-- inventing a hold out of ignorance is worse than dispatching.
+CREATE TABLE repo_projects (
+    repo_key             TEXT PRIMARY KEY REFERENCES repos(repo_key),
+    project_id           TEXT,
+    project_number       INTEGER,
+    project_title        TEXT,
+    project_url          TEXT,
+    project_source       TEXT,
+    column_name          TEXT,
+    column_source        TEXT,
+    resolved_at          TEXT,
+    unresolved_reason    TEXT,
+    last_read_at         TEXT,
+    last_error           TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    backoff_until        TEXT
+);
+"""
+
 
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
@@ -405,6 +469,11 @@ def _migration_008(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_009(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_009_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -415,6 +484,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_006,
     _migration_007,
     _migration_008,
+    _migration_009,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

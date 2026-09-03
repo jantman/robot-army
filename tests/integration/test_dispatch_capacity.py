@@ -924,3 +924,71 @@ def test_reconciliation_frees_a_slot_leaked_before_the_fix_existed(
 
     assert run_two(conn, audit, config, layout, tmp_path, machine) == 1
     assert db.get_work_item(conn, waiting).state is WorkItemState.ACTIVE
+
+
+# -- board order reaches the dispatcher (issue #48, T025) --------------------
+
+
+def _govern(conn, repo_key="demo"):
+    from robot_army.models import RepoProject
+
+    with db.transaction(conn):
+        db.save_repo_project(
+            conn,
+            RepoProject(
+                repo_key=repo_key,
+                project_id="PVT_3",
+                project_number=3,
+                project_title="robot-army",
+                column_name="Ready",
+                project_source="discovered",
+                column_source="discovered",
+                resolved_at="2026-09-02T00:00:00Z",
+                last_read_at="2026-09-02T00:00:00Z",
+            ),
+        )
+
+
+def _place(conn, item_id, column, position=None):
+    conn.execute(
+        "UPDATE work_items SET board_column = ?, board_position = ? WHERE id = ?",
+        (column, position, item_id),
+    )
+
+
+def test_the_dispatcher_takes_the_top_card_first(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """The whole feature, end to end: the item the board puts first is the item that runs,
+    even though it was filed second."""
+    config = capped_at(config, 2)
+    first_filed = ready_item(conn, config, issue_number=1)
+    second_filed = ready_item(conn, config, issue_number=2)
+    _govern(conn)
+    _place(conn, second_filed, "Ready", 1)
+    _place(conn, first_filed, "Ready", 2)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 1
+
+    assert db.get_work_item(conn, second_filed).state is WorkItemState.ACTIVE
+    assert db.get_work_item(conn, first_filed).state is WorkItemState.READY
+
+
+def test_a_parked_card_is_never_selected(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """Not merely ordered last — the author said "not yet", and dispatch must honour that
+    even when the machine is otherwise idle and there is nothing else to run."""
+    config = capped_at(config, 2)
+    parked = ready_item(conn, config, issue_number=1)
+    _govern(conn)
+    _place(conn, parked, "Backlog")
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 0
+
+    assert db.get_work_item(conn, parked).state is WorkItemState.READY
+    snap = capacity.snapshot(
+        conn, config=config, registry_dir=machine[0], proc_root=machine[1]
+    )
+    entries = ordering.plan(conn, config=config, capacity=snap)
+    assert entries[0].hold is ordering.HoldReason.OFF_COLUMN

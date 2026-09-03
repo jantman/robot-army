@@ -31,6 +31,7 @@ from robot_army.models import (
     DispatchControl,
     PollState,
     Repo,
+    RepoProject,
     Session,
     WorkItem,
     from_row,
@@ -764,6 +765,139 @@ def save_poll_state(conn: sqlite3.Connection, state: PollState) -> None:
             state.backoff_until,
         ),
     )
+
+
+# -- project boards (issue #48) ---------------------------------------------
+
+
+def get_repo_project(conn: sqlite3.Connection, repo_key: str) -> RepoProject:
+    """This repository's board resolution. Never ``None``.
+
+    A default-constructed row rather than ``None`` when absent, exactly as
+    ``get_poll_state`` does, so no caller has to branch on existence to ask a question
+    every caller asks. The default is *unresolved and never read*, which is the correct
+    reading of a repository nothing has looked at yet.
+    """
+    row = conn.execute(
+        "SELECT * FROM repo_projects WHERE repo_key = ?", (repo_key,)
+    ).fetchone()
+    return from_row(RepoProject, row) if row else RepoProject(repo_key=repo_key)
+
+
+def list_repo_projects(conn: sqlite3.Connection) -> dict[str, RepoProject]:
+    """Every board resolution, keyed by repository.
+
+    Deliberately **not** given an ``include_simulated`` parameter, and the omission is the
+    point rather than an oversight — see the note in ``tests/unit/test_db_scope.py``.
+    ``repo_projects`` has no ``dry_run`` column and holds one row per repository: a
+    simulated run and a live run of the same repository read the same board, because a
+    board read makes no outward change and there is nothing to withhold.
+
+    Returned whole because ``ordering.plan`` needs all of it once per plan rather than one
+    query per queued item — the same reasoning as ``repos.resolved_all``.
+    """
+    return {
+        row["repo_key"]: from_row(RepoProject, row)
+        for row in conn.execute("SELECT * FROM repo_projects")
+    }
+
+
+def save_repo_project(conn: sqlite3.Connection, state: RepoProject) -> None:
+    """Upsert one repository's board resolution.
+
+    Every column is written on every save, including the NULLs. A partial update would
+    let a stale ``project_title`` outlive the project it named, and the row is small
+    enough that writing it whole is cheaper than reasoning about which half is current.
+    """
+    conn.execute(
+        """
+        INSERT INTO repo_projects
+            (repo_key, project_id, project_number, project_title, project_url,
+             project_source, column_name, column_source, resolved_at, unresolved_reason,
+             last_read_at, last_error, consecutive_failures, backoff_until)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(repo_key) DO UPDATE SET
+            project_id           = excluded.project_id,
+            project_number       = excluded.project_number,
+            project_title        = excluded.project_title,
+            project_url          = excluded.project_url,
+            project_source       = excluded.project_source,
+            column_name          = excluded.column_name,
+            column_source        = excluded.column_source,
+            resolved_at          = excluded.resolved_at,
+            unresolved_reason    = excluded.unresolved_reason,
+            last_read_at         = excluded.last_read_at,
+            last_error           = excluded.last_error,
+            consecutive_failures = excluded.consecutive_failures,
+            backoff_until        = excluded.backoff_until
+        """,
+        (
+            state.repo_key,
+            state.project_id,
+            state.project_number,
+            state.project_title,
+            state.project_url,
+            state.project_source,
+            state.column_name,
+            state.column_source,
+            state.resolved_at,
+            state.unresolved_reason,
+            state.last_read_at,
+            state.last_error,
+            state.consecutive_failures,
+            state.backoff_until,
+        ),
+    )
+
+
+def apply_board_facts(
+    conn: sqlite3.Connection,
+    repo_key: str,
+    *,
+    ranked: dict[int, int],
+    elsewhere: dict[int, str],
+    column_name: str,
+) -> int:
+    """Write one board snapshot over a repository's items. Returns rows touched.
+
+    **Clearing is half the job.** Every item of the repository that the snapshot does not
+    mention has its board facts set back to NULL, because a card removed from the board
+    must stop being ranked and must stop being held — and an update that only wrote the
+    items it saw would leave yesterday's answer in place for exactly the items whose
+    answer changed.
+
+    One clearing statement, then one statement per item the snapshot mentions. Not a
+    single `CASE` expression, and the docstring said otherwise until review caught it:
+    the counts here are tens, so the loop costs nothing measurable, and a `CASE` over a
+    dict of issue numbers is harder to read than the thing it replaces. **The atomicity
+    that matters is the caller's transaction, not this function's statement count** — the
+    repository cannot be observed half in one snapshot and half in another because the
+    whole call is inside one `BEGIN IMMEDIATE`. Do not read a per-statement guarantee
+    into this that it does not provide.
+
+    ``dry_run`` is not filtered. A simulated item occupies a queue position like any
+    other, so it is ordered like any other; the board read that produced this made no
+    outward change to withhold.
+    """
+    conn.execute(
+        "UPDATE work_items SET board_column = NULL, board_position = NULL "
+        "WHERE repo_key = ?",
+        (repo_key,),
+    )
+    touched = 0
+    for number, position in ranked.items():
+        touched += conn.execute(
+            "UPDATE work_items SET board_column = ?, board_position = ? "
+            "WHERE repo_key = ? AND issue_number = ?",
+            (column_name, position, repo_key, number),
+        ).rowcount
+    for number, other_column in elsewhere.items():
+        touched += conn.execute(
+            "UPDATE work_items SET board_column = ?, board_position = NULL "
+            "WHERE repo_key = ? AND issue_number = ?",
+            (other_column, repo_key, number),
+        ).rowcount
+    return touched
 
 
 # -- dispatch control (milestone 002) ---------------------------------------

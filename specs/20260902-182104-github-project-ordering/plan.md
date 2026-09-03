@@ -525,6 +525,29 @@ there are none* — applied to a count rather than to a listing, and it is the r
 a fact about a repository's board rather than about this page's filter. The two differ only
 while simulated rows are being withheld, and the comment at the call site says so.
 
+### A fifth round: two bugs in three lines, one of them unnamed
+
+`view_sort_conflicts` selected the dispatch column with a server-side filter built by
+interpolation: `f'status:"{column_name}"'`.
+
+Review named the first bug — a column whose name contains a double quote or a backslash
+produces an invalid filter, failing the check on a board that is otherwise perfectly healthy.
+
+The second was in the same expression and was worse. Delegating the comparison to that filter
+delegated it to **GitHub's** matching, while every other part of this feature compares with
+`normalise_column`. Where the two disagree, `doctor` would have inspected a different set of
+cards than the dispatcher orders — a check quietly answering a question adjacent to the one it
+claims to answer, which is the least useful possible failure for a diagnostic.
+
+Both go away together by dropping the filter and matching client-side with the same function
+everything else uses, paginated with `read_board`'s bound. Exhausting that bound raises rather
+than returning `False`: a truncated walk would report "no conflict" about a board it had not
+finished reading, which is the reassuring kind of wrong.
+
+Worth recording as the fifth instance of the same habit: reaching for the convenient
+representation — a filter string, a stored row, a plan-wide count — instead of the one the
+answer is actually about.
+
 ### One thing not done
 
 **T043's live walk-through is not complete.** The read-only half was run against the real API

@@ -135,16 +135,27 @@ query($pid: ID!) {
 }
 """
 
-#: Whether a given field actually has a value on any card in one column. The server-side
-#: ``query:`` filter keeps this to the column in question rather than the whole board.
+#: Whether a given field actually has a value on any card in one column.
+#:
+#: The column is matched **here**, not by a server-side ``query: 'status:"…"'`` filter, and
+#: that is two fixes in one. The filter had to be built by interpolating the column name
+#: into a quoted string, which a name containing a quote or a backslash would break. And it
+#: delegated the column comparison to GitHub's own matching, while every other part of this
+#: feature compares with :func:`normalise_column` — so a name the two disagreed about would
+#: have had `doctor` inspecting a different set of cards than the dispatcher orders, which
+#: is a check quietly answering about something else.
 _COLUMN_FIELD_VALUES = """
-query($pid: ID!, $filter: String!, $field: String!) {
+query($pid: ID!, $after: String, $field: String!) {
   node(id: $pid) {
     ... on ProjectV2 {
-      items(first: 100, query: $filter) {
+      items(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           type
-          fieldValueByName(name: $field) {
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          sortValue: fieldValueByName(name: $field) {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
             ... on ProjectV2ItemFieldNumberValue { number }
             ... on ProjectV2ItemFieldDateValue { date }
@@ -745,6 +756,8 @@ class GitHubReader:
         warning about it would be noise — and a check that cries wolf is a check the
         author stops reading.
         """
+        from robot_army.config import normalise_column
+
         data = self._graphql(_PROJECT_VIEWS, {"pid": project_id})
         views = ((data.get("node") or {}).get("views") or {}).get("nodes") or []
         wanted: dict[str, list[str]] = {}
@@ -760,27 +773,55 @@ class GitHubReader:
         if not wanted:
             return ()
 
+        wanted_column = normalise_column(column_name)
         conflicts: list[str] = []
         for field_name, view_names in sorted(wanted.items()):
-            values = self._graphql(
-                _COLUMN_FIELD_VALUES,
-                {
-                    "pid": project_id,
-                    "filter": f'status:"{column_name}"',
-                    "field": field_name,
-                },
-            )
-            nodes = ((values.get("node") or {}).get("items") or {}).get("nodes") or []
-            if any(
-                node and node.get("type") == "ISSUE" and node.get("fieldValueByName")
-                for node in nodes
-            ):
+            if self._column_uses_field(project_id, wanted_column, field_name):
                 conflicts.append(
                     f"view {' and '.join(view_names)} sorts by {field_name!r}, and cards "
                     f"in {column_name!r} have that field set — what you see there is not "
                     f"the order dispatched"
                 )
         return tuple(conflicts)
+
+    def _column_uses_field(
+        self, project_id: str, wanted_column: str, field_name: str
+    ) -> bool:
+        """Does any card in this column have a value for ``field_name``?
+
+        Walks the board rather than asking the server to filter it, for the reasons on
+        :data:`_COLUMN_FIELD_VALUES`. Paginated with the same bound as
+        :meth:`read_board`, and exhausting it raises rather than answering ``False``: a
+        truncated read here would report "no conflict" for a board it had not finished
+        looking at, which is the reassuring kind of wrong.
+        """
+        from robot_army.config import normalise_column
+
+        after: str | None = None
+        for page in range(1, _MAX_BOARD_PAGES + 1):
+            data = self._graphql(
+                _COLUMN_FIELD_VALUES,
+                {"pid": project_id, "after": after, "field": field_name},
+            )
+            items = ((data.get("node") or {}).get("items") or {})
+            for node in items.get("nodes") or []:
+                if not node or node.get("type") != "ISSUE":
+                    continue
+                status = (node.get("fieldValueByName") or {}).get("name") or ""
+                if normalise_column(status) != wanted_column:
+                    continue
+                if node.get("sortValue"):
+                    return True
+            info = items.get("pageInfo") or {}
+            if not info.get("hasNextPage"):
+                return False
+            after = info.get("endCursor")
+            if page == _MAX_BOARD_PAGES:
+                raise TransportError(
+                    f"project board exceeds {_MAX_BOARD_PAGES} pages; cannot say whether "
+                    f"{field_name!r} is set in {wanted_column!r}"
+                )
+        return False
 
     def read_board(
         self, repo_key: str, *, project_id: str, column_name: str

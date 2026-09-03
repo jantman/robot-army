@@ -484,3 +484,157 @@ def test_the_read_is_recorded(config, audit, layout):
         path.read_text() for path in layout.log_dir.glob("*.jsonl")
     )
     assert "github.project.read" in written
+
+
+# -- view sort conflicts (issue #48, review round five) ----------------------
+
+
+def views(*sorts, layout="BOARD_LAYOUT"):
+    return {
+        "data": {
+            "node": {
+                "views": {
+                    "nodes": [
+                        {
+                            "number": 1,
+                            "name": "Backlog",
+                            "layout": layout,
+                            "sortByFields": {
+                                "nodes": [
+                                    {"direction": "ASC", "field": {"name": name}}
+                                    for name in sorts
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+
+def field_values(*rows, has_next=False, cursor=None):
+    """`rows` are (status, sort_value_or_None) pairs."""
+    return {
+        "data": {
+            "node": {
+                "items": {
+                    "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                    "nodes": [
+                        {
+                            "type": "ISSUE",
+                            "fieldValueByName": {"name": status},
+                            "sortValue": {"name": value} if value else None,
+                        }
+                        for status, value in rows
+                    ],
+                }
+            }
+        }
+    }
+
+
+def test_a_view_sort_with_no_values_set_reports_nothing(config, audit):
+    """The measured state of the author's own board: view 1 sorts by Priority and no card
+    in Ready has one, so manual position is exactly what is displayed. A check that fired
+    here would be a check nobody reads."""
+    reader = make_reader(
+        config,
+        audit,
+        sequence(views("Priority"), field_values(("Ready", None), ("Ready", None))),
+    )
+
+    assert reader.view_sort_conflicts(
+        "jantman/demo", project_id="PVT_3", column_name="Ready"
+    ) == ()
+
+
+def test_a_sort_field_with_a_value_in_the_column_is_reported(config, audit):
+    reader = make_reader(
+        config,
+        audit,
+        sequence(views("Priority"), field_values(("Ready", None), ("Ready", "P0"))),
+    )
+
+    conflicts = reader.view_sort_conflicts(
+        "jantman/demo", project_id="PVT_3", column_name="Ready"
+    )
+
+    assert len(conflicts) == 1
+    assert "Priority" in conflicts[0]
+
+
+def test_a_value_in_another_column_does_not_count(config, audit):
+    """The sort only changes what the author sees in the column being dispatched from."""
+    reader = make_reader(
+        config,
+        audit,
+        sequence(views("Priority"), field_values(("Backlog", "P0"), ("Ready", None))),
+    )
+
+    assert reader.view_sort_conflicts(
+        "jantman/demo", project_id="PVT_3", column_name="Ready"
+    ) == ()
+
+
+def test_the_column_is_matched_the_same_way_the_dispatcher_matches_it(config, audit):
+    """Found in review, round five. The column used to be selected by a server-side
+    `status:"…"` filter — GitHub's own matching — while every other part of the feature
+    compares with `normalise_column`. A name the two disagreed about would have had
+    `doctor` inspecting a different set of cards than the dispatcher orders."""
+    reader = make_reader(
+        config,
+        audit,
+        sequence(views("Priority"), field_values(("To Do", "P0"))),
+    )
+
+    conflicts = reader.view_sort_conflicts(
+        "jantman/demo", project_id="PVT_3", column_name="to  do"
+    )
+
+    assert len(conflicts) == 1
+
+
+def test_a_column_name_containing_a_quote_is_handled(config, audit):
+    """It used to be interpolated into `status:"{name}"`, which a quote or a backslash
+    broke — failing the check on a board that was otherwise healthy."""
+    reader = make_reader(
+        config,
+        audit,
+        sequence(views("Priority"), field_values(('Ready "now"', "P0"))),
+    )
+
+    conflicts = reader.view_sort_conflicts(
+        "jantman/demo", project_id="PVT_3", column_name='Ready "now"'
+    )
+
+    assert len(conflicts) == 1
+
+
+def test_a_table_view_sort_is_ignored(config, audit):
+    """Only a board view's sort changes the order of cards in a column."""
+    reader = make_reader(config, audit, graphql(views("Priority", layout="TABLE_LAYOUT")))
+
+    assert reader.view_sort_conflicts(
+        "jantman/demo", project_id="PVT_3", column_name="Ready"
+    ) == ()
+
+
+def test_an_unfinished_walk_raises_rather_than_reporting_no_conflict(config, audit):
+    """A truncated read would report "no conflict" for a board it had not finished looking
+    at, which is the reassuring kind of wrong."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "views" in body:
+            return httpx.Response(200, json=views("Priority"))
+        return httpx.Response(
+            200, json=field_values(("Backlog", None), has_next=True, cursor="c")
+        )
+
+    reader = make_reader(config, audit, handler)
+
+    with pytest.raises(TransportError):
+        reader.view_sort_conflicts(
+            "jantman/demo", project_id="PVT_3", column_name="Ready"
+        )

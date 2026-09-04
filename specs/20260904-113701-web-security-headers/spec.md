@@ -181,10 +181,13 @@ JSON response and a static asset response.
 
 ## Assumptions
 
-- The four declarations are exactly those named in the issue, and their values are the ones the
-  issue proposes. They are the standard, conservative choice for a self-contained local
-  interface, and the interface's own design — no external resource, no inline script or style —
-  is what makes the strict form free.
+- The four declarations are those named in the issue. Three carry the values it proposes; the
+  referrer policy is `same-origin` rather than the `no-referrer` it suggested, because the
+  interface reads the referrer of its own POSTs to decide where a refused control offers a way
+  back to. The purpose the issue gave for that header — that following a link out does not hand
+  the destination this interface's address — is met in full either way. They are otherwise the
+  standard, conservative choice for a self-contained local interface, and the interface's own
+  design — no external resource, no inline script or style — is what makes the strict form free.
 - Nothing legitimately frames this interface. It is a single-user local tool with one operator
   at one machine; there is no dashboard, no embed, and no second surface that would need to
   include it. So the framing refusal is absolute rather than an allowlist, and needs no

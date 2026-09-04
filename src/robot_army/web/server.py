@@ -117,9 +117,11 @@ class Request:
 #: rather than at the call sites, because the call sites are not all in one place: two of
 #: the five — the static assets and the ``413`` — never reach ``_render``, and a sixth added
 #: later would not reach a list of them either. Being a response is the condition; carrying
-#: these is the consequence. That also rules out folding them into :data:`NO_STORE`, which
-#: says something different ("do not cache this") and is absent from exactly the two paths
-#: that matter most here.
+#: these is the consequence. That also rules out folding them into :data:`NO_STORE`: it says
+#: something different ("do not cache this"), the static assets deliberately do not carry it,
+#: and a later response that wanted caching would have to choose between being cacheable and
+#: being unframeable. The ``413`` does happen to spread ``NO_STORE`` today — but on purpose,
+#: for its own reason, which is not a reason to make one constant mean two things.
 SECURITY_HEADERS: dict[str, str] = {
     # The finding itself. A hostile page frames this interface at its shipped default
     # address, makes the frame transparent and baits a click over a real control; the form

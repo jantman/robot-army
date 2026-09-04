@@ -54,7 +54,8 @@ closed by the data structure rather than by a check.
 
 ## Decision 2 — The four header values
 
-**Decision**: Exactly the values the issue proposes:
+**Decision**: The values the issue proposes, with one deliberate change — `Referrer-Policy`
+is `same-origin` rather than `no-referrer`, for the reason given below:
 
 | Header | Value |
 | --- | --- |

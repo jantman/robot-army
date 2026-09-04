@@ -8,7 +8,9 @@ in-memory structure.
 
 ## `SECURITY_HEADERS` (new)
 
-A module-level constant in `src/robot_army/web/server.py`, beside the existing `NO_STORE`.
+A module-level constant in `src/robot_army/web/server.py`, directly above the `Response`
+dataclass that reads it — not beside `NO_STORE`, which sits far below and would leave
+`__post_init__` referring forward to something the reader cannot see.
 
 | Field | Type | Value |
 | --- | --- | --- |

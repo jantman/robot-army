@@ -77,6 +77,20 @@ def test_a_caller_that_sets_one_deliberately_wins():
     assert response.headers["X-Frame-Options"] == "SAMEORIGIN"
 
 
+def test_a_differently_cased_caller_header_does_not_become_a_second_header():
+    """Header names are case-insensitive on the wire; this dict's keys are not.
+
+    Without a case-insensitive comparison, ``x-frame-options`` would collide with nothing,
+    both keys would survive the merge, and ``_respond`` would write both — leaving the
+    browser to choose between two conflicting framing policies. Exactly the failure the
+    single-attachment design exists to make impossible, arriving through the back door.
+    """
+    response = server.Response(headers={"x-frame-options": "SAMEORIGIN"})
+    framing = [name for name in response.headers if name.lower() == "x-frame-options"]
+    assert framing == ["x-frame-options"]
+    assert response.headers["x-frame-options"] == "SAMEORIGIN"
+
+
 def test_the_database_less_refusals_carry_them(web, monkeypatch):
     """A page that only appears when something is already broken is not a gap in the fence.
 

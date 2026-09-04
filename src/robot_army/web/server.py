@@ -187,9 +187,19 @@ class Response:
     def __post_init__(self) -> None:
         # Security headers first, so a caller that sets one of these names deliberately wins
         # rather than being silently overwritten — nothing does today, and the ordering is
-        # what says which way it would go. A dict keyed by name also makes the failure this
-        # guards against unrepresentable: one response cannot emit two conflicting policies.
-        self.headers = {**SECURITY_HEADERS, **self.headers}
+        # what says which way it would go.
+        #
+        # The comparison is case-insensitive because header names are, on the wire, while
+        # this dict's keys are not: a caller passing ``x-frame-options`` would otherwise
+        # collide with nothing, and ``_respond`` would write both, leaving a browser to
+        # choose between two conflicting framing policies. Dropping ours when the caller
+        # names it in any casing is what makes "one response, one value per header" true
+        # rather than nearly true.
+        stated = {name.lower() for name in self.headers}
+        self.headers = {
+            **{n: v for n, v in SECURITY_HEADERS.items() if n.lower() not in stated},
+            **self.headers,
+        }
 
     @property
     def text(self) -> str:

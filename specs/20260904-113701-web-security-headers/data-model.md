@@ -43,8 +43,11 @@ resolves rather than leaving it to whichever line was written last.
 **Invariants**:
 
 1. Every `Response`, however constructed, carries all four names.
-2. A header name appears at most once — the structure is a dict keyed by name, so two conflicting
-   values for one header are not representable.
+2. A header name appears at most once, in any casing. The merge compares names
+   case-insensitively before keeping a security header, because header names are
+   case-insensitive on the wire while this dict's keys are not — without that, a caller
+   passing `x-frame-options` would collide with nothing and the response would emit two
+   conflicting framing policies.
 3. Every header a caller passes survives with its value intact.
 
 **Relationships**: `Handler._respond` writes `Content-Type` and `Content-Length` directly to the

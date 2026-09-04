@@ -46,7 +46,8 @@ uv run robot-army prompt jantman/robot-army 121 > /tmp/b 2>/dev/null
 diff /tmp/a /tmp/b
 ```
 
-The **only** differences are the two marker lines. That is SC-005 by hand.
+The **only** differences are the four lines carrying the nonce: the two that quote the markers
+in the preamble, and the two markers themselves. That is SC-005 by hand.
 
 ## 3. Prove the fence against a hostile body
 
@@ -113,7 +114,7 @@ prompt is still compared between the two paths.
 |---|---|
 | `uv run pytest` | green |
 | `uv run ruff check` | clean |
-| Two previews of one issue | differ only in the two marker lines |
+| Two previews of one issue | differ only in the four lines carrying the nonce |
 | Composed prompt from a hostile body | all issue text inside the fence, no C0 characters, no early close |
 | Composed prompt from an over-long body | says it was truncated, names no URL to fetch |
 | `prompt.DELIVERY` | no sentence granting the issue precedence |

@@ -206,8 +206,12 @@ def test_an_over_long_body_is_truncated_the_way_a_dispatch_truncates_it(preview)
     outcome = operations.prompt_preview(preview(issues=[huge]), REPO, 7)
 
     text = "\n".join(outcome.lines)
-    assert f"[truncated at {prompt.MAX_BODY_CHARS} characters" in text
-    assert ISSUE.url in text
+    assert f"[truncated at {prompt.MAX_BODY_CHARS} characters]" in text
+    # The notice used to name the issue's URL as somewhere to fetch the rest. On a public
+    # repository that page renders every comment on the issue, so the pointer is gone and the
+    # URL now appears exactly once, on its own annotated line (RA-06, FR-013).
+    assert "full text at" not in text
+    assert text.count(ISSUE.url) == 1
 
 
 # -- refusals ---------------------------------------------------------------
@@ -551,14 +555,25 @@ def test_stdout_carries_the_prompt_and_the_note_goes_to_stderr(cli_setup, capsys
     assert _run(monkeypatch, cli_setup, "prompt", REPO, "7") == operations.EXIT_OK
 
     captured = capsys.readouterr()
-    assert captured.out.startswith("Unless the issue below")
+    assert captured.out.startswith("This is how the work is expected to be delivered.")
     assert captured.out.endswith("\n")
     assert "context read from" in captured.err
     assert "context read from" not in captured.out
 
 
 def test_two_runs_produce_byte_identical_stdout(cli_setup, capsys, monkeypatch):
-    """SC-003. Nothing timestamped, ordered by a set, or otherwise incidental leaks in."""
+    """SC-003, with the fence nonce pinned.
+
+    RA-06 made one part of the prompt deliberately random per compose, so "byte-identical"
+    now means "byte-identical but for the fence delimiter". What this test is actually for
+    survives that: nothing *timestamped*, ordered by a set, or otherwise incidental leaks into
+    stdout. ``tests/unit/test_prompt_fence.py`` holds the nonce to being the only variation,
+    which is what makes pinning it here a narrowing rather than a hole.
+    """
+    from robot_army import prompt
+
+    monkeypatch.setattr(prompt, "_fence_nonce", lambda: "0" * 16)
+
     _run(monkeypatch, cli_setup, "prompt", REPO, "7")
     first = capsys.readouterr().out
     _run(monkeypatch, cli_setup, "prompt", REPO, "7")

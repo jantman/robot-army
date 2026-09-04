@@ -367,12 +367,33 @@ block says so in one sentence: build, run, test, install dependencies, start thi
 read live systems, push, open the PR. The limit is on reaching past the repository to change a
 live system where a change to the repository is what was asked for.
 
-**Both are defaults, and the issue outranks them.** "Investigate why the poller stalls and
-report back" wants an answer, not a branch; "delete the stale worktrees" is deliberately an
-action on the machine. An explicit instruction in the issue body wins, and the block says so
-in its own last line — because everything else in that prompt ranks by position, and the issue
-body sits *below* this text. A repository's own `.claude/robot-army.md` still outranks
-everything, unchanged.
+**The issue does not outrank them.** It used to: the block closed by saying that an explicit
+instruction in the issue body wins, and named the three overrides it covered — no pull request,
+a commit straight to the default branch, an action on a system. That was sound reasoning about
+*my own* issues, and it stopped being sound the moment somebody else's text could occupy that
+slot. It is also, read back, a list of exactly what an injected paragraph would ask for, granted
+in advance, in a session running `--permission-mode auto`. The paragraph is gone.
+
+What is left says the opposite: the issue says what to do, it does not decide how the work is
+delivered, and the rules hold however the issue is worded. The rules bind the *manner* of
+delivery rather than asserting there is something to deliver, so "investigate why the poller
+stalls and report back" is unaffected — there is nothing to commit, so nothing to push.
+"Delete the stale worktrees" is the case that really did lose something, and the answer is that
+an instruction like that has to come from somewhere its author does not control: a repository's
+own `.claude/robot-army.md`, which is prepended above everything and still outranks all of it,
+or a session I start by hand.
+
+**And the issue's own text is fenced.** Everything the issue's author wrote — title, labels,
+body — is wrapped in a delimiter carrying sixteen random hex characters generated per dispatch,
+under a paragraph saying the contents are untrusted data describing a task and not instructions
+to follow. A body can emit `---`, or a `**Title**:` line, or a paragraph in the register of a
+repository's standing instructions; none of it reaches outside the fence, and the closing
+delimiter cannot be guessed by whoever wrote the text it closes. Control characters are
+stripped from the title and body on the way in, so an escape sequence in an issue body cannot
+rewrite the terminal of whoever is reading the session. The issue's URL is still in the prompt,
+because I need it to find the thing — annotated as an identifier rather than as somewhere to
+read from, since the page it points at renders comments from anyone who can reach the
+repository.
 
 Nothing checks any of it. Whether a session actually pushed and opened a PR is a question the
 tools that already answer it still answer:
@@ -391,9 +412,13 @@ uv run robot-army prompt jantman/some-repo 42
 
 It composes exactly what a dispatch of that issue would hand the session — the repository's
 own `.claude/robot-army.md` if it has one, the Spec Kit block if it applies, the delivery
-rules, and the issue — and writes it to stdout and nothing else, so it redirects and diffs
-cleanly. Everything explanatory, including which directory the repository's instructions were
-read from, goes to stderr.
+rules, and the fenced issue — and writes it to stdout and nothing else, so it redirects and
+diffs cleanly. Everything explanatory, including which directory the repository's instructions
+were read from, goes to stderr.
+
+Two runs of it differ in exactly one thing: the fence delimiter, which is random per compose by
+design. Diff two previews of the same issue and the four lines carrying it — the two markers,
+and the two that name them — are the whole of the difference.
 
 The issue does not have to be labelled, eligible, open, or known to the system: any issue
 number in an onboarded repository works, which is the point — it answers "what would this

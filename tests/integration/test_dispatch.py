@@ -21,7 +21,7 @@ from tests.conftest import (
     seed_item,
 )
 
-from robot_army import db, dispatch
+from robot_army import db, dispatch, prompt
 from robot_army.boundaries import BoundaryError
 from robot_army.boundaries.hooks import SubprocessHookRunner
 from robot_army.config import HookStep
@@ -566,7 +566,17 @@ def test_a_comment_failure_does_not_change_the_items_state(
     assert "unaffected" in failed[-1]["detail"]["note"]
 
 
-def test_the_build_plan_is_deterministic(config, layout, audit):
+def test_the_build_plan_is_deterministic(config, layout, audit, monkeypatch):
+    """Same inputs, same plan — with the one element that is random by design pinned.
+
+    RA-06 fences the issue's own text in a nonce generated fresh per compose, so the prompt
+    argument is deliberately not byte-stable. Everything else in a launch plan still is, which
+    is what this test is for: a session id that leaked in from ``uuid4``, an argv ordered by a
+    set, a path built from a timestamp. ``tests/unit/test_prompt_fence.py`` holds the nonce to
+    being the only variation in the prompt itself.
+    """
+    monkeypatch.setattr(prompt, "_fence_nonce", lambda: "0" * 16)
+
     boundaries = make_boundaries(audit)
     issue = make_issue()
     kwargs = dict(

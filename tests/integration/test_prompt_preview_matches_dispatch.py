@@ -7,6 +7,16 @@ a golden file would keep passing after someone reimplemented composition inside
 
 If this ever fails, the defect is in ``operations.prompt_preview``. ``prompt.compose`` is
 dispatch's, and the preview has no business disagreeing with it.
+
+RA-06 introduced one deliberately random element — the nonce fencing the issue's own text —
+and the fixture below pins it for the duration of each test so the comparison can stay a
+string equality rather than becoming a fuzzy one. That matters: the claim this file makes is
+"the same string", and a normalising comparison would keep passing after someone reimplemented
+composition inside ``operations`` with a slightly different fence, which is the exact drift the
+pin must not hide. Everything the pin removes from the comparison is held elsewhere —
+``tests/unit/test_prompt_fence.py`` asserts that the nonce is the *only* thing that varies
+between two composes, so pinning it narrows this test rather than weakening it
+(``specs/20260904-093845-fence-untrusted-issue-text/research.md`` R11).
 """
 
 from __future__ import annotations
@@ -23,11 +33,18 @@ from tests.conftest import (
     onboard_repo,
 )
 
-from robot_army import db, dispatch, operations
+from robot_army import db, dispatch, operations, prompt
 from robot_army.boundaries import Issue
 from robot_army.config import parse
 
 REPO = "jantman/demo"
+
+
+@pytest.fixture(autouse=True)
+def pinned_fence_nonce(monkeypatch):
+    """The one part of a composed prompt that is random by design — see the module docstring."""
+    monkeypatch.setattr(prompt, "_fence_nonce", lambda: "0123456789abcdef")
+
 
 ISSUE = Issue(
     number=11,

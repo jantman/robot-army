@@ -153,9 +153,9 @@ tests monkeypatch and which no caller can override
 
 New module-level names: `_fence_nonce()`, `sanitize()`, `FENCE_LABEL`.
 
-**Determinism.** Two calls with the same arguments produce output identical except for the two
-nonce occurrences in the marker lines. That is the whole of the non-determinism, and it is
-asserted directly.
+**Determinism.** Two calls with the same arguments produce output identical except for the four
+occurrences of the nonce — one in each marker line, and one in each of the two preamble lines
+that name the markers. That is the whole of the non-determinism, and it is asserted directly.
 
 ---
 

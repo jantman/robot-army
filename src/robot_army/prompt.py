@@ -242,7 +242,8 @@ def compose(
     composes of the same issue are identical everywhere else, and
     ``tests/unit/test_prompt_fence.py`` asserts exactly that rather than leaving it as a
     claim. ``robot-army prompt`` and a real dispatch both call this function, so a preview
-    still *is* the prompt, modulo those two lines.
+    still *is* the prompt, modulo the four lines the nonce appears on: the two markers, and
+    the two lines of :data:`FENCE_PREAMBLE` that name them.
 
     ``speckit_block`` is milestone 007's fixed guidance, present only when the worktree was
     detected as a Spec Kit project and the repository is not opted out. It goes **after** a

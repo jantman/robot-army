@@ -23,6 +23,14 @@ from robot_army.states import SessionState, WorkItemState
 
 WRAPPER = Path(__file__).resolve().parents[2] / "share" / "robot-army-session-wrapper.sh"
 
+# The wrapper validates the session id's shape (RA-16), so the tests that drive the real
+# script use ids of the shape the daemon actually issues --- `str(uuid.uuid4())` --- rather
+# than readable stand-ins. The ids the *daemon-side* tests use are unconstrained and stay as
+# they were; only what crosses into the script has to be real.
+CLEAN_SESSION = "6f1c9d2a-4b3e-4a58-9c17-2d8e5f0a1b34"
+FAILING_SESSION = "7a2d0e3b-5c4f-4b69-8d28-3e9f6a1b2c45"
+KILLED_SESSION = "8b3e1f4c-6d5a-4c7a-9e39-4f0a7b2c3d56"
+
 
 def active_session(conn, session_id: str = "s-1") -> int:
     item_id = seed_item(conn, state=str(WorkItemState.ACTIVE))
@@ -118,7 +126,7 @@ def test_the_real_wrapper_writes_a_record_the_daemon_can_apply(conn, audit, layo
     """End to end across the process boundary: the actual bash script writes the file and
     the actual drain applies it. Anything less would test our idea of the format rather
     than the format."""
-    item_id = active_session(conn, "wrapper-session")
+    item_id = active_session(conn, CLEAN_SESSION)
 
     result = subprocess.run(
         [
@@ -130,10 +138,11 @@ def test_the_real_wrapper_writes_a_record_the_daemon_can_apply(conn, audit, layo
             "-c",
             "exit 0",
             "--session-id",
-            "wrapper-session",
+            CLEAN_SESSION,
         ],
         env={
             **os.environ,
+            "ROBOT_ARMY_SESSION_ID": CLEAN_SESSION,
             "ROBOT_ARMY_SPOOL_DIR": str(layout.spool_dir),
             "ROBOT_ARMY_LOG_DIR": str(layout.session_log_dir),
         },
@@ -143,7 +152,7 @@ def test_the_real_wrapper_writes_a_record_the_daemon_can_apply(conn, audit, layo
     assert result.returncode == 0, result.stderr
 
     written = sorted(p.name for p in layout.spool_dir.glob("*.json"))
-    assert written == ["wrapper-session.exit.json", "wrapper-session.start.json"]
+    assert written == [f"{CLEAN_SESSION}.exit.json", f"{CLEAN_SESSION}.start.json"]
     assert not list(layout.spool_dir.glob("*.tmp")), "no temporary file may be left behind"
 
     drained = spool.drain(conn, audit=audit, layout=layout)
@@ -158,7 +167,7 @@ def test_the_real_wrapper_writes_a_record_the_daemon_can_apply(conn, audit, layo
 
 @pytest.mark.skipif(not WRAPPER.exists(), reason="wrapper script not installed")
 def test_the_real_wrapper_reports_a_non_zero_exit_and_its_own_status(conn, audit, layout):
-    item_id = active_session(conn, "failing-session")
+    item_id = active_session(conn, FAILING_SESSION)
     result = subprocess.run(
         [
             "bash",
@@ -169,10 +178,11 @@ def test_the_real_wrapper_reports_a_non_zero_exit_and_its_own_status(conn, audit
             "-c",
             "exit 42",
             "--session-id",
-            "failing-session",
+            FAILING_SESSION,
         ],
         env={
             **os.environ,
+            "ROBOT_ARMY_SESSION_ID": FAILING_SESSION,
             "ROBOT_ARMY_SPOOL_DIR": str(layout.spool_dir),
             "ROBOT_ARMY_LOG_DIR": str(layout.session_log_dir),
         },
@@ -182,12 +192,12 @@ def test_the_real_wrapper_reports_a_non_zero_exit_and_its_own_status(conn, audit
     assert result.returncode == 42, "the wrapper propagates the worker's exit status"
 
     record = json.loads(
-        (layout.spool_dir / "failing-session.exit.json").read_text(encoding="utf-8")
+        (layout.spool_dir / f"{FAILING_SESSION}.exit.json").read_text(encoding="utf-8")
     )
     assert record["schema"] == 1
     assert record["exit"] == 42
     assert record["signal"] is None
-    assert record["session_id"] == "failing-session"
+    assert record["session_id"] == FAILING_SESSION
 
     spool.drain(conn, audit=audit, layout=layout)
     assert db.get_work_item(conn, item_id).state is WorkItemState.FAILED
@@ -196,7 +206,7 @@ def test_the_real_wrapper_reports_a_non_zero_exit_and_its_own_status(conn, audit
 @pytest.mark.skipif(not WRAPPER.exists(), reason="wrapper script not installed")
 def test_the_real_wrapper_decodes_a_signal_death(conn, audit, layout):
     """The wrapper decodes at the point where the information is unambiguous (FR-032)."""
-    item_id = active_session(conn, "killed-session")
+    item_id = active_session(conn, KILLED_SESSION)
     subprocess.run(
         [
             "bash",
@@ -207,10 +217,11 @@ def test_the_real_wrapper_decodes_a_signal_death(conn, audit, layout):
             "-c",
             "kill -TERM $$",
             "--session-id",
-            "killed-session",
+            KILLED_SESSION,
         ],
         env={
             **os.environ,
+            "ROBOT_ARMY_SESSION_ID": KILLED_SESSION,
             "ROBOT_ARMY_SPOOL_DIR": str(layout.spool_dir),
             "ROBOT_ARMY_LOG_DIR": str(layout.session_log_dir),
         },
@@ -218,7 +229,7 @@ def test_the_real_wrapper_decodes_a_signal_death(conn, audit, layout):
         text=True,
     )
     record = json.loads(
-        (layout.spool_dir / "killed-session.exit.json").read_text(encoding="utf-8")
+        (layout.spool_dir / f"{KILLED_SESSION}.exit.json").read_text(encoding="utf-8")
     )
     assert record["exit"] == 143
     assert record["signal"] == 15
@@ -248,7 +259,10 @@ def test_the_wrapper_needs_only_the_permitted_tools(conn):
 
 @pytest.mark.skipif(not WRAPPER.exists(), reason="wrapper script not installed")
 def test_the_wrapper_refuses_without_a_session_id(layout, tmp_path):
-    """The session id is the join key; a record without one is unusable."""
+    """The session id is the join key; a record without one is unusable.
+
+    Since RA-16 the environment is its only source, so an unset variable is now the whole
+    of the missing-id case rather than one half of it."""
     result = subprocess.run(
         ["bash", str(WRAPPER), "1", "--", "/bin/true"],
         env={
@@ -260,7 +274,7 @@ def test_the_wrapper_refuses_without_a_session_id(layout, tmp_path):
         text=True,
     )
     assert result.returncode == 2
-    assert "no --session-id" in result.stderr
+    assert "ROBOT_ARMY_SESSION_ID is not set" in result.stderr
     assert list(layout.spool_dir.glob("*.json")) == []
 
 

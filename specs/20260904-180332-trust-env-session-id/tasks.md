@@ -35,7 +35,7 @@ Single project. The wrapper is at `share/robot-army-session-wrapper.sh`; the dae
 **Purpose**: Establish a known-green starting point, so any later failure is attributable to
 this feature rather than inherited.
 
-- [ ] T001 Run `uv run pytest -q` and record that the suite is green before any edit; if it is not, stop and report rather than building on a red baseline
+- [X] T001 Run `uv run pytest -q` and record that the suite is green before any edit; if it is not, stop and report rather than building on a red baseline
 
 ---
 
@@ -47,7 +47,7 @@ sourcing nor the shape checks can satisfy "creates no file or directory on refus
 
 **⚠️ CRITICAL**: No user story work begins until T002 is done.
 
-- [ ] T002 In `share/robot-army-session-wrapper.sh`, move the `mkdir -p "$SPOOL_DIR" "$LOG_DIR"` call and the `LOGFILE=` composition below the point where identifiers are resolved, leaving behaviour otherwise unchanged, so that later validation can precede every filesystem effect (research D3)
+- [X] T002 In `share/robot-army-session-wrapper.sh`, move the `mkdir -p "$SPOOL_DIR" "$LOG_DIR"` call and the `LOGFILE=` composition below the point where identifiers are resolved, leaving behaviour otherwise unchanged, so that later validation can precede every filesystem effect (research D3)
 
 **Checkpoint**: The script still passes the existing suite; the preamble is now ordered so
 validation has somewhere to go.
@@ -65,17 +65,17 @@ appear in the spool directory under the environment's id, and nothing is created
 
 ### Tests for User Story 1
 
-- [ ] T003 [US1] Create `tests/unit/test_session_wrapper_input.py` with a helper that runs the real `share/robot-army-session-wrapper.sh` in a `tmp_path` spool/log/sessions layout and returns its exit status, stderr, and every file created anywhere under the temporary root
-- [ ] T004 [US1] In `tests/unit/test_session_wrapper_input.py`, assert that a final argument beginning `--session-id=../sessions/hijacked` — the RA-16 payload from quickstart.md step 1 — leaves both records in the spool directory named for the environment's id, and creates nothing in the sibling `sessions/` directory
-- [ ] T005 [US1] In `tests/unit/test_session_wrapper_input.py`, assert the same for the separated `--session-id <value>` form, since the deleted loop matched both spellings
-- [ ] T006 [US1] In `tests/unit/test_session_wrapper_input.py`, assert the written record's `session_id` field equals the environment's id, which is the join key the daemon depends on
+- [X] T003 [US1] Create `tests/unit/test_session_wrapper_input.py` with a helper that runs the real `share/robot-army-session-wrapper.sh` in a `tmp_path` spool/log/sessions layout and returns its exit status, stderr, and every file created anywhere under the temporary root
+- [X] T004 [US1] In `tests/unit/test_session_wrapper_input.py`, assert that a final argument beginning `--session-id=../sessions/hijacked` — the RA-16 payload from quickstart.md step 1 — leaves both records in the spool directory named for the environment's id, and creates nothing in the sibling `sessions/` directory
+- [X] T005 [US1] In `tests/unit/test_session_wrapper_input.py`, assert the same for the separated `--session-id <value>` form, since the deleted loop matched both spellings
+- [X] T006 [US1] In `tests/unit/test_session_wrapper_input.py`, assert the written record's `session_id` field equals the environment's id, which is the join key the daemon depends on
 
 ### Implementation for User Story 1
 
-- [ ] T007 [US1] Delete the `--- Recover the session id from argv ---` loop from `share/robot-army-session-wrapper.sh` and set `SESSION_ID` from `ROBOT_ARMY_SESSION_ID` alone (research D1)
-- [ ] T008 [US1] Update the header comment and usage line in `share/robot-army-session-wrapper.sh`: `ROBOT_ARMY_SESSION_ID` is required, not a fallback for when argv lacks the id, and the stale "if it is not discoverable from argv" phrasing must go rather than be left describing behaviour that no longer exists
-- [ ] T009 [US1] Update the three wrapper tests in `tests/integration/test_spool_recovery.py` to pass the session id via `ROBOT_ARMY_SESSION_ID` and use real UUID-shaped ids instead of names like `wrapper-session`, so they exercise the path production uses
-- [ ] T010 [P] [US1] Add a guard test in `tests/unit/test_launch_shapes.py` asserting that `dispatch.build_launch_plan` puts `ROBOT_ARMY_SESSION_ID` in the launch environment and that its value equals the plan's `session_id` — the wrapper's only source of truth, which nothing else currently fails on if removed
+- [X] T007 [US1] Delete the `--- Recover the session id from argv ---` loop from `share/robot-army-session-wrapper.sh` and set `SESSION_ID` from `ROBOT_ARMY_SESSION_ID` alone (research D1)
+- [X] T008 [US1] Update the header comment and usage line in `share/robot-army-session-wrapper.sh`: `ROBOT_ARMY_SESSION_ID` is required, not a fallback for when argv lacks the id, and the stale "if it is not discoverable from argv" phrasing must go rather than be left describing behaviour that no longer exists
+- [X] T009 [US1] Update the three wrapper tests in `tests/integration/test_spool_recovery.py` to pass the session id via `ROBOT_ARMY_SESSION_ID` and use real UUID-shaped ids instead of names like `wrapper-session`, so they exercise the path production uses
+- [X] T010 [P] [US1] Add a guard test in `tests/unit/test_launch_shapes.py` asserting that `dispatch.build_launch_plan` puts `ROBOT_ARMY_SESSION_ID` in the launch environment and that its value equals the plan's `session_id` — the wrapper's only source of truth, which nothing else currently fails on if removed
 
 **Checkpoint**: RA-16 is closed. The finding's own payload no longer redirects a write.
 

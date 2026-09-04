@@ -686,18 +686,28 @@ def build_launch_plan(
     wrapped = [wrapper, str(item_id), "--", *worker_argv]
     host_handle_argv = boundaries.session_host.build_argv(socket_path, wrapped)
 
-    session_env = {
-        "ROBOT_ARMY_ITEM": str(item_id),
-        "ROBOT_ARMY_SESSION_ID": session_id,
-        "ROBOT_ARMY_SPOOL_DIR": str(layout.spool_dir),
-        "ROBOT_ARMY_LOG_DIR": str(layout.session_log_dir),
-        # M0 F19: a stray CLAUDE_CODE_CHILD_SESSION in the terminal daemon's environment
-        # silently disables transcript saving, producing sessions that look perfect,
-        # exit 0, and can never be resumed. Forcing persistence is the cheap defence.
-        "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE": "1",
-    }
-    if env:
-        session_env.update(env)
+    # A repository's own `[repos.*] env` is applied FIRST, so that the variables below --- the
+    # ones this system uses to steer its own machinery --- cannot be displaced by it. The
+    # order used to be the other way round, which was survivable only while the wrapper had
+    # a second way to learn its session id. Since RA-16 it has exactly one: a repository
+    # whose config happened to set ROBOT_ARMY_SESSION_ID would send that session's exit
+    # record somewhere else, or stop it starting at all, and the first evidence would be a
+    # session that never reaches `active`. Repository configuration is maintainer-written
+    # rather than untrusted, so this is a footgun rather than an attack --- but it is one
+    # typo away and costs a line to remove.
+    session_env = dict(env or {})
+    session_env.update(
+        {
+            "ROBOT_ARMY_ITEM": str(item_id),
+            "ROBOT_ARMY_SESSION_ID": session_id,
+            "ROBOT_ARMY_SPOOL_DIR": str(layout.spool_dir),
+            "ROBOT_ARMY_LOG_DIR": str(layout.session_log_dir),
+            # M0 F19: a stray CLAUDE_CODE_CHILD_SESSION in the terminal daemon's environment
+            # silently disables transcript saving, producing sessions that look perfect,
+            # exit 0, and can never be resumed. Forcing persistence is the cheap defence.
+            "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE": "1",
+        }
+    )
 
     return LaunchPlan(
         argv=host_handle_argv,

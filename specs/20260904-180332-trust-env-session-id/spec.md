@@ -121,9 +121,10 @@ tripped text equals what went in.
 - **The launcher's id is absent.** The wrapper refuses and exits non-zero rather than
   guessing. No record is written, so the daemon's existing reconciliation reports the
   session as lost — an honest outcome, and the loud message on error output says why.
-- **A refusal happens before the worker runs.** The refusing exit status must be
-  distinguishable from a worker's own exit status, so a refusal is never read as the
-  worker's verdict on the task.
+- **A refusal happens before the worker runs.** No exit record is produced, so the daemon
+  never attributes an exit status to a worker that never started. The session is reported
+  as lost by the existing reconciliation, and the message on error output — captured by the
+  session host and visible in the held terminal window — says why.
 - **Validation order.** The item id names the log file; the session id names the record
   files. Each must be checked before the path built from it is opened, so a bad value cannot
   create a file even in the act of being reported.
@@ -147,8 +148,9 @@ tripped text equals what went in.
 - **FR-003**: The wrapper MUST validate the item id's shape before using it to build any
   filesystem path, accepting only the shape the system issues for item ids.
 - **FR-004**: On a refused identifier the wrapper MUST NOT start the worker, MUST NOT create
-  any file, MUST write a message on its error output naming which identifier was refused,
-  and MUST exit with a non-zero status distinguishable from a worker's own exit status.
+  any file or directory, MUST write a message on its error output naming which identifier
+  was refused, and MUST exit non-zero. Because no record is written, a refusal can never be
+  read by the daemon as the worker's verdict on the task.
 - **FR-005**: The wrapper MUST escape every character that a strict JSON reader forbids
   inside a string, so that any text reaching a record leaves it parseable.
 - **FR-006**: Escaped text MUST round trip: what a strict reader decodes from a record MUST

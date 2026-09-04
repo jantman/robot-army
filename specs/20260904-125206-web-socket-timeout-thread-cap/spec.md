@@ -141,8 +141,11 @@ of refused connections is recorded.
 - **FR-002**: The bound in FR-001 MUST apply to every point at which the interface waits on a
   client: the first request line, the request headers, the request body, and the wait for a
   follow-up request on a kept-alive connection.
-- **FR-003**: A connection ended by the bound in FR-001 MUST NOT produce a traceback on the
-  terminal and MUST NOT be reported as an error of the interface.
+- **FR-003**: A connection ending — because the bound in FR-001 elapsed, or because the client
+  disappeared — MUST NOT produce a traceback on the terminal and MUST NOT be reported as an
+  error of the interface. Any other failure while serving a request MUST still be reported
+  exactly as it is today; this is a narrowing to connection-lifecycle events, not a general
+  silencing.
 - **FR-004**: The web interface MUST cap the number of client connections it serves
   simultaneously at a fixed maximum.
 - **FR-005**: A connection arriving when the interface is at the cap MUST receive an immediate,
@@ -204,6 +207,8 @@ of refused connections is recorded.
 - **SC-007**: A flood of refused connections adds a number of durable records bounded by the
   number of saturation episodes, not by the number of refusals.
 - **SC-008**: Every existing test of the web interface passes unchanged.
+- **SC-009**: A run in which many connections are opened and dropped produces no tracebacks on
+  the terminal, while a genuine failure inside a request still produces one.
 
 ## Assumptions
 

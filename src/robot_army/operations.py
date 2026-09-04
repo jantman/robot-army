@@ -2600,8 +2600,11 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
     # carrying content nobody re-read, which is the thing this function exists to prevent.
     #
     # One dict rather than a call plus a hand-written list of what it wrote: the record's
-    # ``refreshed`` field has to name exactly the columns that changed, and two copies
-    # would drift the first time a fifth column joined.
+    # ``refreshed`` field has to name exactly the columns this rewrote, and two copies would
+    # drift the first time a fifth column joined. It is the set *written*, not a diff
+    # against what was there — every one of these is taken from the read whether or not its
+    # value moved, and "which of them differed" is a question the log cannot answer anyway
+    # without also carrying the old values.
     refresh: dict[str, Any] = {
         "title": issue.title,
         "body": issue.body,

@@ -49,7 +49,9 @@ because it is the fact the whole feature turns on, and reading it back is how a 
 reader confirms which login was refused — the reason string alone would leave that to
 quoting conventions.
 
-`refreshed` names the columns actually rewritten. It is the log's answer to "what did the
+`refreshed` names the columns actually rewritten, whether or not their values moved —
+answering "which of them *differed*" would mean carrying the old values too, which is the
+verbatim-content gap below. It is the log's answer to "what did the
 item say when it dispatched", and it is present on the refused path too, because FR-009
 refreshes there as well.
 
@@ -107,7 +109,8 @@ dispatch. One line per dispatch answering a question the following `state.work_i
 answers by existing is the omission `_check_recorded_location` already documents, for the
 same reason.
 
-**The refreshed content is not logged verbatim.** `refreshed` names which columns changed;
+**The refreshed content is not logged verbatim.** `refreshed` names which columns were
+rewritten from the read — the set written, not a diff against what was there;
 it does not carry the new title and body. Those are attacker-controlled text of unbounded
 length, and the log is a plain-text line-per-record file that the maintainer reads in a
 terminal. The content itself is one `robot-army show <id>` away and the issue URL is in the

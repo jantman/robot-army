@@ -179,3 +179,109 @@ def test_the_records_carry_the_environments_session_id(tmp_path):
         )
         assert record["session_id"] == VALID_SESSION
         assert record["item"] == "42"
+
+
+# -- US2: an identifier the system would never issue is refused, not used ----------------
+
+
+def test_an_unset_session_id_is_refused(tmp_path):
+    """The environment is now the only source, so an unset variable is the whole of the
+    missing-id case. Refusing beats guessing: a record under a guessed id would be worse
+    than no record, because the daemon would apply it to the wrong session."""
+    run = run_wrapper(tmp_path, session_id=None, args=["/bin/sh", "-c", "touch ran"])
+
+    assert run.returncode == 2
+    assert "ROBOT_ARMY_SESSION_ID is not set" in run.stderr
+    assert run.files == (), "a refusal writes nothing at all"
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        pytest.param("../../escape", id="traversal"),
+        pytest.param("", id="empty"),
+        pytest.param("wrapper-session", id="readable-but-not-an-id"),
+        pytest.param("0d5b1f3e9c2a4f1b8e776a1d2c3b4e5f", id="hex-but-undashed"),
+        pytest.param("------------------------------------", id="thirty-six-dashes"),
+        pytest.param(f"{VALID_SESSION}extra", id="valid-prefix-then-junk"),
+    ],
+)
+def test_a_session_id_the_system_would_never_issue_is_refused(tmp_path, session_id):
+    """The daemon issues `str(uuid.uuid4())`, so that is the shape accepted.
+
+    `thirty-six-dashes` is here because it is exactly what the looser character class
+    suggested in the issue would have let through --- not dangerous in itself, but the
+    difference between a check that admits only real ids and one that merely counts
+    characters.
+    """
+    run = run_wrapper(
+        tmp_path, session_id=session_id, args=["/bin/sh", "-c", "touch ran"]
+    )
+
+    assert run.returncode == 2
+    # Two phrasings, because bash cannot tell an empty variable from an unset one and the
+    # message says which case it is. Both name the session id, which is what FR-004 asks of
+    # them; neither is allowed to be silent about it.
+    assert "session id" in run.stderr or "ROBOT_ARMY_SESSION_ID" in run.stderr
+    assert run.files == ()
+
+
+def test_a_trailing_newline_cannot_smuggle_a_path_past_the_check(tmp_path):
+    """In regex dialects where `$` matches before a trailing newline, `<uuid>\\n../x` walks
+    straight through a check its author believed anchored --- and the second line is what
+    lands in the path. Bash anchors on the whole string; this pins that, because the
+    property is invisible at the call site and a rewrite could lose it silently."""
+    run = run_wrapper(
+        tmp_path,
+        session_id=f"{VALID_SESSION}\n../sessions/smuggled",
+        args=["/bin/sh", "-c", "touch ran"],
+    )
+
+    assert run.returncode == 2
+    assert run.files == ()
+
+
+@pytest.mark.parametrize(
+    "item_id",
+    [
+        pytest.param("../../evil", id="traversal"),
+        pytest.param("42/../../evil", id="traversal-after-a-real-id"),
+        pytest.param("not-a-number", id="not-an-integer"),
+        pytest.param("42\n../evil", id="trailing-newline"),
+    ],
+)
+def test_an_item_id_the_system_would_never_issue_is_refused(tmp_path, item_id):
+    """The item id is a SQLite row id and nothing untrusted reaches it today. It is checked
+    because it names a path, which is the same class of defect one edit away."""
+    run = run_wrapper(tmp_path, item_id=item_id, args=["/bin/sh", "-c", "touch ran"])
+
+    assert run.returncode == 2
+    assert "item id" in run.stderr
+    assert run.files == ()
+
+
+def test_a_refusal_creates_no_directories_either(tmp_path):
+    """Not merely no *file*. The script used to `mkdir -p` its spool and log directories
+    before anything was checked, so a refusal still left a trail; the validation now sits
+    above that. Asserted directly, because it is an ordering property and ordering is what
+    a later edit silently breaks."""
+    run = run_wrapper(
+        tmp_path, session_id="../../escape", precreate=False, args=["/bin/sh", "-c", "true"]
+    )
+
+    assert run.returncode == 2
+    assert not (tmp_path / "spool").exists()
+    assert not (tmp_path / "logs").exists()
+
+
+def test_a_refusal_never_runs_the_worker(tmp_path):
+    """The command is refused, not merely unreported. `touch ran` would leave evidence if
+    the payload ran, so its absence from the file listing is the assertion."""
+    run = run_wrapper(
+        tmp_path,
+        session_id="../../escape",
+        args=["/bin/sh", "-c", f"touch {tmp_path / 'ran'}"],
+    )
+
+    assert run.returncode == 2
+    assert "ran" not in run.files

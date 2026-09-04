@@ -92,17 +92,17 @@ directory exists anywhere under the temporary root.
 
 ### Tests for User Story 2
 
-- [ ] T011 [US2] In `tests/unit/test_session_wrapper_input.py`, assert that an unset `ROBOT_ARMY_SESSION_ID` produces exit 2, a message naming the session id, no worker execution, and no file created
-- [ ] T012 [US2] In `tests/unit/test_session_wrapper_input.py`, assert the same refusal for a session id that is `../../escape`, an empty string, and a plausible-but-wrong value such as `wrapper-session`
-- [ ] T013 [US2] In `tests/unit/test_session_wrapper_input.py`, assert that a UUID followed by a newline and `../x` is refused, pinning the anchor behaviour measured in research D2 so a future rewrite cannot reintroduce a trailing-newline bypass
-- [ ] T014 [US2] In `tests/unit/test_session_wrapper_input.py`, assert that a non-integer item id such as `../../evil` is refused with exit 2 before any file is created, including under the bad name
-- [ ] T015 [US2] In `tests/unit/test_session_wrapper_input.py`, assert that no refusal creates the spool or log directories themselves, which is what T002's reordering exists to make true
+- [X] T011 [US2] In `tests/unit/test_session_wrapper_input.py`, assert that an unset `ROBOT_ARMY_SESSION_ID` produces exit 2, a message naming the session id, no worker execution, and no file created
+- [X] T012 [US2] In `tests/unit/test_session_wrapper_input.py`, assert the same refusal for a session id that is `../../escape`, an empty string, and a plausible-but-wrong value such as `wrapper-session`
+- [X] T013 [US2] In `tests/unit/test_session_wrapper_input.py`, assert that a UUID followed by a newline and `../x` is refused, pinning the anchor behaviour measured in research D2 so a future rewrite cannot reintroduce a trailing-newline bypass
+- [X] T014 [US2] In `tests/unit/test_session_wrapper_input.py`, assert that a non-integer item id such as `../../evil` is refused with exit 2 before any file is created, including under the bad name
+- [X] T015 [US2] In `tests/unit/test_session_wrapper_input.py`, assert that no refusal creates the spool or log directories themselves, which is what T002's reordering exists to make true
 
 ### Implementation for User Story 2
 
-- [ ] T016 [US2] In `share/robot-army-session-wrapper.sh`, validate `ITEM_ID` against `^[0-9]+$` immediately after it is read, refusing with a message naming it and exit 2 (research D3)
-- [ ] T017 [US2] In `share/robot-army-session-wrapper.sh`, validate `SESSION_ID` against the canonical UUID pattern from data-model.md, refusing with a message naming it and exit 2 (research D2)
-- [ ] T018 [US2] Confirm both checks sit above the `mkdir -p` moved in T002, and add a short comment in `share/robot-army-session-wrapper.sh` saying why the order matters, since the ordering is the property and a later edit could silently undo it
+- [X] T016 [US2] In `share/robot-army-session-wrapper.sh`, validate `ITEM_ID` against `^[0-9]+$` immediately after it is read, refusing with a message naming it and exit 2 (research D3)
+- [X] T017 [US2] In `share/robot-army-session-wrapper.sh`, validate `SESSION_ID` against the canonical UUID pattern from data-model.md, refusing with a message naming it and exit 2 (research D2)
+- [X] T018 [US2] Confirm both checks sit above the `mkdir -p` moved in T002, and add a short comment in `share/robot-army-session-wrapper.sh` saying why the order matters, since the ordering is the property and a later edit could silently undo it
 
 **Checkpoint**: The class of defect is closed, not merely the one known route into it.
 

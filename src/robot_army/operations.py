@@ -35,6 +35,7 @@ from robot_army import (
     intake,
     poll,
     procinfo,
+    prompt,
     reconcile,
     sessions,
     speckit,
@@ -1032,6 +1033,267 @@ def resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
     own age so a stale value is visible rather than implied.
     """
     return {**local_resume_signals(ctx, item), **remote_resume_signals(ctx, item)}
+
+
+# -- prompt preview ---------------------------------------------------------
+
+#: The four shapes the context note takes (contracts/cli.md). Written every time, including
+#: the worktree case: the alternative is a reader having to know that *no note* means
+#: *worktree*, which is a rule to remember rather than a fact on the screen.
+#:
+#: Keyed on its own name rather than on ``context_source``, because the clone splits in two
+#: and the audit field does not. A reclaimed worktree and an issue that never had one both
+#: read from the clone, but only one of them can be told "no worktree for this issue"
+#: without lying — and this note exists precisely to stop a reader drawing the wrong
+#: conclusion from a missing section, so a false parenthetical in it is worse than none.
+_CONTEXT_NOTES = {
+    "worktree": "context read from the worktree at {path}",
+    "clone": "context read from the clone at {path} (no worktree for this issue)",
+    "clone_reclaimed": (
+        "context read from the clone at {path} — this issue's worktree at {worktree} is "
+        "gone, so this is not necessarily what its session was sent"
+    ),
+    "none": (
+        "no readable directory at {path} — repository instructions and spec kit guidance "
+        "are omitted"
+    ),
+}
+
+
+def _preview_refusal(
+    ctx: Context,
+    *,
+    entity_id: str,
+    cause: str,
+    message: str,
+    code: int,
+    detail: dict[str, Any] | None = None,
+) -> Result:
+    """One refusal, recorded and returned.
+
+    Every exit path of :func:`prompt_preview` writes exactly one ``prompt.preview`` record,
+    which is what makes "every run leaves a log entry" a property of the code rather than a
+    rule four returns have to remember (spec SC-005).
+
+    The message goes in ``lines`` and the code is non-zero, so ``cli.main``'s existing
+    routing puts it on stderr and leaves stdout empty. That is the whole of FR-014: there is
+    no path that both fails and says something on stdout, because the routing is one
+    expression in ``main`` rather than a branch here.
+
+    ``detail`` carries **every field the caller had resolved by the time it refused**, and a
+    refusal added below must pass its own. A reader reconstructing a run should not have to
+    split ``entity_id`` on ``#`` to learn which repository was asked about: that string is an
+    identifier, not a pair of fields, and for a malformed key it is not even a valid one.
+    The single exception is the malformed-key refusal itself, which genuinely has no
+    repository key to record — contracts/audit-records.md says so.
+    """
+    ctx.audit.record(
+        "prompt.preview",
+        outcome="error",
+        entity_type="issue",
+        entity_id=entity_id,
+        detail={"refused": True, "cause": cause, **(detail or {})},
+    )
+    return Result(code=code, lines=[message], data={"refused": True, "cause": cause})
+
+
+def prompt_preview(
+    ctx: Context,
+    repo_key: str,
+    issue_number: int,
+    *,
+    notes: TextIO | None = None,
+) -> Result:
+    """The prompt a dispatch of this issue would compose, and nothing else.
+
+    Read-only: no work item, branch, worktree or session is created, and nothing is written
+    to the issue source. The only durable effect of a call is its own audit record.
+
+    **This must not reimplement composition.** It resolves the same four arguments
+    ``dispatch.build_launch_plan`` resolves and hands them to the same ``prompt.compose``.
+    That is the only arrangement in which "the preview matches the dispatch" stays true as
+    the prompt is edited underneath it — a second copy of the assembly would be a claim
+    maintained by hand, and the first edit to ``compose`` would quietly falsify it.
+
+    ``notes`` is where the context note is written **as it is resolved**, and it is
+    deliberately not ``lines``: ``lines`` carries the prompt, and a note mixed into it would
+    end up in the caller's redirected file (FR-003/FR-004). ``None`` writes the note nowhere
+    but still records it in ``data``, so a non-CLI caller loses nothing.
+    """
+    result = Result()
+    entity_id = f"{repo_key}#{issue_number}"
+
+    owner, _, name = repo_key.partition("/")
+    if not owner or not name or "/" in name or any(ch.isspace() for ch in repo_key):
+        return _preview_refusal(
+            ctx,
+            entity_id=entity_id,
+            cause="malformed_arguments",
+            message=(
+                f"{repo_key!r} is not a repository key — expected owner/name, as "
+                f"`robot-army repos` prints it"
+            ),
+            code=EXIT_USAGE,
+        )
+    if issue_number <= 0:
+        return _preview_refusal(
+            ctx,
+            entity_id=entity_id,
+            cause="malformed_arguments",
+            message=f"{issue_number} is not an issue number — expected a positive integer",
+            code=EXIT_USAGE,
+            # The key survived validation above, so it is a resolved field and belongs in
+            # the record; the number is the value that was rejected, which is the one thing
+            # a reader of this record wants to see.
+            detail={"repo_key": repo_key, "issue_number": issue_number},
+        )
+
+    # Onboarding is the gate, inherited rather than reinvented: composing this prompt means
+    # reading the repository's own files, which is the step onboarding exists to approve.
+    repository = repos_mod.resolve(ctx.conn, ctx.config, repo_key)
+    if repository is None:
+        return _preview_refusal(
+            ctx,
+            entity_id=entity_id,
+            cause="not_onboarded",
+            message=(
+                f"repository {repo_key!r} is not onboarded, so there is no approved clone "
+                f"to read its instructions from — run `robot-army onboard {repo_key}` "
+                f"first, or `robot-army repos` to see which repositories are known"
+            ),
+            code=EXIT_PRECONDITION,
+            detail={"repo_key": repo_key, "issue_number": issue_number},
+        )
+
+    try:
+        issue = ctx.boundaries.issue_reader.get_issue(repo_key, issue_number)
+    except BoundaryError as exc:
+        # Never a partial or invented prompt: a preview that guessed at the issue would be
+        # worse than no preview, because it reads exactly like one that did not guess.
+        return _preview_refusal(
+            ctx,
+            entity_id=entity_id,
+            cause="issue_unavailable",
+            message=f"could not read {entity_id}: {exc}",
+            code=EXIT_FAILED,
+            detail={"repo_key": repo_key, "issue_number": issue_number, "error": str(exc)},
+        )
+    if issue is None:
+        return _preview_refusal(
+            ctx,
+            entity_id=entity_id,
+            cause="issue_unavailable",
+            message=f"{entity_id} does not exist, or this token cannot see it",
+            code=EXIT_FAILED,
+            detail={"repo_key": repo_key, "issue_number": issue_number},
+        )
+
+    # The live row only. A dry-run row has no worktree on disk — below ``live`` the version
+    # control boundary is simulated — and its branch is the one derived below anyway, so
+    # consulting it would add a branch that cannot change the answer (research R8).
+    item = db.find_work_item(
+        ctx.conn, source="github", source_id=entity_id, dry_run=False
+    )
+
+    branch = prompt.branch_name(ctx.config.worker.branch_prefix, issue_number, issue.title)
+    branch_source = "derived"
+    item_id: int | None = None
+    if item is not None:
+        item_id = item.id
+        if item.branch:
+            # The recorded branch, not a re-derivation: an issue retitled after dispatch
+            # would otherwise be previewed against a branch that does not exist.
+            branch = item.branch
+            branch_source = "recorded"
+
+    # The worktree first, because that is literally the directory a dispatch read from, and
+    # it can carry a ``.claude/robot-army.md`` the clone does not. The clone is the stand-in
+    # for an issue that has never been dispatched, and it is an approximation: it may sit on
+    # another branch or carry uncommitted changes, which is why the source is always named
+    # rather than left to be inferred (research R1, R2).
+    #
+    # Always a concrete path, never ``None``, including when nothing could be read from it:
+    # the note and the record have to say *where* was looked at, or "this repository has no
+    # instructions" is indistinguishable from "the wrong directory was read". Which of the
+    # three happened is ``context_source``'s job, not the path's.
+    recorded_worktree = item.worktree_path if item is not None else None
+    if recorded_worktree and Path(recorded_worktree).is_dir():
+        context_root = Path(recorded_worktree)
+        context_source = "worktree"
+    else:
+        context_root = Path(repository.path)
+        context_source = "clone" if context_root.is_dir() else "none"
+
+    if context_source == "clone" and recorded_worktree:
+        note_key = "clone_reclaimed"
+    else:
+        note_key = context_source
+    note = _CONTEXT_NOTES[note_key].format(path=context_root, worktree=recorded_worktree)
+    result.data["notes"] = [note]
+    if notes is not None:
+        # ``flush=True`` because the difference is invisible on a terminal and is the whole
+        # behaviour when the two streams are being read apart from each other.
+        print(note, file=notes, flush=True)
+
+    if context_source == "none":
+        instructions = None
+        block = None
+    else:
+        instructions = prompt.read_instructions(context_root)
+        # Dispatch's own function, not a copy of it: detection, per-repository suppression
+        # and the configured command list must agree with a real dispatch, and sharing the
+        # code is what makes that structural. ``item_id`` is ``None`` when the issue has no
+        # row, which keys the record on the repository instead (research R3).
+        block = dispatch.speckit_block(
+            config=ctx.config,
+            audit=ctx.audit,
+            repo_key=repo_key,
+            item_id=item_id,
+            worktree_path=str(context_root),
+        )
+
+    text = prompt.compose(
+        issue,
+        repo_key=repo_key,
+        branch=branch,
+        instructions=instructions,
+        speckit_block=block,
+    )
+
+    detail: dict[str, Any] = {
+        "repo_key": repo_key,
+        "issue_number": issue_number,
+        "branch": branch,
+        "branch_source": branch_source,
+        "context_root": str(context_root),
+        "context_source": context_source,
+        "instructions": instructions is not None,
+        "speckit": block is not None,
+    }
+    if item_id is not None:
+        detail["item_id"] = item_id
+    if recorded_worktree and context_source != "worktree":
+        # The worktree this item was dispatched into, recorded because it is *not* what was
+        # read. Without it the record says "clone" and a reader cannot tell a reclaimed
+        # worktree from an issue that never had one — the same distinction the note draws.
+        detail["recorded_worktree"] = recorded_worktree
+    # Never the composed text, the issue body, or the contents of either optional section.
+    # Dispatch does not record them either, and a log that described the rehearsal in more
+    # detail than the performance would be the wrong asymmetry (research R4).
+    ctx.audit.record(
+        "prompt.preview",
+        outcome="ok",
+        entity_type="issue",
+        entity_id=entity_id,
+        detail=detail,
+    )
+
+    result.data.update(detail)
+    result.data["prompt"] = text
+    # The prompt is the *only* line, which is what makes stdout carry the prompt and
+    # nothing else once ``cli.main`` prints it (FR-003).
+    result.say(text)
+    return result
 
 
 # -- onboard ----------------------------------------------------------------

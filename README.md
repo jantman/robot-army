@@ -367,6 +367,34 @@ tools that already answer it still answer:
 uv run robot-army show <id>       # uncommitted changes? commits on the branch? PR open?
 ```
 
+### Reading a prompt before it is sent
+
+Everything above describes what goes into a prompt. This prints one:
+
+```bash
+uv run robot-army prompt jantman/some-repo 42
+```
+
+It composes exactly what a dispatch of that issue would hand the session — the repository's
+own `.claude/robot-army.md` if it has one, the Spec Kit block if it applies, the delivery
+rules, and the issue — and writes it to stdout and nothing else, so it redirects and diffs
+cleanly. Everything explanatory, including which directory the repository's instructions were
+read from, goes to stderr.
+
+The issue does not have to be labelled, eligible, open, or known to the system: any issue
+number in an onboarded repository works, which is the point — it answers "what would this
+session be told?" before there is a session. Nothing is created by asking. No worktree, no
+branch, no work item, no comment on the issue; the only trace is one line in the audit log.
+
+For an issue that already has a worktree the prompt is read from *that worktree*, so it
+answers what that session was told rather than what a fresh one would be. For everything else
+it reads the onboarded clone, and says so, because a clone can sit on another branch or carry
+uncommitted changes and a preview that hid the difference would be worse than no preview.
+
+Exit codes distinguish the failures without reading the message: `2` for a malformed
+`owner/repo` or issue number, `3` for a repository that was never onboarded, `1` if the issue
+could not be fetched. In every one of those, stdout stays empty.
+
 ## When a repository uses Spec Kit
 
 More than half of my work goes through [spec-kit](https://github.com/github/spec-kit), and

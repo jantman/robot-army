@@ -271,6 +271,11 @@ class FakeIssueReader:
         self.view_conflicts: list[str] = []
         self.view_sort_calls: list[tuple[str, str, str]] = []
         self.raise_on_remote: Exception | None = None
+        #: Set to make ``get_issue`` fail the way a transport error does. Separate from
+        #: ``raise_on_remote`` because a test of the preview's failure path must not also
+        #: change what ``is_closed`` does.
+        self.raise_on_get_issue: Exception | None = None
+        self.get_issue_calls: list[tuple[str, int]] = []
         self.listing_calls: list[tuple[str, str, str | None]] = []
         self.created: dict[int, str] = {}
         self.repo_calls: list[str] = []
@@ -287,6 +292,9 @@ class FakeIssueReader:
         return PollResult(items=tuple(self.issues), etag=self.etag, status=self.status)
 
     def get_issue(self, repo_key: str, number: int) -> Issue | None:
+        self.get_issue_calls.append((repo_key, number))
+        if self.raise_on_get_issue is not None:
+            raise self.raise_on_get_issue
         for issue in self.issues:
             if issue.number == number:
                 return issue

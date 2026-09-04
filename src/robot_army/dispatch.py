@@ -408,7 +408,7 @@ def speckit_block(
     config: Config,
     audit: AuditLog,
     repo_key: str,
-    item_id: int,
+    item_id: int | None,
     worktree_path: str,
 ) -> str | None:
     """The Spec Kit guidance for this dispatch, or ``None`` (milestone 007, FR-005).
@@ -418,11 +418,19 @@ def speckit_block(
     behind it are four ``stat`` calls and logging each of those would bury the decision
     they support.
 
+    ``item_id`` is ``None`` for ``robot-army prompt``, which composes the same block for an
+    issue that may have no work item at all. The record is then keyed on the repository
+    rather than on a row that does not exist — writing a sentinel id would put a false
+    statement into an append-only log. Dispatch always has a row and always passes one, so
+    its records are unchanged.
+
     **Nothing here may fail a dispatch.** ``speckit.detect`` already promises not to raise,
     and this catches anyway: the cost of a bare handler here is one over-broad ``except``,
     and the cost of being wrong about that promise is a repository that cannot dispatch at
     all because of a paragraph of prose it was going to be sent.
     """
+    entity_type = "work_item" if item_id is not None else "repo"
+    entity_id: object = item_id if item_id is not None else repo_key
     try:
         detection = speckit.detect(worktree_path)
         enabled, suppressed_by = config.speckit_enabled_for(repo_key)
@@ -434,8 +442,8 @@ def speckit_block(
         audit.record(
             "speckit.detect",
             outcome="error",
-            entity_type="work_item",
-            entity_id=item_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
             target=worktree_path,
             detail={"detected": False, "reason": f"detection failed: {exc}", "enabled": False},
         )
@@ -468,8 +476,8 @@ def speckit_block(
     audit.record(
         "speckit.detect",
         outcome="ok",
-        entity_type="work_item",
-        entity_id=item_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
         target=worktree_path,
         detail=detail,
     )

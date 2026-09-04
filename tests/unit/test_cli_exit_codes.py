@@ -3,6 +3,12 @@
 contracts/cli.md fixes these: ``0`` success, ``1`` operation failed, ``2`` usage error,
 ``3`` precondition not met, ``4`` check failed. Every command must exit non-zero on
 failure *and explain it* (FR-069), so these tests assert the code and the message.
+
+``prompt``'s four codes are asserted in ``tests/unit/test_prompt_preview.py`` instead, not
+here: that command needs a repository keyed ``owner/name`` — a key without an owner is one
+of the failures it is *about* — and the fixture in this module deliberately uses the short
+key every other command is content with. The assertions there are stricter than these, since
+each also proves stdout stayed empty.
 """
 
 from __future__ import annotations

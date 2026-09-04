@@ -2640,9 +2640,20 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
     if not verdict.eligible:
         # The reason is written to the row as well as returned, so the queue describes why
         # the item is blocked *now* rather than why it was blocked before (FR-005).
+        #
+        # **Both** columns, which is not belt-and-braces. ``/queue`` renders
+        # ``failure_reason or blocked_reason`` (``pages.web.pages._queue``), so writing only
+        # the second leaves the page showing the *old* sentence beside a button that has
+        # just refused for a different one — precisely the "the interface says something
+        # other than what happened" failure this whole change exists to remove. ``_settle``
+        # writes the pair for the same reason when the poller rejects an item, and these two
+        # are the only writers of an eligibility verdict; they must not disagree.
         with db.transaction(ctx.conn):
             db.update_work_item_columns(
-                ctx.conn, item_id, blocked_reason=verdict.reason
+                ctx.conn,
+                item_id,
+                blocked_reason=verdict.reason,
+                failure_reason=verdict.reason,
             )
         return Result(
             code=EXIT_PRECONDITION,

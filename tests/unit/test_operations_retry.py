@@ -169,16 +169,59 @@ def test_an_item_that_failed_for_an_unrelated_reason_is_still_re_evaluated(ctx, 
     assert db.get_work_item(conn, item_id).state is WorkItemState.FAILED
 
 
-def test_a_refusal_rewrites_the_blocked_reason_to_the_current_one(ctx, conn, config):
-    """FR-005: the queue must describe why the item is blocked *now*."""
+def test_a_refusal_rewrites_both_reason_columns_to_the_current_one(ctx, conn, config):
+    """FR-005: the queue must describe why the item is blocked *now*.
+
+    Both columns, and asserting only on ``blocked_reason`` is the trap this test fell into
+    once already. ``/queue`` renders ``failure_reason or blocked_reason``, so a refusal that
+    wrote only the second would leave the page showing the *old* sentence next to a button
+    that had just refused for a different one — the interface disagreeing with what
+    happened, which is the whole failure this change exists to remove.
+    """
     item_id = failed_item(conn, config)
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn,
+            item_id,
+            failure_reason="issue author 'mallory' is not the configured author",
+            blocked_reason="issue author 'mallory' is not the configured author",
+        )
+    # A *different* condition now fails, so a stale reason is distinguishable from a fresh
+    # one. Reusing the author condition here would let both columns pass by accident.
     ctx.boundaries.issue_reader.issues = [make_issue(number=42, labels=())]
 
     operations.retry(ctx, item_id)
 
-    reason = db.get_work_item(conn, item_id).blocked_reason
-    assert "label" in reason
-    assert reason != "eligibility rejected", "the stale reason must not survive"
+    row = db.get_work_item(conn, item_id)
+    assert "label" in row.blocked_reason
+    assert "label" in row.failure_reason, "the column /queue actually renders"
+    assert "mallory" not in (row.failure_reason or ""), "the stale reason must not survive"
+
+
+def test_the_queue_page_shows_the_reason_the_retry_just_established(web, conn, config, monkeypatch):
+    """The same property, asserted through the renderer rather than the columns, because
+    the columns are not what the maintainer reads."""
+    monkeypatch.setattr(
+        operations.dispatch,
+        "is_trusted",
+        lambda path, trust_file=None: (True, "trusted in test"),
+    )
+    item_id = seed_item(conn, state="failed", clone_path=config.repos["demo"].path)
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn,
+            item_id,
+            failure_reason="a stale reason from an earlier failure",
+            blocked_reason="a stale reason from an earlier failure",
+        )
+    web.reader.issues = [make_issue(number=42, author="mallory")]
+
+    web.post_json(f"/item/{item_id}/retry")
+    blocked = web.get_json("/queue").json()["blocked"]
+
+    row = next(r for r in blocked if r["id"] == item_id)
+    assert "mallory" in row["reason"]
+    assert "stale" not in row["reason"]
 
 
 def test_an_eligible_issue_returns_to_the_queue_with_its_reasons_cleared(ctx, conn, config):

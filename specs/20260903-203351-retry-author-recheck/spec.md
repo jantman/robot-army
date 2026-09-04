@@ -211,9 +211,11 @@ the item, and names the author as the reason.
   what makes an issue eligible.
 - **FR-004**: A refused `retry` MUST leave the item in the failed state and MUST report the
   condition that caused the refusal.
-- **FR-005**: A refused `retry` MUST update the item's recorded block reason to the reason
-  the refusal just established, so the queue describes the item's present state rather than
-  a past one.
+- **FR-005**: A refused `retry` MUST update **every** recorded reason the interface may
+  display — both the block reason and the failure reason — to the reason the refusal just
+  established, so the queue describes the item's present state rather than a past one.
+  Updating only one of them satisfies the letter of this requirement and defeats it in
+  practice, because the queue renders whichever it finds first.
 - **FR-006**: `retry` MUST refuse, naming the read failure, when the issue cannot be read —
   whether because the source is unreachable, the issue no longer exists, or it is no longer
   visible. It MUST NOT fall back to the item's stored copy of the issue.

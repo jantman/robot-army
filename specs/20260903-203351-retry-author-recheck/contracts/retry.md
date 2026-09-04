@@ -24,6 +24,12 @@ limit finding out.
 Between 5 and 6 the item's `title`, `body`, `labels` and `author` are rewritten from the
 issue just read — on the refused path as well as the allowed one ([R5](../research.md)).
 
+A refusal at check 6 then writes the new reason to **both** `blocked_reason` and
+`failure_reason`. `/queue` renders `failure_reason or blocked_reason`, so writing only the
+second would leave the page showing the old sentence beside a button that had just refused
+for a different one. `poll._settle` writes the pair for the same reason; these two are the
+only writers of an eligibility verdict and must not disagree.
+
 ## Refusal messages
 
 Check 5, unreachable source (`BoundaryError`):

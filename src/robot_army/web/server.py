@@ -95,15 +95,22 @@ _OVER_CAPACITY_BODY = b'{"ok": false, "reason": "too many connections; try again
 #: slot frees the moment any in-flight connection ends. The body is JSON whatever the client
 #: asked for, because at this point not one byte of the request has been read and ``Accept``
 #: is not yet known.
-OVER_CAPACITY_RESPONSE = (
-    b"HTTP/1.1 503 Service Unavailable\r\n"
-    b"Content-Type: application/json; charset=utf-8\r\n"
-    b"Content-Length: " + str(len(_OVER_CAPACITY_BODY)).encode("ascii") + b"\r\n"
-    b"Connection: close\r\n"
-    b"Cache-Control: no-store\r\n"
-    b"Retry-After: 1\r\n"
-    b"\r\n" + _OVER_CAPACITY_BODY
+OVER_CAPACITY_RESPONSE = b"\r\n".join(
+    [
+        b"HTTP/1.1 503 Service Unavailable",
+        b"Content-Type: application/json; charset=utf-8",
+        b"Content-Length: %d" % len(_OVER_CAPACITY_BODY),
+        b"Connection: close",
+        b"Cache-Control: no-store",
+        b"Retry-After: 1",
+        b"",
+        _OVER_CAPACITY_BODY,
+    ]
 )
+
+#: One read is enough to clear what a client sent before we refused it, and one read is all
+#: the refusal path can afford. Sized like a request's headers, not like a body.
+_DRAIN_BYTES = 64 * 1024
 
 TRUTHY = frozenset({"1", "true", "yes", "on"})
 #: Its twin, and the reason there is one: since 009 the visibility default varies by effect
@@ -1712,7 +1719,6 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             admitted = self._in_flight < MAX_CONCURRENT_CONNECTIONS
             if admitted:
                 self._in_flight += 1
-                self._saturated = False
                 announce = False
             else:
                 self.refused_over_capacity += 1
@@ -1754,11 +1760,14 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         ordinary FIN and the ``503`` readable.
         """
         try:
+            # One suppress over all three, not one each: if ``setblocking`` fails the socket
+            # is still blocking and has no timeout of its own — ``setup()`` never ran for it
+            # — so a ``recv`` after it could block the accept loop for good. A failure at any
+            # step must skip the rest, and only the close below is unconditional.
             with contextlib.suppress(OSError):
                 request.setblocking(False)
                 request.send(OVER_CAPACITY_RESPONSE)
-            with contextlib.suppress(OSError):
-                request.recv(MAX_BODY_BYTES)
+                request.recv(_DRAIN_BYTES)
         finally:
             # Whatever the socket did or refused to do, the descriptor goes back. That is
             # the part of this path that is not best-effort.
@@ -1779,7 +1788,12 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     def _release_slot(self) -> None:
         with self._capacity_lock:
             self._in_flight -= 1
-            if self._in_flight < MAX_CONCURRENT_CONNECTIONS:
+            # Hysteresis, and the reason it is not simply ``< cap``: under a sustained flood
+            # the count sits *at* the cap and oscillates by one as slots recycle, so a flag
+            # cleared by any release would re-arm on every recycled connection and print a
+            # line for each. An episode ends when the pressure is actually gone, which is
+            # what half the cap stands for.
+            if self._in_flight * 2 <= MAX_CONCURRENT_CONNECTIONS:
                 self._saturated = False
 
     def handle_error(self, request: Any, client_address: Any) -> None:

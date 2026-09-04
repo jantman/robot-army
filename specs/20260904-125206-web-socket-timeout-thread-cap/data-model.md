@@ -27,7 +27,7 @@ One instance per running server; all of it dies with the process and none of it 
 |---|---|---|---|
 | `_capacity_lock` | `threading.Lock` | Server | Guards every field below. Held only for the counter arithmetic — never across a socket operation, and never across starting a thread. |
 | `_in_flight` | `int` | Server | `0 <= _in_flight <= MAX_CONCURRENT_CONNECTIONS`. Incremented when a connection is admitted, decremented exactly once when its serving thread ends — by completion, timeout, client disconnect, or an unhandled failure (FR-008). |
-| `_saturated` | `bool` | Server | `True` from the first refusal until `_in_flight` next falls below the cap. Exists so the terminal message is one per saturation episode, not one per refusal (FR-009). |
+| `_saturated` | `bool` | Server | `True` from the first refusal until `_in_flight` falls to half the cap or below. Exists so the terminal message is one per saturation episode, not one per refusal (FR-009). The hysteresis is load-bearing: under a sustained flood the count sits *at* the cap and oscillates by one as slots recycle, so a flag cleared by any release would re-arm on every recycled connection. |
 | `refused_over_capacity` | `int` | Server | Monotonically increasing count of connections refused for capacity during this run. Read once, at shutdown, into the `web.stop` record (FR-010). Public because `serve()` is its only reader. |
 
 ### Connection lifecycle
@@ -40,9 +40,10 @@ accept()
    │                          if not _saturated: print to stderr; _saturated = True
    │                          (no thread, no Context, no SQLite, no audit handle)
    │
-   └── otherwise ──────────► _in_flight += 1;  if _in_flight < cap: _saturated = False
+   └── otherwise ──────────► _in_flight += 1
                              thread: serve the connection (one or more requests)
                              finally: _in_flight -= 1
+                                      if _in_flight * 2 <= cap: _saturated = False
 ```
 
 The slot is held for the whole connection, not for one request, because one thread serves

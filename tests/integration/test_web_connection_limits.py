@@ -38,18 +38,20 @@ TEST_TIMEOUT_SECONDS = 0.4
 #: Two, so "at the cap" is reachable by opening two connections and holding them.
 TEST_MAX_CONNECTIONS = 2
 
+#: The bound used by the tests that are *not* about the bound. The cap tests need their held
+#: connections to still be held when the next assertion runs, and a 0.4-second bound on a
+#: loaded CI runner is a connection that quietly times out mid-test and turns a refusal into
+#: an admission. Long enough to be effectively infinite for a test, short enough that a
+#: mistake still ends rather than hangs.
+HOLD_TIMEOUT_SECONDS = 5.0
+
 #: The ceiling every "did it close?" assertion is made against. Far above the bound and far
 #: below "forever", so a regression to the unbounded behaviour fails rather than hangs.
 CLOSE_DEADLINE_SECONDS = 10.0
 
 
-@pytest.fixture
-def bounded_server(config, conn, monkeypatch):
-    """A live server on an ephemeral port with both bounds shrunk to test size.
-
-    Yields ``(base_url, server)`` — the URL for ordinary requests, and the server itself for
-    the tests that read ``refused_over_capacity`` off it.
-    """
+def stub_boundaries(monkeypatch) -> None:
+    """The fakes every live-server test needs, and nothing about the bounds."""
     from tests.conftest import FakeIssueReader, StubDisplay, StubSessionHost
 
     reader, display, host = FakeIssueReader(), StubDisplay(), StubSessionHost()
@@ -62,19 +64,59 @@ def bounded_server(config, conn, monkeypatch):
     )
     operations.clear_resume_signal_cache()
 
-    # ``Handler.timeout`` rather than ``REQUEST_TIMEOUT_SECONDS``: the attribute is what
-    # ``StreamRequestHandler.setup`` reads, and it is bound at class creation, so patching the
-    # constant here would reach nothing. That the attribute *is* the constant by default is
-    # asserted in tests/unit/test_web_connection_limits.py, where it belongs.
-    monkeypatch.setattr(server_mod.Handler, "timeout", TEST_TIMEOUT_SECONDS)
-    # The cap, by contrast, is read on every admission decision, so the constant is the knob.
+
+def shrink_bounds(monkeypatch, *, handler_timeout: float) -> None:
+    """Put both bounds within a test's patience.
+
+    ``Handler.timeout`` rather than ``REQUEST_TIMEOUT_SECONDS``: the attribute is what
+    ``StreamRequestHandler.setup`` reads, and it is bound at class creation, so patching the
+    constant would reach nothing. That the attribute *is* the constant by default is asserted
+    in ``tests/unit/test_web_connection_limits.py``, where it belongs. The cap, by contrast,
+    is read on every admission decision, so there the constant is the knob.
+    """
+    monkeypatch.setattr(server_mod.Handler, "timeout", handler_timeout)
     monkeypatch.setattr(server_mod, "MAX_CONCURRENT_CONNECTIONS", TEST_MAX_CONNECTIONS)
 
+
+def run_server(config) -> Any:
+    """A live server on an ephemeral port, serving on a daemon thread."""
     app = WebApp(config)
     server = build_server(app, bind="127.0.0.1", port=0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02})
     thread.daemon = True
     thread.start()
+    return server, thread
+
+
+@pytest.fixture
+def bounded_server(config, conn, monkeypatch):
+    """A live server whose wait bound is short enough to sit and watch elapse.
+
+    Yields ``(base_url, server)`` — the URL for ordinary requests, and the server itself for
+    the tests that read ``refused_over_capacity`` off it.
+    """
+    stub_boundaries(monkeypatch)
+    shrink_bounds(monkeypatch, handler_timeout=TEST_TIMEOUT_SECONDS)
+    server, thread = run_server(config)
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def patient_server(config, conn, monkeypatch):
+    """The same server, but its wait bound will not expire under a test's own feet.
+
+    Used by every test about the *cap*: those hold connections open to reach capacity, and a
+    held connection that times out mid-test frees a slot and turns the next refusal into an
+    admission — a flake that only appears on a loaded machine.
+    """
+    stub_boundaries(monkeypatch)
+    shrink_bounds(monkeypatch, handler_timeout=HOLD_TIMEOUT_SECONDS)
+    server, thread = run_server(config)
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}", server
     finally:
@@ -273,9 +315,9 @@ def wait_for_in_flight(server: Any, expected: int) -> None:
     pytest.fail(f"only {server._in_flight} of {expected} connections were admitted")
 
 
-def test_a_connection_beyond_the_cap_is_refused_and_closed(bounded_server):
+def test_a_connection_beyond_the_cap_is_refused_and_closed(patient_server):
     """Spec scenario 1, contract C2."""
-    base, server = bounded_server
+    base, server = patient_server
     held = hold(base, TEST_MAX_CONNECTIONS)
     try:
         wait_for_in_flight(server, TEST_MAX_CONNECTIONS)
@@ -295,9 +337,9 @@ def test_a_connection_beyond_the_cap_is_refused_and_closed(bounded_server):
     assert server.refused_over_capacity == 1
 
 
-def test_releasing_a_connection_frees_a_slot(bounded_server):
+def test_releasing_a_connection_frees_a_slot(patient_server):
     """Spec scenario 2, SC-002. The refusal is a "not now", and it has to mean it."""
-    base, server = bounded_server
+    base, server = patient_server
     held = hold(base, TEST_MAX_CONNECTIONS)
     wait_for_in_flight(server, TEST_MAX_CONNECTIONS)
 
@@ -306,18 +348,19 @@ def test_releasing_a_connection_frees_a_slot(bounded_server):
     deadline = time.monotonic() + CLOSE_DEADLINE_SECONDS
     while server._in_flight > 0 and time.monotonic() < deadline:
         time.sleep(0.005)
+    assert server._in_flight == 0, "the released connections never gave their slots back"
 
     raw = get(base, "/queue.json")
     assert raw.startswith(b"HTTP/1.1 200"), raw[:80]
 
 
-def test_a_refused_connection_opens_nothing(bounded_server, monkeypatch):
+def test_a_refused_connection_opens_nothing(patient_server, monkeypatch):
     """Spec scenario 3, FR-006.
 
     The whole point of deciding at ``process_request``: a refused connection must not cost a
     SQLite connection and an audit file handle, or the refusal funds the attack.
     """
-    base, server = bounded_server
+    base, server = patient_server
     contexts = []
     real = server_mod.operations.build_context
     monkeypatch.setattr(
@@ -334,12 +377,18 @@ def test_a_refused_connection_opens_nothing(bounded_server, monkeypatch):
             refused = connect(base)
             read_until_close(refused)
             refused.close()
+        # Read the count *here*, not after the held connections are closed. Each of those is
+        # parked mid-headers, and closing it delivers the EOF that ends the header block —
+        # so the server then dispatches a header-less GET and builds a Context for it, which
+        # has nothing to do with the refusals and would race this assertion.
+        after = len(contexts)
+        refusals = server.refused_over_capacity
     finally:
         for sock in held:
             sock.close()
 
-    assert server.refused_over_capacity == 5
-    assert len(contexts) == before
+    assert refusals == 5
+    assert after == before
 
 
 def test_an_over_large_body_is_still_refused_without_reading(bounded_server):
@@ -372,19 +421,10 @@ def test_the_stop_record_carries_the_refusal_count(config, conn, monkeypatch):
     test that runs the real ``serve`` — signal handler, shutdown path, stop record and all —
     rather than asserting on a dict built in isolation.
     """
-    from tests.conftest import FakeIssueReader, StubDisplay, StubSessionHost
-
-    reader, display, host = FakeIssueReader(), StubDisplay(), StubSessionHost()
-    monkeypatch.setattr(
-        operations,
-        "wire",
-        lambda level, cfg, log: make_boundaries(
-            log, level=level, reader=reader, display=display, host=host
-        ),
-    )
-    operations.clear_resume_signal_cache()
-    monkeypatch.setattr(server_mod.Handler, "timeout", TEST_TIMEOUT_SECONDS)
-    monkeypatch.setattr(server_mod, "MAX_CONCURRENT_CONNECTIONS", TEST_MAX_CONNECTIONS)
+    stub_boundaries(monkeypatch)
+    # The patient bound: this test holds connections to reach capacity, and a held connection
+    # timing out mid-test would turn one of its three refusals into an admission.
+    shrink_bounds(monkeypatch, handler_timeout=HOLD_TIMEOUT_SECONDS)
 
     built: dict[str, Any] = {}
     real_build = server_mod.build_server

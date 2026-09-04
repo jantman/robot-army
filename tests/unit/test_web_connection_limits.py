@@ -248,6 +248,29 @@ def test_dropping_below_the_cap_re_arms_the_message(monkeypatch, capsys):
     assert capsys.readouterr().err.count("at capacity") == 2
 
 
+def test_a_recycled_slot_does_not_re_arm_the_message(monkeypatch, capsys):
+    """The reason the flag has hysteresis rather than clearing on any release.
+
+    Under a sustained flood the count sits *at* the cap and oscillates by one as connections
+    time out and new ones are admitted. A flag cleared by any release would re-arm on every
+    recycled slot and print a line for each, which is one per connection in all but name.
+    """
+    monkeypatch.setattr(server_mod, "MAX_CONCURRENT_CONNECTIONS", 4)
+    server = FakeServer()
+
+    for i in range(4):
+        server.process_request(FakeSocket(), ("127.0.0.1", i))
+    server.process_request(FakeSocket(), ("127.0.0.1", 9))  # refused: the episode begins
+
+    for i in range(10):  # ten connections recycle while the pressure never lets up
+        server._release_slot()
+        server.process_request(FakeSocket(), ("127.0.0.1", i))
+        server.process_request(FakeSocket(), ("127.0.0.1", 99))  # refused again
+
+    assert server.refused_over_capacity == 11
+    assert capsys.readouterr().err.count("at capacity") == 1
+
+
 def test_the_refusal_path_writes_no_audit_record(monkeypatch):
     """FR-011. The enumerated Principle III exception, held in place by a test.
 

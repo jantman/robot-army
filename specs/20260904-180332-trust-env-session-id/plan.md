@@ -146,7 +146,7 @@ share/
 └── robot-army-session-wrapper.sh    # THE change: identifier sourcing, validation, escaping
 
 src/robot_army/
-├── dispatch.py                      # Read only — plan_launch already sets ROBOT_ARMY_SESSION_ID
+├── dispatch.py                      # Read only — build_launch_plan already sets ROBOT_ARMY_SESSION_ID
 └── boundaries/kitty.py              # Read only — delivers it as --env
 
 tests/
@@ -180,6 +180,6 @@ reasoning for each is there, not repeated here.
    environment variable is required, since it is now the only source.
 4. **Escaping order.** The C0 loop runs *after* the backslash substitution, so the
    backslashes it introduces are not themselves escaped.
-5. **The daemon side needs a guard, not a change.** `plan_launch` already sets the variable.
+5. **The daemon side needs a guard, not a change.** `build_launch_plan` already sets the variable.
    A test asserting that it does is what stops a future refactor removing the wrapper's only
    source of truth without anything failing.

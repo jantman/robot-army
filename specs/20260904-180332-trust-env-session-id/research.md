@@ -13,7 +13,7 @@ The prototypes are recorded here because two of them changed the answer.
 `ROBOT_ARMY_SESSION_ID` and from nowhere else. The `for a in "$@"` loop goes.
 
 **Rationale**: The issue offers "invert the precedence and validate" as an alternative that
-keeps a hand-invocation fallback. There is no caller that needs it. `dispatch.plan_launch`
+keeps a hand-invocation fallback. There is no caller that needs it. `dispatch.build_launch_plan`
 (`src/robot_army/dispatch.py:686-700`) builds `session_env` in exactly one place, always
 including `ROBOT_ARMY_SESSION_ID`, and every launch — first attempt, resume, restart — goes
 through that one builder, because `resume_session_id` is a parameter of it rather than a

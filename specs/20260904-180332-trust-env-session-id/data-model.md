@@ -12,7 +12,7 @@ feature.
 
 | Property | Value |
 |---|---|
-| Issued by | `dispatch.plan_launch`, as `str(uuid.uuid4())` (`src/robot_army/dispatch.py:1092`) |
+| Issued by | `dispatch_item` as `str(uuid.uuid4())` (`src/robot_army/dispatch.py:1092`), then handed to `build_launch_plan` |
 | Delivered to the wrapper by | `ROBOT_ARMY_SESSION_ID`, passed as `--env` by the session launcher |
 | Accepted shape | `^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$` |
 | Used for | The record filename `<session-id>.<event>.json`, and the record's `session_id` field |

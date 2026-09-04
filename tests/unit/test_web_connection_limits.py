@@ -329,6 +329,32 @@ def test_a_recycled_slot_does_not_re_arm_the_message(monkeypatch, capsys):
     assert capsys.readouterr().err.count("at capacity") == 1
 
 
+@pytest.mark.parametrize(
+    ("cap", "releases_to_re_arm"),
+    [(1, 1), (2, 1), (3, 2), (4, 2), (8, 4), (32, 16)],
+)
+def test_how_much_must_drain_before_an_episode_ends(cap, releases_to_re_arm, monkeypatch):
+    """Pins the hysteresis arithmetic the comment on ``_release_slot`` describes in prose.
+
+    A comment claiming which caps degenerate is a claim that can be wrong — and was, once,
+    on this branch. This makes it checkable: only 1 and 2 re-arm on a single release, and 3
+    already needs two of its three, so the shipped 32 needs sixteen. A change to the
+    threshold that quietly weakens the guarantee fails here rather than in a log nobody reads.
+    """
+    monkeypatch.setattr(server_mod, "MAX_CONCURRENT_CONNECTIONS", cap)
+    server = FakeServer()
+    server._in_flight = cap
+    server._saturated = True
+
+    for release in range(1, releases_to_re_arm + 1):
+        server._release_slot()
+        expected = release == releases_to_re_arm
+        assert server._saturated is not expected, (
+            f"cap={cap}: after {release} release(s) the episode should "
+            f"{'have ended' if expected else 'still be running'}"
+        )
+
+
 def test_the_refusal_path_writes_no_audit_record(monkeypatch):
     """FR-011. The enumerated Principle III exception, held in place by a test.
 

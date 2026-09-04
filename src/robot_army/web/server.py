@@ -1812,12 +1812,13 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # line for each. An episode ends when the pressure is actually gone, which is
             # what half the cap stands for.
             #
-            # This assumes a cap with room in it for "half" to mean something — at 32, it
-            # takes sixteen connections draining, which is a recovery and not a dip. A cap
-            # small enough that half of it is one connection (2, 3) degenerates back to
-            # re-arming on any release. That is not a case to complicate this arithmetic for:
-            # the cap is a constant and not configuration (FR-012), and a cap that small
-            # would make the announcement itself the wrong idea, not this threshold.
+            # This assumes a cap with room in it for "half" to mean something — at 32 it
+            # takes sixteen connections draining, which is a recovery and not a dip. Only a
+            # cap of 1 or 2 degenerates, because only there does a single release already
+            # satisfy the test; 3 already takes two of its three. Not a case to complicate
+            # this arithmetic for: the cap is a constant and not configuration (FR-012), and
+            # a cap that small would make the announcement itself the wrong idea rather than
+            # this threshold.
             if self._in_flight * 2 <= MAX_CONCURRENT_CONNECTIONS:
                 self._saturated = False
 

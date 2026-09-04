@@ -403,3 +403,72 @@ def test_the_queue_renders_without_ever_asking_github(config, conn, layout, monk
     assert "not the dispatch column" in page
     assert payload["held_off_column"] == 1
     assert payload["ready"][0]["id"] == ranked
+
+
+# -- RA-12: the security headers, across a real socket ----------------------
+
+
+def test_the_security_headers_survive_the_wire(live_server, conn):
+    """The unit tests prove ``handle`` puts them on the ``Response``. This proves nothing
+    between there and the socket drops them — and covers the ``303``, which no browser
+    renders but every action returns."""
+    from robot_army.web.server import SECURITY_HEADERS
+
+    item_id = seed_item(conn, state="interrupted")
+    responses = {
+        "page": fetch(f"{live_server}/active"),
+        "json": fetch(f"{live_server}/queue.json", accept="application/json"),
+        "stylesheet": fetch(f"{live_server}/static/app.css"),
+        "404": fetch(f"{live_server}/definitely-not-a-route"),
+        "405": fetch(f"{live_server}/dispatch/pause"),
+        "303": fetch(f"{live_server}/item/{item_id}/abandon", data={}),
+    }
+    for name, (_status, headers, _body) in responses.items():
+        for header, value in SECURITY_HEADERS.items():
+            assert headers.get(header) == value, f"{header} missing from {name}"
+
+    # And what each of them carried before is still there (FR-006).
+    assert responses["page"][1]["Cache-Control"] == "no-store"
+    assert "max-age" in responses["stylesheet"][1]["Cache-Control"]
+    assert responses["405"][1]["Allow"] == "POST"
+    assert responses["303"][1]["Location"].startswith(f"/item/{item_id}?")
+
+
+def test_a_head_sends_the_same_headers_as_the_get(live_server):
+    """A ``HEAD`` withholds the body and nothing else. Worth asserting because the headers
+    and the body are written by different branches of ``_respond``."""
+    from robot_army.web.server import SECURITY_HEADERS
+
+    request = urllib.request.Request(  # noqa: S310 - our own loopback server
+        f"{live_server}/active", method="HEAD"
+    )
+    with urllib.request.build_opener(_NoRedirect).open(request, timeout=10) as response:
+        headers = dict(response.headers)
+        assert response.read() == b""
+
+    for header, value in SECURITY_HEADERS.items():
+        assert headers.get(header) == value
+
+
+def test_the_oversized_body_refusal_carries_the_headers(live_server, conn):
+    """The one response written directly at the socket boundary, which never reaches the
+    page renderer — and would have been the hole in any per-call-site fix."""
+    from robot_army.web.server import MAX_BODY_BYTES, SECURITY_HEADERS
+
+    item_id = seed_item(conn, state="interrupted")
+    payload = urllib.parse.urlencode({"junk": "x" * (MAX_BODY_BYTES + 1024)}).encode("utf-8")
+    request = urllib.request.Request(  # noqa: S310 - our own loopback server
+        f"{live_server}/item/{item_id}/abandon",
+        data=payload,
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(request, timeout=10) as response:
+            status, headers = response.status, dict(response.headers)
+    except urllib.error.HTTPError as exc:
+        status, headers = exc.code, dict(exc.headers)
+
+    assert status == 413
+    for header, value in SECURITY_HEADERS.items():
+        assert headers.get(header) == value
+    assert headers["Connection"] == "close"

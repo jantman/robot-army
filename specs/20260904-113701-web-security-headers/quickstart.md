@@ -70,14 +70,19 @@ place every ten seconds, and the console is empty — no `Refused to load`, no `
 connect`, no CSP violation of any kind. A styled page with a silent console is the whole check:
 if `default-src 'self'` were wrong, the stylesheet or the refresh would visibly fail.
 
-**Framing is refused (SC-001).** Save this beside nothing in particular and open it as a
-`file://` URL:
+**Framing is refused (SC-001).** Serve this from any other origin — a second port on this
+machine is enough, and is closer to the real thing than a `file://` URL:
 
-```html
+```bash
+cat > /tmp/frame-test.html <<'HTML'
 <!doctype html>
 <p>below is a frame of the interface:</p>
 <iframe src="http://127.0.0.1:8420/queue" width="600" height="400"></iframe>
+HTML
+(cd /tmp && python3 -m http.server 8422 --bind 127.0.0.1 &)
 ```
+
+Then open `http://127.0.0.1:8422/frame-test.html`.
 
 **Expected**: the frame is blank, and the console says the page refused to display in a frame
 because it sets `X-Frame-Options` to `deny` — or names the `frame-ancestors` directive, depending

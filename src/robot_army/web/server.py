@@ -113,12 +113,62 @@ class Request:
         return self.headers.get("referer")
 
 
+#: On every response, without exception (RA-12). Attached in ``Response.__post_init__``
+#: rather than at the call sites, because the call sites are not all in one place: two of
+#: the five — the static assets and the ``413`` — never reach ``_render``, and a sixth added
+#: later would not reach a list of them either. Being a response is the condition; carrying
+#: these is the consequence. That also rules out folding them into :data:`NO_STORE`, which
+#: says something different ("do not cache this") and is absent from exactly the two paths
+#: that matter most here.
+SECURITY_HEADERS: dict[str, str] = {
+    # The finding itself. A hostile page frames this interface at its shipped default
+    # address, makes the frame transparent and baits a click over a real control; the form
+    # that submits belongs to the framed document, so the browser reports
+    # ``Sec-Fetch-Site: same-origin`` and a matching ``Origin`` — honestly.
+    # ``check_same_origin`` passes, and it is right to. The question it answers is not the
+    # one that distinguishes the two clicks, and no header on the request can be: the only
+    # place to refuse is the frame.
+    #
+    # The three directives after it are free, and free only because of how austere these
+    # pages are: ``html.page`` emits exactly two subresources, both served by this server
+    # at fixed routes; there is no inline ``<script>``, no inline ``<style>``, no ``style=``
+    # and no ``on*=`` anywhere in ``html.py``, so no ``'unsafe-inline'`` is needed; and
+    # ``app.js`` fetches only ``window.location.href``, which ``connect-src`` inherits from
+    # ``default-src``. The only external URLs any page emits are ``github.com`` anchors, and
+    # CSP does not govern navigation by link. A page that grows a web font or a CDN script
+    # breaks under this — deliberately, and a unit test says so before a browser does.
+    #
+    # ``default-src`` is also the second line under the escaping in ``html.py``, which is
+    # currently the only thing stopping an injected ``<img onerror>`` from firing when the
+    # refresh loop swaps ``innerHTML``.
+    "Content-Security-Policy": (
+        "frame-ancestors 'none'; default-src 'self'; base-uri 'none'; form-action 'self'"
+    ),
+    # The same instruction, for browsers older than ``frame-ancestors``. Where both are
+    # understood the CSP wins; they say the same thing, so it does not matter which.
+    "X-Frame-Options": "DENY",
+    # Matters most on the ``.json`` responses and the two assets: a browser guessing a type
+    # other than the one declared is the whole of that attack.
+    "X-Content-Type-Options": "nosniff",
+    # The audit and item views link out to ``github.com``. Following one must not tell the
+    # destination this interface's address, port, and the path being looked at.
+    "Referrer-Policy": "no-referrer",
+}
+
+
 @dataclass(slots=True)
 class Response:
     status: int = 200
     body: bytes = b""
     content_type: str = "text/html; charset=utf-8"
     headers: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Security headers first, so a caller that sets one of these names deliberately wins
+        # rather than being silently overwritten — nothing does today, and the ordering is
+        # what says which way it would go. A dict keyed by name also makes the failure this
+        # guards against unrepresentable: one response cannot emit two conflicting policies.
+        self.headers = {**SECURITY_HEADERS, **self.headers}
 
     @property
     def text(self) -> str:

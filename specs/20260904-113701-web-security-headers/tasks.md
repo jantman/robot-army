@@ -43,7 +43,7 @@ without that story re-writing the coverage matrix.
 
 **Purpose**: Establish the baseline so that any later failure is attributable to this change.
 
-- [ ] T001 Run the existing web suite green before touching anything: `uv run pytest -q tests/unit/test_web_routing.py tests/unit/test_web_render.py tests/unit/test_web_actions.py tests/integration/test_web_end_to_end.py`
+- [X] T001 Run the existing web suite green before touching anything: `uv run pytest -q tests/unit/test_web_routing.py tests/unit/test_web_render.py tests/unit/test_web_actions.py tests/integration/test_web_end_to_end.py`
 
 ---
 
@@ -55,11 +55,11 @@ that hold it there.
 **⚠️ CRITICAL**: No user story can be delivered until this phase is complete — each of them is
 entries in the constant this phase creates.
 
-- [ ] T002 Add a module constant `SECURITY_HEADERS: dict[str, str] = {}` to `src/robot_army/web/server.py`, immediately after `NO_STORE` (currently line 1275), with a comment stating that it is attached once at `Response` construction so that a response path added later carries it without its author knowing this exists — and that this is why it is not folded into `NO_STORE`, which reaches neither the static assets nor the `413`
-- [ ] T003 Add `__post_init__` to the `Response` dataclass in `src/robot_army/web/server.py` (line 116) setting `self.headers = {**SECURITY_HEADERS, **self.headers}`, with a comment noting the merge order: the caller's explicit header wins a name collision, and a dict keyed by name makes a duplicated header unrepresentable
-- [ ] T004 Create `tests/unit/test_web_security_headers.py` with the coverage matrix: a helper listing every response path — HTML page, `.json` page, `303` redirect, `404`, `405`, `503` schema mismatch, `/static/app.css`, `/static/app.js` — and a test asserting that for each path, every name in `SECURITY_HEADERS` is present with exactly its constant value
-- [ ] T005 Add to `tests/unit/test_web_security_headers.py` the FR-005 pin: a bare `server.Response()` constructed with no arguments already carries every entry in `SECURITY_HEADERS`, and a `Response(headers={"X-Frame-Options": "SAMEORIGIN"})` keeps the caller's value — the merge-order rule from [data-model.md](./data-model.md)
-- [ ] T006 Add to `tests/unit/test_web_security_headers.py` the FR-006 regression: `Cache-Control` is still `no-store` on `/active` and `public, max-age=3600` on both static assets, `Location` is still present on the `303` from `/`, and `Allow` is still present on a `405` — each alongside the security headers rather than displaced by them
+- [X] T002 Add a module constant `SECURITY_HEADERS: dict[str, str] = {}` to `src/robot_army/web/server.py`, immediately above the `Response` dataclass, with a comment stating that it is attached once at `Response` construction so that a response path added later carries it without its author knowing this exists — and that this is why it is not folded into `NO_STORE`, which reaches neither the static assets nor the `413`
+- [X] T003 Add `__post_init__` to the `Response` dataclass in `src/robot_army/web/server.py` (line 116) setting `self.headers = {**SECURITY_HEADERS, **self.headers}`, with a comment noting the merge order: the caller's explicit header wins a name collision, and a dict keyed by name makes a duplicated header unrepresentable
+- [X] T004 Create `tests/unit/test_web_security_headers.py` with the coverage matrix: a helper listing every response path — HTML page, `.json` page, `303` redirect, `404`, `405`, `503` schema mismatch, `/static/app.css`, `/static/app.js` — and a test asserting that for each path, every name in `SECURITY_HEADERS` is present with exactly its constant value
+- [X] T005 Add to `tests/unit/test_web_security_headers.py` the FR-005 pin: a bare `server.Response()` constructed with no arguments already carries every entry in `SECURITY_HEADERS`, and a `Response(headers={"X-Frame-Options": "SAMEORIGIN"})` keeps the caller's value — the merge-order rule from [data-model.md](./data-model.md)
+- [X] T006 Add to `tests/unit/test_web_security_headers.py` the FR-006 regression: `Cache-Control` is still `no-store` on `/active` and `public, max-age=3600` on both static assets, `Location` is still present on the `303` from `/`, and `Allow` is still present on a `405` — each alongside the security headers rather than displaced by them
 
 **Checkpoint**: the mechanism is in place and proven. `SECURITY_HEADERS` is still empty, so no
 behaviour has changed yet and the suite is green.
@@ -75,10 +75,10 @@ nothing to land on.
 and a CSP whose `frame-ancestors` is `'none'`; the `<iframe>` page in
 [quickstart.md](./quickstart.md) §3 renders blank.
 
-- [ ] T007 [US1] Add `"X-Frame-Options": "DENY"` and `"Content-Security-Policy": "frame-ancestors 'none'"` to `SECURITY_HEADERS` in `src/robot_army/web/server.py`, with a comment saying the two are the same instruction for two generations of browser, and why the same-origin check cannot make this distinction itself
-- [ ] T008 [US1] Add to `tests/unit/test_web_security_headers.py`: the exact values of both headers, and that the confirm page reached by a plain `GET` (`/item/<id>/confirm/abandon`) and the database-less refusal pages carry them — the two paths a clickjack would target directly, per spec User Story 1 scenarios 2 and 3
-- [ ] T009 [US1] Extend `tests/integration/test_web_end_to_end.py` with a test that the framing headers survive the socket on a page, on a static asset, on the `303` returned after a successful POST, and on a `HEAD` (FR-008)
-- [ ] T010 [US1] Extend `tests/integration/test_web_end_to_end.py`'s existing oversized-body test so it also asserts the framing headers on the `413`, the one response written directly at the socket boundary and never seen by the page renderer
+- [X] T007 [US1] Add `"X-Frame-Options": "DENY"` and `"Content-Security-Policy": "frame-ancestors 'none'"` to `SECURITY_HEADERS` in `src/robot_army/web/server.py`, with a comment saying the two are the same instruction for two generations of browser, and why the same-origin check cannot make this distinction itself
+- [X] T008 [US1] Add to `tests/unit/test_web_security_headers.py`: the exact values of both headers, and that the confirm page reached by a plain `GET` (`/item/<id>/confirm/abandon`) and the database-less refusal pages carry them — the two paths a clickjack would target directly, per spec User Story 1 scenarios 2 and 3
+- [X] T009 [US1] Extend `tests/integration/test_web_end_to_end.py` with a test that the framing headers survive the socket on a page, on a static asset, on the `303` returned after a successful POST, and on a `HEAD` (FR-008)
+- [X] T010 [US1] Extend `tests/integration/test_web_end_to_end.py`'s existing oversized-body test so it also asserts the framing headers on the `413`, the one response written directly at the socket boundary and never seen by the page renderer
 
 **Checkpoint**: RA-12 is closed. Everything after this is hardening.
 
@@ -92,10 +92,10 @@ that its document base cannot be redefined, and that its forms submit only to it
 **Independent Test**: the CSP value contains all four directives; the interface loads in a browser
 with a clean console — stylesheet applied, script running, ten-second refresh working.
 
-- [ ] T011 [US2] Extend the `Content-Security-Policy` value in `SECURITY_HEADERS` in `src/robot_army/web/server.py` to `frame-ancestors 'none'; default-src 'self'; base-uri 'none'; form-action 'self'`, with a comment recording why the strict form is free here: `html.page` emits exactly two same-origin subresources, there is no inline script, style or `on*` attribute anywhere in `html.py`, and `app.js` fetches only `window.location.href`
-- [ ] T012 [US2] Add to `tests/unit/test_web_security_headers.py` a test that the CSP contains each of the four directives with its expected value, parsed by splitting on `;` rather than by matching the whole string, so a later reordering does not fail the test for the wrong reason
-- [ ] T013 [US2] Add to `tests/unit/test_web_security_headers.py` a test that the rendered page's only subresource URLs are same-origin — assert every `href`/`src` emitted by `html.page` starts with `/static/` — so that a future page adding a CDN font breaks here rather than silently in a browser under `default-src 'self'` (FR-007)
-- [ ] T014 [US2] Follow [quickstart.md](./quickstart.md) §3 in a real browser and confirm no CSP violation appears in the console: page styled, age counter ticking, content updating in place (SC-004)
+- [X] T011 [US2] Extend the `Content-Security-Policy` value in `SECURITY_HEADERS` in `src/robot_army/web/server.py` to `frame-ancestors 'none'; default-src 'self'; base-uri 'none'; form-action 'self'`, with a comment recording why the strict form is free here: `html.page` emits exactly two same-origin subresources, there is no inline script, style or `on*` attribute anywhere in `html.py`, and `app.js` fetches only `window.location.href`
+- [X] T012 [US2] Add to `tests/unit/test_web_security_headers.py` a test that the CSP contains each of the four directives with its expected value, parsed by splitting on `;` rather than by matching the whole string, so a later reordering does not fail the test for the wrong reason
+- [X] T013 [US2] Add to `tests/unit/test_web_security_headers.py` a test that the rendered page's only subresource URLs are same-origin — assert every `href`/`src` emitted by `html.page` is a root-relative or fragment URL — so that a future page adding a CDN font breaks here rather than silently in a browser under `default-src 'self'` (FR-007)
+- [X] T014 [US2] Follow [quickstart.md](./quickstart.md) §3 in a real browser and confirm no CSP violation appears in the console: page styled, age counter ticking, content updating in place (SC-004)
 
 ---
 
@@ -107,8 +107,8 @@ tells the destination nothing about where the interface lives.
 **Independent Test**: `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` appear
 on an HTML page, a JSON response and a static asset alike.
 
-- [ ] T015 [US3] Add `"X-Content-Type-Options": "nosniff"` and `"Referrer-Policy": "no-referrer"` to `SECURITY_HEADERS` in `src/robot_army/web/server.py`, with a comment noting that `nosniff` matters most on the `.json` responses and the two assets, and that `no-referrer` exists because the audit and item views link out to `github.com`
-- [ ] T016 [US3] Add to `tests/unit/test_web_security_headers.py` a test asserting both values on an HTML page, on a `.json` response and on both static assets — the three content types the browser could otherwise be tempted to re-guess
+- [X] T015 [US3] Add `"X-Content-Type-Options": "nosniff"` and `"Referrer-Policy": "no-referrer"` to `SECURITY_HEADERS` in `src/robot_army/web/server.py`, with a comment noting that `nosniff` matters most on the `.json` responses and the two assets, and that `no-referrer` exists because the audit and item views link out to `github.com`
+- [X] T016 [US3] Add to `tests/unit/test_web_security_headers.py` a test asserting both values on an HTML page, on a `.json` response and on both static assets — the three content types the browser could otherwise be tempted to re-guess
 
 **Checkpoint**: all four headers from [contracts/http-headers.md](./contracts/http-headers.md) are
 in place on all eight response paths.
@@ -117,10 +117,10 @@ in place on all eight response paths.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T017 [P] Add a short paragraph to the web-interface section of `README.md` stating what every response sends and why framing is refused outright — that the same-origin check cannot tell a framed click from an honest one, so the frame is refused rather than the click
-- [ ] T018 Run `uv run ruff check src/ tests/` and fix anything it reports
-- [ ] T019 Run the full suite: `uv run pytest -q -rs`
-- [ ] T020 Walk [quickstart.md](./quickstart.md) §2 end to end against a running `robot-army serve` and confirm the observed headers match the contract exactly, including the headers each response keeps
+- [X] T017 [P] Add a short paragraph to the web-interface section of `README.md` stating what every response sends and why framing is refused outright — that the same-origin check cannot tell a framed click from an honest one, so the frame is refused rather than the click
+- [X] T018 Run `uv run ruff check src/ tests/` and fix anything it reports
+- [X] T019 Run the full suite: `uv run pytest -q -rs`
+- [X] T020 Walk [quickstart.md](./quickstart.md) §2 end to end against a running `robot-army serve` and confirm the observed headers match the contract exactly, including the headers each response keeps
 
 ---
 

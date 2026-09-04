@@ -113,12 +113,95 @@ class Request:
         return self.headers.get("referer")
 
 
+#: On every response, without exception (RA-12). Attached in ``Response.__post_init__``
+#: rather than at the call sites, because the call sites are not all in one place: two of
+#: the five — the static assets and the ``413`` — never reach ``_render``, and a sixth added
+#: later would not reach a list of them either. Being a response is the condition; carrying
+#: these is the consequence. That also rules out folding them into :data:`NO_STORE`: it says
+#: something different ("do not cache this"), the static assets deliberately do not carry it,
+#: and a later response that wanted caching would have to choose between being cacheable and
+#: being unframeable. The ``413`` does happen to spread ``NO_STORE`` today — but on purpose,
+#: for its own reason, which is not a reason to make one constant mean two things.
+SECURITY_HEADERS: dict[str, str] = {
+    # The finding itself. A hostile page frames this interface at its shipped default
+    # address, makes the frame transparent and baits a click over a real control; the form
+    # that submits belongs to the framed document, so the browser reports
+    # ``Sec-Fetch-Site: same-origin`` and a matching ``Origin`` — honestly.
+    # ``check_same_origin`` passes, and it is right to. The question it answers is not the
+    # one that distinguishes the two clicks, and no header on the request can be: the only
+    # place to refuse is the frame.
+    #
+    # The three directives after it are free, and free only because of how austere these
+    # pages are: ``html.page`` emits exactly two subresources, both served by this server
+    # at fixed routes; there is no inline ``<script>``, no inline ``<style>``, no ``style=``
+    # and no ``on*=`` anywhere in ``html.py``, so no ``'unsafe-inline'`` is needed; and
+    # ``app.js`` fetches only ``window.location.href``, which ``connect-src`` inherits from
+    # ``default-src``. The external URLs a page does emit — ``github.com`` and
+    # ``trello.com``, the two systems this interface reads from — are anchors, and CSP does
+    # not govern navigation by link. A page that grows a web font or a CDN script breaks
+    # under this — deliberately, and a unit test says so before a browser does.
+    #
+    # ``default-src`` is also the second line under the escaping in ``html.py``, which is
+    # currently the only thing stopping an injected ``<img onerror>`` from firing when the
+    # refresh loop swaps ``innerHTML``.
+    "Content-Security-Policy": (
+        "frame-ancestors 'none'; default-src 'self'; base-uri 'none'; form-action 'self'"
+    ),
+    # The same instruction, for browsers older than ``frame-ancestors``. Where both are
+    # understood the CSP wins; they say the same thing, so it does not matter which.
+    "X-Frame-Options": "DENY",
+    # Matters most on the ``.json`` responses and the two assets: a browser guessing a type
+    # other than the one declared is the whole of that attack.
+    "X-Content-Type-Options": "nosniff",
+    # The audit and item views link out to ``github.com`` and ``trello.com``. Following one
+    # must not tell the destination this interface's address, port, and the path being
+    # looked at.
+    #
+    # ``same-origin``, not the stricter ``no-referrer`` the finding proposed, because
+    # :func:`_referring_view` reads the ``Referer`` of our own POSTs and ``no-referrer``
+    # suppresses it on those too, not only on the links out.
+    #
+    # The reachable difference is narrow, and worth stating exactly rather than
+    # overstating: after a *successful* action there is none, because every control that
+    # renders as a real form sits on the page its fallback already names — the holds and
+    # the dispatch controls are on ``/queue``, ``attach`` is on the item — and every
+    # confirm-gated verb POSTs from its confirmation page, whose referer this function
+    # refuses on purpose. What does change is the chrome on a *refused* POST: its
+    # visibility toggle is built from the referring view, so a control refused from
+    # ``/queue`` offers a toggle back to ``/queue`` with the header and to ``/active``
+    # without it. Small, but it lands on the error page, where being sent somewhere
+    # unexpected is least welcome — and any confirm-free control added to a list view
+    # later would widen it silently.
+    #
+    # ``same-origin`` withholds the referrer from exactly the destinations this header
+    # exists to withhold it from, and from nothing else.
+    "Referrer-Policy": "same-origin",
+}
+
+
 @dataclass(slots=True)
 class Response:
     status: int = 200
     body: bytes = b""
     content_type: str = "text/html; charset=utf-8"
     headers: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Security headers first, so a caller that sets one of these names deliberately wins
+        # rather than being silently overwritten — nothing does today, and the ordering is
+        # what says which way it would go.
+        #
+        # The comparison is case-insensitive because header names are, on the wire, while
+        # this dict's keys are not: a caller passing ``x-frame-options`` would otherwise
+        # collide with nothing, and ``_respond`` would write both, leaving a browser to
+        # choose between two conflicting framing policies. Dropping ours when the caller
+        # names it in any casing is what makes "one response, one value per header" true
+        # rather than nearly true.
+        stated = {name.lower() for name in self.headers}
+        self.headers = {
+            **{n: v for n, v in SECURITY_HEADERS.items() if n.lower() not in stated},
+            **self.headers,
+        }
 
     @property
     def text(self) -> str:

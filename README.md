@@ -205,6 +205,18 @@ That is the accepted model, so the mitigations are the ones that matter:
   my browser to load `http://evil.test:8420`, and every header agrees with every other while
   the request really lands here. Rebinding needs a *name*, so requiring an address closes it
   — and `[web] bind` already has to be an address for the same reason.
+- **No page of it may be put in a frame.** Every response sends `X-Frame-Options: DENY` and a
+  `Content-Security-Policy` beginning `frame-ancestors 'none'`, because framing walks straight
+  past the same-origin check above: the form a baited click submits belongs to the framed page
+  itself, so the browser reports `Sec-Fetch-Site: same-origin` and a matching `Origin`, and the
+  check passes *honestly*. Nothing about the request distinguishes it, so the frame is refused
+  rather than the click. The same policy adds `default-src 'self'`, `base-uri 'none'` and
+  `form-action 'self'` — free here, because these pages load nothing external by design: no web
+  font, no CDN, no icon set, no inline script or style. Every response also sends
+  `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`, the latter so that
+  following a `github.com` or `trello.com` link out of a view does not hand it this
+  interface's address — `same-origin` and not `no-referrer`, because a refused control's
+  page builds its "back to" link from the `Referer` of my own POST.
 
 From outside the house I connect my existing VPN and use the same LAN address. Nothing is
 published, no tunnel is configured, and no port is forwarded.

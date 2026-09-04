@@ -8,10 +8,13 @@ interface show exactly what the page shows.
 Nothing in this module changes state. Actions live in :mod:`robot_army.web.server`, which
 calls :mod:`robot_army.operations` for every one of them (FR-047).
 
-**The only external URLs any page emits are ``github.com`` ones**, constructed from data
-already stored — repository key, issue number, branch — with no additional source-system
-call (FR-043). :func:`github_link` is the single place that decides an href may point off
-this machine, and a test asserts nothing else does (SC-009).
+**The only external URLs any page emits point at the two systems this project reads
+from** — ``github.com`` and, since milestone 003, ``trello.com`` — constructed from data
+already stored, with no additional source-system call (FR-043). :func:`github_link` and
+:func:`card_link` are the only places that decide an href may point off this machine, and
+a test asserts nothing else does (SC-009). Both are anchors: no page loads a subresource
+from anywhere but this server, which is what lets the interface send
+``default-src 'self'`` (RA-12).
 """
 
 from __future__ import annotations

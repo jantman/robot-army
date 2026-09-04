@@ -127,14 +127,27 @@ Fixed by this contract, because the order is the guarantee:
 1. load the item                     LookupError if absent
 2. resolve the repository            fails the item if unresolvable (unchanged)
 3. check_launch_gate                 ← refuses here; nothing written yet
-4. author check                      fails the item (unchanged, cannot be forced)
-5. claim_work_item                   ← the atomic claim; ClaimLost → DispatchRefused
+4. claim_work_item                   ← the atomic claim; ClaimLost → DispatchRefused
+5. author check                      fails the item (unchanged, cannot be forced)
 6. check_gates                       trust, fingerprint, location; fails the item (cannot be forced)
 7. worktree, launch, confirm         unchanged
 ```
 
-Steps 3 and 5 are the feature. Everything before step 5 writes nothing, which is what makes a
+Steps 3 and 4 are the feature. Everything before step 4 writes nothing, which is what makes a
 refusal free of consequence.
+
+**The claim precedes the author check, and it has to.** An earlier draft of this contract
+put the author check first, on the reasoning that a security boundary should come before a
+policy one. That order cannot be implemented: `author_refusal` refuses through `_fail`,
+which transitions the item to `failed` — and `failed` is reachable only from `dispatching`
+(and `discovered`) in `WORK_ITEM_TRANSITIONS`. An item that has not been claimed is still
+`ready`, `interrupted` or `awaiting_review`, so failing it there would raise
+`IllegalTransition` from inside the refusal.
+
+Nothing is lost by the real order. The gate still runs first, so a held item on a paused
+machine is *refused* rather than failed whoever wrote it, which was R5's actual point; and
+the author check keeps the position relative to the state change it has always had — the
+claim replaced a `transition_work_item` call that already sat above it.
 
 ## What `force` does and does not reach
 
@@ -157,11 +170,16 @@ code in the author's checkout.
 
 ## Caller obligations
 
-- **`select_and_dispatch`** passes no `force`. It catches `DispatchRefused`, records it, and
-  ends the pass — the second snapshot can legitimately disagree with the planner's when a
-  session starts outside the system between them (research R9).
+- **`select_and_dispatch`** passes no `force`. It catches `DispatchRefused` — the second
+  snapshot can legitimately disagree with the planner's when a session starts outside the
+  system between them (research R9) — and splits on `_GLOBAL_HOLDS`, the same set the loop
+  already uses for `ordering.plan`'s holds: a global reason ends the pass, a per-item one
+  (`held`, `repo_cap`, or a lost claim, which carries no `HoldReason`) skips the item and
+  leaves the queue moving.
 - **`operations.resume` / `restart`** pass `force` through unchanged and render
   `DispatchRefused` as `EXIT_PRECONDITION` with the reason. They must not convert it into a
   generic failure.
 - **The web** calls the gate a second time in the request thread, before handing to the
-  worker, so the refusal is visible in the response (FR-015). It never passes `force`.
+  worker, so the refusal is visible in the response (FR-015). It never passes `force`, and
+  it refuses a missing item rather than falling through — "the item does not exist" is not
+  a dispatchable state under any ordering of the guards.

@@ -108,7 +108,14 @@ which a misfiled record actively defeats.
 ## R5 — The gate runs before the claim, and before anything else in `_dispatch_item`
 
 **Decision.** Order inside `_dispatch_item`: load the item, resolve the repository, **gate**,
-author check, claim, `check_gates`, worktree, launch.
+**claim**, author check, `check_gates`, worktree, launch.
+
+(This decision originally read "gate, author check, claim", which was not implementable and
+is corrected here. `author_refusal` refuses through `_fail`, which transitions the item to
+`failed` — reachable only from `dispatching` — so the claim must precede it or the refusal
+would itself raise `IllegalTransition`. The claim replaced a `transition_work_item` call
+that already sat above the author check, so the real order is the pre-existing one with an
+atomic claim substituted, and the gate added above both.)
 
 **Rationale.** FR-010 and FR-011 require a refused launch to change nothing, and the only way
 to guarantee that is to refuse before the first write. The repository resolution stays ahead
@@ -120,7 +127,9 @@ The author check keeps its position relative to the gate deliberately: it is a s
 boundary that fails the item, the gate is a policy that does not, and a held item on a paused
 machine written by somebody else should be *refused*, not failed. Refusing first is also the
 cheaper order and leaks less: an attempt the author never authorised does not get to write a
-`blocked_reason` while the system is paused.
+`blocked_reason` while the system is paused. That reasoning is about the **gate** being
+first, and it survives the correction above — what sits between the gate and the author
+check is only the claim, which changes nothing about who may run code in the checkout.
 
 ## R6 — A new `states.claim_work_item`; `transition_work_item` is not touched
 

@@ -418,9 +418,11 @@ def require_dispatchable(ctx: Context, item_id: int, action: str) -> None:
     *Release hold* and the repository's own release are each one press away, and lifting
     the condition leaves the queue agreeing with the button instead of overridden by it.
     """
-    item = db.get_work_item(ctx.conn, item_id)
-    if item is None:
-        return
+    # ``require_item`` rather than an early return. ``require_legal`` above already
+    # refuses a missing item with a 404, so today this cannot be reached — but a silent
+    # return here means the bypass becomes real the moment someone reorders the guards,
+    # and "the item does not exist" is not a dispatchable state under any ordering.
+    item = require_item(ctx, item_id)
     try:
         dispatch.check_launch_gate(
             ctx.conn,

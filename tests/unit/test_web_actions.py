@@ -766,3 +766,27 @@ def test_a_web_originated_refusal_is_recorded_as_the_web_not_the_terminal(
 
     assert seen, "the gate was consulted"
     assert set(seen) == {"web"}, f"every check names the web, got {seen}"
+
+
+def test_the_dispatch_guard_refuses_a_missing_item_rather_than_falling_through(
+    web, conn, layout, running_daemon, monkeypatch
+):
+    """`require_legal` already refuses a missing item first, so this cannot be reached
+    today — which is exactly why the guard must not depend on that.
+
+    A silent return here turns into a real bypass the moment somebody reorders the four
+    guards, and the worker would then be handed an action for an item that does not exist.
+    Asserted by calling the guard directly, since the ordering is what makes it unreachable
+    through the route.
+    """
+    from robot_army.web import server
+
+    ctx = web.app.context()
+    try:
+        with pytest.raises(server.Refusal) as caught:
+            server.require_dispatchable(ctx, 999999, "resume")
+    finally:
+        ctx.close()
+
+    assert caught.value.status == 404
+    assert "999999" in caught.value.reason

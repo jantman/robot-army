@@ -192,13 +192,24 @@ That is the accepted model, so the mitigations are the ones that matter:
 - The effective address is printed at startup and written to the audit log as `web.start`, on
   every start, with a loud warning when it is not loopback. That is the one fact about this
   design that is never allowed to be silent.
-- A state-changing request that a **browser** reports as coming from another site is refused
-  with `403`. This is the one attack the model above does not already accept: a forged
-  request needs no network path to the port at all, only my own browser — already inside the
-  trust boundary — having some unrelated page open while the interface is running. It is not
-  authentication; it identifies nobody, holds no state, and asks one question. Clients that
-  send neither `Origin` nor `Sec-Fetch-Site`, `curl` included, are allowed through: they can
-  reach the port directly anyway, which is the model above.
+- **Any** request that a **browser** reports as coming from another site is refused with
+  `403` — reads as well as state changes. This is the one attack the model above does not
+  already accept: it needs no network path to the port at all, only my own browser — already
+  inside the trust boundary — having some unrelated page open while the interface is running.
+  It is not authentication; it identifies nobody, holds no state, and asks one question.
+  Clients that send neither `Origin` nor `Sec-Fetch-Site`, `curl` included, are allowed
+  through: they can reach the port directly anyway, which is the model above. So is
+  `Sec-Fetch-Site: none`, which is what a browser sends for the address bar and for a
+  bookmark — the two ways I actually open it.
+
+  Reads are checked *before* anything is done for them, which is the point: the response to
+  `fetch(..., {mode:'no-cors'})` is opaque to the page that sent it, so the attack was never
+  the reading. It was that answering cost this machine a `git` fork per card on
+  `/interrupted`, a whole audit file per `/log`, and a `/proc` walk per page. A refused read
+  now costs a string. A refused *write* still writes its audit pair first, because that pair
+  is the only way a forged action would ever be noticed; a refused read does not, because
+  writing one would open the SQLite connection and audit handle the refusal exists to avoid
+  — so the count for the run goes into `web.stop` as `refused_cross_site` instead.
 - **Reach it by address, not by name.** Any request whose `Host` is a hostname other than
   `localhost` is refused with `403`. Comparing `Origin` to `Host` is not enough on its own,
   because DNS rebinding lets an attacker control both: point `evil.test` at `127.0.0.1`, get
@@ -229,8 +240,18 @@ That is the accepted model, so the mitigations are the ones that matter:
   connection and an audit file handle, permanently. Descriptors run out long before memory
   does, and when they do the interface stops rendering at exactly the moment it is worth
   having. So a `503` from this interface means "too many connections", never a failure; the
-  number of connections a run turned away is in that run's `web.stop` audit record, and
-  reaching the cap prints one line to stderr per episode.
+  number of connections a run turned away is in that run's `web.stop` audit record, beside
+  `refused_cross_site`, and reaching the cap prints one line to stderr per episode.
+- **A page render is bounded work.** One reading of the machine per response, not one per
+  section — `/queue` used to take two and could report two different counts of what is
+  running on one page. One `git` observation per item per five seconds, with the age shown on
+  the card, so a reused answer says so. At most 8 MB of audit log read per `/log` page, in
+  64 KB blocks from the end of each daily file rather than whole files into memory; when a
+  request stops at that ceiling the page says so and "older records" continues from where it
+  stopped, so an empty page is never an empty history. All three numbers are constants in
+  `src/robot_army/operations.py` and `src/robot_army/web/server.py`, not config. None of this
+  is a rate limit — it is the difference between a page costing what it looks like it costs
+  and costing whatever the caller asks for.
 
 From outside the house I connect my existing VPN and use the same LAN address. Nothing is
 published, no tunnel is configured, and no port is forwarded.

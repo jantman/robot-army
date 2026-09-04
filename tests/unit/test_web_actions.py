@@ -279,11 +279,53 @@ def test_a_refused_cross_site_request_still_leaves_a_record(web, conn, layout):
     assert records[-1]["outcome"] == "error"
 
 
-def test_read_views_are_not_origin_checked(web, conn):
-    """A GET changes nothing, and refusing one would break linking to the interface."""
+def test_read_views_are_origin_checked_too(web, conn):
+    """This assertion used to run the other way, and the reasoning behind it was wrong.
+
+    "A GET changes nothing" is true and beside the point: the attack is the *work*, not the
+    state change. ``/interrupted`` forks git per card, ``/log`` read whole audit files, every
+    page enumerated ``/proc`` — and a page looping ``fetch(..., {mode:'no-cors'})`` gets an
+    opaque response it never needed to read. "Refusing one would break linking to the
+    interface" is also true, and nothing links to ``http://127.0.0.1:8420``; the maintainer's
+    own address bar and bookmarks send ``Sec-Fetch-Site: none``, which is allowed.
+    """
     seed_item(conn, state="ready")
     for path in ("/active", "/queue", "/log"):
-        assert web.get(path, headers=CROSS_SITE).status == 200, path
+        assert web.get(path, headers=CROSS_SITE).status == 403, path
+
+
+def test_a_cross_site_read_leaves_no_record_but_a_cross_site_post_still_does(
+    web, conn, layout
+):
+    """The asymmetry is deliberate and is the Principle III exception this feature enumerates.
+
+    A POST's record is written by ``_perform`` before any check runs, and it is the only way
+    a forged action would ever be noticed — so the read-side check must not, and does not,
+    displace it. A *read* is refused before ``app.context()`` exists, because opening a SQLite
+    connection and an audit file handle per refusal is precisely the work being refused; the
+    run's total is folded into ``web.stop`` instead.
+    """
+    item_id = seed_item(conn, state="interrupted")
+
+    web.get("/interrupted", headers=CROSS_SITE)
+    assert web_records(layout) == [], "a refused read writes nothing"
+
+    web.post_json(f"/item/{item_id}/abandon", headers=CROSS_SITE)
+    assert [r["kind"] for r in web_records(layout, action="web.abandon")] == [
+        "intent",
+        "outcome",
+    ]
+
+
+def test_a_successful_action_drops_that_items_cached_signals(web, conn, monkeypatch):
+    """FR-010. The page rendered after an action must reflect the action, not an observation
+    made before it. ``_perform`` is the single choke point every POST passes through."""
+    forgotten: list[int] = []
+    monkeypatch.setattr(operations, "forget_resume_signals", forgotten.append)
+
+    item_id = seed_item(conn, state="interrupted")
+    assert web.post_json(f"/item/{item_id}/abandon").status == 303
+    assert forgotten == [item_id]
 
 
 # -- FR-038 / FR-039 / FR-040: the audit invariant --------------------------

@@ -291,6 +291,7 @@ def status(
     include_simulated: bool = False,
     registry_dir: Path | None = None,
     proc_root: Path | None = None,
+    capacity: Any = None,
 ) -> Result:
     """The default view: effect level, health, counts, the queue, listings, anomalies.
 
@@ -309,7 +310,11 @@ def status(
     )
     anomalies = db.list_anomalies(ctx.conn)
     control_state = db.get_dispatch_control(ctx.conn)
-    snap = capacity_mod.snapshot(
+    # Handed in by a caller that has already taken one, or taken here for the terminal path
+    # that has not (RA-14). The web renders several of these per page — ``/interrupted``
+    # calls this twice, once per section — and each snapshot reads the session registry and
+    # enumerates ``/proc``, so a page was paying for the same observation repeatedly.
+    snap = capacity or capacity_mod.snapshot(
         ctx.conn, config=ctx.config, registry_dir=registry_dir, proc_root=proc_root
     )
     queue = ordering_mod.plan(ctx.conn, config=ctx.config, capacity=snap)
@@ -932,11 +937,38 @@ def _history(item: Any) -> list[tuple[str, str]]:
 #: exists to protect.
 REMOTE_SIGNAL_TTL_SECONDS = 60.0
 
+#: How long a locally observed resume signal may be served from memory (RA-14).
+#:
+#: Deliberately *below* the default ``[web] refresh_seconds = 10``. That is the whole
+#: choice: a page left open observes the worktree afresh on every refresh, so the maintainer
+#: editing a file in the checkout still sees it on their next refresh — which is what
+#: :func:`local_resume_signals` was recomputed on every call to guarantee. What five seconds
+#: removes is the *burst*. ``/interrupted`` renders one card per interrupted and awaiting-
+#: review item and each card costs several ``git`` subprocesses, so a caller issuing requests
+#: in a loop was forking git at the rate it could send. Now it forks at most once per item
+#: per five seconds however fast the requests arrive.
+#:
+#: A number *above* the refresh interval would buy nothing extra and would trade away the
+#: freshness guarantee, which is why this one is pinned below it rather than to it.
+LOCAL_SIGNAL_TTL_SECONDS = 5.0
+
 #: (item id, branch) -> (computed_at monotonic, signals). Per-process, non-authoritative,
 #: bounded by time and by the number of interrupted items, and lost on restart. Nothing is
 #: persisted, so FR-013's prohibition on a *stored* copy is honoured as written.
 _REMOTE_SIGNAL_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 _REMOTE_SIGNAL_LOCK = threading.Lock()
+
+#: (item id, repo key, worktree path, branch, base ref) -> (computed_at monotonic, signals).
+#: Every input :func:`worktree.condition` is given, so an item whose worktree was reclaimed or
+#: whose branch was renamed is a different key rather than a stale answer about somewhere else.
+#:
+#: A second dict rather than one shared with the remote half, because the two have different
+#: lifetimes for different reasons — a minute for "has GitHub changed", five seconds for "has
+#: the checkout changed" — and that split is the fact the two functions already encode.
+_LOCAL_SIGNAL_CACHE: dict[
+    tuple[int, str, str, str, str], tuple[float, dict[str, Any]]
+] = {}
+_LOCAL_SIGNAL_LOCK = threading.Lock()
 
 
 def _monotonic() -> float:
@@ -944,30 +976,94 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
+def _purge_expired(
+    cache: dict[Any, tuple[float, dict[str, Any]]], ttl: float, now: float
+) -> None:
+    """Drop entries older than ``ttl``. Called on insert, under the cache's own lock.
+
+    This is the whole of the bound on both caches (RA-14). Each therefore holds at most the
+    distinct items observed within one of its own TTL windows, which is itself bounded by the
+    number of rows the views render. An LRU or a maximum size would be a second policy
+    answering a question this one already answers.
+    """
+    stale = [key for key, (computed_at, _) in cache.items() if now - computed_at >= ttl]
+    for key in stale:
+        del cache[key]
+
+
 def clear_resume_signal_cache() -> None:
-    """Drop every cached remote signal. For tests, and for a front end that wants a
-    guaranteed-fresh read after acting on an item."""
+    """Drop every cached signal, local and remote. For tests, and for a front end that wants
+    a guaranteed-fresh read after acting on an item."""
     with _REMOTE_SIGNAL_LOCK:
         _REMOTE_SIGNAL_CACHE.clear()
+    with _LOCAL_SIGNAL_LOCK:
+        _LOCAL_SIGNAL_CACHE.clear()
+
+
+def forget_resume_signals(item_id: int) -> None:
+    """Drop every cached signal for one item, local and remote (RA-14 FR-010).
+
+    Called after an action succeeds, so the page rendered next reflects the action rather than
+    an observation made before it. Both halves, because both describe the item and an action
+    can change either: abandoning an item can close its issue, resuming it can dirty its
+    worktree.
+    """
+    with _REMOTE_SIGNAL_LOCK:
+        for key in [k for k in _REMOTE_SIGNAL_CACHE if k[0] == item_id]:
+            del _REMOTE_SIGNAL_CACHE[key]
+    with _LOCAL_SIGNAL_LOCK:
+        for key in [k for k in _LOCAL_SIGNAL_CACHE if k[0] == item_id]:
+            del _LOCAL_SIGNAL_CACHE[key]
 
 
 def local_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
-    """The two signals that come from local git. **Recomputed on every call.**
+    """The three signals that come from local git, reused in-process for five seconds (RA-14).
 
     Volatile precisely because the maintainer may be in the worktree with an editor open —
     ``docs/state.md`` says these are computed on demand and never stored "because a stored
     copy would be wrong the moment I touched the directory", and that reasoning applies to
-    these two and not to the remote pair.
+    these and not to the remote pair. It still does. What it argues for is that the value must
+    not outlive the maintainer's next look at the page, and
+    :data:`LOCAL_SIGNAL_TTL_SECONDS` is set below the default ``[web] refresh_seconds`` for
+    exactly that: a page left open observes the checkout afresh on every refresh.
+
+    What the window removes is the *burst*. ``/interrupted`` renders one card per interrupted
+    and awaiting-review item and every card lands here, so before RA-14 a page on another site
+    could fork ``git`` several times per item at whatever rate it could send requests. Now it
+    forks at most once per item per window however fast they arrive.
+
+    Every returned value carries ``local_signals_age_seconds``, so a reused answer is
+    *visible* as reused rather than implied to be current — the same guarantee
+    :func:`remote_resume_signals` gives its own half, kept as a second number because the two
+    halves age on TTLs an order of magnitude apart and one number would misreport one of them.
     """
     signals: dict[str, Any] = {
         "worktree_present": False,
         "uncommitted_changes": None,
         "commits_on_branch": None,
+        "local_signals_age_seconds": 0,
     }
     repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
     if repo is None or not item.worktree_path or not item.branch:
         return signals
     base_ref = ctx.config.base_branch_for(item.repo_key)
+
+    # Every input the observation is made from. An item whose worktree was reclaimed or whose
+    # branch was renamed is a different key, so it is observed afresh rather than served an
+    # answer about somewhere it was never made.
+    key = (
+        int(item.id),
+        str(item.repo_key),
+        str(item.worktree_path),
+        str(item.branch),
+        str(base_ref),
+    )
+    now = _monotonic()
+    with _LOCAL_SIGNAL_LOCK:
+        cached = _LOCAL_SIGNAL_CACHE.get(key)
+        if cached is not None and now - cached[0] < LOCAL_SIGNAL_TTL_SECONDS:
+            return {**cached[1], "local_signals_age_seconds": int(now - cached[0])}
+
     try:
         condition = worktree.condition(
             ctx.boundaries.version_control,
@@ -980,7 +1076,15 @@ def local_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
         signals["uncommitted_changes"] = condition.dirty
         signals["commits_on_branch"] = condition.commits_ahead
     except BoundaryError as exc:
+        # Not cached, for the reason ``remote_resume_signals`` does not cache a
+        # ``TransportError``: "I could not look" is not an answer, and holding it for five
+        # seconds would suppress the attempt that would have shown the checkout recovering.
         signals["worktree_error"] = str(exc)
+        return signals
+
+    with _LOCAL_SIGNAL_LOCK:
+        _purge_expired(_LOCAL_SIGNAL_CACHE, LOCAL_SIGNAL_TTL_SECONDS, now)
+        _LOCAL_SIGNAL_CACHE[key] = (now, dict(signals))
     return signals
 
 
@@ -1023,6 +1127,7 @@ def remote_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
         return {**fresh, "github_error": str(exc), "signals_age_seconds": 0}
 
     with _REMOTE_SIGNAL_LOCK:
+        _purge_expired(_REMOTE_SIGNAL_CACHE, REMOTE_SIGNAL_TTL_SECONDS, now)
         _REMOTE_SIGNAL_CACHE[key] = (now, fresh)
     return {**fresh, "signals_age_seconds": 0}
 
@@ -1030,8 +1135,11 @@ def remote_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
 def resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
     """All four signals (FR-048, FR-013). Split by cost; see R9 and the two halves above.
 
-    Nothing here is persisted. The local pair is always fresh; the remote pair carries its
-    own age so a stale value is visible rather than implied.
+    Nothing here is persisted. Both halves are reused in-process on their own window — five
+    seconds for the checkout, a minute for GitHub — and each carries its own age, so a value
+    that was reused is visible as reused rather than implied to be current. The two ages stay
+    separate because the two windows differ by an order of magnitude and one number would
+    have to misreport one of them.
     """
     return {**local_resume_signals(ctx, item), **remote_resume_signals(ctx, item)}
 
@@ -3922,68 +4030,170 @@ def read_log(
 #: Default page size for the paged reader. Bounded by construction, per SC-014.
 LOG_PAGE_SIZE = 100
 
+#: How much of a daily file is read at a time when scanning it backwards (RA-14).
+#:
+#: Larger than any single audit record — the longest carry a prompt preview, still kilobytes —
+#: so the path where a record spans a block boundary is exercised by a test rather than by
+#: production. Small enough that a page filling from the newest few records reads one block and
+#: stops, which is the common case and the one SC-014's two-second budget is measured against.
+LOG_SCAN_BLOCK_BYTES = 65536
 
-def _encode_cursor(file_name: str, consumed: int) -> str:
-    """An opaque cursor. Opaque because its shape is ours to change, not a caller's to
-    depend on — FR-009 says there is no stable API here."""
-    raw = json.dumps({"f": file_name, "n": consumed}, separators=(",", ":"))
+#: The most one page request will read across all daily files (RA-14).
+#:
+#: A day's file is a few megabytes, so 8 MiB spans the newest two or three days: every
+#: unfiltered page and every recent-item filter fills long before it. It is reached only by a
+#: filter matching nothing far back in history — the abuse case and the patient case — and both
+#: are served correctly by stopping and offering the next page. Before this bound,
+#: ``/log?item=999999`` read every ``audit-*.jsonl`` in the directory, whole, into memory.
+LOG_SCAN_BUDGET_BYTES = 8 * 1024 * 1024
+
+
+def _encode_cursor(file_name: str, offset: int) -> str:
+    """An opaque cursor naming a file and a **byte position** within it.
+
+    Opaque because its shape is ours to change, not a caller's to depend on — FR-009 says
+    there is no stable API here — and it was changed (RA-14). It used to carry the count of
+    matching records earlier pages had taken from the file, which had two problems. It was
+    unstable under append: the daemon writes to today's file between the two requests of a
+    page turn, and "the Nth match counting from the end" names a different record afterwards.
+    And it cost an O(n) re-scan, because page *k* had to re-read and re-judge every record of
+    pages 1..*k*-1 to skip them.
+
+    ``offset`` is the position the next page scans **backwards** from: it covers ``[0,
+    offset)``. Zero means the file is finished and the next page starts at the file before it.
+    """
+    raw = json.dumps({"f": file_name, "b": offset}, separators=(",", ":"))
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
 
 
 def _decode_cursor(cursor: str) -> tuple[str, int] | None:
     """``None`` for anything unreadable: a hand-edited cursor restarts from the newest
-    page rather than erroring, because the page it names may legitimately no longer exist."""
+    page rather than erroring, because the page it names may legitimately no longer exist.
+
+    A cursor issued before RA-14 carries ``n`` rather than ``b`` and is therefore unreadable
+    — which is exactly the case above, and the reason no compatibility shim is needed. The
+    only client affected is a browser tab held open across the upgrade, and it recovers by
+    showing the newest page.
+    """
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
-        return str(payload["f"]), int(payload["n"])
+        return str(payload["f"]), int(payload["b"])
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def _lines_backwards(
+    handle: Any, end_offset: int, block: int
+) -> Iterator[tuple[bytes, int]]:
+    """Yield ``(line, start_offset)`` from ``[0, end_offset)``, newest line first.
+
+    Blocks rather than ``mmap`` (RA-14). The newest daily file is being appended to by the
+    daemon while it is read, and a mapping's length is fixed at map time; a normal file object
+    read in blocks has no such edge. Blocks rather than ``read_text().splitlines()`` because
+    that allocated the whole file plus a list of every line in it to return, at most, a
+    thousand records from its end.
+
+    The partial line at the front of each block is carried into the next read, so a record
+    longer than one block is still yielded whole. ``start_offset`` is the position the line
+    begins at, which is what the cursor stores when a page ends here.
+    """
+    position = end_offset
+    carry = b""
+    while position > 0:
+        size = min(block, position)
+        position -= size
+        handle.seek(position)
+        chunk = handle.read(size) + carry
+        parts = chunk.split(b"\n")
+        # The first part may be the tail of a line whose start is in the block below this
+        # one — unless this *is* the bottom block, in which case it is a whole line.
+        carry = parts.pop(0) if position > 0 else b""
+        # Walk what remains newest-first. The offset of each line is derived by subtracting
+        # the lengths of everything after it, so it stays exact across a carried line.
+        tail = position + len(carry) + (1 if position > 0 else 0)
+        offsets = []
+        for part in parts:
+            offsets.append(tail)
+            tail += len(part) + 1
+        for part, start in zip(reversed(parts), reversed(offsets), strict=True):
+            if part.strip():
+                yield part, start
+    # No trailing flush of ``carry``: the loop only ends once ``position`` reaches zero, and
+    # that final pass is the one branch that sets ``carry`` empty and emits its own first
+    # part as a whole line. The file's first record leaves here from inside the loop.
+
+
+@dataclass(slots=True)
+class _FileScan:
+    """What one backwards pass over one daily file produced.
+
+    A named result rather than a five-tuple because ``hit_budget`` is the field a reader will
+    most want to find, and it is the one a positional fifth element would hide.
+    """
+
+    records: list[dict[str, Any]]
+    #: Where a following page resumes: it covers ``[0, next_offset)``. ``0`` means the file is
+    #: exhausted and the next page starts at the file below it.
+    next_offset: int
+    #: Lines that could not be parsed or judged. Counted, never silently dropped.
+    skipped: int
+    #: Bytes of log consumed. Within one block of the bytes actually read from the file.
+    read: int
+    #: The budget ended this pass, rather than the page filling or the file running out.
+    hit_budget: bool
 
 
 def _scan_file_backwards(
     path: Path,
     *,
     judge: Callable[[dict[str, Any]], str],
-    skip: int,
     want: int,
-) -> tuple[list[dict[str, Any]], int, int]:
-    """Read one daily file newest-record-first, returning ``(records, matched, skipped)``.
+    end_offset: int,
+    budget: int,
+    must_progress: bool,
+) -> _FileScan:
+    """Read one daily file newest-record-first over ``[0, end_offset)``.
 
-    ``matched`` counts every record that passed the filters **including** the ``skip``
-    already consumed by an earlier page, because that count is exactly what the next
-    cursor has to carry for pages to stay disjoint across a file boundary.
+    Pages are disjoint by construction — each covers a byte range strictly below the previous
+    one — rather than by counting matches and re-skipping what earlier pages took, which is
+    what this did before RA-14 and which cost an O(n) re-scan per page turn.
+
+    Stops when the page is full, when the file runs out, or when ``budget`` bytes have been
+    consumed. The budget is checked *before* consuming a line, so ``read`` never exceeds it —
+    except under ``must_progress``, which forces the first line through even when it alone is
+    larger than the whole budget. Without that, a page could return nothing with a cursor
+    pointing where it already was, and "older records" would loop forever.
     """
     found: list[dict[str, Any]] = []
-    matched = 0
     skipped = 0
+    read = 0
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        handle = path.open("rb")
     except OSError:
         # A file that vanished between the glob and the read is not a reason to fail the
         # page; it is counted so the silence is not silent.
-        return found, matched, 1
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            skipped += 1
-            continue
-        verdict = judge(record)
-        if verdict is _UNREADABLE:
-            skipped += 1
-            continue
-        if verdict is _REJECT:
-            continue
-        matched += 1
-        if matched <= skip:
-            continue
-        found.append(record)
-        if len(found) >= want:
-            break
-    return found, matched, skipped
+        return _FileScan([], 0, 1, 0, False)
+    with handle:
+        cursor = end_offset
+        for raw, start in _lines_backwards(handle, end_offset, LOG_SCAN_BLOCK_BYTES):
+            if read + len(raw) + 1 > budget and not (must_progress and read == 0):
+                return _FileScan(found, cursor, skipped, read, True)
+            read += len(raw) + 1
+            cursor = start
+            try:
+                record = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                skipped += 1
+            else:
+                verdict = judge(record)
+                if verdict is _UNREADABLE:
+                    skipped += 1
+                elif verdict is _MATCH:
+                    found.append(record)
+            if len(found) >= want:
+                return _FileScan(found, cursor, skipped, read, False)
+    return _FileScan(found, 0, skipped, read, False)
 
 
 def read_log_page(
@@ -4020,32 +4230,74 @@ def read_log_page(
 
     files = sorted(Path(ctx.layout.log_dir).glob("audit-*.jsonl"), reverse=True)
     start_index = 0
-    skip_in_file = 0
+    # ``None`` means "from the end of the file", which is what a first page wants and what a
+    # cursor whose offset was ``0`` wants of the *next* file down.
+    start_offset: int | None = None
     if cursor:
         decoded = _decode_cursor(cursor)
         if decoded is not None:
-            name, consumed = decoded
+            name, offset = decoded
             for index, path in enumerate(files):
                 if path.name == name:
-                    start_index, skip_in_file = index, consumed
+                    # An offset of zero means that file is finished, not that it should be
+                    # read again — the difference between a page turn and an infinite loop.
+                    start_index = index if offset else index + 1
+                    start_offset = offset or None
                     break
 
     records: list[dict[str, Any]] = []
     skipped = 0
+    scanned = 0
+    truncated = False
     next_cursor: str | None = None
     judge = lambda record: _judge_record(  # noqa: E731 - one binding, read once, below
         record, cutoff=cutoff, item_id=item_id, outcome=outcome
     )
     for path in files[start_index:]:
-        found, matched, file_skipped = _scan_file_backwards(
-            path, judge=judge, skip=skip_in_file, want=limit - len(records)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            # Vanished between the glob and the stat. Counted, for the same reason the read
+            # failure inside the scan is counted: the silence must not be silent.
+            skipped += 1
+            start_offset = None
+            continue
+        # Clamped, always, because the offset arrives in a URL and is therefore client input.
+        # Unclamped, an offset past the end of the file made ``_lines_backwards`` seek and
+        # read past EOF in block-sized steps; those reads yield no lines, and the byte budget
+        # only counts lines that *are* yielded, so it never fired. The cost was linear in the
+        # offset rather than in the file, which defeats the ceiling this whole function
+        # exists to keep — a minted cursor near ``2**63`` would have held the request thread,
+        # and the SQLite connection and audit handle it carries, effectively forever.
+        #
+        # Clamping is also the honest reading of an honest cursor whose file has since been
+        # rewritten smaller: the newest record it can still name is at the end of the file.
+        end_offset = size if start_offset is None else max(0, min(start_offset, size))
+        scan = _scan_file_backwards(
+            path,
+            judge=judge,
+            want=limit - len(records),
+            end_offset=end_offset,
+            budget=LOG_SCAN_BUDGET_BYTES - scanned,
+            # Progress is guaranteed once per *request*, not once per file: a later file must
+            # not be allowed to force a line through on a budget the earlier ones spent.
+            must_progress=scanned == 0,
         )
-        records.extend(found)
-        skipped += file_skipped
+        records.extend(scan.records)
+        skipped += scan.skipped
+        scanned += scan.read
+        start_offset = None
         if len(records) >= limit:
-            next_cursor = _encode_cursor(path.name, matched)
+            next_cursor = _encode_cursor(path.name, scan.next_offset)
             break
-        skip_in_file = 0
+        if scan.hit_budget:
+            # The budget, not the page, ended this request (RA-14). Saying so matters: an
+            # empty page that stopped early is not an empty history, and the audit view must
+            # never be ambiguous about that. The cursor makes the stop a page boundary rather
+            # than a dead end, so the older records stay reachable one bounded page at a time.
+            truncated = True
+            next_cursor = _encode_cursor(path.name, scan.next_offset)
+            break
 
     filters = {"item": item_id, "since": since, "outcome": outcome}
     result = Result(
@@ -4057,10 +4309,18 @@ def read_log_page(
             "has_more": next_cursor is not None,
             "next_cursor": next_cursor,
             "page_size": limit,
+            "truncated": truncated,
+            "bytes_scanned": scanned,
         }
     )
     for record in records:
         result.say(_format_record(record))
+    if truncated:
+        result.say()
+        result.say(
+            f"(the scan stopped after {scanned} bytes without filling this page; there may "
+            "be older matching records)"
+        )
     if skipped:
         result.say()
         result.say(f"({skipped} unparseable line(s) skipped)")

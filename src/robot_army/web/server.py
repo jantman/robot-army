@@ -47,6 +47,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from robot_army import capacity as capacity_mod
 from robot_army import daemon as daemon_mod
 from robot_army import db, dispatch, effects, health, operations
 from robot_army import repos as repos_mod
@@ -413,6 +414,15 @@ class WebApp:
         self._work: queue.Queue[tuple[str, int]] = queue.Queue()
         self._worker: threading.Thread | None = None
         self._worker_lock = threading.Lock()
+        # How many reads this run refused as cross-site (RA-14). Individual refusals are
+        # deliberately not recorded — see the ``web.stop`` call site — so this integer is the
+        # whole durable trace, and it is folded into that record on shutdown.
+        #
+        # On the app rather than on the server class, because :func:`handle` receives the app
+        # and never the server, and because a unit test drives :func:`handle` with no socket
+        # at all (R15): a counter on the server would be unreachable from where it increments.
+        self.refused_cross_site = 0
+        self._refusal_lock = threading.Lock()
 
     def context(self) -> Context:
         """One ``Context`` per request, closed when the request ends (R11).
@@ -764,6 +774,12 @@ def _perform(
         check_same_origin(request)
         data = body(outcome)
         outcome.update({k: v for k, v in data.items() if k not in outcome})
+    # The action succeeded, so anything reused about this item describes the state before it
+    # (RA-14 FR-010). This is the single choke point every POST passes through and it already
+    # knows what was acted on, so the rule lives here rather than in thirteen handler bodies
+    # that would each have to remember it.
+    if entity_type == "work_item" and entity_id is not None:
+        operations.forget_resume_signals(int(entity_id))
     target = location + html_query(request, ctx, msg=message)
     return Redirect(location=target, data={"ok": True, "message": message, **data})
 
@@ -831,14 +847,14 @@ def check_host(request: Request) -> None:
 
 
 def check_same_origin(request: Request) -> None:
-    """Refuse a state-changing request that a **browser** says came from another site.
+    """Refuse a request that a **browser** says came from another site.
 
     This closes a path the spec's exposure model does not actually cover. FR-003 reasons
     about *network* reachability — "anything that can reach the port has full control" — and
-    accepts that. A cross-site request forgery needs no network path to a loopback-bound
-    port at all: it needs only the author's own browser, already inside the trust boundary,
-    to have some unrelated page open while the interface happens to be running. A zero-field
-    form POST to ``/item/1/restart`` from any such page would otherwise just work.
+    accepts that. A cross-site request needs no network path to a loopback-bound port at
+    all: it needs only the author's own browser, already inside the trust boundary, to have
+    some unrelated page open while the interface happens to be running. A zero-field form
+    POST to ``/item/1/restart`` from any such page would otherwise just work.
 
     It is **not** authentication, which Principle II forbids building. It identifies nobody
     and authorises nobody; it asks one question — did a browser originate this from a page
@@ -850,14 +866,28 @@ def check_same_origin(request: Request) -> None:
     can reach the port directly, which is the accepted model. Browsers always send
     ``Sec-Fetch-Site``, and always send ``Origin`` on a cross-origin POST, so the check
     covers exactly the gap and nothing else.
+
+    **Called from two places, for one reason each** (RA-14). Reads reach it from
+    :func:`handle`, before routing and before any ``Context`` exists — the finding is that a
+    read is *expensive*, not that it discloses, so the refusal has to come before the work
+    rather than merely instead of the response. ``POST`` reaches it from :func:`_perform`
+    instead, and deliberately not from :func:`handle`: ``_perform`` writes the intent record
+    before any check runs, and a pre-routing refusal has nothing to write it with, so
+    hoisting the mutating case here would delete the record that a forged action arrived —
+    which is the only way one would ever be noticed (FR-039, FR-040).
+
+    ``same-site`` is refused alongside ``cross-site``, and that is not over-reach:
+    :func:`check_host` already requires an IP literal or ``localhost``, and an IP literal has
+    no registrable domain to share, so an honest ``same-site`` cannot arise here. Admitting
+    it would leave a second, subtly weaker rule beside this one.
     """
     site = request.headers.get("sec-fetch-site")
     if site is not None and site not in ("same-origin", "none"):
         raise Refusal(
-            f"refusing a state-changing request the browser reports as {site!r}. This "
-            "interface has no authentication by design, so a request forged by another "
-            "page you have open is the one attack its exposure model does not already "
-            "accept",
+            f"refusing a request the browser reports as {site!r}. This interface has no "
+            "authentication by design, so a request made by another page you have open is "
+            "the one attack its exposure model does not already accept — and answering it "
+            "costs this machine real work whether or not that page can read the reply",
             status=403,
             code=EXIT_PRECONDITION,
         )
@@ -866,8 +896,7 @@ def check_same_origin(request: Request) -> None:
         host = request.headers.get("host", "")
         if urlparse(origin).netloc != host:
             raise Refusal(
-                f"refusing a state-changing request from origin {origin!r}, which is not "
-                f"{host!r}",
+                f"refusing a request from origin {origin!r}, which is not {host!r}",
                 status=403,
                 code=EXIT_PRECONDITION,
             )
@@ -912,7 +941,11 @@ def view_root(app: WebApp, ctx: Context, request: Request, params: dict[str, Any
 
 
 def view_active(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
-    return pages.active_view(ctx, include_simulated=params["include_simulated"])
+    return pages.active_view(
+        ctx,
+        include_simulated=params["include_simulated"],
+        capacity=params.get("capacity"),
+    )
 
 
 def view_queue(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
@@ -922,11 +955,16 @@ def view_queue(app: WebApp, ctx: Context, request: Request, params: dict[str, An
         ctx,
         include_simulated=params["include_simulated"],
         chrome_payload=params.get("chrome"),
+        capacity=params.get("capacity"),
     )
 
 
 def view_interrupted(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
-    return pages.interrupted_view(ctx, include_simulated=params["include_simulated"])
+    return pages.interrupted_view(
+        ctx,
+        include_simulated=params["include_simulated"],
+        capacity=params.get("capacity"),
+    )
 
 
 def view_cards(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
@@ -1464,6 +1502,17 @@ def handle(app: WebApp, request: Request) -> Response:
         # rebound Host means this request is not addressed to us in the sense the browser
         # believes, and its response is not the attacker's to read.
         check_host(request)
+        # And, for everything but a mutating request, before any of the work a read costs
+        # (RA-14). ``POST`` is excluded here and checked inside ``_perform`` instead, which
+        # writes the intent record before any check runs; refusing it here would refuse it
+        # just as firmly and leave no trace that it happened. See ``check_same_origin``.
+        if request.method not in POST:
+            try:
+                check_same_origin(request)
+            except Refusal:
+                with app._refusal_lock:
+                    app.refused_cross_site += 1
+                raise
     except Refusal as refusal:
         return _bare(
             pages.refusal_view(
@@ -1509,8 +1558,14 @@ def handle(app: WebApp, request: Request) -> Response:
         # starting mid-request — answer differently in the two halves of one page.
         level = effective_level(ctx)
         include_simulated = include_simulated_for(request, ctx, level=level)
+        # The same argument, for the same reason, about a more expensive fact (RA-14). A
+        # capacity snapshot reads the session registry and enumerates ``/proc``; ``/queue``
+        # took one for the chrome's pill and a second for its own block, so a page could
+        # report two different counts of what is running, moments apart.
+        capacity = capacity_mod.snapshot(ctx.conn, config=ctx.config)
         chrome = pages.chrome(
             ctx,
+            capacity=capacity,
             include_simulated=include_simulated,
             simulated_preference=request.simulated_preference,
             # A GET-able path, because the chrome's visibility toggle links to it — and a
@@ -1530,7 +1585,12 @@ def handle(app: WebApp, request: Request) -> Response:
                 app,
                 ctx,
                 request,
-                {**params, "chrome": chrome, "include_simulated": include_simulated},
+                {
+                    **params,
+                    "chrome": chrome,
+                    "capacity": capacity,
+                    "include_simulated": include_simulated,
+                },
             )
         except Refusal as refusal:
             view = pages.refusal_view(
@@ -1967,17 +2027,23 @@ def serve(
         server.server_close()
         closing = app.context()
         try:
-            # ``refused_over_capacity`` is the whole durable trace of the connection cap
-            # (FR-010). Individual refusals are deliberately not recorded — a record per
-            # refusal would open the SQLite connection and audit handle the cap exists to
-            # bound, making the log amplify the flood it documents — so this integer is what
-            # answers "did this run turn connections away, and how many" from the log alone.
+            # These two counters are the whole durable trace of the two refusals that are
+            # decided before a ``Context`` exists — the connection cap (FR-010) and the
+            # cross-site read check (RA-14). Individual refusals are deliberately not
+            # recorded, for the same reason in both cases: writing a record opens the SQLite
+            # connection and the audit file handle that the refusal exists to avoid opening,
+            # so a record per refusal would make the log amplify the flood it documents.
+            # These integers are what answer "did this run turn requests away, and how many"
+            # from the log alone. What they cannot answer — which paths, at what times, from
+            # what claimed origin — is the enumerated cost of the exception, and the whole of
+            # it. A cross-site *POST* is unaffected and keeps its full ``web.<action>`` pair.
             closing.audit.record(
                 "web.stop",
                 outcome="ok",
                 detail={
                     "reason": "signal",
                     "refused_over_capacity": server.refused_over_capacity,
+                    "refused_cross_site": app.refused_cross_site,
                 },
             )
         finally:

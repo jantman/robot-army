@@ -374,3 +374,62 @@ def test_a_refused_action_links_its_toggle_somewhere_reachable(web_at, conn):
     assert "abandon" not in href.group(1), href.group(1)
     # And the target actually answers a GET.
     assert web_at("plan").get(href.group(1)).status == 200
+
+
+# -- RA-14: one capacity observation per render ------------------------------
+
+
+def test_the_queue_reads_one_observation_of_a_moving_machine(web, conn, monkeypatch):
+    """The correctness half of "observe the machine once", not just the cost half.
+
+    ``/queue`` used to take two snapshots moments apart — one for the chrome's pill, one for
+    its own block — and two observations of a *moving* machine disagree. One page saying two
+    different things about how many sessions are running is worse than either answer, so the
+    stub here deliberately answers differently every time it is asked.
+    """
+    from robot_army import capacity as capacity_mod
+    from robot_army.web import pages, server
+
+    real = capacity_mod.snapshot
+    seen = {"n": 0}
+
+    def moving(*args, **kwargs):
+        seen["n"] += 1
+        snap = real(*args, **kwargs)
+        return replace_total(snap, seen["n"])
+
+    def replace_total(snap, total):
+        import dataclasses
+
+        return dataclasses.replace(snap, total=total)
+
+    monkeypatch.setattr(pages.capacity_mod, "snapshot", moving)
+    monkeypatch.setattr(server.capacity_mod, "snapshot", moving)
+
+    seed_item(conn, state="ready")
+    payload = web.get_json("/queue").json()
+
+    assert seen["n"] == 1, "the machine was observed more than once in one render"
+    assert payload["capacity"]["total"] == 1
+
+
+def test_the_chrome_and_the_queue_view_still_work_without_a_snapshot_handed_in(
+    config, conn, monkeypatch
+):
+    """The ``None`` default exists for direct callers — a test, or a future second entry
+    point — so it is covered rather than assumed."""
+    from tests.conftest import make_boundaries
+
+    from robot_army import operations
+    from robot_army.web import pages
+
+    monkeypatch.setattr(
+        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level)
+    )
+    ctx = operations.build_context(config)
+    chrome = pages.chrome(ctx)
+    assert chrome["capacity"]["global_cap"] >= 0
+
+    view = pages.queue_view(ctx)
+    assert "capacity" in view.data
+    ctx.close()

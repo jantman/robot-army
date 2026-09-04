@@ -7,10 +7,17 @@ and a refusal decided before ``ThreadingMixIn`` starts a thread, are both invisi
 that starts from a parsed ``Request`` — so this module binds a real port and speaks HTTP over
 a raw socket, the same exception ``test_web_end_to_end.py`` makes for itself.
 
-The bounds are overridden to a fraction of a second and a cap of two before the server is
-built. That keeps the module fast, and it is also a live check that each is a single module
-constant rather than a literal repeated at call sites: if either were inlined anywhere, the
-override would not reach it and the test would hang or fail.
+Both bounds are shrunk before the server is built — the cap always to two, the wait to
+whichever value the test's own subject calls for. That keeps the module fast, and it is also a
+live check that each is a single knob rather than a literal repeated at call sites: if either
+were inlined anywhere, the override would not reach it and the test would hang or fail.
+
+Two fixtures, because the two bounds interfere. ``bounded_server`` shortens the wait to a
+fraction of a second, which is what the tests *about* the wait need. ``patient_server`` gives
+it five seconds instead, which is what every test about the *cap* needs — those reach capacity
+by holding connections open, and a held connection that quietly times out frees a slot and
+turns the next refusal into an admission. That failure only appears on a loaded machine, which
+is to say in CI and not here.
 """
 
 from __future__ import annotations

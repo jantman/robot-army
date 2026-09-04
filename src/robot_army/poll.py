@@ -210,6 +210,11 @@ def poll_repo(
                 title=issue.title,
                 body=issue.body,
                 labels=dumps_labels(list(issue.labels)),
+                # The author the listing reported, recorded rather than re-derived
+                # (issue #119). This is the one place a work item's author is first
+                # written, and `dispatch` compares against it instead of asserting the
+                # configured one into the Issue it builds.
+                author=issue.author,
                 dry_run=dry_run,
             )
             if item_id is None:

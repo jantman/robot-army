@@ -422,8 +422,9 @@ ITEM_ACTIONS: dict[str, ActionSpec] = {
         label="retry",
         confirm=True,
         description=(
-            "Move a failed item back to the queue. Refused, with the reason, if the "
-            "condition that blocked it still holds."
+            "Move a failed item back to the queue. The issue is re-read from GitHub and "
+            "its eligibility re-checked — author included — along with the repository's "
+            "own conditions. Refused, with the reason, if any of them still blocks it."
         ),
         item_states=(WorkItemState.FAILED,),
     ),

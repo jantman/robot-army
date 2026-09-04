@@ -184,7 +184,19 @@ def build_parser() -> argparse.ArgumentParser:
     abandon = sub.add_parser("abandon", help="mark abandoned; does not remove the worktree")
     abandon.add_argument("item_id", type=int)
 
-    retry = sub.add_parser("retry", help="move a failed item back to ready")
+    retry = sub.add_parser(
+        "retry",
+        help="re-read the issue, re-check eligibility, and move a failed item back to ready",
+        # The same sentence the web confirmation shows (issue #119, FR-012). The author
+        # clause is not decoration: its absence is what made the old text false in the one
+        # place it mattered, and naming the re-read is what warns that this operation now
+        # depends on the network.
+        description=(
+            "Move a failed item back to the queue. The issue is re-read from GitHub and "
+            "its eligibility re-checked — author included — along with the repository's "
+            "own conditions. Refused, with the reason, if any of them still blocks it."
+        ),
+    )
     retry.add_argument("item_id", type=int)
 
     onboard = sub.add_parser("onboard", help="the deliberate per-repository trust step")

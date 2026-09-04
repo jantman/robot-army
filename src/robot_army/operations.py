@@ -57,11 +57,12 @@ from robot_army.cardstates import NEVER_PARKED, CardState
 from robot_army.config import Config
 from robot_army.effects import Boundaries, EffectLevel, wire
 from robot_army.migrations import SCHEMA_VERSION
-from robot_army.models import ANOMALY_KINDS
+from robot_army.models import ANOMALY_KINDS, WorkItem
 from robot_army.states import (
     TERMINAL_SESSION_STATES,
     SessionState,
     WorkItemState,
+    dumps_labels,
     transition_session,
     transition_work_item,
 )
@@ -2493,7 +2494,27 @@ def abandon(
 
 
 def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Result:
-    """Move a ``failed`` item back to ``ready``, refusing if the block still holds."""
+    """Move a ``failed`` item back to ``ready``, refusing if anything still blocks it.
+
+    Six checks, in the order of contracts/retry.md. The first four are local and free; only
+    once they pass is the issue re-read from its source and put back through
+    ``poll.evaluate``.
+
+    That last step is the point of this function (issue #119, RA-01). ``check_gates`` takes
+    a ``RepoConfig``, not a work item, so it cannot see an issue and never checked its
+    author — which meant an item the poller had refused as *written by somebody else* came
+    back to the queue on one press of a button whose confirmation promised the opposite.
+    The author check is the control that stops "anyone may open an issue on a public
+    repository" becoming "anyone may run an agent in the maintainer's checkout", and this
+    was the one path around it.
+
+    ``poll.evaluate`` is **called**, not reimplemented, and nothing here reads the stored
+    ``blocked_reason`` to decide anything (research R1, R2). Matching the author check's
+    wording in a stored message would put a security boundary at the mercy of whoever next
+    edits an f-string, and would be wrong in both directions: an item whose configured
+    author has since changed would be refused for ever, and an item that reached ``failed``
+    for an unrelated reason after the old bug had already queued it would sail through.
+    """
     item = db.get_work_item(ctx.conn, item_id)
     if item is None:
         return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
@@ -2502,15 +2523,23 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
             code=EXIT_PRECONDITION,
             lines=[f"work item {item_id} is {item.state}; retry applies to failed items"],
         )
+    source_id = f"{item.repo_key}#{item.issue_number}"
     repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
     if repo is None:
-        return Result(
-            code=EXIT_PRECONDITION,
-            lines=[
-                f"repository {item.repo_key!r} does not resolve to a clone any more — "
-                f"run `robot-army onboard {item.repo_key} --reapprove`"
-            ],
+        reason = (
+            f"repository {item.repo_key!r} does not resolve to a clone any more — "
+            f"run `robot-army onboard {item.repo_key} --reapprove`"
         )
+        ctx.audit.record(
+            "retry.blocked",
+            outcome="error",
+            entity_type="work_item",
+            entity_id=item_id,
+            target=source_id,
+            detail={"repo_key": item.repo_key, "blocked": reason},
+            dry_run=item.dry_run,
+        )
+        return Result(code=EXIT_PRECONDITION, lines=[reason])
     try:
         dispatch.check_gates(
             ctx.conn,
@@ -2520,6 +2549,19 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
             trust_file=trust_file,
         )
     except dispatch.DispatchBlocked as exc:
+        # Refused before the read, so no rate limit is spent on an item that could not
+        # dispatch whatever the issue says (research R4). ``retry.blocked`` rather than
+        # ``retry.evaluate`` is how the log distinguishes "we never asked GitHub" from
+        # "we asked".
+        ctx.audit.record(
+            "retry.blocked",
+            outcome="error",
+            entity_type="work_item",
+            entity_id=item_id,
+            target=source_id,
+            detail={"repo_key": item.repo_key, "blocked": str(exc)},
+            dry_run=item.dry_run,
+        )
         return Result(
             code=EXIT_PRECONDITION,
             lines=[
@@ -2528,16 +2570,142 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
             ],
             data={"item_id": item_id, "blocked": str(exc)},
         )
+
+    # -- the read (FR-001) -------------------------------------------------
+    #
+    # Never a fallback to ``item.title`` / ``item.body`` on failure. The stored copy is
+    # precisely what cannot be trusted here, so falling back to it would be the original
+    # defect with a network hiccup as its trigger — and it would be the failure mode
+    # hardest to notice, because it looks exactly like success (FR-006, research R3).
+    try:
+        issue = ctx.boundaries.issue_reader.get_issue(item.repo_key, item.issue_number)
+    except BoundaryError as exc:
+        return _retry_unread(
+            ctx, item, cause="issue_unreachable",
+            message=f"could not read {source_id}: {exc}", error=str(exc),
+        )
+    if issue is None:
+        return _retry_unread(
+            ctx, item, cause="issue_absent",
+            message=f"{source_id} does not exist, or this token cannot see it", error=None,
+        )
+
+    # -- the refresh (FR-009) ----------------------------------------------
+    #
+    # Before the verdict is consulted, and in its own transaction, so both outcomes get it
+    # from one place rather than two call sites kept in step by hand. The order is chosen
+    # for interruption (research R5): killed between this and the transition below, the
+    # item is still ``failed`` with accurate content and its old reason, which the next
+    # retry corrects completely. The other order would leave an item *in the queue*
+    # carrying content nobody re-read, which is the thing this function exists to prevent.
+    #
+    # One dict rather than a call plus a hand-written list of what it wrote: the record's
+    # ``refreshed`` field has to name exactly the columns this rewrote, and two copies would
+    # drift the first time a fifth column joined. It is the set *written*, not a diff
+    # against what was there — every one of these is taken from the read whether or not its
+    # value moved, and "which of them differed" is a question the log cannot answer anyway
+    # without also carrying the old values.
+    refresh: dict[str, Any] = {
+        "title": issue.title,
+        "body": issue.body,
+        "labels": dumps_labels(list(issue.labels)),
+        "author": issue.author,
+    }
+    with db.transaction(ctx.conn):
+        db.update_work_item_columns(ctx.conn, item_id, **refresh)
+
+    # -- the verdict (FR-002) ----------------------------------------------
+    #
+    # ``onboarded=True`` is established, not assumed: ``check_gates`` above raises unless
+    # ``db.get_repo`` returns a row, which is the same question ``poll`` asks.
+    verdict = poll.evaluate(
+        issue, config=ctx.config, repo_key=item.repo_key, onboarded=True
+    )
+    ctx.audit.record(
+        "retry.evaluate",
+        outcome="ok" if verdict.eligible else "error",
+        entity_type="work_item",
+        entity_id=item_id,
+        target=source_id,
+        detail={
+            "repo_key": item.repo_key,
+            "issue_number": item.issue_number,
+            "eligible": verdict.eligible,
+            "reason": verdict.reason,
+            "author": issue.author,
+            "refreshed": list(refresh),
+        },
+        dry_run=item.dry_run,
+    )
+    if not verdict.eligible:
+        # The reason is written to the row as well as returned, so the queue describes why
+        # the item is blocked *now* rather than why it was blocked before (FR-005).
+        #
+        # **Both** columns, which is not belt-and-braces. ``/queue`` renders
+        # ``failure_reason or blocked_reason`` (``pages.web.pages._queue``), so writing only
+        # the second leaves the page showing the *old* sentence beside a button that has
+        # just refused for a different one — precisely the "the interface says something
+        # other than what happened" failure this whole change exists to remove. ``_settle``
+        # writes the pair for the same reason when the poller rejects an item, and these two
+        # are the only writers of an eligibility verdict; they must not disagree.
+        with db.transaction(ctx.conn):
+            db.update_work_item_columns(
+                ctx.conn,
+                item_id,
+                blocked_reason=verdict.reason,
+                failure_reason=verdict.reason,
+            )
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=[
+                f"refusing to retry item {item_id}: the issue is not eligible.",
+                f"  {verdict.reason}",
+            ],
+            data={"item_id": item_id, "eligible": False, "reason": verdict.reason},
+        )
+
     with db.transaction(ctx.conn):
         transition_work_item(
             ctx.conn,
             ctx.audit,
             item_id=item_id,
             target=WorkItemState.READY,
-            reason="retried by the maintainer after the blocking condition cleared",
+            reason="retried by the maintainer; the issue was re-read and re-evaluated",
             extra_columns={"failure_reason": None, "blocked_reason": None},
         )
     return Result(lines=[f"item {item_id} is ready again"], data={"item_id": item_id})
+
+
+def _retry_unread(
+    ctx: Context, item: WorkItem, *, cause: str, message: str, error: str | None
+) -> Result:
+    """A retry that could not read its issue. Refuses, and says which way it failed.
+
+    "It did not happen" and "I could not ask" are different facts, and conflating them is
+    the silent failure Principle III forbids — so the two causes are separate values rather
+    than one "could not verify".
+    """
+    detail: dict[str, Any] = {
+        "repo_key": item.repo_key,
+        "issue_number": item.issue_number,
+        "cause": cause,
+    }
+    if error is not None:
+        detail["error"] = error
+    ctx.audit.record(
+        "retry.evaluate",
+        outcome="error",
+        entity_type="work_item",
+        entity_id=item.id,
+        target=f"{item.repo_key}#{item.issue_number}",
+        detail=detail,
+        dry_run=item.dry_run,
+    )
+    return Result(
+        code=EXIT_FAILED,
+        lines=[f"refusing to retry item {item.id}: {message}"],
+        data={"item_id": item.id, "cause": cause, "error": error},
+    )
 
 
 # -- dispatch pause (milestone 002) -----------------------------------------

@@ -128,6 +128,14 @@ behind my back.
 I own, plus any I list. They are a guard against a mistyped name, not a security boundary;
 the issue-author check is that one, and it cannot be disabled.
 
+That check is enforced in one place, `poll.evaluate`, and every path that can put an item in
+the dispatch queue goes through it. `retry` is the one that used to not: it re-checked the
+repository's conditions and returned the item to the queue carrying its stored,
+someone-else-authored body, while the confirmation in front of the button promised the
+opposite. It now re-reads the issue from GitHub and re-runs the same verdict, so an item
+blocked because somebody else wrote it stays blocked. A second comparison at dispatch, against
+the author recorded on the item, is a backstop rather than the gate.
+
 Two things are easy to overlook:
 
 - **kitty must be running with a control socket.** `kitty.conf` needs
@@ -597,7 +605,8 @@ Three consequences worth knowing before turning it on:
 
 - **A `failed` item holds the repository too.** It is unfinished work, whatever condition it
   is in. `robot-army retry <id>` or `robot-army abandon <id>` says which — and the hold names
-  the item, so I am not left guessing what stopped.
+  the item, so I am not left guessing what stopped. `retry` re-reads the issue and re-checks
+  its eligibility, author included, so it refuses rather than clearing a hold it should not.
 - **It holds one repository, never the queue.** Every other repository dispatches in the
   same pass, exactly as it does under `max_sessions`.
 - **It fast-forwards my own clone.** Before creating the worktree, the clone's local default

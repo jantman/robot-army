@@ -259,6 +259,7 @@ def test_an_item_left_in_discovered_is_re_evaluated_on_the_next_poll(conn, audit
             title="t",
             body="b",
             labels='["robot-army"]',
+            author="jantman",
             dry_run=False,
         )
     reader = FakeIssueReader([make_issue()])

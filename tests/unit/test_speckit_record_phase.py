@@ -49,6 +49,7 @@ def seed(conn: Any, audit: Any, worktree: Path, *, baseline: object) -> Any:
             title="A task",
             body="",
             labels="[]",
+            author="jantman",
             dry_run=False,
         )
     with db.transaction(conn):

@@ -320,6 +320,7 @@ def seed(ctx, *, worktree: Path | None = None, branch: str | None = None, dry_ru
             title=ISSUE.title,
             body=ISSUE.body,
             labels='["robot-army"]',
+            author=ISSUE.author,
             dry_run=dry_run,
         )
         columns = {}

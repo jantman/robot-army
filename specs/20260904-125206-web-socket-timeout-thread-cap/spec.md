@@ -126,8 +126,12 @@ of refused connections is recorded.
 - **A body declared but never sent, on a body larger than the accepted maximum.** The existing
   behaviour — refuse with "too large" and close rather than drain — MUST be preserved; the new
   bound applies to the wait, not to the size decision.
-- **Shutdown while at capacity.** A signalled stop MUST still finish in-flight requests and
-  write its stop record; the cap MUST NOT prevent shutdown from completing.
+- **Shutdown while at capacity.** A signalled stop MUST still stop accepting and write its
+  stop record, and the cap MUST NOT prevent shutdown from completing. It MUST NOT be read as
+  requiring in-flight requests to be finished: they are served on daemon threads that are not
+  joined and that die with the process, which is the existing and intended behaviour. What
+  changes is that the bound in FR-001 now puts a ceiling on how long one of them can be held
+  open by a client that has stopped talking.
 - **The bound is reached during shutdown accounting.** The refusal path MUST NOT require any
   resource that the flood it is defending against has exhausted.
 

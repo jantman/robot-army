@@ -108,9 +108,12 @@ OVER_CAPACITY_RESPONSE = b"\r\n".join(
     ]
 )
 
-#: One read is enough to clear what a client sent before we refused it, and one read is all
-#: the refusal path can afford. Sized like a request's headers, not like a body.
+#: How much of what the client already sent to read back before closing, and in how many
+#: reads. Bounded on both axes because this runs on the accept loop: the point is to leave the
+#: receive queue empty so the close is a FIN rather than an RST, not to read a client's whole
+#: mind. Sized like a request's headers, not like a body.
 _DRAIN_BYTES = 64 * 1024
+_DRAIN_READS = 4
 
 TRUTHY = frozenset({"1", "true", "yes", "on"})
 #: Its twin, and the reason there is one: since 009 the visibility default varies by effect
@@ -1702,9 +1705,9 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         #: operation and never held across starting a thread.
         self._capacity_lock = threading.Lock()
         self._in_flight = 0
-        #: ``True`` from the first refusal until the count next falls below the cap, so the
-        #: terminal line is one per saturation episode rather than one per refused
-        #: connection.
+        #: ``True`` from the first refusal until the count falls to half the cap or below —
+        #: see :meth:`_release_slot` for why half and not simply "below the cap". It exists so
+        #: the terminal line is one per saturation episode rather than one per refusal.
         self._saturated = False
         #: Connections turned away for capacity during this run. Read once, at shutdown.
         self.refused_over_capacity = 0
@@ -1758,16 +1761,29 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         makes the kernel send an RST, and an RST can make the peer discard the response it
         has already buffered — so reading what the client sent is what keeps the close an
         ordinary FIN and the ``503`` readable.
+
+        Both loops are bounded by the socket refusing to make progress, not by a count of
+        attempts, because on a non-blocking socket "would block" is an exception rather than a
+        return value. ``send`` is a loop and not a single call because a short write is legal:
+        it may return having written a prefix, and half a ``503`` is worse than none — a
+        client would read it as a malformed response rather than a refusal.
         """
         try:
-            # One suppress over all three, not one each: if ``setblocking`` fails the socket
-            # is still blocking and has no timeout of its own — ``setup()`` never ran for it
-            # — so a ``recv`` after it could block the accept loop for good. A failure at any
-            # step must skip the rest, and only the close below is unconditional.
+            # One suppress over the whole block, not one per call: if ``setblocking`` fails
+            # the socket is still blocking and has no timeout of its own — ``setup()`` never
+            # ran for it — so a ``recv`` after it could block the accept loop for good. A
+            # failure at any step must skip the rest; only the close below is unconditional.
             with contextlib.suppress(OSError):
                 request.setblocking(False)
-                request.send(OVER_CAPACITY_RESPONSE)
-                request.recv(_DRAIN_BYTES)
+                remaining = memoryview(OVER_CAPACITY_RESPONSE)
+                while remaining:
+                    sent = request.send(remaining)
+                    if not sent:
+                        break
+                    remaining = remaining[sent:]
+                for _ in range(_DRAIN_READS):
+                    if not request.recv(_DRAIN_BYTES):
+                        break
         finally:
             # Whatever the socket did or refused to do, the descriptor goes back. That is
             # the part of this path that is not best-effort.

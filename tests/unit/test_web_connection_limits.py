@@ -27,22 +27,36 @@ from robot_army.web.server import (
 class FakeSocket:
     """Enough socket for the refusal path, which is all it touches."""
 
-    def __init__(self, *, pending: bytes = b"", send_fails: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        pending: bytes = b"",
+        send_fails: bool = False,
+        max_write: int | None = None,
+    ) -> None:
         self.sent = b""
         self.blocking: bool | None = None
         self.pending = pending
         self.send_fails = send_fails
+        #: Bytes accepted per ``send``. ``None`` takes everything; a small number models the
+        #: short write a real non-blocking socket is allowed to do.
+        self.max_write = max_write
+        self.sends = 0
         self.shutdown_called = False
         self.closed = False
 
     def setblocking(self, flag: bool) -> None:
         self.blocking = flag
 
-    def send(self, payload: bytes) -> int:
+    def send(self, payload: Any) -> int:
         if self.send_fails:
             raise BlockingIOError
-        self.sent += payload
-        return len(payload)
+        self.sends += 1
+        chunk = bytes(payload)
+        if self.max_write is not None:
+            chunk = chunk[: self.max_write]
+        self.sent += chunk
+        return len(chunk)
 
     def recv(self, _size: int) -> bytes:
         drained, self.pending = self.pending, b""
@@ -121,11 +135,18 @@ def test_the_cap_is_a_single_constant_with_a_defensible_value():
 
 
 def test_neither_bound_became_configuration():
-    """FR-012. A knob with one caller and no second use is complexity the constitution bans."""
+    """FR-012. A knob with one caller and no second use is complexity the constitution bans.
+
+    Named absences rather than an exact field set: the requirement is that *these two* did not
+    become configuration, and a test that pins the whole of ``WebConfig`` would fail the next
+    time an unrelated web setting is added — which is a false alarm about a real feature.
+    """
     from robot_army.config import WebConfig
 
     fields = set(WebConfig.__dataclass_fields__)
-    assert fields == {"bind", "port", "refresh_seconds"}
+    forbidden = {"timeout", "request_timeout", "request_timeout_seconds", "timeout_seconds",
+                 "max_connections", "max_concurrent_connections", "connection_cap"}
+    assert fields & forbidden == set()
 
 
 # -- the refusal bytes ------------------------------------------------------
@@ -180,6 +201,25 @@ def test_a_connection_at_the_cap_is_refused_without_a_thread(monkeypatch):
     assert refused.blocking is False, "the accept loop must never block on a refusal"
     assert refused.pending == b"", "unread bytes at close turn the FIN into an RST"
     assert refused.shutdown_called and refused.closed
+
+
+def test_a_short_write_still_delivers_the_whole_refusal(monkeypatch):
+    """A non-blocking ``send`` may return having written only a prefix, without raising.
+
+    Half a ``503`` is worse than none: a client reads it as a malformed response rather than
+    a refusal. The response is small enough that a real socket will almost always take it in
+    one call — "almost always" being exactly the kind of assumption that fails in the
+    incident rather than in the test.
+    """
+    monkeypatch.setattr(server_mod, "MAX_CONCURRENT_CONNECTIONS", 0)
+    server = FakeServer()
+    sock = FakeSocket(max_write=7)
+
+    server.process_request(sock, ("127.0.0.1", 1))
+
+    assert sock.sent == OVER_CAPACITY_RESPONSE
+    assert sock.sends > 1, "this fake did not actually exercise a short write"
+    assert sock.closed
 
 
 def test_a_refusal_whose_send_would_block_still_closes(monkeypatch):

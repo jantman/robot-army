@@ -218,8 +218,11 @@ That is the accepted model, so the mitigations are the ones that matter:
   interface's address — `same-origin` and not `no-referrer`, because a refused control's
   page builds its "back to" link from the `Referer` of my own POST.
 - **A connection cannot be held, and there cannot be many of them.** A connection that says
-  nothing for 15 seconds is closed, and at most 32 are served at once; the 33rd gets a `503`
-  with `Connection: close` and is hung up on. Both numbers are constants in
+  nothing for 15 seconds is closed, and at most 32 are served at once; the 33rd is hung up on,
+  with a `503` and `Connection: close` sent first where the socket takes it — delivery is
+  best-effort on purpose, because the refusal is written from the accept loop and blocking
+  there to satisfy a client that is not reading would be the denial of service itself.
+  Both numbers are constants in
   `src/robot_army/web/server.py`, not config. This is not a rate limit and not about the
   network — a page in a browser tab I already have open can connect here and stay silent, and
   without the two bounds each of those connections costs a thread, a socket, a SQLite

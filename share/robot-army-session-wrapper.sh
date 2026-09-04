@@ -54,9 +54,26 @@ fi
 # --- JSON helpers -----------------------------------------------------------
 # No jq: the wrapper must run in a bare environment (M0 F19).
 jesc() {
-  local s=$1
+  local s=$1 i ch esc
   s=${s//\\/\\\\}; s=${s//\"/\\\"}
   s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  # RA-48: JSON forbids every unescaped C0 character, not just the three with short forms
+  # above. A vertical tab or form feed pasted into an issue body used to be copied into the
+  # record raw, and Python's json.loads --- which is strict by default --- then refused the
+  # whole file. The session's own text quarantined its own exit record, and the session
+  # read as lost for no visible reason.
+  #
+  # The loop runs after the backslash substitution, so the backslashes it introduces are
+  # not themselves escaped. It runs unguarded: a `[[ $s == *[range]* ]]` pre-check would
+  # make bracket-range collation decide correctness, and it saves 0.08s on a 100KB prompt,
+  # which is not a trade worth making. 0 is absent because a NUL cannot reach a bash string
+  # through argv; 127 is absent because JSON permits it unescaped.
+  for i in 1 2 3 4 5 6 7 8 11 12 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do
+    printf -v ch '\\x%02x' "$i"
+    printf -v ch "$ch"
+    printf -v esc '\\u%04x' "$i"
+    s=${s//"$ch"/"$esc"}
+  done
   printf '%s' "$s"
 }
 jarr() {

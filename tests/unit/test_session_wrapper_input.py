@@ -285,3 +285,71 @@ def test_a_refusal_never_runs_the_worker(tmp_path):
 
     assert run.returncode == 2
     assert "ran" not in run.files
+
+
+# -- US3: control characters do not quarantine a record (RA-48) -------------------------
+
+#: Every control character an argument can actually carry. 0 is absent because a NUL cannot
+#: cross the `execve` boundary into a bash string at all, so it is unreachable rather than
+#: unhandled.
+CONTROL_CHARACTERS = "".join(chr(i) for i in range(1, 32))
+
+
+def read_record(root, session_id: str, event: str) -> dict:
+    """Read a record the way the daemon does --- strictly.
+
+    `strict=True` is Python's default and is the entire point of this test: it rejects raw
+    control characters inside a string, which is how an ordinary vertical tab in an issue
+    body used to quarantine that session's own exit record.
+    """
+    text = (root / "spool" / f"{session_id}.{event}.json").read_text(encoding="utf-8")
+    return json.loads(text, strict=True)
+
+
+def test_every_control_character_survives_the_record(tmp_path):
+    """All 31, in one argument, rather than a sampled few --- the failure was
+    character-specific, so a sample would have been the wrong instrument."""
+    payload = f"issue body{CONTROL_CHARACTERS}end"
+    run = run_wrapper(tmp_path, args=["/bin/sh", "-c", "exit 0", payload])
+    assert run.returncode == 0, run.stderr
+
+    for event in ("start", "exit"):
+        record = read_record(tmp_path, VALID_SESSION, event)
+        assert payload in record["argv"], (
+            "the text must come back byte-for-byte, not merely parse"
+        )
+
+
+def test_the_escaping_already_in_place_is_not_regressed(tmp_path):
+    """Quotes, backslashes, the three whitespace escapes and multi-byte UTF-8 all worked
+    before. Widening the escaping must not cost any of them --- a doubled backslash or a
+    mangled emoji would be a silent corruption of the record rather than a loud failure."""
+    payload = 'a "quoted" back\\slash\nnewline\rreturn\ttab émoji → \U0001f680'
+    run = run_wrapper(tmp_path, args=["/bin/sh", "-c", "exit 0", payload])
+    assert run.returncode == 0, run.stderr
+
+    assert payload in read_record(tmp_path, VALID_SESSION, "exit")["argv"]
+
+
+def test_a_control_character_in_the_working_directory_is_escaped_too(tmp_path):
+    """`cwd` goes through the same escaper as `argv`, and a directory name may legally
+    contain a control character. Asserted separately because it is a different field, and a
+    fix applied to one string and not the others would pass every test above."""
+    odd = tmp_path / "work\x0bdir"
+    odd.mkdir()
+    result = subprocess.run(
+        ["bash", str(WRAPPER), "42", "--", "/bin/sh", "-c", "exit 0"],
+        cwd=odd,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(tmp_path),
+            "ROBOT_ARMY_SESSION_ID": VALID_SESSION,
+            "ROBOT_ARMY_SPOOL_DIR": str(tmp_path / "spool"),
+            "ROBOT_ARMY_LOG_DIR": str(tmp_path / "logs"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    assert read_record(tmp_path, VALID_SESSION, "exit")["cwd"] == str(odd)

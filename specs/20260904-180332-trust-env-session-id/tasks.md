@@ -119,13 +119,13 @@ input.
 
 ### Tests for User Story 3
 
-- [ ] T019 [US3] In `tests/unit/test_session_wrapper_input.py`, assert that an argument containing all 31 reachable control characters produces records that parse under `json.loads(..., strict=True)` and whose decoded `argv` element equals the input exactly — the full set rather than a sampled subset, per SC-003
-- [ ] T020 [US3] In `tests/unit/test_session_wrapper_input.py`, assert that quotes, backslashes, newlines, carriage returns, tabs and multi-byte UTF-8 still round trip, so the widened escaping does not regress what already worked
+- [X] T019 [US3] In `tests/unit/test_session_wrapper_input.py`, assert that an argument containing all 31 reachable control characters produces records that parse under `json.loads(..., strict=True)` and whose decoded `argv` element equals the input exactly — the full set rather than a sampled subset, per SC-003
+- [X] T020 [US3] In `tests/unit/test_session_wrapper_input.py`, assert that quotes, backslashes, newlines, carriage returns, tabs and multi-byte UTF-8 still round trip, so the widened escaping does not regress what already worked
 
 ### Implementation for User Story 3
 
-- [ ] T021 [US3] Extend `jesc` in `share/robot-army-session-wrapper.sh` to map code points 1-8, 11, 12 and 14-31 to `\u00XX` using only `printf -v` and parameter expansion, placed after the existing backslash substitution so the escapes it introduces are not themselves escaped (research D4)
-- [ ] T022 [US3] Add a brief comment in `share/robot-army-session-wrapper.sh` recording why the loop is unguarded and why 0 and 127 are excluded, so the next reader does not re-derive it or "optimize" in a locale-dependent bracket range
+- [X] T021 [US3] Extend `jesc` in `share/robot-army-session-wrapper.sh` to map code points 1-8, 11, 12 and 14-31 to `\u00XX` using only `printf -v` and parameter expansion, placed after the existing backslash substitution so the escapes it introduces are not themselves escaped (research D4)
+- [X] T022 [US3] Add a brief comment in `share/robot-army-session-wrapper.sh` recording why the loop is unguarded and why 0 and 127 are excluded, so the next reader does not re-derive it or "optimize" in a locale-dependent bracket range
 
 **Checkpoint**: RA-48 is closed. An issue body can no longer quarantine its own exit record.
 

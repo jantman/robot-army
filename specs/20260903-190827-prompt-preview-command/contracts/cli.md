@@ -24,15 +24,22 @@ summary, no blank framing line. `robot-army prompt owner/repo 42 > prompt.txt` p
 file whose whole content is the text a session would be handed.
 
 **stderr**: one note naming the directory the repository's instructions and the Spec Kit
-detection were read from, in one of three forms:
+detection were read from, in one of four forms:
 
 ```text
 context read from the worktree at /home/…/worktrees/repo/issue-42
 context read from the clone at /home/…/git/repo (no worktree for this issue)
+context read from the clone at /home/…/git/repo — this issue's worktree at /home/…/worktrees/repo/issue-42 is gone, so this is not necessarily what its session was sent
 no readable directory at /home/…/git/repo — repository instructions and spec kit guidance are omitted
 ```
 
 plus, on any non-zero exit, the reason for the failure.
+
+The clone splits in two while `context_source` does not, and that asymmetry is deliberate. An
+issue that never had a worktree and one whose worktree has been reclaimed both read from the
+clone, so the audit field is the same — but only the first can be told "no worktree for this
+issue" without lying. This note exists to stop a reader drawing the wrong conclusion from a
+missing section, so a parenthetical that is false in one of its cases is worse than none.
 
 ## Exit codes
 

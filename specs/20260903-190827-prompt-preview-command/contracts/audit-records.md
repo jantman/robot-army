@@ -31,6 +31,11 @@ Written by `operations.prompt_preview`, component `cli`.
 }
 ```
 
+`recorded_worktree` appears only when the item recorded a worktree that was **not** the
+directory read — i.e. it has been reclaimed. Without it the record says `clone` and a reader
+cannot tell a reclaimed worktree from an issue that never had one, which is the same
+distinction the stderr note draws.
+
 `item_id` is omitted when no work item row exists. `instructions` and `speckit` are booleans
 saying whether each optional section was included — **never the text of either**, for the
 reason [R4](../research.md) gives.

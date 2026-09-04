@@ -36,7 +36,10 @@ indistinguishable from "the wrong directory was read". Which of the three happen
 `context_source`'s job.
 
 Each case is reported on the diagnostic stream by a note naming the path and which case it is
-([R2](research.md)), and each is recorded in the `prompt.preview` audit record.
+([R2](research.md)), and each is recorded in the `prompt.preview` audit record. Case 2 has two
+notes rather than one: an issue that never had a worktree and one whose worktree has been
+reclaimed both read the clone, and only the first can be told "no worktree for this issue"
+without lying. `recorded_worktree` in the record carries the same distinction.
 
 ### Branch
 

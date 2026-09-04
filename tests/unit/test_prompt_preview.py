@@ -364,17 +364,38 @@ def test_an_existing_worktree_beats_the_clone(preview, tmp_path, capsys):
 
 
 def test_a_worktree_that_is_gone_falls_back_to_the_clone(preview, tmp_path, repo_clone, capsys):
-    """Reclaimed after the work finished, which is the ordinary end of an item's life."""
+    """Reclaimed after the work finished, which is the ordinary end of an item's life.
+
+    The note must **not** claim there was no worktree. Caught by review: this note exists to
+    stop a reader concluding the wrong thing from a missing section, so a parenthetical that
+    is false in one of its two cases is worse than no parenthetical at all.
+    """
     import sys
 
+    gone = tmp_path / "worktrees" / "demo" / "issue-7"
     ctx = preview()
-    seed(ctx, worktree=tmp_path / "worktrees" / "demo" / "issue-7")
+    seed(ctx, worktree=gone)
 
     outcome = operations.prompt_preview(ctx, REPO, 7, notes=sys.stderr)
 
+    err = capsys.readouterr().err
     assert outcome.code == operations.EXIT_OK
     assert outcome.data["context_source"] == "clone"
-    assert f"context read from the clone at {repo_clone}" in capsys.readouterr().err
+    assert f"context read from the clone at {repo_clone}" in err
+    assert f"this issue's worktree at {gone} is gone" in err
+    assert "no worktree for this issue" not in err
+    assert outcome.data["recorded_worktree"] == str(gone)
+
+
+def test_an_issue_that_never_had_a_worktree_says_exactly_that(preview, repo_clone, capsys):
+    """The other half of the same distinction, and the reason the wording had to split."""
+    import sys
+
+    outcome = operations.prompt_preview(preview(), REPO, 7, notes=sys.stderr)
+
+    err = capsys.readouterr().err
+    assert f"context read from the clone at {repo_clone} (no worktree for this issue)" in err
+    assert "recorded_worktree" not in outcome.data
 
 
 def test_a_dry_run_row_is_not_consulted(preview, tmp_path):

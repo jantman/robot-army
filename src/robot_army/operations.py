@@ -1037,13 +1037,22 @@ def resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
 
 # -- prompt preview ---------------------------------------------------------
 
-#: The three shapes the context note takes, keyed by ``context_source``
-#: (contracts/cli.md). Written every time, including the worktree case: the alternative is
-#: a reader having to know that *no note* means *worktree*, which is a rule to remember
-#: rather than a fact on the screen.
+#: The four shapes the context note takes (contracts/cli.md). Written every time, including
+#: the worktree case: the alternative is a reader having to know that *no note* means
+#: *worktree*, which is a rule to remember rather than a fact on the screen.
+#:
+#: Keyed on its own name rather than on ``context_source``, because the clone splits in two
+#: and the audit field does not. A reclaimed worktree and an issue that never had one both
+#: read from the clone, but only one of them can be told "no worktree for this issue"
+#: without lying — and this note exists precisely to stop a reader drawing the wrong
+#: conclusion from a missing section, so a false parenthetical in it is worse than none.
 _CONTEXT_NOTES = {
     "worktree": "context read from the worktree at {path}",
     "clone": "context read from the clone at {path} (no worktree for this issue)",
+    "clone_reclaimed": (
+        "context read from the clone at {path} — this issue's worktree at {worktree} is "
+        "gone, so this is not necessarily what its session was sent"
+    ),
     "none": (
         "no readable directory at {path} — repository instructions and spec kit guidance "
         "are omitted"
@@ -1207,14 +1216,19 @@ def prompt_preview(
     # the note and the record have to say *where* was looked at, or "this repository has no
     # instructions" is indistinguishable from "the wrong directory was read". Which of the
     # three happened is ``context_source``'s job, not the path's.
-    if item is not None and item.worktree_path and Path(item.worktree_path).is_dir():
-        context_root = Path(item.worktree_path)
+    recorded_worktree = item.worktree_path if item is not None else None
+    if recorded_worktree and Path(recorded_worktree).is_dir():
+        context_root = Path(recorded_worktree)
         context_source = "worktree"
     else:
         context_root = Path(repository.path)
         context_source = "clone" if context_root.is_dir() else "none"
 
-    note = _CONTEXT_NOTES[context_source].format(path=context_root)
+    if context_source == "clone" and recorded_worktree:
+        note_key = "clone_reclaimed"
+    else:
+        note_key = context_source
+    note = _CONTEXT_NOTES[note_key].format(path=context_root, worktree=recorded_worktree)
     result.data["notes"] = [note]
     if notes is not None:
         # ``flush=True`` because the difference is invisible on a terminal and is the whole
@@ -1258,6 +1272,11 @@ def prompt_preview(
     }
     if item_id is not None:
         detail["item_id"] = item_id
+    if recorded_worktree and context_source != "worktree":
+        # The worktree this item was dispatched into, recorded because it is *not* what was
+        # read. Without it the record says "clone" and a reader cannot tell a reclaimed
+        # worktree from an issue that never had one — the same distinction the note draws.
+        detail["recorded_worktree"] = recorded_worktree
     # Never the composed text, the issue body, or the contents of either optional section.
     # Dispatch does not record them either, and a log that described the rehearsal in more
     # detail than the performance would be the wrong asymmetry (research R4).

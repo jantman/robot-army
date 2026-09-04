@@ -15,9 +15,13 @@ from __future__ import annotations
 
 import glob
 import json
+import os
+import stat
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from robot_army.boundaries import BoundaryError, DisplayHandle
+from robot_army.paths import unsafe_ancestor
 from robot_army.subproc import run
 
 if TYPE_CHECKING:
@@ -27,13 +31,72 @@ if TYPE_CHECKING:
 LAUNCH_TIMEOUT = 20.0
 
 
+def _refuse(candidate: str) -> str | None:
+    """Why this candidate must not be spoken to, or ``None`` if it may be.
+
+    A glob returns *names*, and a name in a directory somebody else can write is a name
+    somebody else chose. Nothing about matching the pattern is evidence of who is
+    listening, so a candidate earns the probe by being a socket, owned by this user,
+    under directories no stranger can rearrange — and until it does, it is not addressed
+    at all. That matters more than it sounds: the probe is the first thing an impostor
+    would receive, and a launch carries the whole composed prompt and every ``--env``
+    pair as arguments.
+
+    The clauses live in ``contracts/discovery.md`` of the RA-15 feature. Returning a
+    reason rather than a bool is deliberate: three surfaces quote it, because "kitty is
+    not running" and "something is answering for kitty" send a maintainer to opposite
+    ends of the machine.
+    """
+    path = candidate.removeprefix("unix:")
+    try:
+        # lstat, never stat. A stranger can create a *symbolic link* to the genuine
+        # socket; following it would report our own uid and our own socket type for a
+        # name they chose, which is the whole substitution this function exists to
+        # prevent. Inspecting the link itself reports theirs — and a link is not a
+        # socket, so it fails the next clause regardless.
+        info = os.lstat(path)
+    except OSError as exc:
+        return f"cannot be inspected: {exc.strerror}"
+    if not stat.S_ISSOCK(info.st_mode):
+        return "not a socket"
+    if info.st_uid != os.getuid():
+        return f"owned by uid {info.st_uid}"
+    return unsafe_ancestor(Path(path))
+
+
+def describe_refusals(refusals: tuple[dict[str, str], ...]) -> str:
+    """The refused candidates as a trailing sentence, or nothing at all.
+
+    Three surfaces report a missing socket — the diagnostic, the daemon's startup check,
+    and the error every launch failure quotes — and all three used to say the same thing
+    whether nothing was running or something was answering in kitty's place. Those send a
+    maintainer to opposite ends of the machine, so they get different words; when there
+    are no refusals the wording is exactly what it was.
+    """
+    if not refusals:
+        return ""
+    listed = "; ".join(f"{r['socket']} ({r['reason']})" for r in refusals)
+    return f" {len(refusals)} candidate(s) were found and refused: {listed}"
+
+
 class KittyDisplay:
     def __init__(self, config: Config, audit: AuditLog) -> None:
         self._config = config
         self._audit = audit
         self._socket: str | None = None
+        self._refusals: tuple[dict[str, str], ...] = ()
 
     # -- discovery ---------------------------------------------------------
+
+    @property
+    def refusals(self) -> tuple[dict[str, str], ...]:
+        """Candidates the last discovery declined, and why.
+
+        Read by ``doctor``, by the daemon's startup check, and by the error raised when
+        no socket is available, so that "nothing matched" and "something matched and was
+        refused" are never reported with the same words.
+        """
+        return self._refusals
 
     def probe(self) -> str | None:
         """Find a control socket that answers. Cached for the process's lifetime.
@@ -41,15 +104,46 @@ class KittyDisplay:
         Cached deliberately: kitty restarting means a new PID and a new socket, and the
         right response to that is a clear dispatch failure that a human notices, not a
         silent re-discovery that hides a terminal having died and come back.
+
+        The *path* is cached; the trust in it is not. Checking once at discovery would
+        have left the finding half-closed: the sticky bit stops a stranger unlinking
+        kitty's socket, but not claiming the path after kitty exits and frees it itself.
+        A daemon outliving a kitty restart would then keep dispatching down a name that
+        had become somebody else's, having checked it only when it was still ours. So the
+        cached path is re-checked on the way out, every time.
+
+        A cache that fails the check is *not* re-discovered — that is the silent recovery
+        this docstring already refuses. It keeps failing loudly until a human restarts the
+        daemon, which is the same answer a restarted kitty has always got.
         """
         if self._socket is not None:
-            return self._socket
+            reason = _refuse(self._socket)
+            if reason is None:
+                return self._socket
+            self._refusals = ({"socket": self._socket, "reason": reason},)
+            self._audit.record(
+                "kitty.probe",
+                outcome="error",
+                target=self._socket,
+                detail={
+                    "refused": list(self._refusals),
+                    "error": "the cached socket is no longer usable",
+                },
+            )
+            return None
         pattern = self._config.terminal.socket_glob
         timeout = float(self._config.terminal.probe_timeout_seconds)
         candidates = sorted(glob.glob(pattern), reverse=True)
         tried: list[dict[str, Any]] = []
+        refused: list[dict[str, str]] = []
         for candidate in candidates:
             target = candidate if candidate.startswith("unix:") else f"unix:{candidate}"
+            reason = _refuse(target)
+            if reason is not None:
+                # Nothing is run against it. A refusal that probed first would be a
+                # refusal issued after the disclosure it exists to prevent.
+                refused.append({"socket": target, "reason": reason})
+                continue
             result = run(
                 [self._config.terminal.binary, "@", "--to", target, "ls"],
                 timeout=timeout,
@@ -59,13 +153,20 @@ class KittyDisplay:
             tried.append({"socket": target, "exit": result.returncode})
             if result.ok:
                 self._socket = target
+                self._refusals = tuple(refused)
                 self._audit.record(
                     "kitty.probe",
                     outcome="ok",
                     target=target,
-                    detail={"pattern": pattern, "candidates": len(candidates), "tried": tried},
+                    detail={
+                        "pattern": pattern,
+                        "candidates": len(candidates),
+                        "tried": tried,
+                        "refused": refused,
+                    },
                 )
                 return target
+        self._refusals = tuple(refused)
         self._audit.record(
             "kitty.probe",
             outcome="error",
@@ -73,6 +174,7 @@ class KittyDisplay:
                 "pattern": pattern,
                 "candidates": len(candidates),
                 "tried": tried,
+                "refused": refused,
                 "error": "no candidate socket answered",
             },
         )
@@ -84,6 +186,7 @@ class KittyDisplay:
             raise BoundaryError(
                 f"no kitty control socket answered {self._config.terminal.socket_glob!r}; "
                 "is kitty running with allow_remote_control and listen_on set?"
+                + describe_refusals(self.refusals)
             )
         return socket
 

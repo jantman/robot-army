@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from robot_army.effects import EffectLevel
-from robot_army.paths import Layout, default_config_path
+from robot_army.paths import Layout, default_config_path, runtime_dir, unsafe_ancestor
 
 # The four lifecycle command names have one definition, and it is the one detection already
 # uses. This edge is acyclic and stays that way under the rule recorded in ``speckit.py``'s
@@ -317,9 +317,59 @@ class WorkerConfig:
     binary: str = "claude"
 
 
+def _unsafe_socket_root(pattern: str) -> str | None:
+    """Why the directory a ``socket_glob`` is rooted in cannot be trusted, if it cannot.
+
+    "Rooted in" is the longest leading run of the pattern containing no wildcard —
+    ``/tmp`` for ``/tmp/mykitty-*`` — because that is the part naming a real directory
+    rather than a set of names. A directory that does not exist yet is not judged: there
+    is nothing to look at, and discovery will refuse whatever appears there if it is
+    unsafe.
+
+    Returns the reason rather than the path so the warning says what was actually wrong.
+    The directory judged and the directory at fault are often not the same one — the walk
+    goes all the way up — and a warning naming the wrong directory sends the reader to fix
+    something that is not broken.
+
+    Note what this deliberately does *not* flag: ``/tmp`` itself. It is world-writable but
+    sticky, so nobody can swap an entry in it, and warning about the setup the README
+    shipped for two milestones would be crying wolf.
+    """
+    wildcard = min((i for i in (pattern.find("*"), pattern.find("?")) if i != -1), default=-1)
+    fixed = (pattern if wildcard == -1 else pattern[:wildcard]).removeprefix("unix:")
+    # Cut at the last separator in the *string*, not with ``Path(...).parent``. Path
+    # normalises a trailing slash away first, so ``/srv/shared/*`` — where the wildcard is
+    # the whole final segment — would climb to ``/srv`` and judge the wrong directory,
+    # and ``/tmp/*/mykitty-*`` would climb all the way to ``/``. Both are exactly the
+    # shapes this is supposed to catch.
+    slash = fixed.rfind("/")
+    if slash > 0:
+        directory = Path(fixed[:slash])
+    elif slash == 0:
+        directory = Path("/")
+    else:
+        directory = Path()  # a relative pattern: the working directory is what is judged
+    return unsafe_ancestor(directory) if directory.is_dir() else None
+
+
+def default_socket_glob() -> str:
+    """Where kitty's control socket is looked for when the config does not say.
+
+    Under ``$XDG_RUNTIME_DIR`` (mode 0700, ours, tmpfs, gone at logout) rather than
+    ``/tmp``, which is world-writable: a glob rooted there returns names any local user
+    can create, and RA-15 is what happens next. ``runtime_dir()`` already answers this
+    for the daemon's own sockets, and its no-login fallback — the state directory — is
+    owned by us too, so the answer is never ``/tmp``.
+
+    Computed, not a class constant: it reads the environment, and a value frozen at
+    import would describe whichever environment happened to import this module first.
+    """
+    return f"{runtime_dir()}/mykitty-*"
+
+
 @dataclass(frozen=True, slots=True)
 class TerminalConfig:
-    socket_glob: str = "/tmp/mykitty-*"  # noqa: S108 - kitty's listen_on convention
+    socket_glob: str = field(default_factory=default_socket_glob)
     probe_timeout_seconds: int = 2
     binary: str = "kitty"
 
@@ -1040,12 +1090,27 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
     )
 
     # -- [terminal] --------------------------------------------------------
-    socket_glob = _str("terminal", "socket_glob", "/tmp/mykitty-*")  # noqa: S108
+    socket_glob = _str("terminal", "socket_glob", default_socket_glob())
     if "*" not in socket_glob and "?" not in socket_glob:
         # kitty appends its PID to listen_on, so a fixed path can only ever be stale.
         warnings.append(
             f"[terminal] socket_glob {socket_glob!r} contains no wildcard; kitty appends "
             "its PID to listen_on, so this will not match a live socket after a restart"
+        )
+    unsafe_root = _unsafe_socket_root(socket_glob)
+    if unsafe_root is not None:
+        # A warning rather than an error, deliberately (RA-15). Discovery already refuses
+        # a candidate it does not own, so the daemon is safe with this setting; refusing
+        # to load would stop it on a machine configured exactly as the README used to
+        # say, and a fix that demands an edit before the daemon runs again is a fix that
+        # gets reverted.
+        warnings.append(
+            f"[terminal] socket_glob {socket_glob!r} is rooted somewhere another local "
+            f"user could place a socket: {unsafe_root}. The daemon refuses any candidate "
+            "it does not own, before and while it uses one, so nothing there will be "
+            "dispatched to — but it can leave the daemon with no socket at all. Prefer "
+            "$XDG_RUNTIME_DIR/mykitty-* and the matching "
+            "`listen_on unix:${XDG_RUNTIME_DIR}/mykitty` in kitty.conf"
         )
     terminal = TerminalConfig(
         socket_glob=socket_glob,

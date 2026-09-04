@@ -9,10 +9,58 @@ that must survive a reboot lives under ``~/.local/state``.
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 APP = "robot-army"
+
+
+def unsafe_ancestor(path: Path) -> str | None:
+    """The first directory at or above ``path`` a stranger could rearrange, as a reason.
+
+    Lives here rather than beside its caller because two of them ask the same question:
+    socket discovery, before it will speak to a candidate (RA-15), and configuration
+    load, about the directory a configured glob is rooted in. One rule, one definition.
+
+    Why the question is worth asking at all: ``lstat`` describes a file at an instant,
+    and whatever resolves the name next does so a moment later. If any directory on the
+    path lets somebody else unlink an entry, the file inspected and the file used can be
+    different, and an ownership check becomes a check with a window after it.
+
+    The sticky bit is the exemption rather than an oversight: it restricts unlinking and
+    renaming to the entry's owner, which is exactly the missing property — and it is why
+    ``/tmp`` (root-owned, ``1777``) may hold a socket even though a name in it proves
+    nothing on its own. A directory owned by a third party is refused whatever its mode,
+    because its owner can always replace what is inside it.
+
+    Walked to the filesystem root rather than stopping at the parent, so there is no "how
+    far up is far enough" to answer: a hostile directory anywhere on the path is the same
+    attack. Four ``lstat`` calls for the runtime directory, two for ``/tmp``.
+
+    ``path`` itself is included when it is a directory; pass a file and the walk starts
+    at its parent.
+    """
+    ours = os.getuid()
+    walk = [path, *path.parents] if path.is_dir() else list(path.parents)
+    for directory in walk:
+        try:
+            info = os.lstat(directory)
+        except OSError as exc:
+            return f"directory {directory} cannot be inspected: {exc.strerror}"
+        if stat.S_ISLNK(info.st_mode):
+            # Named for what it is rather than left to the mode check below, which would
+            # refuse it anyway — a symlink's own mode is 0777 on Linux — with a reason
+            # about permissions that says nothing true about the link. What it resolves
+            # to may differ by the time the name is used, and following it here to find
+            # out is the substitution the caller is refusing in the first place.
+            return f"directory {directory} is a symbolic link"
+        if info.st_uid not in (ours, 0):
+            return f"directory {directory} is owned by uid {info.st_uid}"
+        writable_by_others = bool(info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+        if writable_by_others and not info.st_mode & stat.S_ISVTX:
+            return f"directory {directory} is writable by others without the sticky bit"
+    return None
 
 
 def _xdg(var: str, default: Path) -> Path:

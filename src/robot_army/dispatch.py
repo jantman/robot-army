@@ -669,6 +669,35 @@ def dispatch_item(
         raise
 
 
+def author_refusal(item: Any, config: Config) -> tuple[str, str] | None:
+    """``(cause, reason)`` if this item may not dispatch on its author, else ``None``.
+
+    A named function rather than a branch inside ``_dispatch_item`` for the reason
+    ``check_gates`` is one: a refusal that decides whether an agent runs in the maintainer's
+    checkout should be readable, and testable, without standing up a launch around it.
+
+    ``is None`` is checked first and it is **not** redundant with the inequality after it.
+    ``config.parse`` refuses an empty ``[github] author``, so today ``None`` could never
+    equal it — but that guarantee lives in another module, and this is the branch where a
+    future config change letting the value go missing would silently start dispatching every
+    row whose provenance is unknown. Stating it here costs one comparison and depends on
+    nothing outside this function.
+    """
+    if item.author is None:
+        return (
+            "unrecorded",
+            f"work item {item.id} has no recorded issue author, so it cannot be verified "
+            f"— run `robot-army retry {item.id}` to re-read the issue and re-check it",
+        )
+    if item.author != config.github.author:
+        return (
+            "mismatch",
+            f"issue author {item.author!r} is not the configured author "
+            f"{config.github.author!r} (FR-007 security boundary; this cannot be disabled)",
+        )
+    return None
+
+
 def _dispatch_item(
     conn: sqlite3.Connection,
     *,
@@ -726,18 +755,9 @@ def _dispatch_item(
     # its ``Issue`` with ``author=config.github.author``, asserting a fact it had never
     # read, which made the code *read* as though a check happened downstream and removed the
     # last natural place to notice that none did.
-    if item.author is None or item.author != config.github.author:
-        cause = "unrecorded" if item.author is None else "mismatch"
-        reason = (
-            f"work item {item_id} has no recorded issue author, so it cannot be verified "
-            f"— run `robot-army retry {item_id}` to re-read the issue and re-check it"
-            if item.author is None
-            else (
-                f"issue author {item.author!r} is not the configured author "
-                f"{config.github.author!r} (FR-007 security boundary; this cannot be "
-                f"disabled)"
-            )
-        )
+    refusal = author_refusal(item, config)
+    if refusal is not None:
+        cause, reason = refusal
         audit.record(
             "dispatch.author",
             outcome="error",

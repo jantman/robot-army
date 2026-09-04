@@ -452,8 +452,8 @@ def test_retry_refuses_an_author_rejected_item_through_the_web_too(web, conn, co
     """RA-01's worst path. The blocked section of the queue is exactly where an
     author-rejected item appears, and its `retry` control's confirmation used to promise
     the block would be re-verified while `operations.retry` re-checked only the
-    repository's own conditions. Both front ends call the same function, which is what
-    makes closing it once close it everywhere."""
+    repository's own conditions. Both front ends call the same function, which is why
+    closing it once closes it everywhere."""
     monkeypatch.setattr(
         operations.dispatch, "is_trusted", lambda path, trust_file=None: (True, "trusted in test")
     )

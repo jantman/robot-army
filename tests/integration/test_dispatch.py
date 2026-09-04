@@ -1506,3 +1506,39 @@ def test_resume_of_a_pre_migration_item_refuses_into_a_state_retry_can_recover(
     item = db.get_work_item(conn, item_id)
     assert item.state is WorkItemState.FAILED, "retry only accepts failed items"
     assert f"robot-army retry {item_id}" in (item.blocked_reason or "")
+
+
+def test_author_refusal_is_readable_on_its_own(config):
+    """The check extracted out of ``_dispatch_item``, exercised without a launch around it.
+
+    The ``is None`` arm is asserted separately from the mismatch arm even though
+    ``config.parse`` guarantees a non-empty configured author today. That guarantee lives
+    in another module; this is the branch that would start dispatching every unverifiable
+    row if it ever moved.
+    """
+    from dataclasses import replace
+
+    from robot_army.models import WorkItem
+
+    def item(author):
+        return WorkItem(
+            id=7, source="github", source_id="demo#42", source_url="u", repo_key="demo",
+            issue_number=42, title="t", body="b", labels="[]",
+            state=WorkItemState.READY, dry_run=False,
+            discovered_at="x", updated_at="x", author=author,
+        )
+
+    assert dispatch.author_refusal(item("jantman"), config) is None
+
+    cause, reason = dispatch.author_refusal(item("mallory"), config)
+    assert cause == "mismatch"
+    assert "mallory" in reason and "cannot be disabled" in reason
+
+    cause, reason = dispatch.author_refusal(item(None), config)
+    assert cause == "unrecorded"
+    assert "robot-army retry 7" in reason
+
+    # The one that matters if the config guarantee ever moves: an unrecorded author must
+    # not become "equal to the configured one" simply because both are absent.
+    blank = replace(config, github=replace(config.github, author=""))
+    assert dispatch.author_refusal(item(None), blank)[0] == "unrecorded"

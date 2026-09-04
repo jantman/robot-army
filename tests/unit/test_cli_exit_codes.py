@@ -601,3 +601,84 @@ def test_every_command_that_can_prompt_can_also_be_asked_for_json(command):
     """Guards the guard. A command that prompts and cannot produce a document is a
     command whose prompt stream nobody has had to think about."""
     assert build_parser().parse_args([*command, "--json"]).json is True
+
+
+# -- issue #120: a refused launch is a precondition failure, not a failure ---
+
+
+@pytest.mark.parametrize("command", ["resume", "restart"])
+def test_a_gate_refusal_exits_three_not_one(command, config_file, conn, capsys, monkeypatch):
+    """FR-014, and the distinction the author acts on.
+
+    ``1`` means the launch was attempted and the item now carries a failure reason to go
+    and read. ``3`` means nothing was attempted, the item is untouched, and the reason is
+    already on the screen — so sending them to ``robot-army show`` would send them to an
+    empty field.
+    """
+    from robot_army import dispatch, ordering
+
+    item_id = seed_item(conn, state=str(WorkItemState.INTERRUPTED))
+    _seed_ended_session(conn, item_id)
+
+    def refuse(*_args, **_kwargs):
+        raise dispatch.DispatchRefused(
+            "dispatch is paused; lift it with `robot-army unpause`",
+            hold=ordering.HoldReason.PAUSED,
+        )
+
+    monkeypatch.setattr(dispatch, "check_launch_gate", refuse)
+
+    code = run_cli([command, str(item_id)], config_file)
+
+    assert code == EXIT_PRECONDITION
+    # stderr, not stdout: the CLI puts any outcome that did not succeed there, and a
+    # refusal is an outcome that did not succeed.
+    err = capsys.readouterr().err
+    assert f"refusing to {command} item {item_id}" in err
+    assert "dispatch is paused" in err
+    assert "robot-army unpause" in err, "the detail the queue renders, verbatim"
+
+
+def _seed_ended_session(conn, item_id: int) -> None:
+    """``resume`` needs a previous session to restore; ``restart`` does not care."""
+    from tests.conftest import seed_session
+
+    seed_session(conn, item_id, state="exited_error", exit_code=130)
+
+
+@pytest.mark.parametrize("command", ["resume", "restart"])
+def test_force_is_off_unless_the_author_asks_for_it_by_name(
+    command, config_file, conn, monkeypatch
+):
+    """FR-022. There is no configuration key that turns the gate off standing; the override
+    is per invocation, and its absence must mean absent."""
+    from robot_army import dispatch
+
+    item_id = seed_item(conn, state=str(WorkItemState.INTERRUPTED))
+    _seed_ended_session(conn, item_id)
+    seen: list[bool] = []
+
+    def record_force(*_args, force: bool = False, **_kwargs):
+        seen.append(force)
+        raise dispatch.DispatchRefused("stop here", hold=None)
+
+    monkeypatch.setattr(dispatch, "check_launch_gate", record_force)
+
+    run_cli([command, str(item_id)], config_file)
+    run_cli([command, str(item_id), "--force"], config_file)
+
+    assert seen == [False, True]
+
+
+@pytest.mark.parametrize("command", ["resume", "restart"])
+def test_the_force_flag_says_what_it_does_not_bypass(command):
+    """``cancel --force`` already means "skip the confirmation prompt". One word doing two
+    jobs across the CLI is only safe while each says which job it is doing."""
+    parser = build_parser()
+    action = next(
+        a
+        for a in parser._subparsers._group_actions[0].choices[command]._actions
+        if a.dest == "force"
+    )
+    assert "Does not bypass" in action.help
+    assert "author" in action.help

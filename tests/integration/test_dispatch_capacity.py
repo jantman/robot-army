@@ -15,6 +15,8 @@ exactly the case it exists for.
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -992,3 +994,725 @@ def test_a_parked_card_is_never_selected(
     )
     entries = ordering.plan(conn, config=config, capacity=snap)
     assert entries[0].hold is ordering.HoldReason.OFF_COLUMN
+
+
+# -- issue #120: resume and restart pass the same gate ----------------------
+#
+# RA-05. Until this section existed, everything above tested the cap against
+# ``select_and_dispatch`` alone — and ``resume`` and ``restart`` reached the launch by
+# another door, past the cap, past the pause, and past every hold. The tests are written
+# against ``operations.*`` rather than ``dispatch_item`` on purpose: the door that was open
+# is the one the author actually uses, from the terminal and from the phone.
+
+
+def rested_item(conn, config, *, issue_number: int, state=WorkItemState.AWAITING_REVIEW):
+    """An item whose session has ended, which is what ``resume`` and ``restart`` accept.
+
+    The session row is *closed*, as a real ended session is. Leaving it open would make the
+    item count against its own repository's cap and refuse its own resume — correctly, but
+    for a reason that has nothing to do with what these tests are about.
+    """
+    item_id = seed_item(
+        conn,
+        state=str(state),
+        issue_number=issue_number,
+        clone_path=config.repos["demo"].path,
+    )
+    seed_session(conn, item_id, state=str(SessionState.EXITED_CLEAN), exit_code=0)
+    return item_id
+
+
+@pytest.fixture
+def trusted(monkeypatch, tmp_path, config):
+    """Point the *default* trust file at a fixture one.
+
+    ``operations.resume`` and ``operations.restart`` take no ``trust_file``, so unlike
+    every dispatch test above these reach ``check_gates`` through the real
+    ``~/.claude.json`` — which would make the result depend on what the person running the
+    suite happens to have opened. Patching the default is the seam; adding a parameter to
+    the product for a test's convenience is not.
+    """
+    monkeypatch.setattr(
+        dispatch, "claude_trust_file", lambda: trust_file(tmp_path, config.repos["demo"].path)
+    )
+
+
+def context(conn, audit, config):
+    boundaries = make_boundaries(
+        audit,
+        writer=RecordingWriter(),
+        host=StubSessionHost(confirm=True),
+        hooks=SubprocessHookRunner(audit),
+    )
+    return operations.Context(
+        conn=conn,
+        config=config,
+        audit=audit,
+        boundaries=boundaries,
+        effect_level=boundaries.level,
+    )
+
+
+def unchanged_columns(conn, item_id: int) -> dict:
+    """Everything a refusal is forbidden to touch (FR-010, FR-011)."""
+    item = db.get_work_item(conn, item_id)
+    return {
+        "state": item.state,
+        "failure_reason": item.failure_reason,
+        "blocked_reason": item.blocked_reason,
+        "dispatching_at": item.dispatching_at,
+        "worktree_path": item.worktree_path,
+    }
+
+
+@pytest.mark.parametrize("action", ["resume", "restart"])
+def test_a_full_machine_refuses_resume_and_restart(
+    conn, audit, config, layout, tmp_path, machine, action, trusted
+):
+    """SC-001. Two sessions, a cap of two, and the button that used to start a third."""
+    registry, proc = machine
+    config = capped_at(config, 2)
+    out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
+    out_of_band(registry, proc, pid=102, cwd=str(tmp_path / "GIT" / "two"))
+    item_id = rested_item(conn, config, issue_number=1)
+    ctx = context(conn, audit, config)
+    before = unchanged_columns(conn, item_id)
+
+    result = getattr(operations, action)(
+        ctx, item_id, registry_dir=registry, proc_root=proc
+    )
+
+    assert result.code == operations.EXIT_PRECONDITION, "refused, not attempted-and-failed"
+    assert result.data["refused"] is True
+    assert result.data["hold"] == str(ordering.HoldReason.GLOBAL_CAP)
+    assert "2 of 2 sessions running" in result.data["detail"]
+    assert unchanged_columns(conn, item_id) == before, "a refusal writes nothing"
+
+
+def test_a_freed_slot_lets_the_same_resume_succeed_first_time(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    """FR-012 and SC-004: no repair step between the refusal and the success."""
+    registry, proc = machine
+    config = capped_at(config, 1)
+    occupant = out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
+    item_id = rested_item(conn, config, issue_number=1)
+    ctx = context(conn, audit, config)
+
+    assert operations.resume(ctx, item_id, registry_dir=registry, proc_root=proc).code == (
+        operations.EXIT_PRECONDITION
+    )
+
+    occupant.unlink()
+    (proc / "101").rename(proc / "101.gone")
+
+    assert (
+        operations.resume(ctx, item_id, registry_dir=registry, proc_root=proc).code
+        == operations.EXIT_OK
+    )
+    assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
+
+
+def test_a_repository_cap_refuses_a_resume_while_the_machine_has_room(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    """SC-002. The machine-wide limit is nowhere near; this repository's own is reached."""
+    registry, _proc = machine
+    config = capped_at(config, 9, per_repo=1)
+    running = ready_item(conn, config, issue_number=1)
+    seed_session(conn, running, state=str(SessionState.RUNNING))
+    item_id = rested_item(conn, config, issue_number=2)
+    ctx = context(conn, audit, config)
+
+    result = operations.resume(ctx, item_id, registry_dir=registry)
+
+    assert result.code == operations.EXIT_PRECONDITION
+    assert result.data["hold"] == str(ordering.HoldReason.REPO_CAP)
+    assert "demo" in result.data["detail"]
+
+
+def test_an_idle_machine_still_resumes(conn, audit, config, layout, tmp_path, machine, trusted):
+    """The gate must not become a wall. Nothing applies, so nothing is refused — and the
+    ordinary case leaves no refusal record behind."""
+    registry, _proc = machine
+    config = capped_at(config, 2, per_repo=2)
+    item_id = rested_item(conn, config, issue_number=1)
+    ctx = context(conn, audit, config)
+
+    assert operations.resume(ctx, item_id, registry_dir=registry).code == operations.EXIT_OK
+    assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
+
+
+
+def test_the_dispatcher_selects_the_same_items_in_the_same_order_as_before(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """SC-006. The gate must not change what the daemon dispatches or in what order.
+
+    ``select_and_dispatch`` now calls ``check_launch_gate`` for every item it selects, so
+    it observes the machine twice per dispatch — once to plan, once to launch. Everything
+    the second observation could refuse, the first has already refused, so a pass through a
+    queue the planner permits must be identical to one before the gate existed: same items,
+    same order, and no ``dispatch.refused`` record anywhere in the log.
+    """
+    config = capped_at(config, 3, per_repo=3)
+    first = ready_item(conn, config, issue_number=1)
+    second = ready_item(conn, config, issue_number=2)
+    third = ready_item(conn, config, issue_number=3)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 3
+
+    for item_id in (first, second, third):
+        assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
+    order = [
+        db.get_work_item(conn, item_id).active_at for item_id in (first, second, third)
+    ]
+    assert order == sorted(order), "oldest first, exactly as before"
+    assert _records(layout, audit, "dispatch.refused") == [], (
+        "the planner had already permitted every one of them"
+    )
+
+
+def test_a_pass_ends_rather_than_crashing_when_the_gate_disagrees_with_the_plan(
+    conn, audit, config, layout, tmp_path, machine, monkeypatch
+):
+    """R9. The two observations are taken at different instants, and between them the
+    author can start a session by hand — so disagreement is a legitimate outcome, not a
+    contradiction to assert against. It must end the pass, not escape into the daemon tick.
+    """
+    config = capped_at(config, 3, per_repo=3)
+    ready_item(conn, config, issue_number=1)
+    ready_item(conn, config, issue_number=2)
+
+    def refuse(*_args, **_kwargs):
+        raise dispatch.DispatchRefused(
+            "3 of 3 sessions running (0 ours, 3 other)",
+            hold=ordering.HoldReason.GLOBAL_CAP,
+        )
+
+    monkeypatch.setattr(dispatch, "check_launch_gate", refuse)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 0
+
+
+def _records(layout, audit, action: str) -> list[dict]:
+    audit.close()
+    out = []
+    for path in sorted(layout.log_dir.glob("audit-*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record["action"] == action:
+                out.append(record)
+    return out
+
+
+# -- issue #120, US2: the pause and the holds bind every launch path --------
+
+
+@pytest.mark.parametrize("action", ["resume", "restart"])
+def test_a_paused_system_refuses_resume_and_restart(
+    conn, audit, config, layout, tmp_path, machine, action, trusted
+):
+    """The author paused the system before going out. The button used to ignore that."""
+    registry, proc = machine
+    config = capped_at(config, 9, per_repo=9)
+    item_id = rested_item(conn, config, issue_number=1)
+    with db.transaction(conn):
+        db.set_dispatch_paused(conn, paused=True, by="cli")
+    ctx = context(conn, audit, config)
+    before = unchanged_columns(conn, item_id)
+
+    result = getattr(operations, action)(
+        ctx, item_id, registry_dir=registry, proc_root=proc
+    )
+
+    assert result.code == operations.EXIT_PRECONDITION
+    assert result.data["hold"] == str(ordering.HoldReason.PAUSED)
+    assert "robot-army unpause" in result.data["detail"]
+    assert unchanged_columns(conn, item_id) == before
+
+
+@pytest.mark.parametrize("action", ["resume", "restart"])
+def test_a_held_item_refuses_resume_and_restart(
+    conn, audit, config, layout, tmp_path, machine, action, trusted
+):
+    registry, proc = machine
+    config = capped_at(config, 9, per_repo=9)
+    item_id = rested_item(conn, config, issue_number=1)
+    with db.transaction(conn):
+        db.set_item_hold(conn, item_id, by="web")
+    ctx = context(conn, audit, config)
+
+    result = getattr(operations, action)(
+        ctx, item_id, registry_dir=registry, proc_root=proc
+    )
+
+    assert result.code == operations.EXIT_PRECONDITION
+    assert result.data["hold"] == str(ordering.HoldReason.HELD)
+    assert "web" in result.data["detail"]
+
+
+def test_a_held_repository_refuses_a_resume_of_an_item_that_is_not_itself_held(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    registry, proc = machine
+    config = capped_at(config, 9, per_repo=9)
+    item_id = rested_item(conn, config, issue_number=1)
+    with db.transaction(conn):
+        db.set_repo_hold(conn, "demo", by="cli")
+    ctx = context(conn, audit, config)
+
+    result = operations.resume(ctx, item_id, registry_dir=registry, proc_root=proc)
+
+    assert result.code == operations.EXIT_PRECONDITION
+    assert result.data["hold"] == str(ordering.HoldReason.HELD)
+    assert "demo" in result.data["detail"]
+
+
+def test_both_holds_are_named_so_releasing_one_does_not_look_ignored(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    """FR-006 through the launch path. Naming one and silently keeping the other is how
+    the author releases a hold, presses the button, and is told ``held`` again."""
+    registry, proc = machine
+    config = capped_at(config, 9, per_repo=9)
+    item_id = rested_item(conn, config, issue_number=1)
+    with db.transaction(conn):
+        db.set_item_hold(conn, item_id, by="web")
+        db.set_repo_hold(conn, "demo", by="cli")
+    ctx = context(conn, audit, config)
+
+    detail = operations.resume(
+        ctx, item_id, registry_dir=registry, proc_root=proc
+    ).data["detail"]
+
+    assert "web" in detail and "cli" in detail
+    assert "releasing one leaves the other in force" in detail
+
+
+def test_a_pause_is_named_ahead_of_a_full_machine(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    """US2 AS5. Freeing a slot changes nothing while the system is paused, so naming the
+    cap would send the author to fix the wrong thing."""
+    registry, proc = machine
+    config = capped_at(config, 1)
+    out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
+    item_id = rested_item(conn, config, issue_number=1)
+    with db.transaction(conn):
+        db.set_dispatch_paused(conn, paused=True, by="cli")
+    ctx = context(conn, audit, config)
+
+    result = operations.resume(ctx, item_id, registry_dir=registry, proc_root=proc)
+
+    assert result.data["hold"] == str(ordering.HoldReason.PAUSED)
+
+
+@pytest.mark.parametrize(
+    "lift",
+    [
+        pytest.param("unpause", id="unpausing"),
+        pytest.param("unhold", id="releasing the hold"),
+    ],
+)
+def test_lifting_the_condition_lets_the_same_resume_succeed_first_time(
+    conn, audit, config, layout, tmp_path, machine, lift, trusted
+):
+    """SC-004, and the reason a refusal must not write a failure reason: the author's fix
+    is to lift the condition, and nothing else may stand between that and the button."""
+    registry, proc = machine
+    config = capped_at(config, 9, per_repo=9)
+    item_id = rested_item(conn, config, issue_number=1)
+    with db.transaction(conn):
+        if lift == "unpause":
+            db.set_dispatch_paused(conn, paused=True, by="cli")
+        else:
+            db.set_item_hold(conn, item_id, by="cli")
+    ctx = context(conn, audit, config)
+
+    assert operations.resume(
+        ctx, item_id, registry_dir=registry, proc_root=proc
+    ).code == operations.EXIT_PRECONDITION
+
+    with db.transaction(conn):
+        if lift == "unpause":
+            db.set_dispatch_paused(conn, paused=False, by="cli")
+        else:
+            db.clear_item_hold(conn, item_id)
+
+    assert operations.resume(
+        ctx, item_id, registry_dir=registry, proc_root=proc
+    ).code == operations.EXIT_OK
+    assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
+
+
+# -- issue #120, US3: exactly one dispatcher wins an item ------------------
+#
+# The claim is what makes this exclusive, and it can only be reached the way a real racer
+# reaches it: through ``dispatch_item``, on an item another claimant already holds. Driving
+# it through ``operations.resume``/``restart`` proves nothing about the claim — their own
+# state pre-checks refuse first, which is why the sequential double-tap was already safe
+# and why the cross-process race was not.
+
+
+def launch(conn, audit, config, layout, tmp_path, machine, item_id, **kwargs):
+    registry, proc = machine
+    boundaries = make_boundaries(
+        audit,
+        writer=RecordingWriter(),
+        host=StubSessionHost(confirm=True),
+        hooks=SubprocessHookRunner(audit),
+    )
+    return dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+        registry_dir=registry,
+        proc_root=proc,
+        **kwargs,
+    )
+
+
+def test_a_second_launch_of_an_item_already_starting_up_is_refused(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """The state a losing racer finds, and the pair that used to succeed silently.
+
+    ``transition_work_item`` treats ``dispatching -> dispatching`` as a legitimate no-op —
+    correctly, for reconciliation and spool replay — so before the atomic claim both
+    racers walked past it and launched into one worktree on one branch.
+    """
+    config = capped_at(config, 9, per_repo=9)
+    item_id = seed_item(
+        conn,
+        state=str(WorkItemState.DISPATCHING),
+        issue_number=1,
+        clone_path=config.repos["demo"].path,
+    )
+    before = unchanged_columns(conn, item_id)
+
+    with pytest.raises(dispatch.DispatchRefused) as caught:
+        launch(conn, audit, config, layout, tmp_path, machine, item_id)
+
+    assert caught.value.hold is None, "no queueing word describes a lost race"
+    assert "claimed by another dispatcher" in caught.value.detail
+    assert unchanged_columns(conn, item_id) == before, "the winner's item is untouched"
+    assert db.list_sessions_for_item(conn, item_id) == []
+
+
+def test_a_lost_claim_is_refused_rather_than_failing_the_winners_item(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """US3 AS3. Settling here would let the loser fail work it never claimed — the double
+    dispatch wearing the opposite sign, and the item would need ``retry`` to recover."""
+    config = capped_at(config, 9, per_repo=9)
+    item_id = seed_item(
+        conn,
+        state=str(WorkItemState.DISPATCHING),
+        issue_number=1,
+        clone_path=config.repos["demo"].path,
+    )
+
+    with pytest.raises(dispatch.DispatchRefused):
+        launch(conn, audit, config, layout, tmp_path, machine, item_id)
+
+    item = db.get_work_item(conn, item_id)
+    assert item.state is WorkItemState.DISPATCHING, "not failed"
+    assert item.failure_reason is None
+    assert item.blocked_reason is None
+
+
+def test_a_lost_claim_is_recorded_as_a_refusal_not_an_error(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """FR-013. It is also deliberately not a ``dispatch.error``: the generic handler exists
+    for the unforeseen, and a lost race is neither unforeseen nor an error of the dispatch.
+    Filing it there would defeat reconstruction as surely as not recording it at all."""
+    config = capped_at(config, 9, per_repo=9)
+    item_id = seed_item(
+        conn,
+        state=str(WorkItemState.ACTIVE),
+        issue_number=1,
+        clone_path=config.repos["demo"].path,
+    )
+
+    with pytest.raises(dispatch.DispatchRefused):
+        launch(conn, audit, config, layout, tmp_path, machine, item_id)
+
+    refused = _records(layout, audit, "dispatch.refused")
+    assert refused, "a refusal that leaves no record is the bug being fixed"
+    assert refused[-1]["detail"]["hold"] is None
+    assert refused[-1]["detail"]["found_state"] == str(WorkItemState.ACTIVE)
+    assert refused[-1]["detail"]["note"].startswith("the item was not touched")
+    assert _records(layout, audit, "dispatch.error") == []
+
+
+@pytest.mark.parametrize("attempt", range(50))
+def test_two_concurrent_launches_of_one_item_start_exactly_one_session(
+    conn, audit, config, layout, tmp_path, machine, attempt
+):
+    """SC-005, repeated so that "no race" is a measurement rather than an assertion.
+
+    Two threads on two connections to one database file, released together, both past the
+    gate because the machine has room for both. Exactly one may claim the item, and exactly
+    one session may exist afterwards.
+    """
+    config = capped_at(config, 9, per_repo=9)
+    item_id = ready_item(conn, config, issue_number=1)
+    conn.commit()
+
+    outcomes: list[str] = []
+    lock = threading.Lock()
+    start = threading.Barrier(2)
+
+    def attempt_launch() -> None:
+        own = db.connect(layout.db_path)
+        start.wait()
+        try:
+            launch(own, audit, config, layout, tmp_path, machine, item_id)
+            outcome = "won"
+        except dispatch.DispatchRefused:
+            outcome = "refused"
+        except sqlite3.OperationalError:
+            outcome = "busy"
+        finally:
+            own.close()
+        with lock:
+            outcomes.append(outcome)
+
+    threads = [threading.Thread(target=attempt_launch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    # Exactly one, not "at most one": both threads reach the claim, so a pass in which
+    # neither won would mean the contention never happened and the assertion proved
+    # nothing. ``busy`` is accepted as a loss but must not be how *every* run ends.
+    assert outcomes.count("won") == 1, f"expected exactly one winner, got {outcomes}"
+    assert outcomes.count("refused") == 1, f"the loser must be told, got {outcomes}"
+    fresh = db.connect(layout.db_path)
+    assert len(db.list_sessions_for_item(fresh, item_id)) == 1, (
+        "one worktree, one branch, one agent"
+    )
+    fresh.close()
+
+
+
+# -- issue #120, US4: what --force reaches, and what it must never reach ---
+
+
+def test_force_starts_a_session_past_every_policy_condition_at_once(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    """SC-008. Paused, held, repository held, and the machine full — all at once."""
+    registry, proc = machine
+    config = capped_at(config, 1, per_repo=1)
+    out_of_band(registry, proc, pid=101, cwd=str(tmp_path / "GIT" / "one"))
+    item_id = rested_item(conn, config, issue_number=1)
+    with db.transaction(conn):
+        db.set_dispatch_paused(conn, paused=True, by="cli")
+        db.set_item_hold(conn, item_id, by="web")
+        db.set_repo_hold(conn, "demo", by="cli")
+    ctx = context(conn, audit, config)
+
+    assert operations.resume(
+        ctx, item_id, registry_dir=registry, proc_root=proc
+    ).code == operations.EXIT_PRECONDITION
+
+    result = operations.resume(
+        ctx, item_id, registry_dir=registry, proc_root=proc, force=True
+    )
+
+    assert result.code == operations.EXIT_OK
+    assert result.data["force"] is True
+    assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
+    forced = _records(layout, audit, "dispatch.forced")
+    assert forced, "an override that leaves no record is the bug wearing a different hat"
+    assert {entry["hold"] for entry in forced[-1]["detail"]["overridden"]} >= {
+        str(ordering.HoldReason.PAUSED),
+        str(ordering.HoldReason.HELD),
+        str(ordering.HoldReason.GLOBAL_CAP),
+    }
+
+
+def test_force_does_not_reach_the_issue_author_check(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    """FR-024. The author check is what stops "anyone may open an issue on a public
+    repository" becoming "anyone may run an agent in the maintainer's checkout". It is not
+    the author's policy to override — it is the boundary the policy sits inside."""
+    registry, proc = machine
+    config = capped_at(config, 9, per_repo=9)
+    item_id = seed_item(
+        conn,
+        state=str(WorkItemState.AWAITING_REVIEW),
+        issue_number=1,
+        clone_path=config.repos["demo"].path,
+        author="somebody-else",
+    )
+    seed_session(conn, item_id, state=str(SessionState.EXITED_CLEAN), exit_code=0)
+    ctx = context(conn, audit, config)
+
+    result = operations.resume(
+        ctx, item_id, registry_dir=registry, proc_root=proc, force=True
+    )
+
+    assert result.code == operations.EXIT_FAILED
+    item = db.get_work_item(conn, item_id)
+    assert item.state is WorkItemState.FAILED
+    assert "not the configured author" in (item.blocked_reason or "")
+
+
+def test_force_does_not_reach_workspace_trust(
+    conn, audit, config, layout, tmp_path, machine, monkeypatch
+):
+    """FR-024, the other half. ``--force`` is deliberately not ``skip_gates``: two
+    different questions, and one flag answering both is how the cap got lost in the first
+    place."""
+    registry, proc = machine
+    config = capped_at(config, 9, per_repo=9)
+    item_id = rested_item(conn, config, issue_number=1)
+    monkeypatch.setattr(dispatch, "claude_trust_file", lambda: tmp_path / "untrusted.json")
+    (tmp_path / "untrusted.json").write_text("{}", encoding="utf-8")
+    ctx = context(conn, audit, config)
+
+    result = operations.resume(
+        ctx, item_id, registry_dir=registry, proc_root=proc, force=True
+    )
+
+    assert result.code == operations.EXIT_FAILED
+    assert "trust" in (db.get_work_item(conn, item_id).blocked_reason or "")
+
+
+def test_force_does_not_reach_the_claim(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    """FR-025. The override covers the author's own policy; it can never make two agents
+    share one worktree, which is the harm the claim exists to prevent."""
+    config = capped_at(config, 9, per_repo=9)
+    item_id = seed_item(
+        conn,
+        state=str(WorkItemState.DISPATCHING),
+        issue_number=1,
+        clone_path=config.repos["demo"].path,
+    )
+
+    with pytest.raises(dispatch.DispatchRefused) as caught:
+        launch(conn, audit, config, layout, tmp_path, machine, item_id, force=True)
+
+    assert "claimed by another dispatcher" in caught.value.detail
+
+
+# -- review of #129: four corrections --------------------------------------
+
+
+def test_force_on_an_unblocked_launch_claims_no_override(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    """`--force` on a machine with nothing to override must not say it overrode something.
+
+    The first cut printed "the dispatch gate was overridden; see dispatch.forced in the
+    log" for *any* `--force`, including one where `launch_holds` returned nothing and no
+    `dispatch.forced` record was written. That is the "the interface says something other
+    than what happened" failure this whole feature exists to remove, pointed at a log entry
+    that does not exist. The line is gone; the record remains the only claim, and it is
+    written only when a condition actually applied.
+    """
+    registry, proc = machine
+    config = capped_at(config, 9, per_repo=9)
+    item_id = rested_item(conn, config, issue_number=1)
+    ctx = context(conn, audit, config)
+
+    result = operations.resume(
+        ctx, item_id, registry_dir=registry, proc_root=proc, force=True
+    )
+
+    assert result.code == operations.EXIT_OK
+    assert "overridden" not in " ".join(result.lines)
+    assert _records(layout, audit, "dispatch.forced") == [], (
+        "nothing applied, so nothing was overridden"
+    )
+    # The key reports the flag the author gave, which is true, rather than asserting an
+    # override that did not happen.
+    assert result.data["force"] is True
+
+
+def test_a_lost_claim_does_not_end_the_dispatcher_pass(
+    conn, audit, config, layout, tmp_path, machine, monkeypatch
+):
+    """A lost claim is the most per-item condition there is — another process took *this*
+    item, which says nothing about the next candidate.
+
+    The first cut returned on any `DispatchRefused`, so one raced item stopped the whole
+    pass. The split now reuses `_GLOBAL_HOLDS`, exactly as the loop above already applies
+    it to `ordering.plan`'s own holds.
+    """
+    config = capped_at(config, 9, per_repo=9)
+    first = ready_item(conn, config, issue_number=1)
+    second = ready_item(conn, config, issue_number=2)
+    real = dispatch.check_launch_gate
+    lost: list[int] = []
+
+    def steal_the_first(conn_, *, item, **kwargs):
+        if item.id == first and not lost:
+            lost.append(item.id)
+            raise dispatch.DispatchRefused(
+                f"item {first} is dispatching; it was claimed by another dispatcher"
+            )
+        return real(conn_, item=item, **kwargs)
+
+    monkeypatch.setattr(dispatch, "check_launch_gate", steal_the_first)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 1, (
+        "the pass continues past the item it lost"
+    )
+    assert db.get_work_item(conn, second).state is WorkItemState.ACTIVE
+
+
+def test_a_repository_cap_refusal_does_not_end_the_dispatcher_pass(
+    conn, audit, config, layout, tmp_path, machine, monkeypatch
+):
+    """`repo_cap` is per-item too — it holds one repository's work and must leave every
+    other repository free, which is the whole of FR-012 and FR-020."""
+    config = capped_at(config, 9, per_repo=9)
+    first = ready_item(conn, config, issue_number=1)
+    second = ready_item(conn, config, issue_number=2)
+    real = dispatch.check_launch_gate
+    seen: list[int] = []
+
+    def cap_the_first(conn_, *, item, **kwargs):
+        if item.id == first and not seen:
+            seen.append(item.id)
+            raise dispatch.DispatchRefused(
+                "repository demo: 1 of 1 sessions (configured)",
+                hold=ordering.HoldReason.REPO_CAP,
+            )
+        return real(conn_, item=item, **kwargs)
+
+    monkeypatch.setattr(dispatch, "check_launch_gate", cap_the_first)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 1
+    assert db.get_work_item(conn, second).state is WorkItemState.ACTIVE
+
+
+@pytest.mark.parametrize("hold", [ordering.HoldReason.PAUSED, ordering.HoldReason.GLOBAL_CAP])
+def test_a_global_refusal_still_ends_the_dispatcher_pass(
+    conn, audit, config, layout, tmp_path, machine, monkeypatch, hold
+):
+    """The other side of the same split: no later item could fit into a slot this one could
+    not, so continuing would be work with a known answer."""
+    config = capped_at(config, 9, per_repo=9)
+    ready_item(conn, config, issue_number=1)
+    ready_item(conn, config, issue_number=2)
+
+    def refuse(*_args, **_kwargs):
+        raise dispatch.DispatchRefused("the machine is full", hold=hold)
+
+    monkeypatch.setattr(dispatch, "check_launch_gate", refuse)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 0

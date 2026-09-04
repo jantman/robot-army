@@ -609,3 +609,184 @@ def test_a_refused_cancel_is_reported_as_a_refusal_not_as_cancelled(web, conn):
     assert payload["confirmed"] is False
     assert state_of(conn, item_id) == WorkItemState.ACTIVE
     assert db.latest_session_for_item(conn, item_id).state is SessionState.RUNNING
+
+
+# -- issue #120: a refusal must be visible in the answer, not only in the log
+
+
+def test_a_full_machine_refuses_resume_in_the_response_the_author_is_waiting_for(
+    web, conn, layout, running_daemon, config, monkeypatch
+):
+    """FR-015, and the reason the gate is checked twice.
+
+    ``resume`` answers ``303`` at once and prepares the worktree on a worker, because no
+    phone holds a request for minutes. That shape means a refusal discovered on the worker
+    reaches the author only through the log, while the page shows an item that simply did
+    not change — indistinguishable from nothing having happened, which is the failure this
+    whole change exists to remove. So the gate runs in the request thread too.
+    """
+    from robot_army import dispatch, ordering
+
+    beat(layout, effect_level="live")
+    item_id = seed_item(conn, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+    monkeypatch.setattr(
+        dispatch,
+        "check_launch_gate",
+        _refusing(ordering.HoldReason.GLOBAL_CAP, "2 of 2 sessions running (2 ours, 0 other)"),
+    )
+
+    response = web.post_json(f"/item/{item_id}/resume")
+
+    assert response.status == 409, "not a cheerful 303 followed by nothing happening"
+    body = response.json()
+    assert "2 of 2 sessions running" in json.dumps(body)
+    assert state_of(conn, item_id) == WorkItemState.INTERRUPTED
+
+
+def test_a_refused_resume_is_never_handed_to_the_worker(
+    web, conn, layout, running_daemon, config, monkeypatch
+):
+    """The guard sits before ``app.submit``, so a refused action costs no worktree
+    preparation and cannot leave the item mid-dispatch."""
+    from robot_army import dispatch, ordering
+
+    beat(layout, effect_level="live")
+    item_id = seed_item(conn, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+    monkeypatch.setattr(
+        dispatch, "check_launch_gate", _refusing(ordering.HoldReason.PAUSED, "dispatch is paused")
+    )
+    submitted: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        type(web.app), "submit", lambda self, action, item: submitted.append((action, item))
+    )
+
+    assert web.post_json(f"/item/{item_id}/restart").status == 409
+
+    assert submitted == []
+
+
+def test_a_refused_post_still_leaves_the_record_that_says_one_arrived(
+    web, conn, layout, running_daemon, config, monkeypatch
+):
+    """FR-039/FR-040 are unchanged by the new guard: ``_perform`` writes the intent record
+    before any check runs, so the refusal closes an existing pair rather than needing one
+    of its own."""
+    from robot_army import dispatch, ordering
+
+    beat(layout, effect_level="live")
+    item_id = seed_item(conn, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+    monkeypatch.setattr(
+        dispatch, "check_launch_gate", _refusing(ordering.HoldReason.HELD, "held since ... by web")
+    )
+
+    assert web.post_json(f"/item/{item_id}/resume").status == 409
+
+    written = web_records(layout, action="web.resume")
+    assert written, "a refused POST must not be an unrecorded one"
+    assert any(record.get("outcome") == "error" for record in written)
+
+
+def _refusing(hold, detail):
+    """A ``check_launch_gate`` that always refuses, so these tests exercise the *guard*.
+
+    The gate's own decisions are tested against a real registry and a real ``/proc`` in
+    ``test_launch_gate`` and ``test_dispatch_capacity``; what is under test here is that
+    the web calls it, calls it in the request thread, and turns its refusal into an answer.
+    """
+    from robot_army import dispatch
+
+    def refuse(*_args, **_kwargs):
+        raise dispatch.DispatchRefused(detail, hold=hold)
+
+    return refuse
+
+
+def test_the_web_offers_no_override_of_the_dispatch_gate(web, conn, layout, running_daemon):
+    """FR-026. The web's escape hatch is lifting the condition, not overriding it — and
+    *Unpause*, *Release hold* and the repository's own release are each one press away.
+    Lifting leaves the queue agreeing with the button instead of overridden by it.
+
+    Asserted behaviourally rather than by reading the source: a caller who tries to smuggle
+    an override through the form gets nowhere, on both the request-thread guard and the
+    worker's own launch.
+    """
+    beat(layout, effect_level="live")
+    item_id = seed_item(conn, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+    forced: list[bool] = []
+
+    def watch(*_args, force: bool = False, **_kwargs):
+        forced.append(force)
+
+    from robot_army import dispatch
+
+    original = dispatch.check_launch_gate
+    dispatch.check_launch_gate = watch
+    try:
+        web.post_json(f"/item/{item_id}/resume", form={"force": "1"})
+        web.app._work.join()
+    finally:
+        dispatch.check_launch_gate = original
+
+    assert forced and not any(forced), "a form field must not become an override"
+
+
+def test_a_web_originated_refusal_is_recorded_as_the_web_not_the_terminal(
+    web, conn, layout, running_daemon, monkeypatch
+):
+    """The worker's *authoritative* gate check must name the surface that actually asked.
+
+    ``operations.resume`` defaults ``surface="cli"``, and the worker used to call it
+    positionally — so one press of a web button could produce a ``dispatch.refused``
+    attributed to "web" by the request-thread pre-check and a second attributed to "cli" by
+    the worker, for the same action. Principle III's standard is reconstruction, and a
+    record naming the wrong surface defeats it.
+    """
+    from robot_army import dispatch
+
+    beat(layout, effect_level="live")
+    item_id = seed_item(conn, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+    seen: list[str] = []
+
+    original = dispatch.check_launch_gate
+
+    def watch(*_args, surface: str = "unset", **_kwargs):
+        seen.append(surface)
+
+    dispatch.check_launch_gate = watch
+    try:
+        assert web.post_json(f"/item/{item_id}/resume").status == 303
+        web.app._work.join()
+    finally:
+        dispatch.check_launch_gate = original
+
+    assert seen, "the gate was consulted"
+    assert set(seen) == {"web"}, f"every check names the web, got {seen}"
+
+
+def test_the_dispatch_guard_refuses_a_missing_item_rather_than_falling_through(
+    web, conn, layout, running_daemon, monkeypatch
+):
+    """`require_legal` already refuses a missing item first, so this cannot be reached
+    today — which is exactly why the guard must not depend on that.
+
+    A silent return here turns into a real bypass the moment somebody reorders the four
+    guards, and the worker would then be handed an action for an item that does not exist.
+    Asserted by calling the guard directly, since the ordering is what makes it unreachable
+    through the route.
+    """
+    from robot_army.web import server
+
+    ctx = web.app.context()
+    try:
+        with pytest.raises(server.Refusal) as caught:
+            server.require_dispatchable(ctx, 999999, "resume")
+    finally:
+        ctx.close()
+
+    assert caught.value.status == 404
+    assert "999999" in caught.value.reason

@@ -175,11 +175,25 @@ def build_parser() -> argparse.ArgumentParser:
     cancel.add_argument("item_id", type=int)
     cancel.add_argument("--force", action="store_true", help="skip the confirmation prompt")
 
+    # Both verbs pass the same gate the dispatcher does since issue #120 — the cap, the
+    # pause, and item/repo holds — so both carry the same escape hatch. Its help text names
+    # what it does *not* reach as well as what it does: `cancel --force` above means "skip
+    # the confirmation prompt", a different thing entirely, and one word doing two jobs in
+    # two commands is only safe while each says which job it is doing.
+    force_help = (
+        "start it anyway when dispatch is paused, the item or its repository is held, or "
+        "the machine is at its session limit. Does not bypass the issue author check, "
+        "workspace trust, the committed settings fingerprint, onboarding, or the state "
+        "machine"
+    )
+
     resume = sub.add_parser("resume", help="new session restoring the prior context")
     resume.add_argument("item_id", type=int)
+    resume.add_argument("--force", action="store_true", help=force_help)
 
     restart = sub.add_parser("restart", help="fresh session in the existing worktree")
     restart.add_argument("item_id", type=int)
+    restart.add_argument("--force", action="store_true", help=force_help)
 
     abandon = sub.add_parser("abandon", help="mark abandoned; does not remove the worktree")
     abandon.add_argument("item_id", type=int)
@@ -460,8 +474,8 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "reconcile": lambda: operations.reconcile_now(ctx),
         "drain": lambda: operations.drain_spool(ctx),
         "cancel": lambda: operations.cancel(ctx, args.item_id, force=args.force),
-        "resume": lambda: operations.resume(ctx, args.item_id),
-        "restart": lambda: operations.restart(ctx, args.item_id),
+        "resume": lambda: operations.resume(ctx, args.item_id, force=args.force),
+        "restart": lambda: operations.restart(ctx, args.item_id, force=args.force),
         "abandon": lambda: operations.abandon(ctx, args.item_id),
         "retry": lambda: operations.retry(ctx, args.item_id),
         # `notes` is stderr so that stdout carries the prompt alone and stays diffable

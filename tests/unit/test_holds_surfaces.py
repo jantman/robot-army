@@ -453,3 +453,69 @@ def test_a_repository_hold_holding_nothing_still_reaches_status(config_file, con
     run_cli(["status"], config_file)
     assert "1 repository held" in capsys.readouterr().out
 
+
+
+# -- issue #120: the launch speaks the queue's language --------------------
+
+
+@pytest.mark.parametrize(
+    ("arrange", "expected"),
+    [
+        pytest.param(
+            lambda conn, item_id: db.set_dispatch_paused(conn, paused=True, by="cli"),
+            "paused",
+            id="paused",
+        ),
+        pytest.param(
+            lambda conn, item_id: db.set_item_hold(conn, item_id, by="web"),
+            "held",
+            id="item held",
+        ),
+        pytest.param(
+            lambda conn, item_id: db.set_repo_hold(conn, "demo", by="cli"),
+            "held",
+            id="repository held",
+        ),
+    ],
+)
+def test_the_launch_refusal_is_the_queues_own_sentence_character_for_character(
+    conn, config, arrange, expected
+):
+    """FR-008, asserted as identity rather than as similarity.
+
+    The queue view, ``robot-army status`` and now the launch all describe the same
+    condition, and the author reads all three. Two hand-written sentences would drift on
+    the first edit to either; one function cannot. So this compares the exact string
+    ``ordering.plan`` renders with the exact string ``launch_holds`` produces, and the
+    reason it can be an equality is that ``_hold_for`` calls ``launch_holds`` — the launch
+    and the queue are not agreeing, they are the same code.
+    """
+    from robot_army import capacity, ordering
+
+    item_id = seed_item(conn, state=str(WorkItemState.READY))
+    with db.transaction(conn):
+        arrange(conn, item_id)
+    snap = capacity.CapacitySnapshot(
+        observable=True,
+        degraded=False,
+        total=0,
+        ours=(),
+        others=0,
+        global_cap=9,
+        per_repo={},
+        reason=None,
+    )
+
+    queue_entry = ordering.plan(conn, config=config, capacity=snap)[0]
+    launch = ordering.launch_holds(
+        db.get_work_item(conn, item_id),
+        config=config,
+        capacity=snap,
+        paused=db.get_dispatch_control(conn).paused,
+        item_holds=db.list_item_holds(conn),
+        repo_holds=db.list_repo_holds(conn),
+    )
+
+    assert str(queue_entry.hold) == expected
+    assert launch[0][0] is queue_entry.hold
+    assert launch[0][1] == queue_entry.detail

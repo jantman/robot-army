@@ -2350,11 +2350,74 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
     )
 
 
-def resume(ctx: Context, item_id: int, *, registry_dir: Path | None = None) -> Result:
+def _refusal_result(action: str, item_id: int, exc: dispatch.DispatchRefused) -> Result:
+    """A launch the gate would not permit, rendered for the terminal (issue #120).
+
+    ``EXIT_PRECONDITION``, never ``EXIT_FAILED``, and the difference is what the author
+    acts on. ``EXIT_FAILED`` means the launch was attempted and the item now carries a
+    failure reason to go and read; this means nothing was attempted and the item is
+    untouched, so the reason on the screen is the whole story and there is nothing to
+    repair. Sending the author to ``robot-army show`` here would send them to an empty
+    field.
+
+    Two lines: this surface's summary of *which* condition it was, then ``HoldReason``'s
+    own detail string, unmodified. The second line is the same sentence ``/queue`` and
+    ``robot-army status`` render for the same condition — one language across three
+    surfaces (FR-008), because it is one string from one function.
+    """
+    return Result(
+        code=EXIT_PRECONDITION,
+        lines=[f"refusing to {action} item {item_id}: {_refusal_summary(exc)}", f"  {exc.detail}"],
+        data={
+            "item_id": item_id,
+            "ok": False,
+            "refused": True,
+            "hold": str(exc.hold) if exc.hold is not None else None,
+            "detail": exc.detail,
+        },
+    )
+
+
+def _refusal_summary(exc: dispatch.DispatchRefused) -> str:
+    """The short half of a refusal: which condition, in a phrase rather than an enum name.
+
+    A claim failure has no ``HoldReason`` — no queueing word describes "somebody else has
+    this item" — and the summary stays neutral about *why* the claim failed, because the
+    detail line beneath it says which of the two happened: another dispatcher took it, or
+    it was never in a state a session can start from. Asserting a race in the summary would
+    contradict the detail every time the second case applied.
+    """
+    summaries = {
+        ordering_mod.HoldReason.PAUSED: "dispatch is paused",
+        ordering_mod.HoldReason.HELD: "held",
+        ordering_mod.HoldReason.CAPACITY_UNOBSERVABLE: (
+            "the number of running sessions could not be determined"
+        ),
+        ordering_mod.HoldReason.GLOBAL_CAP: "the machine is at its session limit",
+        ordering_mod.HoldReason.REPO_CAP: "the repository is at its session limit",
+    }
+    if exc.hold is None:
+        return "the item could not be claimed"
+    return summaries.get(exc.hold, str(exc.hold))
+
+
+def resume(
+    ctx: Context,
+    item_id: int,
+    *,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+    force: bool = False,
+    surface: str = "cli",
+) -> Result:
     """Start a new session restoring the previous session's context (FR-047).
 
     **Never happens automatically** (FR-046). Resume is always a decision the maintainer
     makes with the FR-048 signals in front of them.
+
+    Subject to the session cap, the dispatch pause and item/repo holds since issue #120 —
+    ``dispatch_item`` applies them now, so this is not a check to keep in step, it is a
+    refusal to render. ``force`` goes past the author's own policy and nothing else.
     """
     item = db.get_work_item(ctx.conn, item_id)
     if item is None:
@@ -2374,16 +2437,22 @@ def resume(ctx: Context, item_id: int, *, registry_dir: Path | None = None) -> R
             lines=[f"work item {item_id} has no previous session to resume"],
         )
 
-    ok = dispatch.dispatch_item(
-        ctx.conn,
-        boundaries=ctx.boundaries,
-        audit=ctx.audit,
-        config=ctx.config,
-        layout=ctx.layout,
-        item_id=item_id,
-        registry_dir=registry_dir,
-        resume_session_id=previous.session_id,
-    )
+    try:
+        ok = dispatch.dispatch_item(
+            ctx.conn,
+            boundaries=ctx.boundaries,
+            audit=ctx.audit,
+            config=ctx.config,
+            layout=ctx.layout,
+            item_id=item_id,
+            registry_dir=registry_dir,
+            proc_root=proc_root,
+            resume_session_id=previous.session_id,
+            force=force,
+            surface=surface,
+        )
+    except dispatch.DispatchRefused as exc:
+        return _refusal_result("resume", item_id, exc)
     code = EXIT_OK if ok else EXIT_FAILED
     return Result(
         code=code,
@@ -2392,12 +2461,32 @@ def resume(ctx: Context, item_id: int, *, registry_dir: Path | None = None) -> R
             if ok
             else f"resume of item {item_id} failed; see `robot-army show {item_id}`"
         ],
-        data={"item_id": item_id, "resumed_from": previous.session_id, "ok": ok},
+        data={
+            "item_id": item_id,
+            "resumed_from": previous.session_id,
+            "ok": ok,
+            # The flag the author gave, **not** an assertion that anything was overridden.
+            # Only the gate knows whether any condition actually applied, and it records
+            # that in ``dispatch.forced`` — which is written only when one did.
+            "force": force,
+        },
     )
 
 
-def restart(ctx: Context, item_id: int, *, registry_dir: Path | None = None) -> Result:
-    """A fresh session in the existing worktree, with no prior context."""
+def restart(
+    ctx: Context,
+    item_id: int,
+    *,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+    force: bool = False,
+    surface: str = "cli",
+) -> Result:
+    """A fresh session in the existing worktree, with no prior context.
+
+    Subject to the same gate as ``resume`` (issue #120): starting an agent is starting an
+    agent, and a cap that one of the two honoured would be no cap at all.
+    """
     item = db.get_work_item(ctx.conn, item_id)
     if item is None:
         return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
@@ -2406,19 +2495,27 @@ def restart(ctx: Context, item_id: int, *, registry_dir: Path | None = None) -> 
             code=EXIT_PRECONDITION,
             lines=[f"work item {item_id} is {item.state}; restart requires a rested item"],
         )
-    ok = dispatch.dispatch_item(
-        ctx.conn,
-        boundaries=ctx.boundaries,
-        audit=ctx.audit,
-        config=ctx.config,
-        layout=ctx.layout,
-        item_id=item_id,
-        registry_dir=registry_dir,
-    )
+    try:
+        ok = dispatch.dispatch_item(
+            ctx.conn,
+            boundaries=ctx.boundaries,
+            audit=ctx.audit,
+            config=ctx.config,
+            layout=ctx.layout,
+            item_id=item_id,
+            registry_dir=registry_dir,
+            proc_root=proc_root,
+            force=force,
+            surface=surface,
+        )
+    except dispatch.DispatchRefused as exc:
+        return _refusal_result("restart", item_id, exc)
     return Result(
         code=EXIT_OK if ok else EXIT_FAILED,
-        lines=[f"restarted item {item_id}" if ok else f"restart of item {item_id} failed"],
-        data={"item_id": item_id, "ok": ok},
+        lines=[
+            f"restarted item {item_id}" if ok else f"restart of item {item_id} failed"
+        ],
+        data={"item_id": item_id, "ok": ok, "force": force},
     )
 
 

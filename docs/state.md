@@ -547,6 +547,9 @@ summary:
 | Interrupted at | Result |
 |---|---|
 | After the `discovered` insert, before evaluation | Row in `discovered`; re-evaluated on the next poll |
+| During the launch gate — the cap, the pause, the holds | Nothing was written; the item is exactly as it was. The gate runs before the claim precisely so a refusal, and an interruption during one, both cost nothing |
+| Between the gate and the claim | Same: nothing written, item unchanged. Press the button again |
+| During the claim | One conditional `UPDATE` in one transaction carrying its own audit record. It commits or it does not; there is no state between, and no change without the record or record without the change |
 | During worktree creation or a preparation step | Item in `dispatching`; failed at max age with whatever output exists. The partial worktree is reported, never reused blindly |
 | After the session row insert, before launch | Confirmation window elapses; session `lost`, item `failed` |
 | After launch, before confirmation | Either the registry scan confirms it late, or the window elapses and the orphan sweep catches the live process |

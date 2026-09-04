@@ -133,11 +133,11 @@ input.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T023 [P] Update `docs/security-analysis.md`: move the RA-16 row to **Resolved**, and add a dated resolution paragraph in the RA-15/RA-16 section stating what was done and why the argv fallback was deleted rather than validated, following the form the RA-15 resolution already uses
-- [ ] T024 [P] Update `docs/security-analysis.md`: mark RA-48 resolved in the low-findings list, noting that it was fixed alongside RA-16 because it is the same function
-- [ ] T025 Update the remediation list near the end of `docs/security-analysis.md` so item 6 ("delete the wrapper's argv scan") reflects that it is done
-- [ ] T026 Walk `specs/20260904-180332-trust-env-session-id/quickstart.md` end to end by hand, including step 1 against the pre-fix script, to confirm the documented reproduction and the documented fix both behave as written
-- [ ] T027 Run `uv run pytest -q` and confirm the full suite passes — the constitution's completion gate
+- [X] T023 [P] Update `docs/security-analysis.md`: move the RA-16 row to **Resolved**, and add a dated resolution paragraph in the RA-15/RA-16 section stating what was done and why the argv fallback was deleted rather than validated, following the form the RA-15 resolution already uses
+- [X] T024 [P] Update `docs/security-analysis.md`: mark RA-48 resolved in the low-findings list, noting that it was fixed alongside RA-16 because it is the same function
+- [X] T025 Update the remediation list near the end of `docs/security-analysis.md` so item 6 ("delete the wrapper's argv scan") reflects that it is done
+- [X] T026 Walk `specs/20260904-180332-trust-env-session-id/quickstart.md` end to end by hand, including step 1 against the pre-fix script, to confirm the documented reproduction and the documented fix both behave as written
+- [X] T027 Run `uv run pytest -q` and confirm the full suite passes — the constitution's completion gate
 
 ---
 

@@ -1762,11 +1762,13 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         has already buffered — so reading what the client sent is what keeps the close an
         ordinary FIN and the ``503`` readable.
 
-        Both loops are bounded by the socket refusing to make progress, not by a count of
-        attempts, because on a non-blocking socket "would block" is an exception rather than a
-        return value. ``send`` is a loop and not a single call because a short write is legal:
-        it may return having written a prefix, and half a ``503`` is worse than none — a
-        client would read it as a malformed response rather than a refusal.
+        The two loops are bounded differently, and deliberately. ``send`` ends when the
+        response is out or the socket stops taking it — bounded by the payload, which is a
+        constant. It is a loop rather than a single call because a short write is legal: a
+        non-blocking ``send`` may return having written only a prefix, and half a ``503`` is
+        worse than none, because a client reads it as a malformed response rather than as a
+        refusal. The drain has no such natural end — a client can keep sending — so it is
+        bounded by a count instead: at most ``_DRAIN_READS`` reads of ``_DRAIN_BYTES``.
         """
         try:
             # One suppress over the whole block, not one per call: if ``setblocking`` fails
@@ -1809,6 +1811,13 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # cleared by any release would re-arm on every recycled connection and print a
             # line for each. An episode ends when the pressure is actually gone, which is
             # what half the cap stands for.
+            #
+            # This assumes a cap with room in it for "half" to mean something — at 32, it
+            # takes sixteen connections draining, which is a recovery and not a dip. A cap
+            # small enough that half of it is one connection (2, 3) degenerates back to
+            # re-arming on any release. That is not a case to complicate this arithmetic for:
+            # the cap is a constant and not configuration (FR-012), and a cap that small
+            # would make the announcement itself the wrong idea, not this threshold.
             if self._in_flight * 2 <= MAX_CONCURRENT_CONNECTIONS:
                 self._saturated = False
 

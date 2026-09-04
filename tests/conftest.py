@@ -1096,10 +1096,10 @@ def seed_item(
     """Insert an onboarded repo and one work item, returning the item id.
 
     ``author`` defaults to the login the ``config`` fixture sets as ``github.author``, so a
-    seeded item is one this installation would accept. Since issue #119 dispatch compares
+    seeded item is one this installation would accept. Since issue #119, dispatch compares
     the recorded author against the configured one, so a test of the *refusal* passes a
-    different login here, and a test of the pre-migration-011 shape writes ``NULL`` to the
-    column directly — ``insert_work_item`` will not do it, deliberately.
+    different login here. A test of the pre-migration-011 shape writes ``NULL`` to the
+    column directly, because ``insert_work_item`` will not do it — deliberately.
 
     ``clone_path`` records the location milestone 005 made part of an approval. It is
     optional because most callers here never reach ``dispatch.check_gates`` and only need a

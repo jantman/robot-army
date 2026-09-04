@@ -76,6 +76,13 @@ class FakeServer(BoundedThreadingHTTPServer):
     state the admission decision reads.
     """
 
+    #: Non-daemon, so ``ThreadingMixIn`` tracks the threads it starts and :meth:`settle` has
+    #: something to join. ``ThreadingHTTPServer`` ships ``daemon_threads = True`` and
+    #: ``_Threads.append`` silently drops daemon threads, so with the shipped value nothing is
+    #: tracked, there is nothing to wait on, and every assertion about ``threads_started``
+    #: is a race against a thread that may not have run yet.
+    daemon_threads = False
+
     def __init__(self) -> None:
         self._capacity_lock = threading.Lock()
         self._in_flight = 0
@@ -85,6 +92,15 @@ class FakeServer(BoundedThreadingHTTPServer):
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         self.threads_started.append(request)
+
+    def settle(self) -> None:
+        """Wait for every thread admission started, before asserting on what they recorded.
+
+        A join and not a poll, so it is deterministic rather than merely usually long enough.
+        Only ``threads_started`` needs it: ``_in_flight``, ``refused_over_capacity`` and the
+        saturation message are all written by ``process_request`` on the calling thread.
+        """
+        self._threads.join()
 
 
 class ServingServer(FakeServer):
@@ -176,6 +192,7 @@ def test_a_connection_under_the_cap_is_admitted_and_counted():
     sock = FakeSocket()
 
     server.process_request(sock, ("127.0.0.1", 1))
+    server.settle()
 
     assert server.threads_started == [sock]
     assert server._in_flight == 1
@@ -193,6 +210,7 @@ def test_a_connection_at_the_cap_is_refused_without_a_thread(monkeypatch):
 
     refused = FakeSocket(pending=b"GET / HTTP/1.1\r\n\r\n")
     server.process_request(refused, ("127.0.0.1", 2))
+    server.settle()
 
     assert server.threads_started == [admitted]
     assert server._in_flight == 1

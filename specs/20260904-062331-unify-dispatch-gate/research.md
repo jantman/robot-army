@@ -230,8 +230,20 @@ remembered count cannot see it. The whole point of `capacity` is that the count 
 machine rather than of our own bookkeeping.
 
 **Consequence to handle.** Because the second observation is real, it can legitimately
-disagree with the first. `select_and_dispatch` therefore catches `DispatchRefused`, records
-it, and ends the pass rather than propagating out of the daemon tick.
+disagree with the first. `select_and_dispatch` therefore catches `DispatchRefused` rather
+than letting it escape the daemon tick — and splits on it exactly as the loop above already
+splits `ordering.plan`'s own holds, by asking whether the reason is in `_GLOBAL_HOLDS`:
+
+- **Global** (`paused`, `capacity_unobservable`, `global_cap`) ends the pass. No later item
+  could fit into a slot this one could not.
+- **Per-item** (`held`, `repo_cap`, and a lost claim, which carries no `HoldReason` at all)
+  skips the item and leaves the queue moving. `attempted` already holds the id, so
+  re-planning cannot offer it again and the loop cannot spin.
+
+An earlier draft returned on *any* refusal, which was wrong in the way the module's own
+docstring already warns about: a lost claim says another process took **this** item, and
+nothing whatever about the next candidate. Reusing `_GLOBAL_HOLDS` rather than making a
+second judgement about which reasons are global is what keeps the two places in agreement.
 
 ## R10 — Residual: two concurrent launches of *different* items can still overshoot
 

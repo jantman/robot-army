@@ -74,9 +74,15 @@ refusing to resume item 7: repository jantman/robot-army is at its session limit
 
 ```
 $ robot-army resume 7
-refusing to resume item 7: another dispatcher claimed it
+refusing to resume item 7: the item could not be claimed
   item 7 is dispatching; it was claimed by another dispatcher
 ```
+
+The summary line stays neutral about *why* the claim failed, because the detail beneath it
+says which of the two happened. A state a concurrent claimant leaves behind — `dispatching`
+or `active` — reads "it was claimed by another dispatcher"; any other non-claimable state
+reads "a session cannot be started from that state", because nobody raced for a `done`
+item and saying otherwise sends the reader hunting a second process that never existed.
 
 The second line is `HoldReason`'s own detail string, unmodified. The first is this surface's
 summary of which reason it was. Nothing is invented for the terminal that the web does not
@@ -84,24 +90,29 @@ also say.
 
 ### Overridden
 
-Exit `0`, and the override is announced rather than silent:
+Exit `0`, and the output is the ordinary success line:
 
 ```
 $ robot-army resume 7 --force
-resumed item 7 from session 019831f2-... (--force: the dispatch gate was overridden;
-see dispatch.forced in the log for what it went past)
+resumed item 7 from session 019831f2-...
 ```
 
 **Every** condition is named in the `dispatch.forced` record, not just the first (FR-023) —
-the author who forces past a pause needs to know they also forced past a hold.
+the author who forces past a pause needs to know they also forced past a hold. That record
+is written **only when a condition actually applied**, so `--force` on an idle, unpaused,
+unheld machine produces no record and overrode nothing.
 
-The terminal line points at that record rather than repeating it, and the reason is worth
-stating because the first draft of this contract had it the other way round. Only the gate
-inside `dispatch_item` knows which conditions applied, and `dispatch_item` returns a
-`bool`; carrying the list back out would mean a return channel or a callback threaded
-through two functions for one caller and one cosmetic line. FR-023 asks for a durable
-record, which the log has, and Principle I asks that machinery earn its place, which this
-would not.
+The terminal says nothing about the override, and the reason is worth stating because two
+earlier drafts of this contract got it wrong in opposite directions. The first had the
+terminal list the conditions, which only the gate inside `dispatch_item` knows — and
+`dispatch_item` returns a `bool`, so carrying the list out would mean a return channel
+threaded through two functions for one cosmetic line. The second had it print a fixed
+sentence pointing at `dispatch.forced` whenever the flag was given, which was worse: on an
+unblocked launch it claimed an override that never happened and sent the reader to a log
+record that was never written — exactly the "the interface says something other than what
+happened" failure this feature exists to remove. A durable record that is written when and
+only when something was overridden is the whole of FR-023, and it needs no help from the
+terminal.
 
 ### `--json`
 
@@ -118,8 +129,9 @@ does:
 }
 ```
 
-and an override carries `"forced": true`; which conditions it went past is in the
-`dispatch.forced` record, for the reason given above.
+and `"force"` reports the **flag the author gave** — not a claim that anything was
+overridden. Which conditions were actually gone past, if any, is in the `dispatch.forced`
+record, for the reason given above.
 
 ## What a refusal leaves behind
 

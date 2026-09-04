@@ -2378,28 +2378,14 @@ def _refusal_result(action: str, item_id: int, exc: dispatch.DispatchRefused) ->
     )
 
 
-def _forced_note(force: bool) -> str:
-    """What to append when the author went past their own dispatch policy (FR-023).
-
-    Points at the record rather than repeating it. Only the gate inside ``dispatch_item``
-    knows which conditions applied, and ``dispatch_item`` returns a ``bool`` — carrying the
-    list back out would mean a return channel threaded through two functions for one caller
-    and one line of prose. The durable answer is in ``dispatch.forced``, which names every
-    condition; this makes sure the author knows to look.
-    """
-    if not force:
-        return ""
-    return (
-        " (--force: the dispatch gate was overridden; see dispatch.forced in the log for "
-        "what it went past)"
-    )
-
-
 def _refusal_summary(exc: dispatch.DispatchRefused) -> str:
     """The short half of a refusal: which condition, in a phrase rather than an enum name.
 
-    A lost claim has no ``HoldReason`` — no queueing word describes "another dispatcher got
-    there first" — so it falls through to the detail, which already says it plainly.
+    A claim failure has no ``HoldReason`` — no queueing word describes "somebody else has
+    this item" — and the summary stays neutral about *why* the claim failed, because the
+    detail line beneath it says which of the two happened: another dispatcher took it, or
+    it was never in a state a session can start from. Asserting a race in the summary would
+    contradict the detail every time the second case applied.
     """
     summaries = {
         ordering_mod.HoldReason.PAUSED: "dispatch is paused",
@@ -2411,7 +2397,7 @@ def _refusal_summary(exc: dispatch.DispatchRefused) -> str:
         ordering_mod.HoldReason.REPO_CAP: "the repository is at its session limit",
     }
     if exc.hold is None:
-        return "another dispatcher claimed it"
+        return "the item could not be claimed"
     return summaries.get(exc.hold, str(exc.hold))
 
 
@@ -2471,7 +2457,7 @@ def resume(
     return Result(
         code=code,
         lines=[
-            f"resumed item {item_id} from session {previous.session_id}{_forced_note(force)}"
+            f"resumed item {item_id} from session {previous.session_id}"
             if ok
             else f"resume of item {item_id} failed; see `robot-army show {item_id}`"
         ],
@@ -2479,7 +2465,10 @@ def resume(
             "item_id": item_id,
             "resumed_from": previous.session_id,
             "ok": ok,
-            "forced": force,
+            # The flag the author gave, **not** an assertion that anything was overridden.
+            # Only the gate knows whether any condition actually applied, and it records
+            # that in ``dispatch.forced`` — which is written only when one did.
+            "force": force,
         },
     )
 
@@ -2524,11 +2513,9 @@ def restart(
     return Result(
         code=EXIT_OK if ok else EXIT_FAILED,
         lines=[
-            f"restarted item {item_id}{_forced_note(force)}"
-            if ok
-            else f"restart of item {item_id} failed"
+            f"restarted item {item_id}" if ok else f"restart of item {item_id} failed"
         ],
-        data={"item_id": item_id, "ok": ok, "forced": force},
+        data={"item_id": item_id, "ok": ok, "force": force},
     )
 
 

@@ -283,3 +283,41 @@ def _records(layout, audit, action: str) -> list[dict]:
             if record["action"] == action:
                 out.append(record)
     return out
+
+
+# -- review of #129: the message must not assert a race that did not happen
+
+
+@pytest.mark.parametrize("state", [WorkItemState.DISPATCHING, WorkItemState.ACTIVE])
+def test_a_genuinely_raced_claim_says_another_dispatcher_took_it(conn, audit, state):
+    """These are the two states a concurrent claimant leaves behind."""
+    item_id = item_in(conn, state)
+
+    with pytest.raises(ClaimLost) as caught:
+        claim(conn, audit, item_id)
+
+    assert "claimed by another dispatcher" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        WorkItemState.FAILED,
+        WorkItemState.DONE,
+        WorkItemState.ABANDONED,
+        WorkItemState.DISCOVERED,
+    ],
+)
+def test_an_ineligible_state_is_not_reported_as_a_lost_race(conn, audit, state):
+    """Nobody raced for a ``done`` item. The first cut said "claimed by another
+    dispatcher" for every non-claimable state, which contradicted the exception's own
+    docstring and would send the reader hunting a second process that never existed."""
+    item_id = item_in(conn, state)
+
+    with pytest.raises(ClaimLost) as caught:
+        claim(conn, audit, item_id)
+
+    message = str(caught.value)
+    assert "claimed by another dispatcher" not in message
+    assert "a session cannot be started from that state" in message
+    assert str(state) in message

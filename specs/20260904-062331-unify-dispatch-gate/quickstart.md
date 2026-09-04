@@ -148,17 +148,24 @@ With the machine at its limit, the system paused, and the item held all at once:
 uv run robot-army resume 7 --force ; echo "exit=$?"
 ```
 
-**Expect** exit `0`, the session starts, and a line pointing at the record:
+**Expect** exit `0`, the session starts, and the ordinary success line:
 
 ```
-resumed item 7 from session 019831f2-... (--force: the dispatch gate was overridden;
-see dispatch.forced in the log for what it went past)
+resumed item 7 from session 019831f2-...
 ```
 
 **Expect in the log** one `dispatch.forced` record listing **all** the conditions — not
-just the first. The terminal points at that record rather than repeating it, because only
-the gate inside `dispatch_item` knows which applied and `dispatch_item` returns a `bool`;
-see `contracts/cli.md` for why a return channel was not worth building for one line.
+just the first. The terminal says nothing about the override, deliberately: only the gate
+knows which conditions applied, and a fixed sentence printed whenever the flag was given
+would claim an override on an unblocked launch that never happened. Check that too:
+
+```bash
+uv run robot-army unpause && uv run robot-army unhold 7
+uv run robot-army resume 7 --force        # nothing to override
+```
+
+**Expect** no new `dispatch.forced` record — the flag was given, nothing applied, so
+nothing was overridden and nothing is claimed.
 
 Then confirm what `--force` cannot reach (FR-024, FR-025): point the item at a repository whose
 onboarding record you have removed, or one whose recorded author does not match, and

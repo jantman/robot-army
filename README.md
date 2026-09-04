@@ -978,10 +978,11 @@ uv run robot-army resume <id> --force   # past the cap, the pause, and the holds
 ```
 
 `--force` covers my own policy and nothing else. It cannot bypass the issue author check,
-workspace trust, the committed settings fingerprint, onboarding, or the state machine, it
-has no configuration equivalent, and every condition it goes past is named in the log as
-`dispatch.forced`. Note that this is a different `--force` from `cancel --force`, which only
-skips a confirmation prompt.
+workspace trust, the committed settings fingerprint, onboarding, or the state machine, and
+it has no configuration equivalent. Every condition it goes past is named in the log as
+`dispatch.forced` — written only when something actually applied, so forcing an already
+dispatchable item overrides nothing and records nothing. Note that this is a different
+`--force` from `cancel --force`, which only skips a confirmation prompt.
 
 The claim on an item is atomic, so a tap on my phone and a terminal command arriving in the
 same second cannot both start a session: one wins, the other is told the item was claimed by

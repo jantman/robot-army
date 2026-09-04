@@ -1966,17 +1966,22 @@ def select_and_dispatch(
                 registry_dir=registry_dir,
                 proc_root=proc_root,
             )
-        except DispatchRefused:
+        except DispatchRefused as exc:
             # The plan and the gate disagreed, and that is a *legitimate* outcome rather
             # than a contradiction to assert against. Both observe the machine, but not at
             # the same instant: between this pass's snapshot and the launch's own the
             # author can start a session by hand, and the second observation is the one
             # that counts (FR-009). ``check_launch_gate`` has already recorded why.
             #
-            # The pass ends rather than moving to the next candidate. Every reason the gate
-            # can give is either machine-wide or, for ``repo_cap``, one this queue is
-            # already ordered by --- so continuing would mean re-planning against a snapshot
-            # this pass has been told is stale. The next tick is five seconds away.
-            return dispatched
+            # Global ends the pass; per-item skips the item --- exactly the split the loop
+            # above already applies to ``ordering.plan``'s own holds, read off the same
+            # ``_GLOBAL_HOLDS`` set rather than a second judgement about which is which.
+            # A lost claim (``hold is None``) is the most per-item reason there is: another
+            # process took *this* item, which says nothing whatever about the next
+            # candidate. ``attempted`` already holds this id, so re-planning cannot offer
+            # it again and the loop cannot spin.
+            if exc.hold in _GLOBAL_HOLDS:
+                return dispatched
+            continue
         if launched:
             dispatched += 1

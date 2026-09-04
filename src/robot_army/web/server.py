@@ -340,7 +340,19 @@ class WebApp:
         ctx = self.context()
         try:
             operation = getattr(operations, action)
-            result = operation(ctx, item_id)
+            # ``surface="web"`` because this is the *authoritative* gate check for a web
+            # button press, and its ``dispatch.refused`` record would otherwise inherit the
+            # operation's ``"cli"`` default — one press producing a refusal attributed to
+            # "web" by the pre-check and a second attributed to "cli" by the worker, for
+            # the same action. Principle III's standard is reconstruction, and a record
+            # naming the wrong surface defeats it.
+            #
+            # Passed unconditionally because ``submit`` is reachable only from
+            # ``_slow_item_action``, which is bound to ``resume`` and ``restart`` alone and
+            # both accept it. A third slow action lacking the parameter would fail loudly
+            # here on its first use rather than log the wrong surface quietly, which is the
+            # right way round.
+            result = operation(ctx, item_id, surface="web")
             ctx.audit.record(
                 f"web.{action}.result",
                 outcome="ok" if result.code == EXIT_OK else "error",

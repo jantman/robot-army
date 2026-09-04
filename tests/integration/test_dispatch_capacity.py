@@ -1529,7 +1529,7 @@ def test_force_starts_a_session_past_every_policy_condition_at_once(
     )
 
     assert result.code == operations.EXIT_OK
-    assert result.data["forced"] is True
+    assert result.data["force"] is True
     assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
     forced = _records(layout, audit, "dispatch.forced")
     assert forced, "an override that leaves no record is the bug wearing a different hat"
@@ -1606,3 +1606,113 @@ def test_force_does_not_reach_the_claim(
         launch(conn, audit, config, layout, tmp_path, machine, item_id, force=True)
 
     assert "claimed by another dispatcher" in caught.value.detail
+
+
+# -- review of #129: four corrections --------------------------------------
+
+
+def test_force_on_an_unblocked_launch_claims_no_override(
+    conn, audit, config, layout, tmp_path, machine, trusted
+):
+    """`--force` on a machine with nothing to override must not say it overrode something.
+
+    The first cut printed "the dispatch gate was overridden; see dispatch.forced in the
+    log" for *any* `--force`, including one where `launch_holds` returned nothing and no
+    `dispatch.forced` record was written. That is the "the interface says something other
+    than what happened" failure this whole feature exists to remove, pointed at a log entry
+    that does not exist. The line is gone; the record remains the only claim, and it is
+    written only when a condition actually applied.
+    """
+    registry, proc = machine
+    config = capped_at(config, 9, per_repo=9)
+    item_id = rested_item(conn, config, issue_number=1)
+    ctx = context(conn, audit, config)
+
+    result = operations.resume(
+        ctx, item_id, registry_dir=registry, proc_root=proc, force=True
+    )
+
+    assert result.code == operations.EXIT_OK
+    assert "overridden" not in " ".join(result.lines)
+    assert _records(layout, audit, "dispatch.forced") == [], (
+        "nothing applied, so nothing was overridden"
+    )
+    # The key reports the flag the author gave, which is true, rather than asserting an
+    # override that did not happen.
+    assert result.data["force"] is True
+
+
+def test_a_lost_claim_does_not_end_the_dispatcher_pass(
+    conn, audit, config, layout, tmp_path, machine, monkeypatch
+):
+    """A lost claim is the most per-item condition there is — another process took *this*
+    item, which says nothing about the next candidate.
+
+    The first cut returned on any `DispatchRefused`, so one raced item stopped the whole
+    pass. The split now reuses `_GLOBAL_HOLDS`, exactly as the loop above already applies
+    it to `ordering.plan`'s own holds.
+    """
+    config = capped_at(config, 9, per_repo=9)
+    first = ready_item(conn, config, issue_number=1)
+    second = ready_item(conn, config, issue_number=2)
+    real = dispatch.check_launch_gate
+    lost: list[int] = []
+
+    def steal_the_first(conn_, *, item, **kwargs):
+        if item.id == first and not lost:
+            lost.append(item.id)
+            raise dispatch.DispatchRefused(
+                f"item {first} is dispatching; it was claimed by another dispatcher"
+            )
+        return real(conn_, item=item, **kwargs)
+
+    monkeypatch.setattr(dispatch, "check_launch_gate", steal_the_first)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 1, (
+        "the pass continues past the item it lost"
+    )
+    assert db.get_work_item(conn, second).state is WorkItemState.ACTIVE
+
+
+def test_a_repository_cap_refusal_does_not_end_the_dispatcher_pass(
+    conn, audit, config, layout, tmp_path, machine, monkeypatch
+):
+    """`repo_cap` is per-item too — it holds one repository's work and must leave every
+    other repository free, which is the whole of FR-012 and FR-020."""
+    config = capped_at(config, 9, per_repo=9)
+    first = ready_item(conn, config, issue_number=1)
+    second = ready_item(conn, config, issue_number=2)
+    real = dispatch.check_launch_gate
+    seen: list[int] = []
+
+    def cap_the_first(conn_, *, item, **kwargs):
+        if item.id == first and not seen:
+            seen.append(item.id)
+            raise dispatch.DispatchRefused(
+                "repository demo: 1 of 1 sessions (configured)",
+                hold=ordering.HoldReason.REPO_CAP,
+            )
+        return real(conn_, item=item, **kwargs)
+
+    monkeypatch.setattr(dispatch, "check_launch_gate", cap_the_first)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 1
+    assert db.get_work_item(conn, second).state is WorkItemState.ACTIVE
+
+
+@pytest.mark.parametrize("hold", [ordering.HoldReason.PAUSED, ordering.HoldReason.GLOBAL_CAP])
+def test_a_global_refusal_still_ends_the_dispatcher_pass(
+    conn, audit, config, layout, tmp_path, machine, monkeypatch, hold
+):
+    """The other side of the same split: no later item could fit into a slot this one could
+    not, so continuing would be work with a known answer."""
+    config = capped_at(config, 9, per_repo=9)
+    ready_item(conn, config, issue_number=1)
+    ready_item(conn, config, issue_number=2)
+
+    def refuse(*_args, **_kwargs):
+        raise dispatch.DispatchRefused("the machine is full", hold=hold)
+
+    monkeypatch.setattr(dispatch, "check_launch_gate", refuse)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 0

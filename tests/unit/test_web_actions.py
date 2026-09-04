@@ -732,3 +732,37 @@ def test_the_web_offers_no_override_of_the_dispatch_gate(web, conn, layout, runn
         dispatch.check_launch_gate = original
 
     assert forced and not any(forced), "a form field must not become an override"
+
+
+def test_a_web_originated_refusal_is_recorded_as_the_web_not_the_terminal(
+    web, conn, layout, running_daemon, monkeypatch
+):
+    """The worker's *authoritative* gate check must name the surface that actually asked.
+
+    ``operations.resume`` defaults ``surface="cli"``, and the worker used to call it
+    positionally — so one press of a web button could produce a ``dispatch.refused``
+    attributed to "web" by the request-thread pre-check and a second attributed to "cli" by
+    the worker, for the same action. Principle III's standard is reconstruction, and a
+    record naming the wrong surface defeats it.
+    """
+    from robot_army import dispatch
+
+    beat(layout, effect_level="live")
+    item_id = seed_item(conn, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+    seen: list[str] = []
+
+    original = dispatch.check_launch_gate
+
+    def watch(*_args, surface: str = "unset", **_kwargs):
+        seen.append(surface)
+
+    dispatch.check_launch_gate = watch
+    try:
+        assert web.post_json(f"/item/{item_id}/resume").status == 303
+        web.app._work.join()
+    finally:
+        dispatch.check_launch_gate = original
+
+    assert seen, "the gate was consulted"
+    assert set(seen) == {"web"}, f"every check names the web, got {seen}"

@@ -135,12 +135,24 @@ class ClaimLost(Exception):
     lose. The loser has written nothing.
     """
 
+    #: States a *concurrent claimant* leaves behind. Reaching one of these means somebody
+    #: else took the item; reaching any other claimable-target failure means the item was
+    #: never eligible, which is a different sentence and must not be told as a race.
+    _RACED: frozenset[str] = frozenset({"dispatching", "active"})
+
     def __init__(self, item_id: int, found: WorkItemState | None) -> None:
         if found is None:
             super().__init__(f"work item {item_id} no longer exists")
-        else:
+        elif str(found) in self._RACED:
             super().__init__(
                 f"item {item_id} is {found}; it was claimed by another dispatcher"
+            )
+        else:
+            # ``failed``, ``done``, ``abandoned``, ``discovered``. Nobody raced for this —
+            # it simply is not in a state a session can start from, and saying otherwise
+            # would send the reader hunting a second process that never existed.
+            super().__init__(
+                f"item {item_id} is {found}; a session cannot be started from that state"
             )
         self.item_id = item_id
         self.found = found

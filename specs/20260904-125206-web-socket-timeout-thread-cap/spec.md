@@ -163,8 +163,10 @@ of refused connections is recorded.
 - **FR-008**: Capacity MUST be released when a connection ends, by any means — normal
   completion, the bound in FR-001, client disconnect, or an unhandled failure while serving —
   so that a failure cannot permanently consume a slot.
-- **FR-009**: The interface MUST print a message to the terminal when it transitions from
-  below capacity to refusing connections, and MUST NOT print one per refused connection.
+- **FR-009**: The interface MUST print a message to the terminal when it begins a saturation
+  episode, and MUST NOT print one per refused connection. It MUST NOT begin a new episode on
+  a momentary dip below capacity — a single freed slot is not a recovery, and treating it as
+  one reintroduces the per-connection message this requirement exists to prevent.
 - **FR-010**: The interface MUST record the total number of connections refused for capacity
   in the durable record it writes when it stops.
 - **FR-011**: Individual refusals MUST NOT be written to the durable record. This is a
@@ -189,8 +191,14 @@ of refused connections is recorded.
 - **Refusal count**: A running total of connections turned away for capacity during one run of
   the interface, carried into the stop record. Not persisted across runs.
 - **Saturation episode**: A period beginning when the interface reaches capacity and ending
-  when it drops below it. One terminal message per episode, regardless of how many connections
-  are refused within it.
+  only once the pressure is comfortably gone — not the instant a single slot frees. One
+  terminal message per episode, regardless of how many connections are refused within it.
+  The asymmetry is deliberate and required: under sustained pressure the count sits *at* the
+  cap and oscillates by one as slots recycle, so an episode that ended at the first release
+  would restart on every recycled connection and produce a message per connection in all but
+  name, which is exactly what FR-009 forbids. The implementation's threshold is half the cap;
+  what this specification requires is only that the end of an episode means recovery rather
+  than a momentary dip.
 
 ## Success Criteria *(mandatory)*
 

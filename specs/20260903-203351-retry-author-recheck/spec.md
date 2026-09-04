@@ -58,8 +58,9 @@ author condition.
    worktree that could not be created, say — **When** `retry` is invoked, **Then**
    eligibility is re-evaluated all the same, and a now-ineligible issue is refused.
 6. **Given** a failed work item, **When** `retry` is refused because eligibility no longer
-   passes, **Then** the item's recorded block reason is updated to the current reason, so
-   the queue shows why it is blocked now rather than why it was blocked before.
+   passes, **Then** every recorded reason the queue may display is updated to the current
+   reason, so the queue shows why it is blocked now rather than why it was blocked before —
+   verified by reading the rendered page, not only the stored columns.
 7. **Given** any invocation of `retry`, **When** it is refused or allowed, **Then** the
    decision, the item it concerned, and the reason are written to the durable action
    record.

@@ -52,8 +52,10 @@ from robot_army.ordering import HoldReason
 from robot_army.paths import claude_trust_file
 from robot_army.states import (
     TERMINAL_SESSION_STATES,
+    ClaimLost,
     SessionState,
     WorkItemState,
+    claim_work_item,
     transition_session,
     transition_work_item,
 )
@@ -91,6 +93,29 @@ _GLOBAL_HOLDS: frozenset[HoldReason] = frozenset(
 
 class DispatchBlocked(Exception):
     """A precondition failed. Carries a message the maintainer can act on."""
+
+
+class DispatchRefused(Exception):
+    """The launch was not attempted, and the item is untouched (issue #120, RA-05).
+
+    Deliberately **not** a subclass of :class:`DispatchBlocked`, and the distinction is the
+    whole reason this class exists rather than a reused one. ``DispatchBlocked`` means the
+    item cannot run and is *failed* for it: ``_dispatch_item`` catches it and calls
+    ``_fail(..., blocked=True)``, and ``operations.retry`` catches it to refuse a retry.
+    Being paused, held, or at the session cap says nothing whatsoever about the item, and
+    FR-010 and FR-011 forbid touching it — so subclassing would make this eligible for
+    handlers written to fail items, and the bug would read as "the machine was busy, so my
+    work item is now failed". That is worse than the gap being closed.
+
+    ``hold`` is ``None`` when the refusal is a lost claim rather than a policy hold: no
+    ``HoldReason`` describes "another dispatcher got there first", and inventing one would
+    put a queueing vocabulary word in front of a concurrency outcome.
+    """
+
+    def __init__(self, detail: str, *, hold: HoldReason | None = None) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.hold = hold
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +207,110 @@ def read_committed_settings(
         if content is not None:
             contents[relative] = content.decode("utf-8", errors="replace")
     return contents
+
+
+def check_launch_gate(
+    conn: sqlite3.Connection,
+    *,
+    audit: AuditLog,
+    config: Config,
+    item: Any,
+    surface: str,
+    force: bool = False,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+) -> None:
+    """Raise ``DispatchRefused`` unless the cap, the pause and the holds all allow it.
+
+    The fix for RA-05 (issue #120). Until this existed the three brakes lived only in
+    ``ordering.plan``, which ``select_and_dispatch`` walks and which ``resume`` and
+    ``restart`` bypass entirely — so with a cap of two and two sessions running, one press
+    of *Resume* started a third, then a fourth, and a held item and a paused system both
+    resumed. ``capacity``'s docstring names the stake: an under-count oversubscribes the
+    author's own subscription while claiming to protect it. This was not an under-count. It
+    was no count.
+
+    The **policy** is not re-implemented here — ``ordering.launch_holds`` is called, the
+    same function ``_hold_for`` calls, so the queue view and this gate cannot report
+    different reasons or rank them differently. What lives here is the *reading*: a
+    capacity snapshot, the pause flag and the two hold tables. ``ordering`` is pure and is
+    called on every web page render; this module already launches processes.
+
+    **The snapshot is taken here, on every call, and none may be passed in** (FR-009).
+    Between a planner's snapshot and this launch the author can start a session by hand,
+    and a remembered number cannot see it — which is the whole reason ``capacity`` counts
+    the machine rather than our own bookkeeping. It costs a directory listing and a handful
+    of ``/proc`` reads, and only on the path that actually dispatches.
+
+    Called **before** the claim and before every other write, so a refusal leaves the item
+    exactly as it was (FR-010, FR-011). That ordering is the requirement, not an
+    optimisation: an item failed for the machine being busy would need ``retry`` before the
+    author could press the button again, which turns "wait a minute" into "your work item
+    is broken".
+    """
+    holds = ordering.launch_holds(
+        item,
+        config=config,
+        capacity=capacity.snapshot(
+            conn,
+            config=config,
+            audit=audit,
+            registry_dir=registry_dir,
+            proc_root=proc_root,
+        ),
+        paused=db.get_dispatch_control(conn).paused,
+        item_holds=db.list_item_holds(conn),
+        repo_holds=db.list_repo_holds(conn),
+    )
+    if not holds:
+        # Nothing recorded. A permitted launch is the ordinary case, and the dispatch
+        # records that follow already say one happened.
+        return
+
+    if force:
+        # Every condition, not only the first (FR-023). The author who forced past a full
+        # machine needs to know they also forced past a hold they had forgotten placing —
+        # reporting one and silently passing the rest is how the escape hatch becomes its
+        # own surprise.
+        audit.record(
+            "dispatch.forced",
+            outcome="ok",
+            entity_type="work_item",
+            entity_id=item.id,
+            detail={
+                "surface": surface,
+                "overridden": [
+                    {"hold": str(hold), "detail": detail} for hold, detail in holds
+                ],
+                "note": (
+                    "an operator override went past the author's own dispatch policy; the "
+                    "author check, workspace trust, the settings fingerprint and the state "
+                    "machine are not overridable and still applied"
+                ),
+            },
+            dry_run=bool(getattr(item, "dry_run", False)),
+        )
+        return
+
+    hold, detail = holds[0]
+    audit.record(
+        "dispatch.refused",
+        outcome="error",
+        entity_type="work_item",
+        entity_id=item.id,
+        detail={
+            "surface": surface,
+            "hold": str(hold),
+            "reason": detail,
+            # Not de-duplicated the way ``_note_hold`` de-duplicates the dispatcher's own
+            # holds, and deliberately: each of these is an action somebody took, and a
+            # button press that leaves no record is the failure this whole change exists to
+            # remove. The volume is bounded by how fast a person can press a button.
+            "note": "the item was not touched",
+        },
+        dry_run=bool(getattr(item, "dry_run", False)),
+    )
+    raise DispatchRefused(detail, hold=hold)
 
 
 def check_gates(
@@ -595,6 +724,8 @@ def dispatch_item(
     proc_root: Path | None = None,
     resume_session_id: str | None = None,
     skip_gates: bool = False,
+    force: bool = False,
+    surface: str = "dispatcher",
 ) -> bool:
     """Prepare and launch one item. Returns ``True`` when it reached ``active``.
 
@@ -608,6 +739,11 @@ def dispatch_item(
     item is settled here and the exception is then **re-raised**: settling without
     re-raising would be the swallowing catch-all Principle III forbids, and re-raising
     without settling is the bug. Both, or neither is right.
+
+    ``force`` overrides the author's own dispatch policy --- the cap, the pause, the holds
+    --- and nothing else (issue #120). It cannot reach the author check, workspace trust,
+    the committed settings fingerprint, or the state machine. ``surface`` names who asked,
+    for the record a refusal writes.
     """
     try:
         return _dispatch_item(
@@ -622,7 +758,17 @@ def dispatch_item(
             proc_root=proc_root,
             resume_session_id=resume_session_id,
             skip_gates=skip_gates,
+            force=force,
+            surface=surface,
         )
+    except DispatchRefused:
+        # Already recorded by ``check_launch_gate``, and it is not an error of the dispatch:
+        # the handler below exists for the *unforeseen* failure, and it would file a paused
+        # system under ``dispatch.error`` with ``outcome="error"``. Principle III's standard
+        # is reconstruction, which a misfiled record defeats as surely as a missing one.
+        # There is also nothing to settle --- the gate runs before the claim, so the item is
+        # not ``dispatching`` and has not been touched.
+        raise
     except Exception as exc:
         # The item is read *before* the record is written, so the record can say which item
         # this was and what is about to happen to it. Only ``dispatching`` is settled here:
@@ -698,6 +844,55 @@ def author_refusal(item: Any, config: Config) -> tuple[str, str] | None:
     return None
 
 
+def _claim_or_refuse(
+    conn: sqlite3.Connection,
+    audit: AuditLog,
+    item_id: int,
+    *,
+    surface: str,
+    dry_run: bool,
+) -> None:
+    """Take the item for launch, or raise ``DispatchRefused`` because somebody else did.
+
+    Atomic, because ``transition_work_item`` is not (issue #120). That function reads the
+    state and then writes it, treating "already there" as a legitimate no-op --- which is
+    right for reconciliation and for spool replay, and is why it still does. But it also
+    made ``dispatching -> dispatching`` succeed silently, so the web worker and a terminal
+    command racing on one item could both walk past it and launch **two agents into one
+    worktree on one branch**. ``web/server.py`` anticipates an ``IllegalTransition`` from
+    "a concurrent terminal command"; for that one pair, none was ever raised.
+
+    A lost claim is reported as a **refusal**, never as a failure. The winner owns the item
+    now, and settling it here would let the loser fail work it never claimed --- the same
+    class of bug as the double dispatch, wearing the opposite sign.
+    """
+    try:
+        with db.transaction(conn):
+            claim_work_item(
+                conn,
+                audit,
+                item_id=item_id,
+                target=WorkItemState.DISPATCHING,
+                reason="dispatcher selected it and capacity exists",
+            )
+    except ClaimLost as exc:
+        audit.record(
+            "dispatch.refused",
+            outcome="error",
+            entity_type="work_item",
+            entity_id=item_id,
+            detail={
+                "surface": surface,
+                "hold": None,
+                "reason": str(exc),
+                "found_state": str(exc.found) if exc.found is not None else None,
+                "note": "the item was not touched; another claimant holds it",
+            },
+            dry_run=dry_run,
+        )
+        raise DispatchRefused(str(exc)) from exc
+
+
 def _dispatch_item(
     conn: sqlite3.Connection,
     *,
@@ -711,6 +906,8 @@ def _dispatch_item(
     proc_root: Path | None = None,
     resume_session_id: str | None = None,
     skip_gates: bool = False,
+    force: bool = False,
+    surface: str = "dispatcher",
 ) -> bool:
     """The launch itself. Always called through ``dispatch_item``, never directly."""
     item = db.get_work_item(conn, item_id)
@@ -732,14 +929,34 @@ def _dispatch_item(
         )
         return False
 
-    with db.transaction(conn):
-        transition_work_item(
-            conn,
-            audit,
-            item_id=item_id,
-            target=WorkItemState.DISPATCHING,
-            reason="dispatcher selected it and capacity exists",
-        )
+    # -- the cap, the pause and the holds (issue #120, RA-05) --------------
+    #
+    # First, and before any write. Every path that starts a session comes through here, so
+    # this is where "the dispatcher honours the cap" becomes "the system honours the cap"
+    # --- ``resume`` and ``restart`` used to reach the launch below without meeting any of
+    # the three.
+    #
+    # Placed **above** the author check on purpose, even though that check is the more
+    # serious one. A refusal here says nothing about the item and writes nothing; the
+    # author check *fails* the item and stores a reason. An item that is held, on a paused
+    # machine, and written by somebody else should be refused rather than failed --- and
+    # refusing first also means an attempt the author never authorised does not get to
+    # write a ``blocked_reason`` while the system is paused.
+    #
+    # Deliberately outside ``skip_gates``, which is about trust and the fingerprint. Two
+    # different questions, and one flag answering both would be how the cap got lost again.
+    check_launch_gate(
+        conn,
+        audit=audit,
+        config=config,
+        item=item,
+        surface=surface,
+        force=force,
+        registry_dir=registry_dir,
+        proc_root=proc_root,
+    )
+
+    _claim_or_refuse(conn, audit, item_id, surface=surface, dry_run=dry_run)
 
     # -- the author (issue #119, FR-014, FR-015) ---------------------------
     #
@@ -1737,15 +1954,29 @@ def select_and_dispatch(
 
         _resolve_hold(audit, entries, snap, selected=selected)
         attempted.add(selected.item.id)
-        if dispatch_item(
-            conn,
-            boundaries=boundaries,
-            audit=audit,
-            config=config,
-            layout=layout,
-            item_id=selected.item.id,
-            trust_file=trust_file,
-            registry_dir=registry_dir,
-            proc_root=proc_root,
-        ):
+        try:
+            launched = dispatch_item(
+                conn,
+                boundaries=boundaries,
+                audit=audit,
+                config=config,
+                layout=layout,
+                item_id=selected.item.id,
+                trust_file=trust_file,
+                registry_dir=registry_dir,
+                proc_root=proc_root,
+            )
+        except DispatchRefused:
+            # The plan and the gate disagreed, and that is a *legitimate* outcome rather
+            # than a contradiction to assert against. Both observe the machine, but not at
+            # the same instant: between this pass's snapshot and the launch's own the
+            # author can start a session by hand, and the second observation is the one
+            # that counts (FR-009). ``check_launch_gate`` has already recorded why.
+            #
+            # The pass ends rather than moving to the next candidate. Every reason the gate
+            # can give is either machine-wide or, for ``repo_cap``, one this queue is
+            # already ordered by --- so continuing would mean re-planning against a snapshot
+            # this pass has been told is stale. The next tick is five seconds away.
+            return dispatched
+        if launched:
             dispatched += 1

@@ -1,5 +1,12 @@
 # Quickstart: verifying the dispatch gate by hand
 
+**Status**: the statically checkable claims below — command spellings, flag names, exit
+codes, and the exact wording of every message — were verified against the implementation.
+The live end-to-end walk against a running daemon was **not** performed as part of the
+implementing session, because it needs a real terminal host, a real worker binary and a
+real GitHub repository. Step 8 in particular is checked by the automated tests rather than
+by hand, and says why.
+
 Eight checks. Each maps to requirements in [spec.md](spec.md) and can be run on its own. The
 automated equivalents live in `tests/unit/test_launch_gate.py`,
 `tests/unit/test_claim_work_item.py` and `tests/integration/test_dispatch_capacity.py`; this
@@ -36,7 +43,8 @@ uv run robot-army pause
 uv run robot-army resume 7 ; echo "exit=$?"
 ```
 
-**Expect** exit `3`, and:
+**Expect** exit `3`, and on **stderr** (the CLI puts any outcome that did not succeed
+there):
 
 ```
 refusing to resume item 7: dispatch is paused
@@ -140,13 +148,17 @@ With the machine at its limit, the system paused, and the item held all at once:
 uv run robot-army resume 7 --force ; echo "exit=$?"
 ```
 
-**Expect** exit `0`, the session starts, and:
+**Expect** exit `0`, the session starts, and a line pointing at the record:
 
 ```
-overriding 3 conditions on item 7: paused, held, global_cap
+resumed item 7 from session 019831f2-... (--force: the dispatch gate was overridden;
+see dispatch.forced in the log for what it went past)
 ```
 
-**Expect in the log** one `dispatch.forced` record listing all three — not just the first.
+**Expect in the log** one `dispatch.forced` record listing **all** the conditions — not
+just the first. The terminal points at that record rather than repeating it, because only
+the gate inside `dispatch_item` knows which applied and `dispatch_item` returns a `bool`;
+see `contracts/cli.md` for why a return channel was not worth building for one line.
 
 Then confirm what `--force` cannot reach (FR-024, FR-025): point the item at a repository whose
 onboarding record you have removed, or one whose recorded author does not match, and
@@ -159,25 +171,31 @@ enumerates — refusals are not de-duplicated the way the queue's own holds are.
 
 ## 8. Exactly one dispatcher wins (FR-016, FR-017, SC-005)
 
-The honest version of this needs two processes racing, which is what
-`tests/integration/test_dispatch_capacity.py` does 50 times. By hand you can see the
-deterministic half:
+This one is genuinely hard to see by hand, and it is worth being clear about why rather
+than writing a recipe that proves something else.
+
+`resume` and `restart` each check the item's state *before* they reach the launch, so a
+second terminal command run while item 7 is `dispatching` is refused by that pre-check —
+exit `3`, but saying `restart requires a rested item`, not `another dispatcher claimed
+it`. That pre-check is why the sequential double-tap was already safe, and why the
+cross-process race was not: two processes that both pass it then both reach the claim.
+
+So the automated tests are the real check here, and they drive it two ways:
 
 ```bash
-# terminal 1 — start a long resume
-uv run robot-army resume 7 &
-# terminal 2 — immediately, while item 7 is still `dispatching`
-uv run robot-army restart 7 ; echo "exit=$?"
+uv run pytest tests/unit/test_claim_work_item.py            # 8 threads, one winner
+uv run pytest tests/integration/test_dispatch_capacity.py \
+  -k two_concurrent_launches                                # 50 repetitions, one session
 ```
 
-**Expect** exit `3` from the second, with `another dispatcher claimed it`, and **expect** the
-first to complete normally. One worktree, one branch, one agent.
-
-Check afterwards that the loser changed nothing:
+What you *can* confirm by hand is the state a loser finds:
 
 ```bash
-uv run robot-army show 7 --json | jq .state    # whatever the winner made it
+uv run robot-army show 7 --json | jq .state    # dispatching, while the winner starts up
 ```
+
+and that a second launch against it is refused rather than settling it — the winner's item
+must come out of the loser's attempt exactly as it went in.
 
 ## Regression: the automatic dispatcher is unchanged (SC-006)
 

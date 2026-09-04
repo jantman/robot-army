@@ -293,6 +293,105 @@ def order_key(item: WorkItem, repo: RepoConfig | None, mode: str) -> tuple[Any, 
     return (item.discovered_at, item.id)
 
 
+def launch_holds(
+    item: WorkItem,
+    *,
+    config: Config,
+    capacity: CapacitySnapshot,
+    paused: bool,
+    item_holds: dict[int, Hold] | None = None,
+    repo_holds: dict[str, Hold] | None = None,
+) -> list[tuple[HoldReason, str]]:
+    """Every reason this item may not *launch* right now, in precedence order (issue #120).
+
+    The five reasons that are conditions of the machine and of the author's own policy,
+    separated from the four that are conditions of the queue. ``_hold_for`` calls this and
+    then continues; ``dispatch.check_launch_gate`` calls it and stops here. That is the
+    whole of the fix for RA-05: ``resume`` and ``restart`` reached the launch without
+    passing any of these, so the cap that exists to protect one subscription, the pause,
+    and the holds were enforced against the dispatcher alone.
+
+    The split is by *subject*, not by convenience. What stays behind in ``_hold_for`` —
+    waiting for a pull request to land, sitting off the board's dispatch column, a
+    repository that no longer resolves, stale preparation residue — decides whether a
+    **new** item may enter the queue. None of them is a statement about work already begun,
+    and applying them to a resume would refuse an interrupted session for the crime of
+    being the second thing its own repository is working on.
+
+    **Every** applicable reason is returned rather than the first, and the reason is that
+    two requirements want different halves of one ordered fact: the surfaces report the
+    first (FR-007 — two reasons shown at once is how a surface stops being read), and an
+    operator override must record all of them (FR-023 — someone forcing past a pause needs
+    to know they also forced past a hold). Evaluating once and returning the list gives
+    both, and keeps the precedence written down exactly once. The cost is a handful of
+    comparisons over data the caller has already loaded.
+
+    Pure, like everything else in this module: the pause flag, the two hold maps and the
+    snapshot arrive as arguments, so ``ordering`` still writes nothing and touches neither
+    the filesystem nor the network. Reading them is ``dispatch``'s job, which is already
+    impure.
+    """
+    holds: list[tuple[HoldReason, str]] = []
+
+    if paused:
+        # `unpause`, not `resume`. `robot-army resume <item>` starts a new session for one
+        # work item — a different command entirely — so the old wording sent the author at
+        # something that would not lift the pause and would fail for want of an item id.
+        holds.append(
+            (HoldReason.PAUSED, "dispatch is paused; lift it with `robot-army unpause`")
+        )
+
+    # Second, and above every capacity reason (issue #117). The author said not this one,
+    # and nothing the queue could do — free a slot, land a pull request, fix the item —
+    # changes that. Reporting anything below would name a fix that cannot work.
+    item_hold = (item_holds or {}).get(item.id)
+    repo_hold = (repo_holds or {}).get(item.repo_key)
+    if item_hold is not None or repo_hold is not None:
+        holds.append(
+            (HoldReason.HELD, _held_detail(item.repo_key, item_hold, repo_hold))
+        )
+
+    if not capacity.observable:
+        # Returned early rather than appended, and this is the one place where collecting
+        # everything would be wrong. The two reasons above do not come from the
+        # observation and stand whatever it says; the two below are *made of* it. Naming a
+        # cap whose numbers the snapshot has just declared untrustworthy would put a
+        # fabricated count in a refusal message and in the override record — and an
+        # unobservable snapshot reports ``total=0``, so the caps would not fire anyway and
+        # the list would quietly assert the machine was empty.
+        holds.append(
+            (
+                HoldReason.CAPACITY_UNOBSERVABLE,
+                capacity.reason or "the number of live sessions could not be determined",
+            )
+        )
+        return holds
+
+    if capacity.total >= capacity.global_cap:
+        detail = (
+            f"{capacity.total} of {capacity.global_cap} sessions running "
+            f"({len(capacity.ours)} ours, {capacity.others} other)"
+        )
+        if capacity.degraded:
+            detail += " — counted via /proc, so this is a ceiling rather than a fact"
+        holds.append((HoldReason.GLOBAL_CAP, detail))
+
+    # The first *per-item* reason, and the distinction is the whole of FR-012 and FR-020.
+    # Everything above holds the queue; this holds one repository's work and leaves every
+    # other repository free to proceed in the same pass.
+    running, cap, explicit = repo_capacity(item.repo_key, config=config, capacity=capacity)
+    if running >= cap:
+        source = "configured" if explicit else "the default"
+        holds.append(
+            (
+                HoldReason.REPO_CAP,
+                f"repository {item.repo_key}: {running} of {cap} sessions ({source})",
+            )
+        )
+
+    return holds
+
+
 def _hold_for(
     item: WorkItem,
     *,
@@ -310,46 +409,21 @@ def _hold_for(
 
     Written as a straight sequence of returns rather than as a table, because the order is
     the content: reading it top to bottom is reading the precedence.
+
+    The first five reasons now live in :func:`launch_holds`, because ``dispatch`` needs
+    exactly those five and needs them in exactly this order (issue #120). Reading top to
+    bottom still reads the precedence; the first stanza of it is one call away.
     """
-    if paused:
-        # `unpause`, not `resume`. `robot-army resume <item>` starts a new session for one
-        # work item — a different command entirely — so the old wording sent the author at
-        # something that would not lift the pause and would fail for want of an item id.
-        return HoldReason.PAUSED, "dispatch is paused; lift it with `robot-army unpause`"
-
-    # Second, and above every capacity reason (issue #117). The author said not this one,
-    # and nothing the queue could do — free a slot, land a pull request, fix the item —
-    # changes that. Reporting anything below would name a fix that cannot work.
-    item_hold = (item_holds or {}).get(item.id)
-    repo_hold = (repo_holds or {}).get(item.repo_key)
-    if item_hold is not None or repo_hold is not None:
-        return HoldReason.HELD, _held_detail(item.repo_key, item_hold, repo_hold)
-
-    if not capacity.observable:
-        return (
-            HoldReason.CAPACITY_UNOBSERVABLE,
-            capacity.reason or "the number of live sessions could not be determined",
-        )
-
-    if capacity.total >= capacity.global_cap:
-        detail = (
-            f"{capacity.total} of {capacity.global_cap} sessions running "
-            f"({len(capacity.ours)} ours, {capacity.others} other)"
-        )
-        if capacity.degraded:
-            detail += " — counted via /proc, so this is a ceiling rather than a fact"
-        return HoldReason.GLOBAL_CAP, detail
-
-    # The first *per-item* reason, and the distinction is the whole of FR-012 and FR-020.
-    # Everything above holds the queue; this holds one repository's work and leaves every
-    # other repository free to proceed in the same pass.
-    running, cap, explicit = repo_capacity(item.repo_key, config=config, capacity=capacity)
-    if running >= cap:
-        source = "configured" if explicit else "the default"
-        return (
-            HoldReason.REPO_CAP,
-            f"repository {item.repo_key}: {running} of {cap} sessions ({source})",
-        )
+    launch = launch_holds(
+        item,
+        config=config,
+        capacity=capacity,
+        paused=paused,
+        item_holds=item_holds,
+        repo_holds=repo_holds,
+    )
+    if launch:
+        return launch[0]
 
     # The wait-for-merge gate (milestone 047, FR-005). Per-item like ``repo_cap`` above and
     # for the same reason: it is a statement about one repository, and a queue that stopped

@@ -25,7 +25,7 @@ from robot_army import db, dispatch
 from robot_army.boundaries import BoundaryError
 from robot_army.boundaries.hooks import SubprocessHookRunner
 from robot_army.config import HookStep
-from robot_army.states import SessionState, WorkItemState
+from robot_army.states import TERMINAL_SESSION_STATES, SessionState, WorkItemState
 
 pytestmark = pytest.mark.requires_git
 
@@ -805,9 +805,28 @@ def records_of(layout, audit, action: str) -> list[dict]:
 
 
 def interrupt(conn, item_id: int, audit) -> None:
-    from robot_army.states import transition_work_item
+    """Interrupt the item **and** close its session row, as a real interruption does.
 
+    Closing the session is not tidiness. In the product an item reaches ``interrupted``
+    only through ``spool``/``reconcile`` classifying a session *exit*, which ends the
+    session row in the same pass — so a live session row under an interrupted item is a
+    state nothing can produce. Since issue #120 the difference is load-bearing rather than
+    cosmetic: ``dispatch_item`` now counts live sessions before it launches, and an item
+    left holding an open session row would be refused its own resume, correctly, for
+    already having an agent in that worktree.
+    """
+    from robot_army.states import transition_session, transition_work_item
+
+    session = db.latest_session_for_item(conn, item_id)
     with db.transaction(conn):
+        if session is not None and session.state not in TERMINAL_SESSION_STATES:
+            transition_session(
+                conn,
+                audit,
+                session_row_id=session.id,
+                target=SessionState.EXITED_ERROR,
+                reason="wrapper reported exit 130",
+            )
         transition_work_item(
             conn,
             audit,

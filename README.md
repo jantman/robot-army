@@ -217,6 +217,12 @@ cancel, retry, attach a terminal, acknowledge an anomaly, hold and release an it
 repository, pause and resume dispatch, and force a poll or a reconciliation. Every one of them has a terminal equivalent, verified by a test
 rather than by intention.
 
+Resume and restart here obey the session cap, the pause and holds exactly as the terminal
+does, and say so on the page rather than appearing to work and then quietly doing nothing.
+There is no `--force` button: the answer to a refusal is the control that lifts the
+condition, which is one press away on the same page and leaves the queue agreeing with the
+button instead of overridden by it.
+
 Deliberately **not** there: repository onboarding and permission re-approval, removing a
 checkout or its branch, purging simulated rows, changing the concurrency limit, and anything
 that starts or stops the daemon. Each stays a terminal command.
@@ -960,6 +966,26 @@ uv run robot-army restart <id>    # new session, no prior context
 uv run robot-army cancel <id>     # stop that session's process tree and no other
 uv run robot-army abandon <id>    # give up; the worktree is left alone
 ```
+
+**`resume` and `restart` pass the same gate the dispatcher does**, and did not until issue
+#120. If the machine is at `max_concurrent_sessions`, if the repository is at its own limit,
+if dispatch is paused, or if the item or its repository is held, they refuse — exit `3`, the
+reason on stderr in the same words the queue uses, and the item untouched. Lift the
+condition and press again; there is nothing to repair in between. To go past it anyway:
+
+```bash
+uv run robot-army resume <id> --force   # past the cap, the pause, and the holds
+```
+
+`--force` covers my own policy and nothing else. It cannot bypass the issue author check,
+workspace trust, the committed settings fingerprint, onboarding, or the state machine, it
+has no configuration equivalent, and every condition it goes past is named in the log as
+`dispatch.forced`. Note that this is a different `--force` from `cancel --force`, which only
+skips a confirmation prompt.
+
+The claim on an item is atomic, so a tap on my phone and a terminal command arriving in the
+same second cannot both start a session: one wins, the other is told the item was claimed by
+another dispatcher. One worktree, one branch, one agent.
 
 Reattach to a running session directly:
 

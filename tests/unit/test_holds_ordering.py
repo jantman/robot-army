@@ -385,3 +385,46 @@ def test_a_repository_hold_survives_and_still_applies_after_release_and_replacem
     hold_repo(conn, "demo", by="web")
     assert "by web" in plan(conn, config)[0].detail
 
+
+
+# -- the extraction of the first five reasons (issue #120) ------------------
+
+
+def test_plan_still_reports_every_reason_after_the_launch_holds_extraction(conn, config):
+    """The whole precedence, end to end, after five of its nine branches moved out.
+
+    Issue #120 extracted ``paused``, ``held``, ``capacity_unobservable``, ``global_cap``
+    and ``repo_cap`` into ``ordering.launch_holds`` so ``dispatch`` could call the same
+    rule the queue does. SC-006 requires ``plan`` to be unchanged by that, and "unchanged"
+    is only worth asserting if the assertion covers reasons on *both* sides of the split —
+    a test of the extracted five would pass even if the fall-through into the remaining
+    four had been dropped entirely.
+
+    Each case is built independently rather than layered, because the point is the mapping
+    from condition to reported reason, not the precedence between them; the ranking is
+    asserted by the outranking tests above and by ``test_launch_gate``.
+    """
+    reason = ordering.HoldReason
+    item_id = ready(conn, 1)[0]
+
+    # Two of the extracted five, driven by the snapshot.
+    assert plan(conn, config, observable=False)[0].hold is reason.CAPACITY_UNOBSERVABLE
+    assert plan(conn, config, total=9, global_cap=1)[0].hold is reason.GLOBAL_CAP
+
+    # A reason on the far side of the split, so a fall-through that stopped working would
+    # be caught rather than assumed.
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, item_id, blocked_reason="worktree hook failed")
+    assert plan(conn, config)[0].hold is reason.PREPARATION_FAILED
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, item_id, blocked_reason=None)
+
+    # The remaining extracted reasons, each read from the database rather than the
+    # snapshot — which is the half `launch_holds` takes as arguments and `dispatch` now
+    # reads for itself.
+    hold_item(conn, item_id)
+    assert plan(conn, config)[0].hold is reason.HELD
+
+    with db.transaction(conn):
+        db.set_dispatch_paused(conn, paused=True, by="cli")
+    assert plan(conn, config)[0].hold is reason.PAUSED, "and it outranks the hold above"

@@ -41,7 +41,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from robot_army import daemon as daemon_mod
-from robot_army import db, effects, health, operations
+from robot_army import db, dispatch, effects, health, operations
 from robot_army import repos as repos_mod
 from robot_army.config import Config
 from robot_army.effects import EffectLevel
@@ -384,6 +384,46 @@ def require_effect_agreement(ctx: Context, action: str) -> None:
     mismatch = pages.effect_mismatch(ctx)
     if mismatch:
         raise Refusal(mismatch, status=409, code=EXIT_PRECONDITION)
+
+
+def require_dispatchable(ctx: Context, item_id: int, action: str) -> None:
+    """Refuse a launch the cap, the pause or a hold would refuse (issue #120, FR-015).
+
+    The *second* check of the same gate, and the reason for the duplication is this
+    interface's shape rather than caution. ``_slow_item_action`` answers ``303``
+    immediately and does the slow work on a worker, because preparing a worktree takes
+    minutes and no phone holds a request that long — so a refusal discovered on the worker
+    reaches the author only through the log, while the page shows an item that simply did
+    not change. That is indistinguishable from nothing having happened, which is precisely
+    the failure this feature exists to remove.
+
+    So the gate runs here, where its refusal becomes a response the author reads on the
+    page they are looking at, and again inside ``dispatch_item`` on the worker, where it is
+    authoritative because minutes can have passed. The same discipline ``_run_slow_action``
+    already states: the pre-check is advisory, the check at the launch decides.
+
+    Never passes ``force``. The web has no override, and does not need one — *Unpause*,
+    *Release hold* and the repository's own release are each one press away, and lifting
+    the condition leaves the queue agreeing with the button instead of overridden by it.
+    """
+    item = db.get_work_item(ctx.conn, item_id)
+    if item is None:
+        return
+    try:
+        dispatch.check_launch_gate(
+            ctx.conn,
+            audit=ctx.audit,
+            config=ctx.config,
+            item=item,
+            surface="web",
+        )
+    except dispatch.DispatchRefused as exc:
+        raise Refusal(
+            f"cannot {action} item {item_id}: {exc.detail}",
+            status=409,
+            code=EXIT_PRECONDITION,
+            extra={"item_id": item_id, "hold": str(exc.hold) if exc.hold else None},
+        ) from exc
 
 
 def require_item(ctx: Context, item_id: int) -> Any:
@@ -800,6 +840,10 @@ def _slow_item_action(action: str) -> Callable[..., Redirect]:
             require_daemon(ctx, action)
             require_effect_agreement(ctx, action)
             require_legal(ctx, item_id, action)
+            # Last of the four, because it is the only one that observes the machine — a
+            # directory listing and a handful of /proc reads have no business running for a
+            # request the three cheap guards above will refuse anyway.
+            require_dispatchable(ctx, item_id, action)
             app.submit(action, item_id)
             outcome["handed_to_worker"] = True
             outcome["note"] = (

@@ -43,8 +43,9 @@ to resume — already exits `3`. The gate's refusals join them.
 
 ### Refused by the gate
 
-Standard output, exit `3`. One line naming the action and the item, one line carrying the
-reason exactly as the queue view renders it:
+Standard **error**, exit `3` — the CLI already puts any outcome that did not succeed on
+stderr, and a refusal is one. One line naming the action and the item, one line carrying
+the reason exactly as the queue view renders it:
 
 ```
 $ robot-army resume 7
@@ -87,12 +88,20 @@ Exit `0`, and the override is announced rather than silent:
 
 ```
 $ robot-army resume 7 --force
-overriding 2 conditions on item 7: paused, global_cap
-resumed item 7 from session 019831f2-...
+resumed item 7 from session 019831f2-... (--force: the dispatch gate was overridden;
+see dispatch.forced in the log for what it went past)
 ```
 
-Every condition is named, not just the first (FR-023) — the author who forces past a pause
-needs to know they also forced past a hold.
+**Every** condition is named in the `dispatch.forced` record, not just the first (FR-023) —
+the author who forces past a pause needs to know they also forced past a hold.
+
+The terminal line points at that record rather than repeating it, and the reason is worth
+stating because the first draft of this contract had it the other way round. Only the gate
+inside `dispatch_item` knows which conditions applied, and `dispatch_item` returns a
+`bool`; carrying the list back out would mean a return channel or a callback threaded
+through two functions for one caller and one cosmetic line. FR-023 asks for a durable
+record, which the log has, and Principle I asks that machinery earn its place, which this
+would not.
 
 ### `--json`
 
@@ -109,7 +118,8 @@ does:
 }
 ```
 
-and an override carries `"forced": ["paused", "global_cap"]`.
+and an override carries `"forced": true`; which conditions it went past is in the
+`dispatch.forced` record, for the reason given above.
 
 ## What a refusal leaves behind
 

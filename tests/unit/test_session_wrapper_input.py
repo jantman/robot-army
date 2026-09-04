@@ -92,6 +92,12 @@ def run_wrapper(
 
     result = subprocess.run(
         ["bash", str(WRAPPER), item_id, "--", *(args or ["/bin/sh", "-c", "exit 0"])],
+        # `cwd` is load-bearing, not tidiness. The refusal tests prove the payload never ran
+        # by giving it `touch ran` and then asserting nothing was created --- and `files`
+        # below only ever looks inside `root`. Without this the payload would run in the
+        # test runner's own directory, so a regression that actually executed the worker
+        # would drop `ran` in the repository root and leave the assertion green.
+        cwd=root,
         env=env,
         capture_output=True,
         text=True,

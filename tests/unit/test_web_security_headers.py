@@ -195,33 +195,48 @@ def test_the_refresh_loop_only_ever_fetches_its_own_url(web):
 # -- sniffing and referrers (US3) -------------------------------------------
 
 
-def test_nothing_is_sniffed_and_nothing_leaks_a_referrer(web, conn):
-    """Three content types, because guessing past the declared one is the whole attack."""
+def test_nothing_is_sniffed_and_no_referrer_reaches_another_origin(web, conn):
+    """Three content types, because guessing past the declared one is the whole attack.
+
+    ``same-origin`` is a cross-origin guarantee, not an absolute one: requests back to this
+    server still carry their referrer, which is the point of the test below.
+    """
     responses = every_response(web, conn)
     for name in ("html page", "json page", "css", "js"):
         assert responses[name].headers["X-Content-Type-Options"] == "nosniff", name
         assert responses[name].headers["Referrer-Policy"] == "same-origin", name
 
 
-def test_the_referrer_policy_does_not_break_returning_to_the_referring_view(web, conn):
+def test_the_referrer_policy_leaves_the_referring_view_working(web, conn):
     """Why the policy is ``same-origin`` and not the stricter ``no-referrer``.
 
-    ``_referring_view`` reads the ``Referer`` of a POST so that abandoning an item from
-    ``/interrupted`` returns there rather than to the item. Under ``no-referrer`` a browser
-    stops sending that header **on our own forms too**, and the feature quietly degrades to
-    its fallback everywhere — while every test of it keeps passing, because a test supplies
-    a ``Referer`` the browser would no longer send. That is the failure this asserts
-    against: the policy must be one that still permits a same-origin referrer.
+    ``_referring_view`` reads the ``Referer`` of our own POSTs, and ``no-referrer`` would
+    suppress it on those as well as on the links out. The reachable difference is narrow —
+    after a successful action there is none, because every control that renders as a real
+    form already sits on the page its fallback names — so this pins the case that *is*
+    reachable: the chrome of a **refused** POST builds its visibility toggle from the
+    referring view, and a control refused from ``/queue`` must offer a way back to
+    ``/queue`` rather than to ``/active``.
+
+    Asserting the behaviour and not only the header value is deliberate. A test that read
+    the constant alone would keep passing under ``no-referrer`` while the thing the
+    constant is chosen to protect stopped working.
     """
     assert server.SECURITY_HEADERS["Referrer-Policy"] == "same-origin"
 
     item_id = seed_item(conn, issue_number=7, state="interrupted")
-    response = web.post(
-        f"/item/{item_id}/abandon",
-        headers={"Referer": "http://localhost:8420/interrupted"},
+    # ``attach`` on an item that is not active: refused, so the page carries chrome.
+    refused = web.post(
+        f"/item/{item_id}/attach", headers={"Referer": "http://localhost:8420/queue"}
     )
-    assert response.headers["Location"].startswith("/interrupted"), (
-        "the feature this policy has to leave working"
+    blind = web.post(f"/item/{item_id}/attach")
+    assert refused.status == 409 and blind.status == 409
+
+    assert '"/queue?include_simulated=1"' in refused.text, (
+        "the toggle should return to the view the refused control was pressed on"
+    )
+    assert '"/active?include_simulated=1"' in blind.text, (
+        "and fall back to /active when no referrer was sent — the no-referrer behaviour"
     )
 
 

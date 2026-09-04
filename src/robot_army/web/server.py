@@ -155,14 +155,24 @@ SECURITY_HEADERS: dict[str, str] = {
     # must not tell the destination this interface's address, port, and the path being
     # looked at.
     #
-    # ``same-origin`` rather than the stricter ``no-referrer``, and the difference is
-    # load-bearing: :func:`_referring_view` reads the ``Referer`` of a POST to send the
-    # author back to the list they acted from, so abandoning an item from ``/interrupted``
-    # returns to ``/interrupted`` rather than to the item. ``no-referrer`` would suppress
-    # that header on our own forms too, and the feature would degrade to its fallback
-    # everywhere — silently, and invisibly to the tests, which supply a ``Referer`` the
-    # browser would no longer be sending. ``same-origin`` withholds it from exactly the
-    # destinations this header exists to withhold it from, and from nothing else.
+    # ``same-origin``, not the stricter ``no-referrer`` the finding proposed, because
+    # :func:`_referring_view` reads the ``Referer`` of our own POSTs and ``no-referrer``
+    # suppresses it on those too, not only on the links out.
+    #
+    # The reachable difference is narrow, and worth stating exactly rather than
+    # overstating: after a *successful* action there is none, because every control that
+    # renders as a real form sits on the page its fallback already names — the holds and
+    # the dispatch controls are on ``/queue``, ``attach`` is on the item — and every
+    # confirm-gated verb POSTs from its confirmation page, whose referer this function
+    # refuses on purpose. What does change is the chrome on a *refused* POST: its
+    # visibility toggle is built from the referring view, so a control refused from
+    # ``/queue`` offers a toggle back to ``/queue`` with the header and to ``/active``
+    # without it. Small, but it lands on the error page, where being sent somewhere
+    # unexpected is least welcome — and any confirm-free control added to a list view
+    # later would widen it silently.
+    #
+    # ``same-origin`` withholds the referrer from exactly the destinations this header
+    # exists to withhold it from, and from nothing else.
     "Referrer-Policy": "same-origin",
 }
 

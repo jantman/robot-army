@@ -85,12 +85,20 @@ the interface needs is worse than no policy:
 - `same-origin`: the audit and item views link out to `github.com` and `trello.com`. Without
   this, following one hands the destination the interface's address, port and the path being
   viewed. **Not `no-referrer`**, which the issue proposed: `_referring_view` reads the
-  `Referer` of a POST so an action taken from `/interrupted` returns there rather than to the
-  item, and `no-referrer` suppresses the header on our own forms too. That would degrade the
-  feature to its fallback everywhere while `test_the_redirect_returns_to_the_referring_view`
-  kept passing, because a unit test supplies a `Referer` the browser would have stopped
-  sending. `same-origin` withholds it from exactly the destinations this header exists to
-  withhold it from, and from nothing else.
+  `Referer` of our own POSTs, and `no-referrer` suppresses it on those too.
+
+  The reachable difference is narrower than it first looks, and worth stating exactly. After
+  a *successful* action there is none: every control that renders as a real form already sits
+  on the page its fallback names — the item and repository holds and the four dispatch
+  controls are on `/queue`, `attach` is on the item view — and every confirm-gated verb POSTs
+  from its confirmation page, whose referer `_referring_view` deliberately refuses. What does
+  change is a **refused** POST: its chrome builds the visibility toggle from the referring
+  view, so a control refused from `/queue` offers a toggle back to `/queue` with the header
+  and to `/active` without it. Minor, but it lands on the error page, and any confirm-free
+  control added to a list view later would widen it silently.
+
+  `same-origin` withholds the referrer from exactly the destinations this header exists to
+  withhold it from, and from nothing else, so the issue's stated purpose is met in full.
 
 **Alternatives considered**: adding `object-src 'none'` and `frame-src 'none'` for completeness —
 both are already covered by `default-src 'self'` given the interface embeds nothing, and a longer

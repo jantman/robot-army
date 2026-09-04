@@ -44,7 +44,8 @@ the caller asked for HTML or JSON.
 - **`same-origin`** — the audit and item views link out to `github.com` and `trello.com`.
   Following one must not tell the destination the interface's address, port, or the path being
   viewed. Requests to this server still carry their referrer, because `_referring_view` reads
-  it to send the author back to the list they acted from.
+  it — the visible effect being that a control refused from `/queue` offers a way back to
+  `/queue` rather than to `/active`.
 
 ## Headers a response keeps
 

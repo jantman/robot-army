@@ -52,12 +52,17 @@ branch_prefix   = "robot-army"    # branches are <prefix>/<something>
 binary          = "claude"
 
 [terminal]
-# Match `listen_on unix:${XDG_RUNTIME_DIR}/mykitty` in kitty.conf. Under the
-# runtime directory rather than /tmp because /tmp is world-writable: a glob
-# rooted there matches names any local user can create, and whichever answers
-# first would receive every launch. The daemon refuses a candidate it does not
-# own, so /tmp still works and only warns — but this is the setup to have.
-socket_glob           = "/run/user/1000/mykitty-*"  # kitty appends its PID: a glob
+# socket_glob is commented out on purpose: leave it unset and it defaults to
+# $XDG_RUNTIME_DIR/mykitty-*, resolved for whoever is running. Set it and you
+# must write the path out in full — nothing in this file is shell-expanded, so
+# a literal "$XDG_RUNTIME_DIR" would be looked for as a directory of that name.
+#
+# Match `listen_on unix:${XDG_RUNTIME_DIR}/mykitty` in kitty.conf. The runtime
+# directory rather than /tmp because /tmp is world-writable: a glob rooted
+# there matches names any local user can create, and whichever answers first
+# would receive every launch. The daemon refuses a candidate it does not own,
+# so a /tmp setup keeps working — but this is the setup to have.
+# socket_glob         = "/run/user/1000/mykitty-*"   # kitty appends its PID: a glob
 probe_timeout_seconds = 2
 binary                = "kitty"
 

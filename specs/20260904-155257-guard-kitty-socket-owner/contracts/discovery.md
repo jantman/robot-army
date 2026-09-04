@@ -28,8 +28,15 @@ so it receives nothing — not the probe, and not a launch.
 
 ## Ordering and caching
 
-Unchanged. Candidates are still sorted in reverse and tried in that order; the first that is
-acceptable *and* answers is cached for the life of the process. Refusals do not stop the walk.
+Candidates are still sorted in reverse and tried in that order; the first that is acceptable
+*and* answers is cached for the life of the process. Refusals do not stop the walk.
+
+What is cached is the **path**, not the trust in it. The rule is re-applied to the cached path
+every time it is handed out, because the sticky bit stops a stranger unlinking kitty's socket
+but not claiming the name after kitty exits and frees it — a daemon outliving a kitty restart
+would otherwise dispatch down a name it checked only while it was still ours. A cached path
+that fails is **not** re-discovered: it keeps failing until a human restarts the daemon, which
+is the answer a restarted kitty has always got.
 
 ## What each surface reports
 
@@ -48,5 +55,6 @@ record discovery already writes at the end of the walk — success and failure a
 
 - The `Display` protocol: `probe()` still returns `str | None`.
 - `SimulatedDisplay`: still answers with its fictional path, still performs no filesystem check.
+- That a cached path is never replaced by a fresh discovery.
 - The probe subprocess, its arguments, and its timeout.
 - Which acceptable socket wins when several are acceptable.

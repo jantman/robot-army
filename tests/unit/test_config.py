@@ -1600,3 +1600,31 @@ def test_a_socket_glob_in_a_directory_that_does_not_exist_does_not_warn(
         repo_clone, layout, tmp_path, terminal={"socket_glob": f"{tmp_path}/not-yet/kitty-*"}
     )
     assert not [w for w in config.warnings if "socket_glob" in w and "writable" in w]
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "{dir}/mykitty-*",  # the ordinary shape
+        "{dir}/*",  # the wildcard is the whole final segment
+        "{dir}/*/mykitty-*",  # the wildcard opens a directory component
+        "unix:{dir}/mykitty-*",  # carrying the prefix kitty uses
+    ],
+)
+def test_the_warning_judges_the_directory_the_pattern_is_rooted_in(
+    shape, repo_clone, layout, tmp_path
+):
+    """Every wildcard shape must resolve to the same directory.
+
+    `Path(...).parent` normalises a trailing slash away first, so `<dir>/*` used to climb
+    one level too high and judge the parent instead — silently skipping the warning for
+    exactly the directory it exists to flag.
+    """
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    config = build(
+        repo_clone, layout, tmp_path, terminal={"socket_glob": shape.format(dir=shared)}
+    )
+    warning = next(w for w in config.warnings if "socket_glob" in w)
+    assert f"directory {shared} is writable by others without the sticky bit" in warning

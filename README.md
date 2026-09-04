@@ -144,9 +144,13 @@ Two things are easy to overlook:
   path. Under the runtime directory and not `/tmp`: `/tmp` is world-writable, so any local
   user can create a socket matching the glob and — because the daemon takes whichever answers
   first, and keeps it — receive every launch instead of kitty. The daemon refuses a socket it
-  does not own, so an existing `/tmp` setup still works and only warns, but the runtime
-  directory is nobody else's to write in. Not `unix:@mykitty` either: an abstract socket
-  carries no filesystem permissions at all, so any local process can connect to it.
+  does not own, so an existing `/tmp` setup keeps working and is not even flagged: `/tmp` is
+  sticky, which stops a stranger swapping an entry. What sticky does *not* stop is them
+  claiming the name after kitty exits and frees it, so the daemon re-checks the socket it is
+  using and refuses it if it changed hands — a loud failure rather than a silent redirection.
+  The runtime directory avoids the whole question, because nobody else can write there at all.
+  Not `unix:@mykitty` either: an abstract socket carries no filesystem permissions, so any
+  local process can connect to it.
 - **Start the daemon by hand after graphical login**, not at boot. A daemon started before
   login has no display environment and no kitty to launch into.
 - **A launch is visible in the process table.** The composed prompt and every `[repos.*] env`

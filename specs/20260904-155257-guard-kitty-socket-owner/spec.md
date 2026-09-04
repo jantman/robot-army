@@ -200,8 +200,10 @@ local processes for the life of the launch.
   feature warns, it does not break a running setup.
 - The simulated display, used at reduced effect levels, which answers with a fictional socket
   path that exists nowhere. It must not be subjected to a filesystem check.
-- The cached socket. Once chosen it is kept for the life of the process, deliberately; the checks
-  are part of choosing, and this feature does not add re-validation on every use.
+- The cached socket. The path is kept for the life of the process, deliberately — but the checks
+  are re-applied to it on every use, because the directory rule stops a stranger *swapping* an
+  entry and not claiming the name after the terminal exits and frees it. A cached path that
+  stops passing fails loudly and is never quietly replaced by a fresh discovery.
 
 ## Requirements *(mandatory)*
 
@@ -296,8 +298,10 @@ local processes for the life of the launch.
 - The world-writable-without-sticky refusal is what closes the window between inspecting a
   candidate and speaking to it. A re-inspection after connecting is out of scope, and would not
   be reachable through the terminal's own client anyway.
-- Caching the selected socket for the process lifetime stays as it is; it is a deliberate,
-  documented decision and this feature does not revisit it.
+- Caching the selected socket *path* for the process lifetime stays as it is; it is a
+  deliberate, documented decision. Caching the *verdict* on that path is not part of it: the
+  checks are cheap, and skipping them after the first would leave the finding open across a
+  terminal restart.
 - Removing the prompt and environment values from command arguments — passing them by another
   means — is a separate change with its own design, and is out of scope here. This feature
   documents the exposure rather than closing it.

@@ -336,8 +336,19 @@ def _unsafe_socket_root(pattern: str) -> str | None:
     shipped for two milestones would be crying wolf.
     """
     wildcard = min((i for i in (pattern.find("*"), pattern.find("?")) if i != -1), default=-1)
-    fixed = pattern if wildcard == -1 else pattern[:wildcard]
-    directory = Path(fixed.removeprefix("unix:")).parent
+    fixed = (pattern if wildcard == -1 else pattern[:wildcard]).removeprefix("unix:")
+    # Cut at the last separator in the *string*, not with ``Path(...).parent``. Path
+    # normalises a trailing slash away first, so ``/srv/shared/*`` — where the wildcard is
+    # the whole final segment — would climb to ``/srv`` and judge the wrong directory,
+    # and ``/tmp/*/mykitty-*`` would climb all the way to ``/``. Both are exactly the
+    # shapes this is supposed to catch.
+    slash = fixed.rfind("/")
+    if slash > 0:
+        directory = Path(fixed[:slash])
+    elif slash == 0:
+        directory = Path("/")
+    else:
+        directory = Path()  # a relative pattern: the working directory is what is judged
     return unsafe_ancestor(directory) if directory.is_dir() else None
 
 
@@ -1096,7 +1107,8 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         warnings.append(
             f"[terminal] socket_glob {socket_glob!r} is rooted somewhere another local "
             f"user could place a socket: {unsafe_root}. The daemon refuses any candidate "
-            "it does not own, so this is safe but not advised — prefer "
+            "it does not own, before and while it uses one, so nothing there will be "
+            "dispatched to — but it can leave the daemon with no socket at all. Prefer "
             "$XDG_RUNTIME_DIR/mykitty-* and the matching "
             "`listen_on unix:${XDG_RUNTIME_DIR}/mykitty` in kitty.conf"
         )

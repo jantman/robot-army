@@ -543,3 +543,77 @@ def test_a_symlinked_directory_is_refused_by_name(
     assert shown.probe() is None
     assert fake.asked == []
     assert shown.refusals[0]["reason"] == f"directory {tmp_path}/linked is a symbolic link"
+
+
+# -- the cached socket is a cached path, not cached trust ---------------------
+
+
+def test_a_cached_socket_that_stops_being_ours_is_refused(
+    config: Config,
+    audit: AuditLog,
+    layout: Any,
+    tmp_path: Path,
+    socket_at: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checking once at discovery would leave the finding half-closed.
+
+    The sticky bit stops a stranger unlinking kitty's socket. It does not stop them
+    claiming the path once kitty exits and frees it itself. A daemon that outlives a
+    kitty restart would otherwise keep dispatching down a name it checked only while it
+    was still ours — the whole composed prompt, to whoever got there first.
+    """
+    held = socket_at(tmp_path / "sock-a")
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", answering())
+    shown = display(config, audit, str(tmp_path / "sock-*"))
+    assert shown.probe() == f"unix:{tmp_path}/sock-a"
+
+    # kitty exits, unlinking its socket; somebody else takes the vacant name.
+    held.unlink()
+    (tmp_path / "sock-a").write_text("mine now")
+
+    assert shown.probe() is None
+    assert shown.refusals == ({"socket": f"unix:{tmp_path}/sock-a", "reason": "not a socket"},)
+
+
+def test_a_cached_socket_that_is_still_ours_is_not_rediscovered(
+    config: Config, audit: AuditLog, tmp_path: Path, socket_at: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-checking is not re-globbing: a candidate that appears later is still ignored."""
+    socket_at(tmp_path / "sock-a")
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", answering())
+    shown = display(config, audit, str(tmp_path / "sock-*"))
+    assert shown.probe() == f"unix:{tmp_path}/sock-a"
+
+    socket_at(tmp_path / "sock-z")  # sorts first; would win a fresh discovery
+
+    assert shown.probe() == f"unix:{tmp_path}/sock-a"
+
+
+def test_a_refused_cache_keeps_failing_rather_than_silently_recovering(
+    config: Config,
+    audit: AuditLog,
+    layout: Any,
+    tmp_path: Path,
+    socket_at: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loud, repeatable failure is the documented answer to a terminal that went away.
+
+    Re-discovering here would hide a kitty that died and came back — and would hand the
+    daemon whatever now sorts first, which is the attack.
+    """
+    held = socket_at(tmp_path / "sock-a")
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", answering())
+    shown = display(config, audit, str(tmp_path / "sock-*"))
+    shown.probe()
+    held.unlink()
+    socket_at(tmp_path / "sock-z")  # a perfectly good socket, which must NOT be adopted
+
+    assert shown.probe() is None
+    assert shown.probe() is None
+    assert shown.refusals[0]["reason"].startswith("cannot be inspected")
+
+    audit.close()
+    record = probe_records(layout)[-1]
+    assert record["detail"]["error"] == "the cached socket is no longer usable"

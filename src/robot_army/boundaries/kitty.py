@@ -104,9 +104,33 @@ class KittyDisplay:
         Cached deliberately: kitty restarting means a new PID and a new socket, and the
         right response to that is a clear dispatch failure that a human notices, not a
         silent re-discovery that hides a terminal having died and come back.
+
+        The *path* is cached; the trust in it is not. Checking once at discovery would
+        have left the finding half-closed: the sticky bit stops a stranger unlinking
+        kitty's socket, but not claiming the path after kitty exits and frees it itself.
+        A daemon outliving a kitty restart would then keep dispatching down a name that
+        had become somebody else's, having checked it only when it was still ours. So the
+        cached path is re-checked on the way out, every time.
+
+        A cache that fails the check is *not* re-discovered — that is the silent recovery
+        this docstring already refuses. It keeps failing loudly until a human restarts the
+        daemon, which is the same answer a restarted kitty has always got.
         """
         if self._socket is not None:
-            return self._socket
+            reason = _refuse(self._socket)
+            if reason is None:
+                return self._socket
+            self._refusals = ({"socket": self._socket, "reason": reason},)
+            self._audit.record(
+                "kitty.probe",
+                outcome="error",
+                target=self._socket,
+                detail={
+                    "refused": list(self._refusals),
+                    "error": "the cached socket is no longer usable",
+                },
+            )
+            return None
         pattern = self._config.terminal.socket_glob
         timeout = float(self._config.terminal.probe_timeout_seconds)
         candidates = sorted(glob.glob(pattern), reverse=True)

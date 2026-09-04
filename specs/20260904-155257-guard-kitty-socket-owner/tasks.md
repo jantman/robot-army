@@ -40,7 +40,7 @@ Single project. Source at `src/robot_army/`, tests at `tests/unit/`.
 **Purpose**: nothing to install or scaffold. The one task creates the file three later phases add
 cases to, so it is not created three times.
 
-- [ ] T001 Create `tests/unit/test_kitty_socket_trust.py` with a module docstring naming its subject — which candidate paths `KittyDisplay.probe` may speak to, and which it must refuse without speaking to them — plus a `socket_at(path)` helper that binds and returns a real `AF_UNIX` socket (kept open for the test's duration so the inode stays a socket), and a `display(config, audit)` helper building a `KittyDisplay` against a `tmp_path` pattern. No test cases yet.
+- [X] T001 Create `tests/unit/test_kitty_socket_trust.py` with a module docstring naming its subject — which candidate paths `KittyDisplay.probe` may speak to, and which it must refuse without speaking to them — plus a `socket_at(path)` helper that binds and returns a real `AF_UNIX` socket (kept open for the test's duration so the inode stays a socket), and a `display(config, audit)` helper building a `KittyDisplay` against a `tmp_path` pattern. No test cases yet.
 
 **Checkpoint**: `uv run pytest tests/unit/test_kitty_socket_trust.py` collects zero tests and passes.
 
@@ -52,13 +52,15 @@ cases to, so it is not created three times.
 `probe()` that consults them. Split out because US1 and US2 are two clauses of one rule and would
 otherwise both rewrite the same loop.
 
-- [ ] T002 In `src/robot_army/boundaries/kitty.py`, add a module-level `_refuse(path: str) -> str | None` returning `None` when a candidate is acceptable and a reason string when it is not, with a docstring stating the rule from `contracts/discovery.md` and *why* it exists (a name in a shared directory is not evidence of who owns the listener). Body for now: strip any `unix:` prefix and return `None` — the clauses arrive in US1 and US2.
-- [ ] T003 In `src/robot_army/boundaries/kitty.py`, rewrite the `probe` loop to call `_refuse` before running anything against a candidate: on a refusal, append `{"socket": target, "reason": reason}` to a `refused` list and continue to the next candidate without invoking `run`; on acceptance, probe exactly as today. Store the list on `self._refusals` alongside the cached socket, and expose it as a read-only `refusals` property returning a tuple.
-- [ ] T004 In `src/robot_army/boundaries/kitty.py`, carry `refused` into the existing aggregate `kitty.probe` audit record on both the success and the failure path, beside `tried`, so one record still answers what was found, what was refused and why, and what was selected (Principle III).
-- [ ] T005 In `tests/unit/test_kitty_socket_trust.py`, add cases proving the seam independently of any clause: a candidate that `_refuse` rejects is never passed to `run` (assert on a `run` that fails the test if called with that target), discovery continues past a refusal to a later acceptable candidate, and the `kitty.probe` audit record carries both `tried` and `refused`.
+- [X] T002 In `src/robot_army/boundaries/kitty.py`, add a module-level `_refuse(path: str) -> str | None` returning `None` when a candidate is acceptable and a reason string when it is not, with a docstring stating the rule from `contracts/discovery.md` and *why* it exists (a name in a shared directory is not evidence of who owns the listener). Body for now: strip any `unix:` prefix and return `None` — the clauses arrive in US1 and US2.
+- [X] T003 In `src/robot_army/boundaries/kitty.py`, rewrite the `probe` loop to call `_refuse` before running anything against a candidate: on a refusal, append `{"socket": target, "reason": reason}` to a `refused` list and continue to the next candidate without invoking `run`; on acceptance, probe exactly as today. Store the list on `self._refusals` alongside the cached socket, and expose it as a read-only `refusals` property returning a tuple.
+- [X] T004 In `src/robot_army/boundaries/kitty.py`, carry `refused` into the existing aggregate `kitty.probe` audit record on both the success and the failure path, beside `tried`, so one record still answers what was found, what was refused and why, and what was selected (Principle III).
+- [X] T005 In `tests/unit/test_kitty_socket_trust.py`, add cases proving the seam independently of any clause: a candidate that `_refuse` rejects is never passed to `run` (assert on a `run` that fails the test if called with that target), discovery continues past a refusal to a later acceptable candidate, and the `kitty.probe` audit record carries both `tried` and `refused`.
 
-**Checkpoint**: `uv run pytest tests/unit/test_kitty_socket_trust.py` passes; behaviour is
-unchanged for every existing test because `_refuse` still accepts everything.
+**Checkpoint**: behaviour is unchanged for every existing test, because `_refuse` still accepts
+everything. The new cases *fail* at this checkpoint rather than passing, and that was wrong in
+the plan: a test that a refusal is never spoken to cannot pass while nothing is ever refused.
+They are the right tests in the right file; they go green with T007, one phase later.
 
 ---
 
@@ -71,9 +73,9 @@ be inspected are each refused before any command runs against them.
 refusable shape, and confirm only the socket is spoken to; then make every candidate unowned and
 confirm the failure is the same clear one as when nothing matched.
 
-- [ ] T006 [US1] In `tests/unit/test_kitty_socket_trust.py`, add the failing cases for this story: a real socket is accepted; a plain file is refused `not a socket`; a directory is refused `not a socket`; a symbolic link pointing at the accepted socket is refused (proving `lstat`, not `stat` — this is the case that fails if the implementation follows links); a path deleted between globbing and inspection is refused `cannot be inspected`; and with `os.getuid` monkeypatched to a different id, every candidate is refused with a reason naming the owning uid.
-- [ ] T007 [US1] In `src/robot_army/boundaries/kitty.py`, implement the first three clauses of `_refuse`: `os.lstat` (returning `cannot be inspected: <strerror>` on `OSError`), `stat.S_ISSOCK`, and `st_uid == os.getuid()`, with a comment on the `lstat` choice naming the symlink case it defeats.
-- [ ] T008 [US1] In `tests/unit/test_kitty_socket_trust.py`, add the ordering case that is the finding itself: a refusable candidate whose name sorts *ahead* of the genuine socket under the existing reverse sort, asserted to receive nothing while the genuine socket is the one cached.
+- [X] T006 [US1] In `tests/unit/test_kitty_socket_trust.py`, add the failing cases for this story: a real socket is accepted; a plain file is refused `not a socket`; a directory is refused `not a socket`; a symbolic link pointing at the accepted socket is refused (proving `lstat`, not `stat` — this is the case that fails if the implementation follows links); a path deleted between globbing and inspection is refused `cannot be inspected`; and with `os.getuid` monkeypatched to a different id, every candidate is refused with a reason naming the owning uid.
+- [X] T007 [US1] In `src/robot_army/boundaries/kitty.py`, implement the first three clauses of `_refuse`: `os.lstat` (returning `cannot be inspected: <strerror>` on `OSError`), `stat.S_ISSOCK`, and `st_uid == os.getuid()`, with a comment on the `lstat` choice naming the symlink case it defeats.
+- [X] T008 [US1] In `tests/unit/test_kitty_socket_trust.py`, add the ordering case that is the finding itself: a refusable candidate whose name sorts *ahead* of the genuine socket under the existing reverse sort, asserted to receive nothing while the genuine socket is the one cached.
 
 **Checkpoint**: the impostor is refused; `uv run pytest tests/unit/test_kitty_socket_trust.py`
 passes and the full suite still passes.
@@ -89,9 +91,9 @@ candidate whose path passes through a directory a stranger can rearrange.
 world-writable *sticky* one, refused in a world-writable non-sticky one, with the reason naming
 the directory rather than the socket.
 
-- [ ] T009 [US2] In `tests/unit/test_kitty_socket_trust.py`, add the failing cases: an owned socket in a `0700` directory is accepted; the same socket in a `0777` directory is refused with a reason naming the directory; the same socket in a `1777` directory is accepted (the `/tmp` shape — this is the case that fails if the implementation refuses world-writable directories outright and breaks the maintainer's running setup); and a directory owned by another uid is refused, proved by monkeypatching `os.getuid`.
-- [ ] T010 [US2] In `src/robot_army/boundaries/kitty.py`, add the fourth clause of `_refuse`: walk the candidate's parent and every directory above it to the filesystem root, refusing unless each is owned by `os.getuid()` or uid 0 **and** is either not group/other-writable or carries the sticky bit; any `OSError` during the walk is a refusal. Comment why the sticky bit is the exemption and not an oversight.
-- [ ] T011 [US2] In `tests/unit/test_kitty_socket_trust.py`, add the regression case that the real default location passes the rule: a socket under a `0700` directory nested several levels deep is accepted, so the walk terminating at the root does not itself refuse everything.
+- [X] T009 [US2] In `tests/unit/test_kitty_socket_trust.py`, add the failing cases: an owned socket in a `0700` directory is accepted; the same socket in a `0777` directory is refused with a reason naming the directory; the same socket in a `1777` directory is accepted (the `/tmp` shape — this is the case that fails if the implementation refuses world-writable directories outright and breaks the maintainer's running setup); and a directory owned by another uid is refused, proved by monkeypatching `os.getuid`.
+- [X] T010 [US2] In `src/robot_army/boundaries/kitty.py`, add the fourth clause of `_refuse`: walk the candidate's parent and every directory above it to the filesystem root, refusing unless each is owned by `os.getuid()` or uid 0 **and** is either not group/other-writable or carries the sticky bit; any `OSError` during the walk is a refusal. Comment why the sticky bit is the exemption and not an oversight.
+- [X] T011 [US2] In `tests/unit/test_kitty_socket_trust.py`, add the regression case that the real default location passes the rule: a socket under a `0700` directory nested several levels deep is accepted, so the walk terminating at the root does not itself refuse everything.
 
 **Checkpoint**: both P1 stories are complete; the rule is whole. Full suite passes.
 
@@ -152,7 +154,7 @@ visible to other local processes.
 
 - [ ] T023 In `docs/security-analysis.md`, mark RA-15 resolved: what now refuses the impostor (the ownership and directory rule, before the probe), what changed by default (the socket location), what is deliberately only a warning (an existing shared-directory pattern), and what remains true (launch arguments in the process table, now documented).
 - [ ] T024 Run the by-hand proof in [quickstart.md](quickstart.md) — most importantly the pair that plants a listener in a `0777` directory and then sets the sticky bit on the same directory — and confirm each expected outcome.
-- [ ] T025 Run `uv run pytest`, `uv run ruff check`, and `uv run mypy src`; the whole suite must pass before the feature is complete (constitution, Development Workflow).
+- [ ] T025 Run `uv run pytest` and `uv run ruff check src/ tests/` — the two gates CI runs; the whole suite must pass before the feature is complete (constitution, Development Workflow).
 
 ---
 

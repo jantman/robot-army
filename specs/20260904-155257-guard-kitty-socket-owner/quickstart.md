@@ -11,7 +11,7 @@ running kitty with `allow_remote_control yes`.
 uv run pytest tests/unit/test_kitty_socket_trust.py -v
 uv run pytest tests/unit/test_config.py -k socket_glob -v
 uv run pytest                       # the whole suite must pass (constitution)
-uv run ruff check && uv run mypy src
+uv run ruff check src/ tests/       # the scope CI lints
 ```
 
 ## The negative test that matters most

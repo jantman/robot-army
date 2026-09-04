@@ -27,8 +27,9 @@ documented rather than changed, and the reason is recorded in the spec's Assumpt
 **Storage**: none. Nothing here persists; the refusals live in the audit log and in memory for
 the life of the process.
 
-**Testing**: `pytest`, `tests/unit/`, run with `uv run pytest`. Lint and types with
-`uv run ruff check` and `uv run mypy src`.
+**Testing**: `pytest`, `tests/unit/`, run with `uv run pytest`. Lint with
+`uv run ruff check src/ tests/`, which is the scope CI uses. There is no type checker in the
+dev group and none is added here.
 
 **Target Platform**: single Linux workstation, one user, kitty 0.48.2 with
 `allow_remote_control yes`.

@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import glob
 import json
+import os
+import stat
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from robot_army.boundaries import BoundaryError, DisplayHandle
@@ -27,13 +30,89 @@ if TYPE_CHECKING:
 LAUNCH_TIMEOUT = 20.0
 
 
+def _refuse(candidate: str) -> str | None:
+    """Why this candidate must not be spoken to, or ``None`` if it may be.
+
+    A glob returns *names*, and a name in a directory somebody else can write is a name
+    somebody else chose. Nothing about matching the pattern is evidence of who is
+    listening, so a candidate earns the probe by being a socket, owned by this user,
+    under directories no stranger can rearrange — and until it does, it is not addressed
+    at all. That matters more than it sounds: the probe is the first thing an impostor
+    would receive, and a launch carries the whole composed prompt and every ``--env``
+    pair as arguments.
+
+    The clauses live in ``contracts/discovery.md`` of the RA-15 feature. Returning a
+    reason rather than a bool is deliberate: three surfaces quote it, because "kitty is
+    not running" and "something is answering for kitty" send a maintainer to opposite
+    ends of the machine.
+    """
+    path = candidate.removeprefix("unix:")
+    try:
+        # lstat, never stat. A stranger can create a *symbolic link* to the genuine
+        # socket; following it would report our own uid and our own socket type for a
+        # name they chose, which is the whole substitution this function exists to
+        # prevent. Inspecting the link itself reports theirs — and a link is not a
+        # socket, so it fails the next clause regardless.
+        info = os.lstat(path)
+    except OSError as exc:
+        return f"cannot be inspected: {exc.strerror}"
+    if not stat.S_ISSOCK(info.st_mode):
+        return "not a socket"
+    if info.st_uid != os.getuid():
+        return f"owned by uid {info.st_uid}"
+    return _unsafe_directory(Path(path))
+
+
+def _unsafe_directory(candidate: Path) -> str | None:
+    """The first directory above ``candidate`` a stranger could rearrange, as a reason.
+
+    ``lstat`` describes the file at an instant; ``kitty @ --to`` resolves the name again
+    a moment later. If any directory on the path lets somebody else unlink an entry, the
+    name inspected and the name used can be different files, and the ownership check
+    becomes a check with a window after it.
+
+    The sticky bit is the exemption rather than an oversight: it restricts unlinking and
+    renaming to the entry's owner, which is precisely the missing property — and it is
+    why ``/tmp`` (root-owned, ``1777``) may hold a socket even though a name in it is
+    worth nothing on its own. A directory owned by a third party is refused whatever its
+    mode, because its owner can always replace what is inside it.
+
+    Walked to the filesystem root rather than stopping at the parent, so there is no
+    "how far up is far enough" to get wrong: a hostile directory anywhere on the path is
+    the same attack. Four ``stat`` calls for the runtime directory, two for ``/tmp``.
+    """
+    ours = os.getuid()
+    for directory in candidate.parents:
+        try:
+            info = os.lstat(directory)
+        except OSError as exc:
+            return f"directory {directory} cannot be inspected: {exc.strerror}"
+        if info.st_uid not in (ours, 0):
+            return f"directory {directory} is owned by uid {info.st_uid}"
+        writable_by_others = bool(info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+        if writable_by_others and not info.st_mode & stat.S_ISVTX:
+            return f"directory {directory} is writable by others without the sticky bit"
+    return None
+
+
 class KittyDisplay:
     def __init__(self, config: Config, audit: AuditLog) -> None:
         self._config = config
         self._audit = audit
         self._socket: str | None = None
+        self._refusals: tuple[dict[str, str], ...] = ()
 
     # -- discovery ---------------------------------------------------------
+
+    @property
+    def refusals(self) -> tuple[dict[str, str], ...]:
+        """Candidates the last discovery declined, and why.
+
+        Read by ``doctor``, by the daemon's startup check, and by the error raised when
+        no socket is available, so that "nothing matched" and "something matched and was
+        refused" are never reported with the same words.
+        """
+        return self._refusals
 
     def probe(self) -> str | None:
         """Find a control socket that answers. Cached for the process's lifetime.
@@ -48,8 +127,15 @@ class KittyDisplay:
         timeout = float(self._config.terminal.probe_timeout_seconds)
         candidates = sorted(glob.glob(pattern), reverse=True)
         tried: list[dict[str, Any]] = []
+        refused: list[dict[str, str]] = []
         for candidate in candidates:
             target = candidate if candidate.startswith("unix:") else f"unix:{candidate}"
+            reason = _refuse(target)
+            if reason is not None:
+                # Nothing is run against it. A refusal that probed first would be a
+                # refusal issued after the disclosure it exists to prevent.
+                refused.append({"socket": target, "reason": reason})
+                continue
             result = run(
                 [self._config.terminal.binary, "@", "--to", target, "ls"],
                 timeout=timeout,
@@ -59,13 +145,20 @@ class KittyDisplay:
             tried.append({"socket": target, "exit": result.returncode})
             if result.ok:
                 self._socket = target
+                self._refusals = tuple(refused)
                 self._audit.record(
                     "kitty.probe",
                     outcome="ok",
                     target=target,
-                    detail={"pattern": pattern, "candidates": len(candidates), "tried": tried},
+                    detail={
+                        "pattern": pattern,
+                        "candidates": len(candidates),
+                        "tried": tried,
+                        "refused": refused,
+                    },
                 )
                 return target
+        self._refusals = tuple(refused)
         self._audit.record(
             "kitty.probe",
             outcome="error",
@@ -73,6 +166,7 @@ class KittyDisplay:
                 "pattern": pattern,
                 "candidates": len(candidates),
                 "tried": tried,
+                "refused": refused,
                 "error": "no candidate socket answered",
             },
         )

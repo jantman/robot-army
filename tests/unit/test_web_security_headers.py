@@ -14,6 +14,7 @@ in the direction a test can fail.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -146,21 +147,44 @@ def test_the_policy_states_each_directive(web, directive, value):
     assert directives(web.get("/queue"))[directive] == value
 
 
-def test_the_pages_load_nothing_the_policy_would_refuse(web):
+#: Tags whose ``href``/``src`` the browser *fetches*. An ``<a href>`` is not one of them:
+#: CSP governs resource loading, not navigation, and the item and audit views link out to
+#: ``github.com`` and ``trello.com`` by design.
+SUBRESOURCE = re.compile(r"<(?:link|script|img|source|iframe|embed|object)\b[^>]*>")
+LOADED_URL = re.compile(r'(?:href|src|data)="([^"]*)"')
+
+
+def subresource_urls(body: str) -> list[str]:
+    return [url for tag in SUBRESOURCE.findall(body) for url in LOADED_URL.findall(tag)]
+
+
+def test_the_pages_load_nothing_the_policy_would_refuse(web, conn):
     """FR-007, from the other end: the policy is only free because the pages are austere.
 
     ``default-src 'self'`` breaks the interface the moment a page grows a web font, a CDN
     script or an icon set. This fails there, in a unit test, rather than silently in a
     browser nobody has open.
+
+    The item is seeded deliberately: a populated ``/queue`` carries an outbound
+    ``github.com`` anchor, and this test has to *tolerate* that while still refusing an
+    external subresource. An empty page would prove neither.
     """
-    body = web.get("/queue").text
-    for attribute in ('href="', 'src="'):
-        for fragment in body.split(attribute)[1:]:
-            url = fragment.split('"')[0]
-            assert url.startswith(("/", "#")), f"page loads or links to {url}"
-    assert "<script>" not in body, "an inline script would need 'unsafe-inline'"
-    assert "<style" not in body and "style=" not in body, "an inline style would too"
-    assert "onerror=" not in body and "onload=" not in body
+    seed_item(conn, issue_number=1, state="ready")
+    for path in ("/queue", "/active", "/item/1", "/cards", "/log"):
+        body = web.get(path).text
+        assert "github.com" in body or path != "/queue", "the anchor case is not covered"
+        for url in subresource_urls(body):
+            assert url.startswith(("/", "#")), f"{path} loads {url}"
+        assert "<script>" not in body, "an inline script would need 'unsafe-inline'"
+        assert "<style" not in body and "style=" not in body, "an inline style would too"
+        assert "onerror=" not in body and "onload=" not in body
+
+
+def test_an_external_subresource_would_be_caught(web):
+    """The check above is only worth having if it fails on the thing it is watching for."""
+    cdn = '<link rel="stylesheet" href="https://fonts.example.com/x.css">'
+    assert subresource_urls(cdn) == ["https://fonts.example.com/x.css"]
+    assert subresource_urls('<a href="https://github.com/x/y/issues/1">#1</a>') == []
 
 
 def test_the_refresh_loop_only_ever_fetches_its_own_url(web):

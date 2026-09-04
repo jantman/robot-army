@@ -214,7 +214,8 @@ That is the accepted model, so the mitigations are the ones that matter:
   `form-action 'self'` — free here, because these pages load nothing external by design: no web
   font, no CDN, no icon set, no inline script or style. Every response also sends
   `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`, the latter so that
-  following a `github.com` link out of a view does not hand it this interface's address.
+  following a `github.com` or `trello.com` link out of a view does not hand it this
+  interface's address.
 
 From outside the house I connect my existing VPN and use the same LAN address. Nothing is
 published, no tunnel is configured, and no port is forwarded.

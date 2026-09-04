@@ -41,8 +41,9 @@ the caller asked for HTML or JSON.
 - **`form-action 'self'`** — every form on every page submits to this server.
 - **`nosniff`** — a `.json` response is JSON and a stylesheet is a stylesheet; the browser may
   not guess otherwise.
-- **`no-referrer`** — the audit and item views link out to `github.com`. Following one must not
-  tell the destination the interface's address, port, or the path being viewed.
+- **`no-referrer`** — the audit and item views link out to `github.com` and `trello.com`.
+  Following one must not tell the destination the interface's address, port, or the path being
+  viewed.
 
 ## Headers a response keeps
 

@@ -134,9 +134,10 @@ SECURITY_HEADERS: dict[str, str] = {
     # at fixed routes; there is no inline ``<script>``, no inline ``<style>``, no ``style=``
     # and no ``on*=`` anywhere in ``html.py``, so no ``'unsafe-inline'`` is needed; and
     # ``app.js`` fetches only ``window.location.href``, which ``connect-src`` inherits from
-    # ``default-src``. The only external URLs any page emits are ``github.com`` anchors, and
-    # CSP does not govern navigation by link. A page that grows a web font or a CDN script
-    # breaks under this — deliberately, and a unit test says so before a browser does.
+    # ``default-src``. The external URLs a page does emit — ``github.com`` and
+    # ``trello.com``, the two systems this interface reads from — are anchors, and CSP does
+    # not govern navigation by link. A page that grows a web font or a CDN script breaks
+    # under this — deliberately, and a unit test says so before a browser does.
     #
     # ``default-src`` is also the second line under the escaping in ``html.py``, which is
     # currently the only thing stopping an injected ``<img onerror>`` from firing when the

@@ -72,8 +72,9 @@ the interface needs is worse than no policy:
   this server at fixed routes. There is no inline `<script>`, no inline `<style>`, and no `style=`
   or `on*=` attribute anywhere in `html.py`, so no `'unsafe-inline'` is needed. `app.js` calls
   `fetch(window.location.href)`, which is same-origin, so `connect-src` falls through to `'self'`
-  and the refresh loop keeps working. The only external URLs any page emits are `github.com`
-  anchors, and CSP does not govern navigation by link.
+  and the refresh loop keeps working. The external URLs a page does emit — `github.com` and
+  `trello.com`, the two systems this interface reads from — are anchors, and CSP does not
+  govern navigation by link.
 - `frame-ancestors 'none'` and `X-Frame-Options: DENY` say the same thing to two generations of
   browser. `frame-ancestors` is not covered by `default-src` and must be stated explicitly.
 - `base-uri 'none'`: nothing emits a `<base>`, so forbidding one costs nothing and removes the
@@ -81,8 +82,9 @@ the interface needs is worse than no policy:
 - `form-action 'self'`: every form on every page posts to this server.
 - `nosniff` matters most on the `.json` responses and the two static assets, where a browser
   guessing a type other than the declared one is the whole attack.
-- `no-referrer`: the audit and item views link out to `github.com`. Without this, following one
-  hands github.com the interface's address, port and the path being viewed.
+- `no-referrer`: the audit and item views link out to `github.com` and `trello.com`. Without
+  this, following one hands the destination the interface's address, port and the path being
+  viewed.
 
 **Alternatives considered**: adding `object-src 'none'` and `frame-src 'none'` for completeness —
 both are already covered by `default-src 'self'` given the interface embeds nothing, and a longer

@@ -1153,9 +1153,10 @@ def _signals_cell(row: dict[str, Any]) -> Markup:
         ),
     ]
     footnote: list[Any] = []
-    # Two footnotes, not one. The checkout pair and the GitHub pair are reused on windows an
-    # order of magnitude apart — five seconds against a minute — so a single age would have to
-    # misreport one of them, and the whole point of showing an age is that it is honest.
+    # Two footnotes, not one. The checkout pair and the GitHub pair are reused for lengths of
+    # time an order of magnitude apart — five seconds against a minute — so a single age would
+    # have to misreport one of them, and the whole point of showing an age is that it is
+    # honest.
     local_age = row.get("local_signals_age_seconds")
     if local_age is not None:
         # RA-14: the checkout observation is reused for a few seconds, so a reused value must

@@ -124,9 +124,10 @@ def test_interrupted_view_carries_the_four_signals_and_their_age(web, conn):
 def test_the_interrupted_card_says_how_old_its_checkout_signals_are(web, conn, monkeypatch):
     """RA-14 reuses the checkout observation for a few seconds, so the page must say so.
 
-    Two footnotes, not one: the checkout half and the GitHub half are reused on windows an
-    order of magnitude apart, so a single age would have to misreport one of them. The clock
-    is moved rather than slept on — three seconds of real time to prove a string.
+    Two footnotes, not one: the checkout half and the GitHub half are reused for lengths of
+    time an order of magnitude apart — five seconds against a minute — so a single age would
+    have to misreport one of them. The clock is moved rather than slept on, rather than
+    spending three seconds of real time to prove a string.
     """
     from robot_army import operations
 

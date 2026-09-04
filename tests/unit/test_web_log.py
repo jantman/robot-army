@@ -204,6 +204,186 @@ def test_paging_returns_disjoint_pages_across_a_file_boundary(ctx, layout):
     assert collected == sorted(collected, reverse=True), "and none is skipped or reordered"
 
 
+def test_no_daily_file_is_ever_read_whole(ctx, layout, monkeypatch):
+    """RA-14. ``read_text().splitlines()`` allocated the whole file plus a list of every line
+    in it, to return at most a thousand records from the end.
+
+    Breaking ``read_text`` is a blunt instrument and the right one: it fails if a single call
+    site is left behind, which is the regression this asserts against.
+    """
+    write_log(layout, TODAY, [record(n) for n in range(50)])
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a daily file was read whole")
+
+    monkeypatch.setattr(operations.Path, "read_text", forbidden)
+    page = operations.read_log_page(ctx, limit=5)
+    assert len(page.data["records"]) == 5
+
+
+def test_a_record_longer_than_one_block_is_returned_whole(ctx, layout, monkeypatch):
+    """The shape a backwards block reader gets wrong: a line that spans a block boundary has
+    to be carried into the next read rather than emitted as two."""
+    monkeypatch.setattr(operations, "LOG_SCAN_BLOCK_BYTES", 512)
+    big = record(1, detail={"note": "x" * 4000})
+    write_log(layout, TODAY, [record(0), big, record(2)])
+
+    page = operations.read_log_page(ctx)
+    notes = [r.get("detail", {}).get("note") for r in page.data["records"]]
+    assert "x" * 4000 in notes
+    assert len(page.data["records"]) == 3
+
+
+def test_a_file_whose_size_is_an_exact_multiple_of_the_block_reads_correctly(
+    ctx, layout, monkeypatch
+):
+    """The other off-by-one: the final read must land exactly on zero without emitting an
+    empty leading line or dropping the first record in the file."""
+    monkeypatch.setattr(operations, "LOG_SCAN_BLOCK_BYTES", 64)
+    records = [record(n) for n in range(6)]
+    write_log(layout, TODAY, records)
+    path = layout.log_dir / f"audit-{TODAY}.jsonl"
+    # Pad the *first* record's detail until the file is an exact multiple of the block size,
+    # so the last backwards read consumes precisely one block and stops.
+    size = path.stat().st_size
+    padding = (-size) % 64
+    if padding:
+        records[0] = record(0, detail={"note": "x" * padding})
+        write_log(layout, TODAY, records)
+        # Re-pad: the JSON grew by more than the padding (quotes, keys), so converge once.
+        extra = (-path.stat().st_size) % 64
+        records[0] = record(0, detail={"note": "x" * (padding + extra)})
+        write_log(layout, TODAY, records)
+
+    assert path.stat().st_size % 64 == 0, "the fixture must sit on a block boundary"
+    page = operations.read_log_page(ctx)
+    assert len(page.data["records"]) == 6
+
+
+def test_a_truncated_final_line_is_still_counted_when_read_backwards(ctx, layout):
+    """The interruption path: R14 flushes per record, so the process can die between the
+    write and the flush. Reading the file from its end meets that partial line first."""
+    write_log(layout, TODAY, [record(n) for n in range(5)], truncate_last=True)
+    page = operations.read_log_page(ctx)
+    assert len(page.data["records"]) == 4
+    assert page.data["skipped_lines"] == 1
+
+
+# -- RA-14: the byte budget --------------------------------------------------
+
+
+def _fat_record(n: int, day: str) -> dict:
+    return record(n, ts=f"{day}T00:{n // 60:02d}:{n % 60:02d}Z", detail={"note": "z" * 200})
+
+
+def _fill_beyond_the_budget(layout, monkeypatch, *, budget: int) -> None:
+    """A log directory bigger than the budget, without writing eight megabytes in a test."""
+    monkeypatch.setattr(operations, "LOG_SCAN_BUDGET_BYTES", budget)
+    for offset in range(4):
+        day = (datetime.now(UTC) - timedelta(days=offset)).strftime("%Y-%m-%d")
+        write_log(layout, day, [_fat_record(n, day) for n in range(400)])
+
+
+def test_a_filter_matching_nothing_stops_at_the_budget_and_says_so(ctx, layout, monkeypatch):
+    """Before this, ``/log?item=999999`` walked and fully read every audit file present.
+
+    Stopping silently would be worse than not stopping: an empty page would be
+    indistinguishable from an empty history, which is the one thing the audit view must never
+    be ambiguous about.
+    """
+    _fill_beyond_the_budget(layout, monkeypatch, budget=20_000)
+
+    page = operations.read_log_page(ctx, item_id=999999)
+    assert page.data["records"] == []
+    assert page.data["truncated"] is True
+    assert page.data["bytes_scanned"] <= 20_000
+    assert page.data["has_more"] is True
+    assert page.data["next_cursor"]
+
+
+def test_following_the_cursor_after_a_truncated_scan_continues_rather_than_restarting(
+    ctx, layout, monkeypatch
+):
+    """A truncated page is a page boundary, not a dead end. Without this the older history
+    would be unreachable through the interface that exists to read it."""
+    _fill_beyond_the_budget(layout, monkeypatch, budget=20_000)
+
+    seen = 0
+    cursor = None
+    for _ in range(200):
+        page = operations.read_log_page(ctx, item_id=1, limit=50, cursor=cursor)
+        seen += len(page.data["records"])
+        cursor = page.data["next_cursor"]
+        if not page.data["has_more"]:
+            break
+    assert seen == 1600, "every record is reachable, one bounded page at a time"
+
+
+def test_an_untruncated_page_says_it_was_not_truncated(ctx, layout):
+    write_log(layout, TODAY, [record(n) for n in range(3)])
+    page = operations.read_log_page(ctx)
+    assert page.data["truncated"] is False
+    assert page.data["bytes_scanned"] > 0
+
+
+def test_a_cursor_from_the_previous_version_restarts_from_the_newest_page(ctx, layout):
+    """The cursor payload changed from "(file, matches consumed)" to "(file, byte offset)".
+    An old one is exactly the case ``_decode_cursor`` already documents: a cursor naming a
+    page that may legitimately no longer exist, which restarts rather than erroring.
+    """
+    import base64
+
+    write_log(layout, TODAY, [record(n) for n in range(3)])
+    old_shape = json.dumps({"f": f"audit-{TODAY}.jsonl", "n": 2}, separators=(",", ":"))
+    cursor = base64.urlsafe_b64encode(old_shape.encode()).decode().rstrip("=")
+
+    page = operations.read_log_page(ctx, cursor=cursor)
+    assert page.code == 0
+    assert len(page.data["records"]) == 3
+
+
+def test_a_cursor_whose_offset_is_zero_advances_to_the_previous_file(ctx, layout):
+    """Zero means "this file is finished", not "start it again" — the difference between a
+    page turn and an infinite loop."""
+    write_log(layout, YESTERDAY, [record(n, ts=f"{YESTERDAY}T00:00:{n:02d}Z") for n in range(3)])
+    write_log(layout, TODAY, [record(n, ts=f"{TODAY}T00:00:{n:02d}Z") for n in range(3)])
+
+    cursor = operations._encode_cursor(f"audit-{TODAY}.jsonl", 0)
+    page = operations.read_log_page(ctx, cursor=cursor)
+    assert [r["ts"] for r in page.data["records"]] == [
+        f"{YESTERDAY}T00:00:0{n}Z" for n in (2, 1, 0)
+    ]
+
+
+def test_an_append_between_pages_does_not_repeat_a_record(ctx, layout):
+    """The daemon writes to today's file between two requests of a page turn. A cursor
+    counting matches from the end names a different record after an append; one naming a byte
+    position does not."""
+    write_log(layout, TODAY, [record(n) for n in range(6)])
+    first = operations.read_log_page(ctx, limit=3)
+    assert len(first.data["records"]) == 3
+
+    path = layout.log_dir / f"audit-{TODAY}.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record(99), separators=(",", ":")) + "\n")
+
+    second = operations.read_log_page(ctx, limit=3, cursor=first.data["next_cursor"])
+    seen = [r["ts"] for r in first.data["records"] + second.data["records"]]
+    assert len(set(seen)) == len(seen), "no record appears twice across the append"
+
+
+def test_the_web_says_when_the_scan_stopped_early(web, layout, monkeypatch):
+    _fill_beyond_the_budget(layout, monkeypatch, budget=20_000)
+    body = web.get("/log?item=999999").text
+    assert "scan stopped" in body
+    assert "older records" in body
+
+
+def test_the_web_does_not_say_it_stopped_early_when_it_did_not(web, layout):
+    write_log(layout, TODAY, [record(n) for n in range(3)])
+    assert "scan stopped" not in web.get("/log").text
+
+
 def test_the_last_page_reports_no_more(ctx, layout):
     write_log(layout, TODAY, [record(n) for n in range(3)])
     page = operations.read_log_page(ctx, limit=10)

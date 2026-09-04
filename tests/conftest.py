@@ -1268,6 +1268,9 @@ def web_at(config: Config, conn: Any, layout: Layout, monkeypatch: Any) -> Any:
         )
 
     monkeypatch.setattr(operations, "wire", fake_wire)
+    # Both signal caches, local and remote (RA-14). They are process-global, so one surviving
+    # into the next test would make the suite order-dependent in the worst way: a test that
+    # counts observations would pass alone and fail after its neighbour.
     operations.clear_resume_signal_cache()
 
     def build(level: str) -> WebHarness:

@@ -337,6 +337,19 @@ def test_a_cross_site_post_over_the_wire_is_refused(live_server, conn):
     assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED
 
 
+def test_a_cross_site_get_over_the_wire_is_refused(live_server, conn):
+    """RA-14, over a real socket. The response is opaque to the page that sent it either way
+    — what changes is that the interface no longer does the work it asked for."""
+    seed_item(conn, state="interrupted")
+    status, _headers, body = fetch(
+        f"{live_server}/interrupted",
+        accept="application/json",
+        headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+    )
+    assert status == 403
+    assert json.loads(body)["code"] == 3
+
+
 def test_the_queue_renders_without_ever_asking_github(config, conn, layout, monkeypatch):
     """FR-005 and SC-004, asserted rather than eyeballed.
 

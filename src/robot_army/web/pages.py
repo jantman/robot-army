@@ -205,6 +205,7 @@ def chrome(
     effective_level: str | None = None,
     simulated_consequences: list[str] | None = None,
     all_effects_simulated: bool = False,
+    capacity: capacity_mod.CapacitySnapshot | None = None,
 ) -> dict[str, Any]:
     """The facts every view carries. Assembled once per request.
 
@@ -260,8 +261,16 @@ def chrome(
         "anomaly_count": len(anomalies),
         # On every view rather than only on the queue: "why is nothing running?" is asked
         # from wherever the author happens to be looking, and the answer is one line.
+        #
+        # Handed in by ``handle`` in a served request, so a page takes exactly one reading of
+        # the machine (RA-14) — ``/queue`` used to take two, and two readings of a moving
+        # machine disagree. The ``None`` default is for a direct caller: a test, or a future
+        # second entry point, neither of which has a snapshot to hand.
         "capacity": operations._capacity_dict(
-            capacity_mod.snapshot(ctx.conn, config=ctx.config), ctx.config.dispatch.order
+            capacity if capacity is not None else capacity_mod.snapshot(
+                ctx.conn, config=ctx.config
+            ),
+            ctx.config.dispatch.order,
         ),
         "include_simulated": include_simulated,
         # What the operator *said*, beside what the interface *decided*. A reader of the
@@ -583,7 +592,11 @@ def dispatch_controls(chrome: dict[str, Any], *, include_simulated: bool = False
 
 
 def _items(
-    ctx: operations.Context, *, include_simulated: bool, state: str | None = None
+    ctx: operations.Context,
+    *,
+    include_simulated: bool,
+    state: str | None = None,
+    capacity: capacity_mod.CapacitySnapshot | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Rows through ``operations.status``, so field names match ``_item_dict`` exactly.
 
@@ -592,7 +605,9 @@ def _items(
     discipline, and the reason the number this interface prints is the number the link would
     actually reveal (009 FR-007) rather than merely close to it.
     """
-    data = operations.status(ctx, state=state, include_simulated=include_simulated).data
+    data = operations.status(
+        ctx, state=state, include_simulated=include_simulated, capacity=capacity
+    ).data
     return data["items"], int(data["withheld_simulated"]["items"])
 
 
@@ -672,11 +687,19 @@ def _nothing(text: str, count: int, *, path: str, include_simulated: bool) -> Ma
 # -- /active (FR-011) -------------------------------------------------------
 
 
-def active_view(ctx: operations.Context, *, include_simulated: bool = False) -> View:
+def active_view(
+    ctx: operations.Context,
+    *,
+    include_simulated: bool = False,
+    capacity: capacity_mod.CapacitySnapshot | None = None,
+) -> View:
     """What is running, and for how long."""
     rows: list[dict[str, Any]] = []
     items, withheld = _items(
-        ctx, include_simulated=include_simulated, state=str(WorkItemState.ACTIVE)
+        ctx,
+        include_simulated=include_simulated,
+        state=str(WorkItemState.ACTIVE),
+        capacity=capacity,
     )
     for item in items:
         session = _session_for(ctx, item["id"])
@@ -755,6 +778,7 @@ def queue_view(
     *,
     include_simulated: bool = False,
     chrome_payload: dict[str, Any] | None = None,
+    capacity: capacity_mod.CapacitySnapshot | None = None,
 ) -> View:
     """Ready in dispatch order with each hold's reason, dispatching with its age, blocked
     with the reason.
@@ -768,10 +792,15 @@ def queue_view(
     # Always assembled whole, then filtered per section below. The dispatcher plans
     # simulated rows regardless because they occupy slots, so partitioning first and hiding
     # second is both the cheaper query and the only way to count what each section withheld.
-    all_items, _ = _items(ctx, include_simulated=True)
+    all_items, _ = _items(ctx, include_simulated=True, capacity=capacity)
     max_age = ctx.config.daemon.dispatching_max_age_seconds
 
-    snap = capacity_mod.snapshot(ctx.conn, config=ctx.config)
+    # The same reading the chrome is built from, handed down by ``handle`` (RA-14). Taking a
+    # second one here cost a registry read and a ``/proc`` walk per render, and let the pill
+    # at the top of the page disagree with the block in the middle of it.
+    snap = capacity if capacity is not None else capacity_mod.snapshot(
+        ctx.conn, config=ctx.config
+    )
     plan = ordering_mod.plan(ctx.conn, config=ctx.config, capacity=snap)
     by_id = {item["id"]: item for item in all_items}
     ready: list[dict[str, Any]] = [
@@ -1093,6 +1122,7 @@ def _signal_row(ctx: operations.Context, item: dict[str, Any]) -> dict[str, Any]
         "issue_closed": signals.get("issue_closed"),
         "open_pr": signals.get("open_pull_request"),
         "signals_age_seconds": signals.get("signals_age_seconds"),
+        "local_signals_age_seconds": signals.get("local_signals_age_seconds"),
         "worktree_missing": not signals.get("worktree_present", False),
         "worktree_error": signals.get("worktree_error"),
         "github_error": signals.get("github_error"),
@@ -1122,8 +1152,23 @@ def _signals_cell(row: dict[str, Any]) -> Markup:
             else _tri(bool(row["open_pr"]) if row["issue_closed"] is not None else None),
         ),
     ]
-    age = row.get("signals_age_seconds")
     footnote: list[Any] = []
+    # Two footnotes, not one. The checkout pair and the GitHub pair are reused on windows an
+    # order of magnitude apart — five seconds against a minute — so a single age would have to
+    # misreport one of them, and the whole point of showing an age is that it is honest.
+    local_age = row.get("local_signals_age_seconds")
+    if local_age is not None:
+        # RA-14: the checkout observation is reused for a few seconds, so a reused value must
+        # be visible as reused rather than implied to be current.
+        footnote.append(
+            span(
+                "checkout signals read just now"
+                if local_age == 0
+                else f"checkout signals {local_age}s old (cached)",
+                class_="meta",
+            )
+        )
+    age = row.get("signals_age_seconds")
     if age is not None:
         # R9: the GitHub-derived pair may be up to a minute old, and a cached value must be
         # visible as such rather than implied to be current.
@@ -1181,7 +1226,12 @@ def _interrupted_card(
     )
 
 
-def interrupted_view(ctx: operations.Context, *, include_simulated: bool = False) -> View:
+def interrupted_view(
+    ctx: operations.Context,
+    *,
+    include_simulated: bool = False,
+    capacity: capacity_mod.CapacitySnapshot | None = None,
+) -> View:
     """Interrupted items with the four FR-014 signals, plus what is awaiting review.
 
     ``awaiting_review`` is listed in its own section rather than left out: resume, restart
@@ -1190,14 +1240,14 @@ def interrupted_view(ctx: operations.Context, *, include_simulated: bool = False
     but cannot be navigated to is a gap, not a scope boundary.
     """
     interrupted_items, _ = _items(
-        ctx, include_simulated=True, state=str(WorkItemState.INTERRUPTED)
+        ctx, include_simulated=True, state=str(WorkItemState.INTERRUPTED), capacity=capacity
     )
     interrupted, withheld_interrupted = _visible(
         interrupted_items, include_simulated=include_simulated
     )
     interrupted = [_signal_row(ctx, item) for item in interrupted]
     awaiting_items, _ = _items(
-        ctx, include_simulated=True, state=str(WorkItemState.AWAITING_REVIEW)
+        ctx, include_simulated=True, state=str(WorkItemState.AWAITING_REVIEW), capacity=capacity
     )
     awaiting, withheld_awaiting = _visible(awaiting_items, include_simulated=include_simulated)
     awaiting = [_signal_row(ctx, item) for item in awaiting]
@@ -1858,6 +1908,19 @@ def log_view(
     filter_form = form("/log", controls, method="get")
 
     active_filters = [f"{k}={v}" for k, v in filters.items() if v not in (None, "")]
+    # RA-14 bounds how much of the log one request reads. Stopping silently would be worse
+    # than not stopping: an empty page that stopped early is indistinguishable from an empty
+    # history, and that is the one thing this view must never be ambiguous about.
+    truncation_note = (
+        div(
+            f"The scan stopped after {payload['bytes_scanned']:,} bytes without filling this "
+            "page. There may be older matching records — follow \u201colder records\u201d to "
+            "keep looking.",
+            class_="banner",
+        )
+        if payload.get("truncated")
+        else Markup("")
+    )
     more = (
         p(
             a(
@@ -1888,6 +1951,7 @@ def log_view(
             )
             if payload["skipped_lines"]
             else Markup(""),
+            truncation_note,
             _empty("No records match.")
             if not records
             else join(

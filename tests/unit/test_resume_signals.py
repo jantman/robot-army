@@ -46,9 +46,8 @@ def _item(conn, **kwargs):
     return db.get_work_item(conn, item_id)
 
 
-def test_the_local_signals_are_recomputed_on_every_call(ctx, conn, monkeypatch):
-    """A stored copy would be wrong the moment the maintainer touched the directory."""
-    item = _item(conn)
+@pytest.fixture
+def count_conditions(monkeypatch):
     calls: list[str] = []
     real = operations.worktree.condition
 
@@ -57,9 +56,177 @@ def test_the_local_signals_are_recomputed_on_every_call(ctx, conn, monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(operations.worktree, "condition", counting)
+    return calls
+
+
+def test_the_local_signals_are_reused_inside_the_window(ctx, conn, count_conditions):
+    """This assertion used to read "must never be cached", and it was right until it wasn't.
+
+    The reasoning behind it survives intact: a stored copy would be wrong the moment the
+    maintainer touched the directory, so the value must not outlive their next look at the
+    page. What changed is that ``/interrupted`` renders one card per interrupted and
+    awaiting-review item, each card costs several ``git`` subprocesses, and until RA-14 a
+    cross-site page could ask for that page in a loop. Five seconds — deliberately below the
+    ten-second page refresh — keeps the freshness and removes the burst.
+    """
+    item = _item(conn)
     for _ in range(3):
         operations.local_resume_signals(ctx, item)
-    assert len(calls) == 3, "the local signals must never be cached"
+    assert len(count_conditions) == 1, "three calls inside the window cost one observation"
+
+
+def test_the_local_signals_are_observed_again_after_the_window(
+    ctx, conn, count_conditions, monkeypatch
+):
+    """Five seconds is below the default ``[web] refresh_seconds``, so a page left open
+    observes the checkout afresh on every refresh — which is the freshness the recompute-on-
+    every-call rule existed to give."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(operations, "_monotonic", lambda: clock["now"])
+    item = _item(conn)
+
+    operations.local_resume_signals(ctx, item)
+    clock["now"] = 1000.0 + operations.LOCAL_SIGNAL_TTL_SECONDS + 0.1
+    operations.local_resume_signals(ctx, item)
+    assert len(count_conditions) == 2
+
+
+@pytest.mark.parametrize("column", ["branch", "worktree_path"])
+def test_the_local_cache_is_keyed_on_what_it_observed(ctx, conn, count_conditions, column):
+    """A worktree reclaimed or a branch renamed is a different question. Answering the old
+    one would attribute an observation to somewhere it was never made."""
+    item = _item(conn)
+    operations.local_resume_signals(ctx, item)
+
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, item.id, **{column: "/somewhere-else-entirely"})
+    changed = db.get_work_item(conn, item.id)
+    operations.local_resume_signals(ctx, changed)
+
+    assert len(count_conditions) == 2
+
+
+def test_the_local_cache_is_keyed_on_the_base_ref_too(ctx, conn, count_conditions, monkeypatch):
+    """``commits_on_branch`` is counted against the base branch, so a reconfigured base is a
+    different answer even though nothing about the item moved.
+
+    ``Config`` is a frozen dataclass, so the base ref is redirected at the type rather than
+    at the instance — which is also closer to what an edited config file does.
+    """
+    item = _item(conn)
+    operations.local_resume_signals(ctx, item)
+
+    monkeypatch.setattr(type(ctx.config), "base_branch_for", lambda self, repo_key: "release")
+    operations.local_resume_signals(ctx, item)
+
+    assert len(count_conditions) == 2
+
+
+def test_a_failed_local_observation_is_not_cached(ctx, conn, monkeypatch):
+    """Caching "I could not look" would suppress the next attempt for five seconds and hide
+    the recovery — the silent failure Principle III forbids, and the rule the remote half
+    already applies to a TransportError."""
+    from robot_army.boundaries import BoundaryError
+
+    item = _item(conn)
+    failures = {"left": 1}
+
+    real = operations.worktree.condition
+
+    def sometimes(*args, **kwargs):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise BoundaryError("the checkout is unreadable")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(operations.worktree, "condition", sometimes)
+
+    first = operations.local_resume_signals(ctx, item)
+    assert "the checkout is unreadable" in first["worktree_error"]
+
+    second = operations.local_resume_signals(ctx, item)
+    assert "worktree_error" not in second, "a failed lookup must not poison the cache"
+
+
+def test_a_reused_local_signal_carries_its_age(ctx, conn, monkeypatch):
+    """A reused value must be visible as reused rather than implied to be current — the same
+    guarantee the GitHub-derived pair already gives."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(operations, "_monotonic", lambda: clock["now"])
+    item = _item(conn)
+
+    assert operations.local_resume_signals(ctx, item)["local_signals_age_seconds"] == 0
+    clock["now"] = 1003.0
+    assert operations.local_resume_signals(ctx, item)["local_signals_age_seconds"] == 3
+
+
+def test_the_two_ages_do_not_overwrite_each_other(ctx, conn, monkeypatch):
+    """Two separately-aged halves get two numbers. One number would have to misreport one of
+    them, and the two TTLs differ by more than an order of magnitude."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(operations, "_monotonic", lambda: clock["now"])
+    item = _item(conn)
+
+    operations.resume_signals(ctx, item)
+    clock["now"] = 1003.0
+    both = operations.resume_signals(ctx, item)
+
+    assert both["local_signals_age_seconds"] == 3
+    assert both["signals_age_seconds"] == 3
+    assert set(both) >= {
+        "worktree_present",
+        "uncommitted_changes",
+        "commits_on_branch",
+        "issue_closed",
+        "open_pull_request",
+    }
+
+
+def test_acting_on_an_item_forgets_both_halves_of_its_signals(ctx, conn, count_conditions):
+    """FR-010. An action can change either half — abandoning can close the issue, resuming
+    can dirty the worktree — so forgetting one and keeping the other would be arbitrary."""
+    item = _item(conn)
+    ctx.boundaries.issue_reader.closed[("demo", 42)] = True
+    operations.resume_signals(ctx, item)
+    assert len(count_conditions) == 1
+    assert len(ctx.boundaries.issue_reader.closed_calls) == 1
+
+    operations.forget_resume_signals(item.id)
+
+    operations.resume_signals(ctx, item)
+    assert len(count_conditions) == 2
+    assert len(ctx.boundaries.issue_reader.closed_calls) == 2
+
+
+def test_forgetting_one_item_leaves_another_alone(ctx, conn, count_conditions):
+    first = _item(conn, issue_number=1)
+    second = _item(conn, issue_number=2)
+    operations.local_resume_signals(ctx, first)
+    operations.local_resume_signals(ctx, second)
+    assert len(count_conditions) == 2
+
+    operations.forget_resume_signals(first.id)
+
+    operations.local_resume_signals(ctx, second)
+    assert len(count_conditions) == 2, "the other item's observation still stands"
+    operations.local_resume_signals(ctx, first)
+    assert len(count_conditions) == 3
+
+
+def test_expired_entries_do_not_accumulate(ctx, conn, monkeypatch):
+    """FR-012. The key includes the worktree path and the branch, so a long-running process
+    that watched items come and go could otherwise grow one entry per key ever seen."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(operations, "_monotonic", lambda: clock["now"])
+    item = _item(conn)
+
+    for step in range(20):
+        clock["now"] = 1000.0 + step * (operations.LOCAL_SIGNAL_TTL_SECONDS + 0.1)
+        with db.transaction(conn):
+            db.update_work_item_columns(conn, item.id, branch=f"robot-army/42-take-{step}")
+        operations.local_resume_signals(ctx, db.get_work_item(conn, item.id))
+
+    assert len(operations._LOCAL_SIGNAL_CACHE) == 1, "expired entries are purged on insert"
 
 
 def test_the_remote_signals_are_served_from_cache_inside_the_window(ctx, conn):

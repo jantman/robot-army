@@ -84,7 +84,8 @@ uv run robot-army log --limit 1
 ```
 
 **Expected**: a `web.stop` record whose detail carries `refused_cross_site` with the number of
-reads this run turned away.
+reads this run turned away, and *no* record at all for any individual refused read — the two
+`web.*` records a quiet run leaves are `web.start` and `web.stop`.
 
 ---
 
@@ -120,11 +121,14 @@ Then confirm acting on an item clears it — hold and release an item, and reloa
 
 ```bash
 uv run robot-army hold <id> --reason quickstart
-uv run robot-army release <id>
+uv run robot-army unhold <id>
 curl -sS http://127.0.0.1:8420/interrupted | grep -o 'checkout signals[^<]*'
 ```
 
-**Expected**: `read just now` — the cache was dropped for that item.
+**Expected**: `read just now` — the cache was dropped for that item. (The terminal path shown
+here proves the render; the *invalidation* itself is driven by the web `POST`, which
+`tests/unit/test_web_actions.py` asserts directly, because reaching it by hand needs a real
+issue in `interrupted`.)
 
 ---
 
@@ -146,7 +150,8 @@ curl -sS -H 'Accept: application/json' 'http://127.0.0.1:8420/log?item=999999' \
 
 **Expected**: `bytes_scanned` no greater than 8388608. If the log directory is larger than the
 budget, `truncated` is `true`, `has_more` is `true`, and `next_cursor` is set — follow it and the
-scan continues from where it stopped rather than starting over.
+scan continues from where it stopped rather than starting over. Measured against an 18 MB log
+directory on 2026-09-04: `truncated: True`, `bytes_scanned: 8388411`, 51 ms.
 
 Confirm the ordinary page is unchanged:
 
@@ -174,15 +179,18 @@ wait
 
 **Expected**: roughly half what the same command reports before this feature.
 
-Cheaper and just as conclusive — the two capacity readings on one page must agree:
+Cheaper and just as conclusive — one reading, so there is only one to report:
 
 ```bash
 curl -sS -H 'Accept: application/json' http://127.0.0.1:8420/queue \
-  | python3 -m json.tool | grep -A6 '"capacity"'
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["capacity"])'
 ```
 
-**Expected**: the chrome's capacity block and the queue's own capacity block report identical
-numbers, every time. Before this feature they were two observations moments apart.
+**Expected**: one capacity block. The `?json` representation merges the chrome into the
+payload, so the chrome's reading and the queue body's reading occupy the same key — which is
+exactly why they used to be able to disagree and now cannot.
+`tests/unit/test_web_render.py::test_the_queue_reads_one_observation_of_a_moving_machine`
+proves the count by answering differently on every call and asserting only one was made.
 
 ---
 

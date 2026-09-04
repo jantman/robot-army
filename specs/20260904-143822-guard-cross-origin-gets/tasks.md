@@ -37,7 +37,7 @@ Single project. Source at `src/robot_army/`, tests at `tests/unit/` and `tests/i
 here establishes the file the counting tests live in, because three later phases add to it and
 creating it three times would conflict.
 
-- [ ] T001 Create `tests/unit/test_web_read_cost.py` with a module docstring naming its subject — the *cost* of a served read, counted rather than asserted by construction — plus imports and the shared fixtures the counting tests need: a `counting_condition` helper that wraps `operations.worktree.condition` and records calls, and a `counting_snapshot` helper that wraps `robot_army.capacity.snapshot`. No test cases yet.
+- [X] T001 Create `tests/unit/test_web_read_cost.py` with a module docstring naming its subject — the *cost* of a served read, counted rather than asserted by construction — plus imports and the shared fixtures the counting tests need: a `counting_condition` helper that wraps `operations.worktree.condition` and records calls, and a `counting_snapshot` helper that wraps `robot_army.capacity.snapshot`. No test cases yet.
 
 **Checkpoint**: `uv run pytest tests/unit/test_web_read_cost.py` collects zero tests and passes.
 
@@ -50,9 +50,9 @@ reads. Both are trivial in isolation and both must exist before the stories that
 
 **⚠️ CRITICAL**: no user story work begins until this phase is complete.
 
-- [ ] T002 [P] Add `LOCAL_SIGNAL_TTL_SECONDS = 5.0` to `src/robot_army/operations.py`, beside `REMOTE_SIGNAL_TTL_SECONDS`, with a comment giving the reasoning from research R6: below the default `[web] refresh_seconds = 10` so an open page still observes the worktree afresh on every refresh, above the burst window so a flood collapses to one observation per item per five seconds.
-- [ ] T003 [P] Add `LOG_SCAN_BLOCK_BYTES = 65536` and `LOG_SCAN_BUDGET_BYTES = 8 * 1024 * 1024` to `src/robot_army/operations.py`, near `LOG_PAGE_SIZE`, each with the reasoning from research R4 at the definition.
-- [ ] T004 Extract the expiry purge shared by both signal caches into `operations._purge_expired(cache, ttl, now)` in `src/robot_army/operations.py`, and call it from the existing `_REMOTE_SIGNAL_CACHE` insert. Behaviour of the remote cache must not change; `tests/unit/test_resume_signals.py` must still pass untouched.
+- [X] T002 [P] Add `LOCAL_SIGNAL_TTL_SECONDS = 5.0` to `src/robot_army/operations.py`, beside `REMOTE_SIGNAL_TTL_SECONDS`, with a comment giving the reasoning from research R6: below the default `[web] refresh_seconds = 10` so an open page still observes the worktree afresh on every refresh, above the burst window so a flood collapses to one observation per item per five seconds.
+- [X] T003 [P] Add `LOG_SCAN_BLOCK_BYTES = 65536` and `LOG_SCAN_BUDGET_BYTES = 8 * 1024 * 1024` to `src/robot_army/operations.py`, near `LOG_PAGE_SIZE`, each with the reasoning from research R4 at the definition.
+- [X] T004 Extract the expiry purge shared by both signal caches into `operations._purge_expired(cache, ttl, now)` in `src/robot_army/operations.py`, and call it from the existing `_REMOTE_SIGNAL_CACHE` insert. Behaviour of the remote cache must not change; `tests/unit/test_resume_signals.py` must still pass untouched.
 
 **Checkpoint**: `uv run pytest tests/unit/test_resume_signals.py` passes with no test edited.
 
@@ -69,19 +69,19 @@ no `git`, no audit file read, no process enumeration, no SQLite connection, no a
 
 ### Tests for User Story 1
 
-- [ ] T005 [P] [US1] In `tests/unit/test_web_routing.py`, add a `CROSS_SITE_READ` header dict and cases asserting `403` for `GET` on `/active`, `/queue`, `/interrupted`, `/item/1`, `/log`, `/anomalies`, `/cards`, `/style.css` and `/app.js`, in both the HTML and the `?json` representations, and that the body carries the standard refusal shape (`ok: false`, `code: 3`).
-- [ ] T006 [P] [US1] In `tests/unit/test_web_routing.py`, add cases asserting `200` for the three honest read paths — no origin headers at all (the documented `curl` path), `Sec-Fetch-Site: none` (address bar or bookmark), and `Sec-Fetch-Site: same-origin` with a matching `Origin` — each with a docstring naming why that path must never be refused.
-- [ ] T007 [P] [US1] In `tests/unit/test_web_routing.py`, add a case asserting a read whose `Origin` netloc differs from its `Host` is refused, and one asserting `Sec-Fetch-Site: same-site` is refused, with a docstring recording R2's reason: `check_host` already requires an IP literal or `localhost`, so an honest `same-site` cannot arise here.
-- [ ] T008 [US1] In `tests/unit/test_web_read_cost.py`, add the test that gives this story its name: seed several interrupted items, issue a cross-site `GET /interrupted`, and assert zero calls to `operations.worktree.condition`, zero calls to `capacity.snapshot`, and that no audit file was read — proving the refusal precedes the work rather than merely accompanying it.
-- [ ] T009 [P] [US1] In `tests/unit/test_web_actions.py`, add a case asserting a cross-site `POST` is still refused **and still leaves its audit pair** — the property the early check must not displace. Assert the `web.<action>` record exists with outcome `error`.
-- [ ] T010 [P] [US1] In `tests/integration/test_web_end_to_end.py`, add one round-trip over a real socket asserting a cross-site `GET` is refused with `403`, alongside the existing cross-site `POST` case.
+- [X] T005 [P] [US1] In `tests/unit/test_web_routing.py`, add a `CROSS_SITE_READ` header dict and cases asserting `403` for `GET` on `/active`, `/queue`, `/interrupted`, `/item/1`, `/log`, `/anomalies`, `/cards`, `/style.css` and `/app.js`, in both the HTML and the `?json` representations, and that the body carries the standard refusal shape (`ok: false`, `code: 3`).
+- [X] T006 [P] [US1] In `tests/unit/test_web_routing.py`, add cases asserting `200` for the three honest read paths — no origin headers at all (the documented `curl` path), `Sec-Fetch-Site: none` (address bar or bookmark), and `Sec-Fetch-Site: same-origin` with a matching `Origin` — each with a docstring naming why that path must never be refused.
+- [X] T007 [P] [US1] In `tests/unit/test_web_routing.py`, add a case asserting a read whose `Origin` netloc differs from its `Host` is refused, and one asserting `Sec-Fetch-Site: same-site` is refused, with a docstring recording R2's reason: `check_host` already requires an IP literal or `localhost`, so an honest `same-site` cannot arise here.
+- [X] T008 [US1] In `tests/unit/test_web_read_cost.py`, add the test that gives this story its name: seed several interrupted items, issue a cross-site `GET /interrupted`, and assert zero calls to `operations.worktree.condition`, zero calls to `capacity.snapshot`, and that no audit file was read — proving the refusal precedes the work rather than merely accompanying it.
+- [X] T009 [P] [US1] In `tests/unit/test_web_actions.py`, add a case asserting a cross-site `POST` is still refused **and still leaves its audit pair** — the property the early check must not displace. Assert the `web.<action>` record exists with outcome `error`.
+- [X] T010 [P] [US1] In `tests/integration/test_web_end_to_end.py`, add one round-trip over a real socket asserting a cross-site `GET` is refused with `403`, alongside the existing cross-site `POST` case.
 
 ### Implementation for User Story 1
 
-- [ ] T011 [US1] In `src/robot_army/web/server.py`, generalise `check_same_origin`'s docstring and refusal message from "state-changing request" to "request", keeping the rule itself byte-for-byte unchanged, and adding a paragraph recording R1: why the `POST` call site stays inside `_perform` and this function is now also called before routing.
-- [ ] T012 [US1] In `src/robot_army/web/server.py`, add `refused_cross_site: int` and its lock to `WebApp.__init__`, with a comment stating why the counter lives on `WebApp` rather than on the server class (`handle` receives the app and never the server; a socketless test drives `handle` directly).
-- [ ] T013 [US1] In `src/robot_army/web/server.py`, call `check_same_origin(request)` inside `handle`'s existing `try` block beside `check_host` — before routing, before `app.context()` — for every method **not** in the mutating set, incrementing `app.refused_cross_site` on refusal and returning the same `_bare(pages.refusal_view(...))` response the rebinding refusal already returns.
-- [ ] T014 [US1] In `src/robot_army/web/server.py`, add `refused_cross_site` to the `web.stop` audit record's detail beside `refused_over_capacity`, and extend that call site's comment to state the Principle III exception in the same words as `contracts/read-cost.md` C2, so the two cannot drift.
+- [X] T011 [US1] In `src/robot_army/web/server.py`, generalise `check_same_origin`'s docstring and refusal message from "state-changing request" to "request", keeping the rule itself byte-for-byte unchanged, and adding a paragraph recording R1: why the `POST` call site stays inside `_perform` and this function is now also called before routing.
+- [X] T012 [US1] In `src/robot_army/web/server.py`, add `refused_cross_site: int` and its lock to `WebApp.__init__`, with a comment stating why the counter lives on `WebApp` rather than on the server class (`handle` receives the app and never the server; a socketless test drives `handle` directly).
+- [X] T013 [US1] In `src/robot_army/web/server.py`, call `check_same_origin(request)` inside `handle`'s existing `try` block beside `check_host` — before routing, before `app.context()` — for every method **not** in the mutating set, incrementing `app.refused_cross_site` on refusal and returning the same `_bare(pages.refusal_view(...))` response the rebinding refusal already returns.
+- [X] T014 [US1] In `src/robot_army/web/server.py`, add `refused_cross_site` to the `web.stop` audit record's detail beside `refused_over_capacity`, and extend that call site's comment to state the Principle III exception in the same words as `contracts/read-cost.md` C2, so the two cannot drift.
 
 **Checkpoint**: US1 is complete and independently demonstrable — quickstart check 1 passes end
 to end, and the finding is closed even if nothing else in this feature ships.
@@ -99,24 +99,24 @@ the TTL and confirm they are made again.
 
 ### Tests for User Story 2
 
-- [ ] T015 [P] [US2] In `tests/unit/test_resume_signals.py`, replace `test_the_local_signals_are_recomputed_on_every_call` with `test_the_local_signals_are_reused_inside_the_window` — three calls, one observation — and rewrite its docstring to record what changed and why the old rule was right until the flood made it expensive.
-- [ ] T016 [P] [US2] In `tests/unit/test_resume_signals.py`, add a case moving `operations._monotonic` past `LOCAL_SIGNAL_TTL_SECONDS` and asserting the observation is made again.
-- [ ] T017 [P] [US2] In `tests/unit/test_resume_signals.py`, add cases asserting the cache key covers every input `worktree.condition` is given: changing the branch, the worktree path, and the base ref each force a fresh observation (FR-007).
-- [ ] T018 [P] [US2] In `tests/unit/test_resume_signals.py`, add a case asserting a `BoundaryError` is reported as `worktree_error` and **not** cached — the next call tries again and a recovery is visible (FR-008).
-- [ ] T019 [P] [US2] In `tests/unit/test_resume_signals.py`, add a case asserting `local_signals_age_seconds` is `0` on a fresh observation and the elapsed whole seconds on a reused one (FR-009), and one asserting `resume_signals` carries both age fields without either overwriting the other.
-- [ ] T020 [P] [US2] In `tests/unit/test_resume_signals.py`, add cases for `forget_resume_signals(item_id)`: it drops that item's local and remote entries and leaves another item's alone (FR-010); and for the purge, that entries older than the TTL do not accumulate across many distinct keys (FR-012).
-- [ ] T021 [P] [US2] In `tests/unit/test_web_views.py`, add a case asserting `/interrupted` renders the checkout-signal age footnote — "read just now" when fresh, "Ns old (cached)" when reused — beside the existing GitHub one.
-- [ ] T022 [US2] In `tests/unit/test_web_read_cost.py`, add the counting test: ten interrupted items, two renders of `/interrupted` inside the window, and at most the observations of a single render (SC-004).
-- [ ] T023 [P] [US2] In `tests/unit/test_web_actions.py`, add a case asserting a successful `POST` on an item drops that item's cached signals, so the page rendered after the action reflects it (FR-010).
+- [X] T015 [P] [US2] In `tests/unit/test_resume_signals.py`, replace `test_the_local_signals_are_recomputed_on_every_call` with `test_the_local_signals_are_reused_inside_the_window` — three calls, one observation — and rewrite its docstring to record what changed and why the old rule was right until the flood made it expensive.
+- [X] T016 [P] [US2] In `tests/unit/test_resume_signals.py`, add a case moving `operations._monotonic` past `LOCAL_SIGNAL_TTL_SECONDS` and asserting the observation is made again.
+- [X] T017 [P] [US2] In `tests/unit/test_resume_signals.py`, add cases asserting the cache key covers every input `worktree.condition` is given: changing the branch, the worktree path, and the base ref each force a fresh observation (FR-007).
+- [X] T018 [P] [US2] In `tests/unit/test_resume_signals.py`, add a case asserting a `BoundaryError` is reported as `worktree_error` and **not** cached — the next call tries again and a recovery is visible (FR-008).
+- [X] T019 [P] [US2] In `tests/unit/test_resume_signals.py`, add a case asserting `local_signals_age_seconds` is `0` on a fresh observation and the elapsed whole seconds on a reused one (FR-009), and one asserting `resume_signals` carries both age fields without either overwriting the other.
+- [X] T020 [P] [US2] In `tests/unit/test_resume_signals.py`, add cases for `forget_resume_signals(item_id)`: it drops that item's local and remote entries and leaves another item's alone (FR-010); and for the purge, that entries older than the TTL do not accumulate across many distinct keys (FR-012).
+- [X] T021 [P] [US2] In `tests/unit/test_web_views.py`, add a case asserting `/interrupted` renders the checkout-signal age footnote — "read just now" when fresh, "Ns old (cached)" when reused — beside the existing GitHub one.
+- [X] T022 [US2] In `tests/unit/test_web_read_cost.py`, add the counting test: ten interrupted items, two renders of `/interrupted` inside the window, and at most the observations of a single render (SC-004).
+- [X] T023 [P] [US2] In `tests/unit/test_web_actions.py`, add a case asserting a successful `POST` on an item drops that item's cached signals, so the page rendered after the action reflects it (FR-010).
 
 ### Implementation for User Story 2
 
-- [ ] T024 [US2] In `src/robot_army/operations.py`, add `_LOCAL_SIGNAL_CACHE` and `_LOCAL_SIGNAL_LOCK` beside the remote pair, with a docstring stating the key from `data-model.md` §1 and why the two caches stay separate rather than merging (different TTLs, for different reasons — the split the existing code already encodes).
-- [ ] T025 [US2] In `src/robot_army/operations.py`, rewrite `local_resume_signals` to read the cache, observe on a miss, cache only a successful observation, purge expired entries on insert via `_purge_expired`, and return `local_signals_age_seconds` on every path. Replace the "**Recomputed on every call**" docstring with the reasoning that replaces it, keeping the original sentence's point — the maintainer may be in the worktree with an editor open — and explaining why five seconds preserves it.
-- [ ] T026 [US2] In `src/robot_army/operations.py`, add `forget_resume_signals(item_id)` dropping both caches' entries for that item, and extend `clear_resume_signal_cache` to clear both dicts.
-- [ ] T027 [US2] In `src/robot_army/web/server.py`, call `operations.forget_resume_signals(entity_id)` from `_perform` after the body succeeds, when `entity_type` is `work_item`, with a comment naming it as the single choke point every `POST` passes through.
-- [ ] T028 [US2] In `src/robot_army/web/pages.py`, pass `local_signals_age_seconds` through `_signal_row` and render it in `_signals_cell` as its own footnote, with a comment stating why it is a second line rather than merged with the GitHub age.
-- [ ] T029 [US2] In `tests/conftest.py`, confirm the three web fixtures' `clear_resume_signal_cache()` calls now clear both caches, and add a comment saying so — a local cache surviving between tests would make them order-dependent.
+- [X] T024 [US2] In `src/robot_army/operations.py`, add `_LOCAL_SIGNAL_CACHE` and `_LOCAL_SIGNAL_LOCK` beside the remote pair, with a docstring stating the key from `data-model.md` §1 and why the two caches stay separate rather than merging (different TTLs, for different reasons — the split the existing code already encodes).
+- [X] T025 [US2] In `src/robot_army/operations.py`, rewrite `local_resume_signals` to read the cache, observe on a miss, cache only a successful observation, purge expired entries on insert via `_purge_expired`, and return `local_signals_age_seconds` on every path. Replace the "**Recomputed on every call**" docstring with the reasoning that replaces it, keeping the original sentence's point — the maintainer may be in the worktree with an editor open — and explaining why five seconds preserves it.
+- [X] T026 [US2] In `src/robot_army/operations.py`, add `forget_resume_signals(item_id)` dropping both caches' entries for that item, and extend `clear_resume_signal_cache` to clear both dicts.
+- [X] T027 [US2] In `src/robot_army/web/server.py`, call `operations.forget_resume_signals(entity_id)` from `_perform` after the body succeeds, when `entity_type` is `work_item`, with a comment naming it as the single choke point every `POST` passes through.
+- [X] T028 [US2] In `src/robot_army/web/pages.py`, pass `local_signals_age_seconds` through `_signal_row` and render it in `_signals_cell` as its own footnote, with a comment stating why it is a second line rather than merged with the GitHub age.
+- [X] T029 [US2] In `tests/conftest.py`, confirm the three web fixtures' `clear_resume_signal_cache()` calls now clear both caches, and add a comment saying so — a local cache surviving between tests would make them order-dependent.
 
 **Checkpoint**: US2 complete — quickstart check 2 passes; `/interrupted` and `/item/<id>` show
 the checkout-signal age.
@@ -134,23 +134,23 @@ and that following `next_cursor` continues rather than restarting.
 
 ### Tests for User Story 3
 
-- [ ] T030 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting a file is never read whole: monkeypatch `Path.read_text` to fail and assert a page still renders, with a docstring naming the allocation the old implementation made.
-- [ ] T031 [P] [US3] In `tests/unit/test_web_log.py`, add cases for the block boundary: a record longer than `LOG_SCAN_BLOCK_BYTES` is returned whole, and a file whose size is an exact multiple of the block size reads correctly — the two off-by-one shapes a backwards block reader gets wrong.
-- [ ] T032 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting a partially written final line is still counted as one unparseable line and reported, unchanged from today — the interruption path the constitution requires be tested.
-- [ ] T033 [P] [US3] In `tests/unit/test_web_log.py`, add cases for the byte budget: a filter matching nothing across files summing to more than the budget returns `truncated: true`, `has_more: true`, a `next_cursor`, and `bytes_scanned <= LOG_SCAN_BUDGET_BYTES`; and following that cursor returns records the first page did not.
-- [ ] T034 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting a cursor in the old `{"f","n"}` shape restarts from the newest page rather than erroring (Principle V, and `_decode_cursor`'s documented behaviour).
-- [ ] T035 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting a cursor whose offset is `0` advances to the previous file rather than re-reading the one it names.
-- [ ] T036 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting an append to today's file between two page requests does not cause a record to repeat — the property the byte offset buys over the match count.
-- [ ] T037 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting `/log` renders the truncation notice when `truncated` is true and does not when it is false, so an empty page is never mistaken for an empty history.
-- [ ] T038 [US3] In `tests/unit/test_web_read_cost.py`, add the measured test for SC-005: a log directory of at least 100 MB, a filter matching nothing, completing under two seconds with `bytes_scanned` inside the budget.
+- [X] T030 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting a file is never read whole: monkeypatch `Path.read_text` to fail and assert a page still renders, with a docstring naming the allocation the old implementation made.
+- [X] T031 [P] [US3] In `tests/unit/test_web_log.py`, add cases for the block boundary: a record longer than `LOG_SCAN_BLOCK_BYTES` is returned whole, and a file whose size is an exact multiple of the block size reads correctly — the two off-by-one shapes a backwards block reader gets wrong.
+- [X] T032 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting a partially written final line is still counted as one unparseable line and reported, unchanged from today — the interruption path the constitution requires be tested.
+- [X] T033 [P] [US3] In `tests/unit/test_web_log.py`, add cases for the byte budget: a filter matching nothing across files summing to more than the budget returns `truncated: true`, `has_more: true`, a `next_cursor`, and `bytes_scanned <= LOG_SCAN_BUDGET_BYTES`; and following that cursor returns records the first page did not.
+- [X] T034 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting a cursor in the old `{"f","n"}` shape restarts from the newest page rather than erroring (Principle V, and `_decode_cursor`'s documented behaviour).
+- [X] T035 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting a cursor whose offset is `0` advances to the previous file rather than re-reading the one it names.
+- [X] T036 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting an append to today's file between two page requests does not cause a record to repeat — the property the byte offset buys over the match count.
+- [X] T037 [P] [US3] In `tests/unit/test_web_log.py`, add a case asserting `/log` renders the truncation notice when `truncated` is true and does not when it is false, so an empty page is never mistaken for an empty history.
+- [X] T038 [US3] In `tests/unit/test_web_read_cost.py`, add the measured test for SC-005: a log directory of at least 100 MB, a filter matching nothing, completing under two seconds with `bytes_scanned` inside the budget.
 
 ### Implementation for User Story 3
 
-- [ ] T039 [US3] In `src/robot_army/operations.py`, add `_read_lines_backwards(path, *, end_offset, block=LOG_SCAN_BLOCK_BYTES)` yielding `(line, start_offset)` newest-first over `[0, end_offset)`, carrying the partial line at the front of each block into the next, with a docstring stating why blocks rather than `mmap` (R4: the newest file is being appended to while it is read).
-- [ ] T040 [US3] In `src/robot_army/operations.py`, rewrite `_scan_file_backwards` on top of it: take `end_offset` and a byte budget, return `(records, next_end_offset, skipped, bytes_read)`, drop the `skip`/`matched` machinery, and keep the `OSError` path that counts a file that vanished between the glob and the read.
-- [ ] T041 [US3] In `src/robot_army/operations.py`, change `_encode_cursor`/`_decode_cursor` to the `{"f","b"}` payload per `data-model.md` §3, keeping the "unreadable restarts from the newest page" behaviour and extending its docstring to say a cursor from the previous version is exactly that case.
-- [ ] T042 [US3] In `src/robot_army/operations.py`, rewrite `read_log_page`'s file loop to carry a byte budget across files, resume at the cursor's offset, advance to the previous file when an offset reaches `0`, and add `truncated` and `bytes_scanned` to the returned payload.
-- [ ] T043 [US3] In `src/robot_army/web/pages.py`, render the truncation notice in `log_view` above the "older records →" link when `payload["truncated"]`, naming the budget in the message.
+- [X] T039 [US3] In `src/robot_army/operations.py`, add `_read_lines_backwards(path, *, end_offset, block=LOG_SCAN_BLOCK_BYTES)` yielding `(line, start_offset)` newest-first over `[0, end_offset)`, carrying the partial line at the front of each block into the next, with a docstring stating why blocks rather than `mmap` (R4: the newest file is being appended to while it is read).
+- [X] T040 [US3] In `src/robot_army/operations.py`, rewrite `_scan_file_backwards` on top of it: take `end_offset` and a byte budget, return `(records, next_end_offset, skipped, bytes_read)`, drop the `skip`/`matched` machinery, and keep the `OSError` path that counts a file that vanished between the glob and the read.
+- [X] T041 [US3] In `src/robot_army/operations.py`, change `_encode_cursor`/`_decode_cursor` to the `{"f","b"}` payload per `data-model.md` §3, keeping the "unreadable restarts from the newest page" behaviour and extending its docstring to say a cursor from the previous version is exactly that case.
+- [X] T042 [US3] In `src/robot_army/operations.py`, rewrite `read_log_page`'s file loop to carry a byte budget across files, resume at the cursor's offset, advance to the previous file when an offset reaches `0`, and add `truncated` and `bytes_scanned` to the returned payload.
+- [X] T043 [US3] In `src/robot_army/web/pages.py`, render the truncation notice in `log_view` above the "older records →" link when `payload["truncated"]`, naming the budget in the message.
 
 **Checkpoint**: US3 complete — quickstart check 3 passes; the existing paging and filtering tests
 pass unchanged except where the cursor shape is the subject.
@@ -167,16 +167,16 @@ chrome's capacity block and the queue body's capacity block are equal.
 
 ### Tests for User Story 4
 
-- [ ] T044 [P] [US4] In `tests/unit/test_web_read_cost.py`, add cases asserting exactly one `capacity.snapshot` per render for `/queue`, `/active`, `/interrupted` and `/item/<id>`, and **zero** for a `404`, a `405`, and a static asset.
-- [ ] T045 [P] [US4] In `tests/unit/test_web_render.py`, add a case asserting the chrome's capacity block and `/queue`'s own capacity block report identical numbers in the `?json` representation — the correctness half of this story, not just the cost half.
-- [ ] T046 [P] [US4] In `tests/unit/test_web_render.py`, add a case asserting `pages.chrome` and `pages.queue_view` still work when called directly with no snapshot supplied, so the `None` default is covered rather than assumed.
+- [X] T044 [P] [US4] In `tests/unit/test_web_read_cost.py`, add cases asserting exactly one `capacity.snapshot` per render for `/queue`, `/active`, `/interrupted` and `/item/<id>`, and **zero** for a `404`, a `405`, and a static asset.
+- [X] T045 [P] [US4] In `tests/unit/test_web_render.py`, add a case asserting the chrome's capacity block and `/queue`'s own capacity block report identical numbers in the `?json` representation — the correctness half of this story, not just the cost half.
+- [X] T046 [P] [US4] In `tests/unit/test_web_render.py`, add a case asserting `pages.chrome` and `pages.queue_view` still work when called directly with no snapshot supplied, so the `None` default is covered rather than assumed.
 
 ### Implementation for User Story 4
 
-- [ ] T047 [US4] In `src/robot_army/web/pages.py`, give `chrome` a `capacity: CapacitySnapshot | None = None` keyword, computing one only when not given, with a comment explaining that in a served request it is always supplied and the default exists for direct callers.
-- [ ] T048 [US4] In `src/robot_army/web/pages.py`, give `queue_view` the same keyword and use it for both `ordering_mod.plan(...)` and the rendered capacity block.
-- [ ] T049 [US4] In `src/robot_army/web/server.py`, compute the snapshot once in `handle` beside `level` and `include_simulated`, hand it to `pages.chrome`, and put it in the handler `params` under `"capacity"`; extend the existing "resolved once, here" comment to cover it, since the argument it already makes about the effect level is the same argument.
-- [ ] T050 [US4] In `src/robot_army/web/server.py`, pass `params["capacity"]` from `view_queue` into `pages.queue_view`, alongside the `chrome_payload` it already threads for the same reason.
+- [X] T047 [US4] In `src/robot_army/web/pages.py`, give `chrome` a `capacity: CapacitySnapshot | None = None` keyword, computing one only when not given, with a comment explaining that in a served request it is always supplied and the default exists for direct callers.
+- [X] T048 [US4] In `src/robot_army/web/pages.py`, give `queue_view` the same keyword and use it for both `ordering_mod.plan(...)` and the rendered capacity block.
+- [X] T049 [US4] In `src/robot_army/web/server.py`, compute the snapshot once in `handle` beside `level` and `include_simulated`, hand it to `pages.chrome`, and put it in the handler `params` under `"capacity"`; extend the existing "resolved once, here" comment to cover it, since the argument it already makes about the effect level is the same argument.
+- [X] T050 [US4] In `src/robot_army/web/server.py`, pass `params["capacity"]` from `view_queue` into `pages.queue_view`, alongside the `chrome_payload` it already threads for the same reason.
 
 **Checkpoint**: all four stories independently functional.
 
@@ -184,11 +184,11 @@ chrome's capacity block and the queue body's capacity block are equal.
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T051 [P] Update `README.md`'s "Read this part" list: amend the same-origin bullet to say the check now covers reads as well as state changes and why absent headers are still allowed; amend the connection-bounds bullet to mention `refused_cross_site` beside `refused_over_capacity` in `web.stop`; and add one bullet stating what a read now costs — one capacity observation, one checkout observation per item per five seconds, at most 8 MB of audit log per page — with the two constants' location named.
-- [ ] T052 [P] Update `docs/state.md` where it says the local resume signals are "computed on demand and never stored", so the document and the code agree about the five-second reuse and the visible age.
-- [ ] T053 Run `uv run ruff check src tests` and `uv run ruff format --check src tests`; fix anything raised.
-- [ ] T054 Run the full suite, `uv run pytest`, and confirm every test passes with none skipped or xfailed by this feature.
-- [ ] T055 Walk `quickstart.md` checks 1 through 5 against a live `robot-army serve` and correct any command or expected output that does not match what actually happens.
+- [X] T051 [P] Update `README.md`'s "Read this part" list: amend the same-origin bullet to say the check now covers reads as well as state changes and why absent headers are still allowed; amend the connection-bounds bullet to mention `refused_cross_site` beside `refused_over_capacity` in `web.stop`; and add one bullet stating what a read now costs — one capacity observation, one checkout observation per item per five seconds, at most 8 MB of audit log per page — with the two constants' location named.
+- [X] T052 [P] Update `docs/state.md` where it says the local resume signals are "computed on demand and never stored", so the document and the code agree about the five-second reuse and the visible age.
+- [X] T053 Run `uv run ruff check src tests`; fix anything raised. (`ruff format --check` is **not** run: it is not in CI — `.github/workflows` runs `ruff check` only — and the repository has never been formatted with it, so running it would rewrite 124 unrelated files.)
+- [X] T054 Run the full suite, `uv run pytest`, and confirm every test passes with none skipped or xfailed by this feature.
+- [X] T055 Walk `quickstart.md` checks 1 through 5 against a live `robot-army serve` and correct any command or expected output that does not match what actually happens.
 
 ---
 

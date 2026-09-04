@@ -115,9 +115,40 @@ def test_interrupted_view_carries_the_four_signals_and_their_age(web, conn):
         "issue_closed",
         "open_pr",
         "signals_age_seconds",
+        "local_signals_age_seconds",
         "worktree_missing",
     ):
         assert field in row, field
+
+
+def test_the_interrupted_card_says_how_old_its_checkout_signals_are(web, conn, monkeypatch):
+    """RA-14 reuses the checkout observation for a few seconds, so the page must say so.
+
+    Two footnotes, not one: the checkout half and the GitHub half are reused on windows an
+    order of magnitude apart, so a single age would have to misreport one of them. The clock
+    is moved rather than slept on — three seconds of real time to prove a string.
+    """
+    from robot_army import operations
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(operations, "_monotonic", lambda: clock["now"])
+    item_id = seed_item(conn, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+    # Both halves short-circuit on an item with no branch, and a short-circuit is not a
+    # cache hit — so the row has to be the shape that actually costs something.
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn, item_id, worktree_path="/nowhere", branch="robot-army/42"
+        )
+
+    first = web.get("/interrupted").text
+    assert "checkout signals read just now" in first
+    assert "GitHub signals computed just now" in first
+
+    clock["now"] = 1003.0
+    second = web.get("/interrupted").text
+    assert "checkout signals 3s old (cached)" in second
+    assert "GitHub signals 3s old (cached)" in second
 
 
 def test_interrupted_view_lists_awaiting_review_separately(web, conn):

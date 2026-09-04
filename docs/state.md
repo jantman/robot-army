@@ -538,6 +538,15 @@ Nothing resumes automatically. `robot-army status` lists what is waiting; `robot
 whether the issue is closed, and whether a PR is open — computed on demand, never stored,
 because a stored copy would be wrong the moment I touched the directory.
 
+"Never stored" is exact: nothing is written to disk or to the database. Both halves *are*
+reused in memory for a short window — five seconds for the two that read the checkout, a
+minute for the two that ask GitHub — and every rendered value carries its own age, so a
+reused answer says so on the page rather than passing itself off as current. The five seconds
+sits below the ten-second page refresh on purpose, so a page left open still observes the
+checkout afresh on every refresh; what the window removes is a page on another site asking
+for `/interrupted` in a loop and forking `git` per card at whatever rate it can send. Acting
+on an item drops both halves for that item immediately.
+
 ## Interrupted at X → result on next start
 
 The full table is in

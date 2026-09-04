@@ -278,6 +278,101 @@ def test_the_rebinding_refusal_renders_without_touching_the_database(web, layout
     assert web.get("/active", headers=REBOUND).status == 403
 
 
+# -- cross-site reads (RA-14) ------------------------------------------------
+#
+# ``check_same_origin`` used to run only inside ``_perform``, which only POSTs reach. Reads
+# were unchecked, and several of them are expensive: ``/interrupted`` forks git per card,
+# ``/log`` read whole audit files, every page enumerated ``/proc``. A page on another site
+# looping ``fetch(..., {mode:'no-cors'})`` never sees a response — and does not need to.
+
+
+CROSS_SITE_READ = {
+    "origin": "https://evil.example",
+    "referer": "https://evil.example/page",
+    "sec-fetch-site": "cross-site",
+}
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/active", "/queue", "/interrupted", "/item/1", "/log", "/anomalies", "/cards",
+     "/style.css", "/app.js"],
+)
+def test_a_cross_site_read_is_refused(web, conn, path):
+    """Including the two static assets. They cost nothing to serve, so refusing them buys
+    little — it is done because "every read, one rule" is a smaller thing to hold than
+    "every read except two"."""
+    seed_item(conn, state="interrupted")
+    assert web.get(path, headers=CROSS_SITE_READ).status == 403, path
+
+
+def test_a_cross_site_read_is_refused_in_the_json_representation_too(web, conn):
+    seed_item(conn, state="interrupted")
+    response = web.get_json("/log", headers=CROSS_SITE_READ)
+    assert response.status == 403
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["code"] == 3
+
+
+def test_a_client_that_sends_no_origin_headers_can_still_read(web):
+    """``curl`` sends neither, and the quickstart drives every control with it. Refusing
+    those would break the documented terminal path to protect against a client that has no
+    need of forgery — it can reach the port directly, which is the accepted model."""
+    for path in GET_VIEWS:
+        assert web.get(path).status == 200, path
+
+
+def test_the_address_bar_and_a_bookmark_can_still_read(web):
+    """``Sec-Fetch-Site: none`` is what a browser sends for a navigation the user started
+    themselves. It is how the interface is opened."""
+    for path in GET_VIEWS:
+        assert web.get(path, headers={"sec-fetch-site": "none"}).status == 200, path
+
+
+def test_a_link_on_a_page_this_server_rendered_can_still_read(web):
+    for path in GET_VIEWS:
+        response = web.get(
+            path,
+            headers={"sec-fetch-site": "same-origin", "origin": "http://localhost:8420"},
+        )
+        assert response.status == 200, path
+
+
+def test_a_read_whose_origin_is_not_the_host_is_refused(web):
+    response = web.get("/active", headers={"origin": "http://192.168.1.99:8420"})
+    assert response.status == 403
+    assert "192.168.1.99" in response.text
+
+
+def test_a_same_site_read_is_refused_like_a_cross_site_one(web):
+    """``check_host`` already requires an IP literal or ``localhost``, and an IP literal has
+    no registrable domain to share — so an honest ``same-site`` cannot arise here. Admitting
+    it would be a second, subtly weaker rule beside the first, which is the shape that rots.
+    """
+    assert web.get("/active", headers={"sec-fetch-site": "same-site"}).status == 403
+
+
+def test_the_cross_site_read_refusal_renders_without_touching_the_database(web, layout):
+    """Checked before routing, before ``app.context()`` — so it still answers when nothing
+    else would, and so it opens nothing on the way to refusing."""
+    layout.db_path.unlink()
+    assert web.get("/active", headers=CROSS_SITE_READ).status == 403
+
+
+def test_refused_cross_site_reads_are_counted_for_the_stop_record(web):
+    """No record per refusal: writing one needs a Context, which is the SQLite connection
+    and audit handle the refusal exists to avoid opening. The run's total goes into
+    ``web.stop`` instead — the same trade the connection cap made for the same reason."""
+    assert web.app.refused_cross_site == 0
+    for _ in range(4):
+        web.get("/queue", headers=CROSS_SITE_READ)
+    assert web.app.refused_cross_site == 4
+
+    web.get("/queue")
+    assert web.app.refused_cross_site == 4, "an honest read is not counted"
+
+
 # -- dead-end pages do not poll ----------------------------------------------
 
 

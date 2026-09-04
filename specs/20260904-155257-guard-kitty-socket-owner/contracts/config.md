@@ -37,7 +37,7 @@ Both are warnings, never errors: the configuration still loads and the daemon st
 | Condition | Message |
 |-----------|---------|
 | pattern contains no `*` or `?` | unchanged from today, word for word |
-| the pattern's fixed leading directory is writable by others without the sticky bit, or is owned by a third party | states that another local user could place a socket there, names the recommended `$XDG_RUNTIME_DIR/mykitty-*`, and says the daemon will refuse any candidate it does not own |
+| the pattern's fixed leading directory fails the acceptance rule's directory clause | states that another local user could place a socket there, quotes the reason the check gave — the directory at fault is often not the one in the pattern, because the walk goes all the way up — names the recommended `$XDG_RUNTIME_DIR/mykitty-*`, and says the daemon will refuse any candidate it does not own |
 
 The fixed leading directory is the longest prefix of the pattern containing no wildcard
 character — for `/tmp/mykitty-*` that is `/tmp`, which is world-writable *with* the sticky bit

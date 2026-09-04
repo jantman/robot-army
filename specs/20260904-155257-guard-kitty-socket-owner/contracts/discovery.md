@@ -12,6 +12,9 @@ this order and the first failure is the refusal reason.
    and not its target — which is the point (research R1).
 3. `st.st_uid == os.getuid()`.
 4. For the candidate's parent directory and every directory above it up to the filesystem root:
+   - the directory is not itself a symbolic link — refused by name, because a symlink's own
+     mode is `0777` on Linux and the mode clause below would otherwise refuse it with a reason
+     that says nothing true about it, and
    - the directory is owned by `os.getuid()` or by uid 0, and
    - it is not writable by group or other, **or** it carries the sticky bit.
 

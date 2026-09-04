@@ -35,6 +35,8 @@ Reasons, exhaustive:
 - `directory <path> is writable by others without the sticky bit` — the name could be swapped
   between the check and the connection.
 - `directory <path> is owned by uid <n>` — its owner can replace entries in it whatever the mode.
+- `directory <path> is a symbolic link` — what it resolves to may differ by the time the name is
+  used, and following it to find out is the substitution being refused.
 - `cannot be inspected: <errno description>` — vanished, or a directory on the path is unreadable.
 
 The reasons are stable strings because three surfaces quote them and a test asserts on them. A

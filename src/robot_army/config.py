@@ -317,26 +317,28 @@ class WorkerConfig:
     binary: str = "claude"
 
 
-def _shared_socket_directory(pattern: str) -> str | None:
-    """The directory a ``socket_glob`` is rooted in, if other users can write to it.
+def _unsafe_socket_root(pattern: str) -> str | None:
+    """Why the directory a ``socket_glob`` is rooted in cannot be trusted, if it cannot.
 
-    "Rooted in" is the longest leading run of the pattern that contains no wildcard —
+    "Rooted in" is the longest leading run of the pattern containing no wildcard —
     ``/tmp`` for ``/tmp/mykitty-*`` — because that is the part naming a real directory
     rather than a set of names. A directory that does not exist yet is not judged: there
     is nothing to look at, and discovery will refuse whatever appears there if it is
     unsafe.
 
-    Note what this deliberately does *not* flag: ``/tmp`` itself. It is world-writable
-    but sticky, so nobody can swap an entry in it, and warning about the setup the README
+    Returns the reason rather than the path so the warning says what was actually wrong.
+    The directory judged and the directory at fault are often not the same one — the walk
+    goes all the way up — and a warning naming the wrong directory sends the reader to fix
+    something that is not broken.
+
+    Note what this deliberately does *not* flag: ``/tmp`` itself. It is world-writable but
+    sticky, so nobody can swap an entry in it, and warning about the setup the README
     shipped for two milestones would be crying wolf.
     """
     wildcard = min((i for i in (pattern.find("*"), pattern.find("?")) if i != -1), default=-1)
     fixed = pattern if wildcard == -1 else pattern[:wildcard]
     directory = Path(fixed.removeprefix("unix:")).parent
-    if not directory.is_dir():
-        return None
-    reason = unsafe_ancestor(directory)
-    return None if reason is None else str(directory)
+    return unsafe_ancestor(directory) if directory.is_dir() else None
 
 
 def default_socket_glob() -> str:
@@ -1084,18 +1086,18 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
             f"[terminal] socket_glob {socket_glob!r} contains no wildcard; kitty appends "
             "its PID to listen_on, so this will not match a live socket after a restart"
         )
-    shared = _shared_socket_directory(socket_glob)
-    if shared is not None:
+    unsafe_root = _unsafe_socket_root(socket_glob)
+    if unsafe_root is not None:
         # A warning rather than an error, deliberately (RA-15). Discovery already refuses
         # a candidate it does not own, so the daemon is safe with this setting; refusing
         # to load would stop it on a machine configured exactly as the README used to
         # say, and a fix that demands an edit before the daemon runs again is a fix that
         # gets reverted.
         warnings.append(
-            f"[terminal] socket_glob {socket_glob!r} is rooted in {shared}, which other "
-            "local users can write to; another user could place a socket there. The "
-            "daemon refuses any candidate it does not own, so this is safe but not "
-            "advised — prefer $XDG_RUNTIME_DIR/mykitty-* and the matching "
+            f"[terminal] socket_glob {socket_glob!r} is rooted somewhere another local "
+            f"user could place a socket: {unsafe_root}. The daemon refuses any candidate "
+            "it does not own, so this is safe but not advised — prefer "
+            "$XDG_RUNTIME_DIR/mykitty-* and the matching "
             "`listen_on unix:${XDG_RUNTIME_DIR}/mykitty` in kitty.conf"
         )
     terminal = TerminalConfig(

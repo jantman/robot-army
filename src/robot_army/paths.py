@@ -48,6 +48,13 @@ def unsafe_ancestor(path: Path) -> str | None:
             info = os.lstat(directory)
         except OSError as exc:
             return f"directory {directory} cannot be inspected: {exc.strerror}"
+        if stat.S_ISLNK(info.st_mode):
+            # Named for what it is rather than left to the mode check below, which would
+            # refuse it anyway — a symlink's own mode is 0777 on Linux — with a reason
+            # about permissions that says nothing true about the link. What it resolves
+            # to may differ by the time the name is used, and following it here to find
+            # out is the substitution the caller is refusing in the first place.
+            return f"directory {directory} is a symbolic link"
         if info.st_uid not in (ours, 0):
             return f"directory {directory} is owned by uid {info.st_uid}"
         writable_by_others = bool(info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))

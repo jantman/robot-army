@@ -1580,7 +1580,9 @@ def test_a_socket_glob_in_a_world_writable_directory_warns_but_loads(
     shared.chmod(0o777)  # chmod, not mkdir(mode=...): the umask would take the bits back
     config = build(repo_clone, layout, tmp_path, terminal={"socket_glob": f"{shared}/kitty-*"})
     warning = next(w for w in config.warnings if "socket_glob" in w)
-    assert str(shared) in warning
+    # The reason, not just the path: the directory at fault is often not the one named in
+    # the pattern, because the check walks all the way up.
+    assert f"directory {shared} is writable by others without the sticky bit" in warning
     assert "XDG_RUNTIME_DIR" in warning
 
 

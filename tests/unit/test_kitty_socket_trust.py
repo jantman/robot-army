@@ -520,3 +520,26 @@ def test_the_daemon_will_not_start_and_says_what_it_refused(
     problem = next(p for p in problems if "no terminal control socket answered" in p)
     assert "were found and refused" in problem
     assert "not a socket" in problem
+
+
+def test_a_symlinked_directory_is_refused_by_name(
+    config: Config, audit: AuditLog, tmp_path: Path, socket_at: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal says "symbolic link", not something untrue about its permissions.
+
+    A symlink's own mode is 0777 on Linux, so the mode clause would refuse it anyway —
+    with a reason that reads as though the maintainer had left a directory world-writable.
+    A wrong explanation is worse than a terse one: it sends them to fix the wrong thing.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    socket_at(real / "sock-a")
+    (tmp_path / "linked").symlink_to(real)
+    fake = answering()
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", fake)
+
+    shown = display(config, audit, str(tmp_path / "linked" / "sock-*"))
+
+    assert shown.probe() is None
+    assert fake.asked == []
+    assert shown.refusals[0]["reason"] == f"directory {tmp_path}/linked is a symbolic link"

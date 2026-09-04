@@ -99,7 +99,9 @@ never as a command.
 ```
 
 - `{nonce}` is 16 lowercase hex characters, freshly generated on every call.
-- `{labels}` is the comma-joined label list, or `(none)`.
+- `{labels}` is the comma-joined label list — each label sanitised and whitespace-collapsed
+  the way the title is, and one that reduces to nothing dropped rather than left as an empty
+  slot — or `(none)`.
 - `{body}` is the sanitised, truncated body, or `_(the issue has no body)_` when empty.
 - The `---` that used to separate the header lines from the body is gone: the fence is the
   separator now, and a second one would only give an issue body something to imitate.
@@ -108,6 +110,10 @@ never as a command.
 
 1. `title` ← sanitise, then collapse runs of whitespace to single spaces, then strip.
 2. `body` ← sanitise, then strip.
+2a. `labels` ← each label sanitised and collapsed the same way; empties dropped. Not a control
+   against the issue's author — labels are the maintainer's — but it is what makes "nothing
+   inside the fence carries a control character" true of the whole region rather than of the
+   two fields most likely to carry one.
 3. If `len(body) > MAX_BODY_CHARS`: `body = body[:MAX_BODY_CHARS] + "\n\n[truncated at 60000
    characters]"`. **No URL, no pointer, no suggestion of where the rest lives.**
 4. Assemble the payload (title line, labels line, blank line, body).

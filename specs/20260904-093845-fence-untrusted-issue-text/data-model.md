@@ -55,7 +55,8 @@ Applied in this order; each is total, and none can fail.
 |---|---|---|
 | Normalise line endings | `\r\n`, `\r` | `\n` |
 | Strip control characters | `[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]` | removed |
-| Collapse whitespace (**title only**) | runs of whitespace | one space |
+| Collapse whitespace (**title and each label**) | runs of whitespace | one space |
+| Drop empties (**labels only**) | a label that sanitised to nothing | removed from the list |
 | Strip | leading/trailing whitespace | removed |
 | Truncate (**body only**, if over the limit) | `body[MAX_BODY_CHARS:]` | replaced by `\n\n[truncated at 60000 characters]` |
 | De-nonce | every occurrence of the nonce | removed |

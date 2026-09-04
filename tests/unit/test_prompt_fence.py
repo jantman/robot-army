@@ -366,6 +366,25 @@ def test_sanitisation_runs_before_the_length_check() -> None:
     assert "truncated" not in text
 
 
+def test_labels_are_sanitised_too() -> None:
+    """Not the control the title and body need — the invariant.
+
+    Labels are created by the repository's maintainer, not by the issue's author, so nothing
+    here is defending against them. But "nothing inside the fence carries a control character"
+    is worth being true of the whole region rather than of the two fields most likely to carry
+    one, and the alternative is an assumption about what GitHub permits in a label name.
+    """
+    text = compose(labels=("robot\x00-army", "en\x1bhancement"))
+
+    assert "**Labels**: robot-army, enhancement" in fenced(text)
+
+
+def test_a_label_that_sanitises_to_nothing_does_not_leave_an_empty_slot() -> None:
+    """A stray ", ," would read as a label list this system got wrong."""
+    assert "**Labels**: keep" in fenced(compose(labels=("\x00", "keep")))
+    assert "**Labels**: (none)" in fenced(compose(labels=("\x00",)))
+
+
 def test_sanitize_is_available_on_its_own() -> None:
     """It is used through ``compose``; tested directly because it is the failure-path unit."""
     assert prompt.sanitize("a\x00b\x1bc") == "abc"

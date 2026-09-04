@@ -292,7 +292,13 @@ def compose(
     sections.append(DELIVERY)
     sections.append("---")
 
-    labels = ", ".join(issue.labels) if issue.labels else "(none)"
+    # Labels are created by the repository's maintainer rather than by the issue's author, so
+    # this is not the control the title and body need — it is the invariant. "Nothing inside
+    # the fence carries a control character" is worth being true of the whole region rather
+    # than of the two fields most likely to carry one, and the alternative is an assumption
+    # about what GitHub permits in a label name.
+    cleaned = [" ".join(sanitize(label).split()) for label in issue.labels]
+    labels = ", ".join(label for label in cleaned if label) or "(none)"
     fenced = "\n".join(
         [
             f"**Title**: {title}",

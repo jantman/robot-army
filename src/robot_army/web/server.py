@@ -21,10 +21,17 @@ Three properties here are requirements rather than implementation choices:
   passing through :func:`_perform`, which writes the intent before any check runs.
 * **Every action calls an** ``operations.*`` **function** (FR-047). There is no action logic
   in this module; there are guards, and there is reporting of what the operation returned.
+* **Every wait on a client is bounded, and so is the number of clients** (RA-13). Keep-alive
+  without ``Handler.timeout`` means a connection that says nothing pins a thread forever, and
+  an uncapped ``ThreadingHTTPServer`` means the number of those is whatever an attacker
+  chooses — each one holding a socket and, once routed, a SQLite connection and an audit file
+  handle. Descriptor exhaustion arrives long before memory does, and it stops the interface
+  rendering at exactly the moment it is worth having. Removing either bound reopens that.
 """
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import queue
@@ -61,6 +68,42 @@ from robot_army.web.pages import ITEM_ACTIONS, View
 #: handful of bytes; anything bigger is a mistake or a probe, and reading an unbounded body
 #: from a socket is the one denial-of-service this parser can trivially avoid.
 MAX_BODY_BYTES = 64 * 1024
+
+#: How long any single wait on a client may last (RA-13). ``MAX_BODY_BYTES`` bounds the
+#: *size* of what a client may send; this bounds the *wait*, which is the other half and was
+#: missing. Under HTTP/1.1 keep-alive a connection that says nothing would otherwise pin its
+#: thread, its socket, and — once routed — a SQLite connection and an audit file handle,
+#: forever. 15 sits above ``web.refresh_seconds`` (10 by default) so an idle-but-live browser
+#: connection is left alone between refreshes, and far below anything a person would wait out.
+REQUEST_TIMEOUT_SECONDS = 15
+
+#: The most connections served at once (RA-13). The bound above is not sufficient on its own:
+#: a client that sends one byte every fourteen seconds resets the wait and keeps its thread.
+#: This is the ceiling that makes the resource cost a fact rather than a race — at saturation,
+#: 32 sockets plus at most 32 SQLite connections plus at most 32 audit handles, under 100
+#: descriptors against a typical ``RLIMIT_NOFILE`` of 1024. It is not 16, which the finding
+#: suggested: a browser opens up to six connections per origin and this page refreshes itself
+#: on a timer, so a handful of tabs can hold a dozen live connections between them, and a
+#: refusal served to the operator's own page would be a worse bug than the one being fixed.
+MAX_CONCURRENT_CONNECTIONS = 32
+
+_OVER_CAPACITY_BODY = b'{"ok": false, "reason": "too many connections; try again"}'
+
+#: The whole refusal, serialised once at import. Pre-built because it is written from the
+#: accept loop's own thread while under attack: formatting a response per refused connection
+#: is allocation on exactly the path that must stay cheap. ``Retry-After: 1`` is honest — a
+#: slot frees the moment any in-flight connection ends. The body is JSON whatever the client
+#: asked for, because at this point not one byte of the request has been read and ``Accept``
+#: is not yet known.
+OVER_CAPACITY_RESPONSE = (
+    b"HTTP/1.1 503 Service Unavailable\r\n"
+    b"Content-Type: application/json; charset=utf-8\r\n"
+    b"Content-Length: " + str(len(_OVER_CAPACITY_BODY)).encode("ascii") + b"\r\n"
+    b"Connection: close\r\n"
+    b"Cache-Control: no-store\r\n"
+    b"Retry-After: 1\r\n"
+    b"\r\n" + _OVER_CAPACITY_BODY
+)
 
 TRUTHY = frozenset({"1", "true", "yes", "on"})
 #: Its twin, and the reason there is one: since 009 the visibility default varies by effect
@@ -1546,6 +1589,16 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "robot-army"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    #: The bound, and the reason keep-alive makes it mandatory rather than optional (RA-13).
+    #: ``socketserver.StreamRequestHandler.setup`` turns this one attribute into
+    #: ``settimeout()`` on the connection, which bounds *every* wait on a client: the request
+    #: line, the headers, ``rfile.read(length)`` for a body, the gap before the next request
+    #: on a kept-alive connection, and writes to a client that stops reading. Left at its
+    #: inherited ``None`` — which is what ``http.server`` ships — each of those blocks
+    #: forever, and a connection that says nothing pins a thread for the life of the process.
+    #: ``handle_one_request`` already catches the resulting ``TimeoutError`` and closes the
+    #: connection, so nothing else here has to know about it.
+    timeout = REQUEST_TIMEOUT_SECONDS
 
     app: WebApp
 
@@ -1615,7 +1668,137 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch("POST")
 
 
-def build_server(app: WebApp, *, bind: str, port: int) -> ThreadingHTTPServer:
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """``ThreadingHTTPServer`` with a ceiling on how many connections it will serve (RA-13).
+
+    The count is per **connection**, not per request, and that is the whole design decision.
+    ``ThreadingMixIn.process_request`` starts one thread per accepted connection and
+    ``BaseHTTPRequestHandler.handle`` loops on that one thread for the life of a keep-alive
+    connection — so the thread, the socket, and everything the requests on it open are held
+    for as long as the *connection* lives. Counting requests would leave an idle keep-alive
+    connection uncounted while it still holds a thread, which is precisely the case that
+    made the finding exploitable.
+
+    Admission is decided in :meth:`process_request`, before ``super()`` starts a thread, so a
+    refused connection never reaches a handler and therefore never calls ``WebApp.context()``
+    — no SQLite connection, no ``AuditLog`` file handle, no worker.
+
+    Refusals are counted, not audited. Writing an audit record per refusal would open the
+    exact pair of descriptors this class exists to bound, making the log the amplifier of the
+    flood it documents; the run's total rides out in the ``web.stop`` record instead. That is
+    the enumerated Principle III exception in this feature's plan.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        #: Guards the three fields below, and nothing else. Never held across a socket
+        #: operation and never held across starting a thread.
+        self._capacity_lock = threading.Lock()
+        self._in_flight = 0
+        #: ``True`` from the first refusal until the count next falls below the cap, so the
+        #: terminal line is one per saturation episode rather than one per refused
+        #: connection.
+        self._saturated = False
+        #: Connections turned away for capacity during this run. Read once, at shutdown.
+        self.refused_over_capacity = 0
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        """Admit the connection, or refuse it — decided before any thread exists.
+
+        The cap is read from the module rather than captured at construction so it is one
+        constant with one meaning; the alternative is a copy that can disagree with it.
+        """
+        with self._capacity_lock:
+            admitted = self._in_flight < MAX_CONCURRENT_CONNECTIONS
+            if admitted:
+                self._in_flight += 1
+                self._saturated = False
+                announce = False
+            else:
+                self.refused_over_capacity += 1
+                announce = not self._saturated
+                self._saturated = True
+
+        if not admitted:
+            # Outside the lock: the refusal touches a socket, and no socket operation is
+            # worth blocking every other connection's admission decision on.
+            if announce:
+                print(
+                    f"robot-army: at capacity ({MAX_CONCURRENT_CONNECTIONS} connections); "
+                    "refusing new connections",
+                    file=sys.stderr,
+                )
+            self._refuse(request)
+            return
+
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            # The thread never started, so nothing will ever run the release in
+            # ``process_request_thread``. Give the slot back here or lose it for good.
+            self._release_slot()
+            raise
+
+    def _refuse(self, request: Any) -> None:
+        """Answer ``503`` and close, without blocking and without opening anything.
+
+        This runs on the accept loop's own thread, so a blocking write to a client that
+        never reads would stall admission for every other client — the refusal would become
+        the denial of service. Non-blocking makes it O(1): the response is 200-odd bytes and
+        fits in any send buffer, and if it would block we drop it and close, which is the
+        outcome that actually matters. Delivery is best-effort by design.
+
+        The drain is not politeness. Closing a socket that still has unread bytes queued
+        makes the kernel send an RST, and an RST can make the peer discard the response it
+        has already buffered — so reading what the client sent is what keeps the close an
+        ordinary FIN and the ``503`` readable.
+        """
+        try:
+            with contextlib.suppress(OSError):
+                request.setblocking(False)
+                request.send(OVER_CAPACITY_RESPONSE)
+            with contextlib.suppress(OSError):
+                request.recv(MAX_BODY_BYTES)
+        finally:
+            # Whatever the socket did or refused to do, the descriptor goes back. That is
+            # the part of this path that is not best-effort.
+            self.shutdown_request(request)
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        """Serve the connection, and give the slot back however it ends.
+
+        ``finally`` rather than a trailing statement because a slot lost to a failure is
+        permanent: the server would starve one connection at a time, and the symptom —
+        refusals rising over days — would look nothing like its cause.
+        """
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release_slot()
+
+    def _release_slot(self) -> None:
+        with self._capacity_lock:
+            self._in_flight -= 1
+            if self._in_flight < MAX_CONCURRENT_CONNECTIONS:
+                self._saturated = False
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """A connection ending is not an error; anything else still gets its traceback.
+
+        ``ThreadingMixIn`` routes everything escaping a handler here, and the inherited
+        implementation prints a full traceback. A client that times out, resets, or hangs up
+        mid-response is not this program failing — and under the flood the cap exists to
+        survive, one traceback per dropped connection is itself an amplifier, since stderr is
+        usually the journal. The suppression is exactly three exception types, all of which
+        mean "the connection ended". Principle III's ban on silent failure is about *our*
+        failures, so every other exception prints exactly as it does today.
+        """
+        if isinstance(sys.exception(), TimeoutError | ConnectionResetError | BrokenPipeError):
+            return
+        super().handle_error(request, client_address)
+
+
+def build_server(app: WebApp, *, bind: str, port: int) -> BoundedThreadingHTTPServer:
     """Bind the server, in the address family the address actually belongs to.
 
     ``TCPServer`` defaults to ``AF_INET``, so without this an IPv6 literal passed every
@@ -1624,11 +1807,11 @@ def build_server(app: WebApp, *, bind: str, port: int) -> ThreadingHTTPServer:
     told an address is fine and then refused it is worse than being refused it up front.
     """
     handler = type("BoundHandler", (Handler,), {"app": app})
-    server_class: type[ThreadingHTTPServer] = ThreadingHTTPServer
+    server_class: type[BoundedThreadingHTTPServer] = BoundedThreadingHTTPServer
     if ":" in bind:
         server_class = type(
-            "ThreadingHTTPServerV6",
-            (ThreadingHTTPServer,),
+            "BoundedThreadingHTTPServerV6",
+            (BoundedThreadingHTTPServer,),
             {"address_family": socket.AF_INET6},
         )
     return server_class((bind, port), handler)
@@ -1654,7 +1837,9 @@ def serve(
     the incident that makes them worth reading.
     """
     effective_bind = bind or config.web.bind
-    effective_port = int(port or config.web.port)
+    # ``is not None`` rather than ``or``: port 0 is a real request — let the kernel choose —
+    # and ``or`` silently answered it with the configured port instead.
+    effective_port = int(port if port is not None else config.web.port)
 
     problems, warnings = check_preconditions(
         config, bind=effective_bind, port=effective_port
@@ -1717,7 +1902,7 @@ def serve(
             return
         stopping.set()
         print(
-            f"robot-army: {signal.Signals(signum).name} — finishing in-flight requests",
+            f"robot-army: {signal.Signals(signum).name} — closing the listening socket",
             file=sys.stderr,
         )
         # shutdown() must not run on the thread inside serve_forever, or it deadlocks.
@@ -1729,13 +1914,32 @@ def serve(
     try:
         server.serve_forever(poll_interval=0.25)
     finally:
-        # Joins in-flight request threads. The dispatch worker is a daemon thread and is
-        # deliberately **not** waited for: an item left mid-dispatch is reconciliation's
-        # problem, the same path any interrupted dispatch already takes.
+        # Stops accepting and closes the listening socket. It does **not** join anything,
+        # which this comment used to claim: ``_Threads.append`` drops daemon threads and
+        # ``ThreadingHTTPServer`` sets ``daemon_threads = True``, so nothing is ever tracked
+        # and the join is over an empty list. In-flight requests die with the process. That
+        # is the intended trade — but before ``Handler.timeout`` existed there was no bound
+        # on how long one could take, and now there is one.
+        #
+        # The dispatch worker is a daemon thread and is deliberately not waited for either:
+        # an item left mid-dispatch is reconciliation's problem, the same path any
+        # interrupted dispatch already takes.
         server.server_close()
         closing = app.context()
         try:
-            closing.audit.record("web.stop", outcome="ok", detail={"reason": "signal"})
+            # ``refused_over_capacity`` is the whole durable trace of the connection cap
+            # (FR-010). Individual refusals are deliberately not recorded — a record per
+            # refusal would open the SQLite connection and audit handle the cap exists to
+            # bound, making the log amplify the flood it documents — so this integer is what
+            # answers "did this run turn connections away, and how many" from the log alone.
+            closing.audit.record(
+                "web.stop",
+                outcome="ok",
+                detail={
+                    "reason": "signal",
+                    "refused_over_capacity": server.refused_over_capacity,
+                },
+            )
         finally:
             closing.close()
     return EXIT_OK

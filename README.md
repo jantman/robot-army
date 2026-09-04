@@ -217,6 +217,17 @@ That is the accepted model, so the mitigations are the ones that matter:
   following a `github.com` or `trello.com` link out of a view does not hand it this
   interface's address — `same-origin` and not `no-referrer`, because a refused control's
   page builds its "back to" link from the `Referer` of my own POST.
+- **A connection cannot be held, and there cannot be many of them.** A connection that says
+  nothing for 15 seconds is closed, and at most 32 are served at once; the 33rd gets a `503`
+  with `Connection: close` and is hung up on. Both numbers are constants in
+  `src/robot_army/web/server.py`, not config. This is not a rate limit and not about the
+  network — a page in a browser tab I already have open can connect here and stay silent, and
+  without the two bounds each of those connections costs a thread, a socket, a SQLite
+  connection and an audit file handle, permanently. Descriptors run out long before memory
+  does, and when they do the interface stops rendering at exactly the moment it is worth
+  having. So a `503` from this interface means "too many connections", never a failure; the
+  number of connections a run turned away is in that run's `web.stop` audit record, and
+  reaching the cap prints one line to stderr per episode.
 
 From outside the house I connect my existing VPN and use the same LAN address. Nothing is
 published, no tunnel is configured, and no port is forwarded.

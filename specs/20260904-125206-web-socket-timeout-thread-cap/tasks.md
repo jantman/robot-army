@@ -39,8 +39,8 @@ Single Python project. Source at `src/robot_army/`, tests at `tests/unit/` and
 
 **Purpose**: Confirm the ground is where the plan says it is before changing it.
 
-- [ ] T001 Verify the working tree is on `speckit/20260904-125206-web-socket-timeout-thread-cap` and that `uv run pytest -q` passes on the untouched tree, so any later failure is attributable to this feature (repository root)
-- [ ] T002 Confirm the three upstream facts the design rests on, by reading `/usr/lib/python3.14/socketserver.py` (`StreamRequestHandler.setup` sets the socket timeout only when `timeout is not None`; `_Threads.append` drops daemon threads) and `/usr/lib/python3.14/http/server.py` (`handle_one_request` catches `TimeoutError` around `method()`); if any differs from [research.md](research.md) R1/R2/R6, stop and revise the plan before writing code
+- [X] T001 Verify the working tree is on `speckit/20260904-125206-web-socket-timeout-thread-cap` and that `uv run pytest -q` passes on the untouched tree, so any later failure is attributable to this feature (repository root)
+- [X] T002 Confirm the three upstream facts the design rests on, by reading `/usr/lib/python3.14/socketserver.py` (`StreamRequestHandler.setup` sets the socket timeout only when `timeout is not None`; `_Threads.append` drops daemon threads) and `/usr/lib/python3.14/http/server.py` (`handle_one_request` catches `TimeoutError` around `method()`); if any differs from [research.md](research.md) R1/R2/R6, stop and revise the plan before writing code
 
 **Checkpoint**: A green baseline and a verified set of assumptions.
 
@@ -51,9 +51,9 @@ Single Python project. Source at `src/robot_army/`, tests at `tests/unit/` and
 **Purpose**: The module constants and the server subclass both stories build on.
 No user story work can begin until this phase is complete.
 
-- [ ] T003 Add the three module constants to `src/robot_army/web/server.py`, beside the existing `MAX_BODY_BYTES` block and in the same commented style: `REQUEST_TIMEOUT_SECONDS = 15`, `MAX_CONCURRENT_CONNECTIONS = 32`, and `OVER_CAPACITY_RESPONSE` built from the `503` in [contracts/connection-limits.md](contracts/connection-limits.md) C2 (compute `Content-Length` from the body rather than hard-coding it, so the two cannot drift)
-- [ ] T004 Add `class BoundedThreadingHTTPServer(ThreadingHTTPServer)` to `src/robot_army/web/server.py` with `__init__` initialising `_capacity_lock`, `_in_flight = 0`, `_saturated = False`, and `refused_over_capacity = 0` per [data-model.md](data-model.md), and a class docstring stating why the count is per connection rather than per request
-- [ ] T005 Change `build_server` in `src/robot_army/web/server.py` to base both the IPv4 and the IPv6 server class on `BoundedThreadingHTTPServer` instead of `ThreadingHTTPServer`, leaving the address-family branch and its docstring otherwise untouched
+- [X] T003 Add the three module constants to `src/robot_army/web/server.py`, beside the existing `MAX_BODY_BYTES` block and in the same commented style: `REQUEST_TIMEOUT_SECONDS = 15`, `MAX_CONCURRENT_CONNECTIONS = 32`, and `OVER_CAPACITY_RESPONSE` built from the `503` in [contracts/connection-limits.md](contracts/connection-limits.md) C2 (compute `Content-Length` from the body rather than hard-coding it, so the two cannot drift)
+- [X] T004 Add `class BoundedThreadingHTTPServer(ThreadingHTTPServer)` to `src/robot_army/web/server.py` with `__init__` initialising `_capacity_lock`, `_in_flight = 0`, `_saturated = False`, and `refused_over_capacity = 0` per [data-model.md](data-model.md), and a class docstring stating why the count is per connection rather than per request
+- [X] T005 Change `build_server` in `src/robot_army/web/server.py` to base both the IPv4 and the IPv6 server class on `BoundedThreadingHTTPServer` instead of `ThreadingHTTPServer`, leaving the address-family branch and its docstring otherwise untouched
 
 **Checkpoint**: The server is the bounded class everywhere it is constructed, with the counter present and unused. Behaviour is unchanged, and the suite still passes.
 
@@ -70,19 +70,19 @@ connection and see it succeed unchanged.
 
 ### Tests for User Story 1
 
-- [ ] T006 [P] [US1] Create `tests/integration/test_web_connection_limits.py` with a `live_server` fixture modelled on the one in `tests/integration/test_web_end_to_end.py`, parameterised so the test module can override `REQUEST_TIMEOUT_SECONDS` and `MAX_CONCURRENT_CONNECTIONS` via `monkeypatch` before `build_server` is called, and a module docstring saying why a real socket is required here
-- [ ] T007 [US1] Add to `tests/integration/test_web_connection_limits.py` a test that connects and sends nothing, asserting the server closes the connection (a `recv` returning `b""`) within a short overridden bound and comfortably before a generous ceiling — spec scenario 1, SC-001
-- [ ] T008 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test that sends a partial request line and asserts the connection is closed within the bound — spec scenario 2
-- [ ] T009 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test that sends a complete `POST` declaring a `Content-Length` far larger than the bytes it then sends, and asserts the connection is closed within the bound rather than held — spec scenario 3, FR-002
-- [ ] T010 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test that completes one request over a keep-alive connection, then goes silent, asserting the idle connection is closed within the bound — spec scenario 4
-- [ ] T011 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test that a normal request served over a connection that stays inside the bound returns exactly the status, headers, and body it returns today — spec scenario 5, FR-007
-- [ ] T012 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test asserting that a timed-out connection writes nothing to `stderr` — no traceback, no line — using `capsys` or a captured stream, per FR-003 and contract C1
+- [X] T006 [P] [US1] Create `tests/integration/test_web_connection_limits.py` with a `live_server` fixture modelled on the one in `tests/integration/test_web_end_to_end.py`, parameterised so the test module can override `REQUEST_TIMEOUT_SECONDS` and `MAX_CONCURRENT_CONNECTIONS` via `monkeypatch` before `build_server` is called, and a module docstring saying why a real socket is required here
+- [X] T007 [US1] Add to `tests/integration/test_web_connection_limits.py` a test that connects and sends nothing, asserting the server closes the connection (a `recv` returning `b""`) within a short overridden bound and comfortably before a generous ceiling — spec scenario 1, SC-001
+- [X] T008 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test that sends a partial request line and asserts the connection is closed within the bound — spec scenario 2
+- [X] T009 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test that sends a complete `POST` declaring a `Content-Length` far larger than the bytes it then sends, and asserts the connection is closed within the bound rather than held — spec scenario 3, FR-002
+- [X] T010 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test that completes one request over a keep-alive connection, then goes silent, asserting the idle connection is closed within the bound — spec scenario 4
+- [X] T011 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test that a normal request served over a connection that stays inside the bound returns exactly the status, headers, and body it returns today — spec scenario 5, FR-007
+- [X] T012 [P] [US1] Add to `tests/integration/test_web_connection_limits.py` a test asserting that a timed-out connection writes nothing to `stderr` — no traceback, no line — using `capsys` or a captured stream, per FR-003 and contract C1
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Set `timeout = REQUEST_TIMEOUT_SECONDS` on `Handler` in `src/robot_army/web/server.py`, beside `protocol_version`, with a comment naming the mechanism (`StreamRequestHandler.setup` → `settimeout`) and the reason keep-alive makes it mandatory rather than optional — FR-001, FR-002
-- [ ] T014 [US1] Confirm the dynamically built `BoundedHandler` subclass in `build_server` (`type("BoundedHandler", (Handler,), {"app": app})`) inherits `timeout` rather than shadowing it, in `src/robot_army/web/server.py`; the tests in T007–T010 are the check
-- [ ] T015 [US1] Add `handle_error` to `BoundedThreadingHTTPServer` in `src/robot_army/web/server.py`, returning silently for `TimeoutError`, `ConnectionResetError`, and `BrokenPipeError` and delegating to `super().handle_error` for everything else, with a comment stating that the ban on silent failure is about our failures and a client hanging up is not one — FR-003, research R8
+- [X] T013 [US1] Set `timeout = REQUEST_TIMEOUT_SECONDS` on `Handler` in `src/robot_army/web/server.py`, beside `protocol_version`, with a comment naming the mechanism (`StreamRequestHandler.setup` → `settimeout`) and the reason keep-alive makes it mandatory rather than optional — FR-001, FR-002
+- [X] T014 [US1] Confirm the dynamically built `BoundedHandler` subclass in `build_server` (`type("BoundedHandler", (Handler,), {"app": app})`) inherits `timeout` rather than shadowing it, in `src/robot_army/web/server.py`; the tests in T007–T010 are the check
+- [X] T015 [US1] Add `handle_error` to `BoundedThreadingHTTPServer` in `src/robot_army/web/server.py`, returning silently for `TimeoutError`, `ConnectionResetError`, and `BrokenPipeError` and delegating to `super().handle_error` for everything else, with a comment stating that the ban on silent failure is about our failures and a client hanging up is not one — FR-003, research R8
 
 **Checkpoint**: The slowloris is closed. This alone is a shippable fix; stop here and validate with quickstart steps 1 and 2 if desired.
 
@@ -100,19 +100,19 @@ while those within it are served normally.
 
 ### Tests for User Story 2
 
-- [ ] T016 [P] [US2] Create `tests/unit/test_web_connection_limits.py` asserting the shape of `OVER_CAPACITY_RESPONSE` against contract C2 — the `503` status line, `Connection: close`, `Cache-Control: no-store`, `Retry-After`, the JSON content type, and a `Content-Length` that equals the actual body length
-- [ ] T017 [P] [US2] Add to `tests/unit/test_web_connection_limits.py` a test driving `BoundedThreadingHTTPServer.process_request` with a fake socket object and a stubbed `process_request_thread`, asserting that admission increments the count, that the call beyond the cap sends the refusal bytes and never starts a thread, and that `refused_over_capacity` advances — FR-004, FR-006
-- [ ] T018 [P] [US2] Add to `tests/unit/test_web_connection_limits.py` a test that a handler raising an exception still releases its slot, asserting `_in_flight` returns to zero — FR-008
-- [ ] T019 [US2] Add to `tests/integration/test_web_connection_limits.py` a test that, with the cap overridden to a small number, holds that many connections open and asserts the next connection receives a well-formed `503` with `Connection: close` and is then closed — spec scenario 1, contract C2
-- [ ] T020 [US2] Add to `tests/integration/test_web_connection_limits.py` a test that releasing one held connection lets a newly opened connection be served normally — spec scenario 2, SC-002
-- [ ] T021 [P] [US2] Add to `tests/integration/test_web_connection_limits.py` a test asserting that a refused connection opens no database connection and no audit-log file handle — by counting `operations.build_context` calls (or the audit records written) across a saturation episode — spec scenario 3, FR-006
-- [ ] T022 [P] [US2] Add to `tests/integration/test_web_connection_limits.py` a test that the existing `413` refusal of an over-large declared body still refuses without reading and still closes the connection — FR-014, guarding against a regression from the new body-read path
+- [X] T016 [P] [US2] Create `tests/unit/test_web_connection_limits.py` asserting the shape of `OVER_CAPACITY_RESPONSE` against contract C2 — the `503` status line, `Connection: close`, `Cache-Control: no-store`, `Retry-After`, the JSON content type, and a `Content-Length` that equals the actual body length
+- [X] T017 [P] [US2] Add to `tests/unit/test_web_connection_limits.py` a test driving `BoundedThreadingHTTPServer.process_request` with a fake socket object and a stubbed `process_request_thread`, asserting that admission increments the count, that the call beyond the cap sends the refusal bytes and never starts a thread, and that `refused_over_capacity` advances — FR-004, FR-006
+- [X] T018 [P] [US2] Add to `tests/unit/test_web_connection_limits.py` a test that a handler raising an exception still releases its slot, asserting `_in_flight` returns to zero — FR-008
+- [X] T019 [US2] Add to `tests/integration/test_web_connection_limits.py` a test that, with the cap overridden to a small number, holds that many connections open and asserts the next connection receives a well-formed `503` with `Connection: close` and is then closed — spec scenario 1, contract C2
+- [X] T020 [US2] Add to `tests/integration/test_web_connection_limits.py` a test that releasing one held connection lets a newly opened connection be served normally — spec scenario 2, SC-002
+- [X] T021 [P] [US2] Add to `tests/integration/test_web_connection_limits.py` a test asserting that a refused connection opens no database connection and no audit-log file handle — by counting `operations.build_context` calls (or the audit records written) across a saturation episode — spec scenario 3, FR-006
+- [X] T022 [P] [US2] Add to `tests/integration/test_web_connection_limits.py` a test that the existing `413` refusal of an over-large declared body still refuses without reading and still closes the connection — FR-014, guarding against a regression from the new body-read path
 
 ### Implementation for User Story 2
 
-- [ ] T023 [US2] Implement `process_request` on `BoundedThreadingHTTPServer` in `src/robot_army/web/server.py`: under the lock, refuse when `_in_flight >= MAX_CONCURRENT_CONNECTIONS` (incrementing `refused_over_capacity`) or otherwise increment `_in_flight` and clear `_saturated`; outside the lock, either call the refusal helper or delegate to `super().process_request`, decrementing again if starting the thread raises — FR-004, FR-005, FR-008
-- [ ] T024 [US2] Implement the refusal helper on `BoundedThreadingHTTPServer` in `src/robot_army/web/server.py`: set the socket non-blocking, one `send` of `OVER_CAPACITY_RESPONSE`, one `recv` to drain what the client already sent, then `shutdown_request` — every step guarded against `OSError`, with a comment explaining that this runs on the accept loop's own thread so it must never block, and that the drain is what keeps the close a FIN rather than an RST — FR-005, FR-006, research R5
-- [ ] T025 [US2] Implement `process_request_thread` on `BoundedThreadingHTTPServer` in `src/robot_army/web/server.py` as a `try/finally` around `super().process_request_thread` that decrements `_in_flight` exactly once however the connection ended — FR-008
+- [X] T023 [US2] Implement `process_request` on `BoundedThreadingHTTPServer` in `src/robot_army/web/server.py`: under the lock, refuse when `_in_flight >= MAX_CONCURRENT_CONNECTIONS` (incrementing `refused_over_capacity`) or otherwise increment `_in_flight` and clear `_saturated`; outside the lock, either call the refusal helper or delegate to `super().process_request`, decrementing again if starting the thread raises — FR-004, FR-005, FR-008
+- [X] T024 [US2] Implement the refusal helper on `BoundedThreadingHTTPServer` in `src/robot_army/web/server.py`: set the socket non-blocking, one `send` of `OVER_CAPACITY_RESPONSE`, one `recv` to drain what the client already sent, then `shutdown_request` — every step guarded against `OSError`, with a comment explaining that this runs on the accept loop's own thread so it must never block, and that the drain is what keeps the close a FIN rather than an RST — FR-005, FR-006, research R5
+- [X] T025 [US2] Implement `process_request_thread` on `BoundedThreadingHTTPServer` in `src/robot_army/web/server.py` as a `try/finally` around `super().process_request_thread` that decrements `_in_flight` exactly once however the connection ended — FR-008
 
 **Checkpoint**: Both bounds hold. Descriptors are bounded regardless of how many clients connect (SC-003).
 
@@ -130,14 +130,14 @@ captured terminal output and the `web.stop` audit record.
 
 ### Tests for User Story 3
 
-- [ ] T026 [P] [US3] Add to `tests/unit/test_web_connection_limits.py` a test that many refusals within one saturation episode produce exactly one terminal message, and that dropping below the cap and saturating again produces a second — spec scenario 1 and 3, FR-009
-- [ ] T027 [US3] Add to `tests/integration/test_web_connection_limits.py` a test that a run which refused connections writes a `web.stop` audit record whose `detail` carries `refused_over_capacity` with the right count, and that an ordinary run records `0` — spec scenario 2, FR-010, SC-006
-- [ ] T028 [P] [US3] Add to `tests/unit/test_web_connection_limits.py` a test asserting no audit record is written on the refusal path itself, holding the enumerated Principle III exception in place so a later change cannot reintroduce the amplifier by accident — FR-011
+- [X] T026 [P] [US3] Add to `tests/unit/test_web_connection_limits.py` a test that many refusals within one saturation episode produce exactly one terminal message, and that dropping below the cap and saturating again produces a second — spec scenario 1 and 3, FR-009
+- [X] T027 [US3] Add to `tests/integration/test_web_connection_limits.py` a test that a run which refused connections writes a `web.stop` audit record whose `detail` carries `refused_over_capacity` with the right count, and that an ordinary run records `0` — spec scenario 2, FR-010, SC-006
+- [X] T028 [P] [US3] Add to `tests/unit/test_web_connection_limits.py` a test asserting no audit record is written on the refusal path itself, holding the enumerated Principle III exception in place so a later change cannot reintroduce the amplifier by accident — FR-011
 
 ### Implementation for User Story 3
 
-- [ ] T029 [US3] In the refusal path in `src/robot_army/web/server.py`, print `robot-army: at capacity (<N> connections); refusing new connections` to `stderr` on the transition into saturation only, setting `_saturated` under the same lock that decides admission — FR-009, contract C3
-- [ ] T030 [US3] Extend the `web.stop` audit record in `serve()` in `src/robot_army/web/server.py` with `"refused_over_capacity": server.refused_over_capacity`, leaving every other field of the record untouched — FR-010, [data-model.md](data-model.md)
+- [X] T029 [US3] In the refusal path in `src/robot_army/web/server.py`, print `robot-army: at capacity (<N> connections); refusing new connections` to `stderr` on the transition into saturation only, setting `_saturated` under the same lock that decides admission — FR-009, contract C3
+- [X] T030 [US3] Extend the `web.stop` audit record in `serve()` in `src/robot_army/web/server.py` with `"refused_over_capacity": server.refused_over_capacity`, leaving every other field of the record untouched — FR-010, [data-model.md](data-model.md)
 
 **Checkpoint**: All three stories functional. The feature is complete.
 
@@ -145,12 +145,12 @@ captured terminal output and the `web.stop` audit record.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T031 Correct the two shutdown claims in `src/robot_army/web/server.py` that were already false: the `server_close()` comment saying it "Joins in-flight request threads" (it does not — `_Threads.append` drops daemon threads and `ThreadingHTTPServer` sets `daemon_threads = True`), and the SIGTERM stderr line promising to finish in-flight requests; say what actually happens, and that the new bound is what puts a ceiling on shutdown — research R6
-- [ ] T032 [P] Extend the module docstring of `src/robot_army/web/server.py` so the two bounds join the three properties already listed there as requirements rather than implementation choices, since a future reader removing either would reopen RA-13
-- [ ] T033 [P] Add a short paragraph to `README.md`, in the section covering the web interface, saying what the two numbers are, that a `503` from this interface means the connection cap and not a failure, and where the refusal count is recorded — written for the author's future self, per Principle V
-- [ ] T034 Run `uv run pytest -q` and confirm the whole suite passes, including every pre-existing web test unchanged — SC-008, and the constitution's "implementation is not complete until the unit test suite passes"
-- [ ] T035 Run `uv run ruff check` and `uv run ruff format --check` (or whatever the repository's configured lint entry point is) over the changed files and fix anything reported
-- [ ] T036 Walk [quickstart.md](quickstart.md) steps 1 through 4 against a live `robot-army serve`, confirming each expected outcome including the descriptor count staying bounded under a held flood
+- [X] T031 Correct the two shutdown claims in `src/robot_army/web/server.py` that were already false: the `server_close()` comment saying it "Joins in-flight request threads" (it does not — `_Threads.append` drops daemon threads and `ThreadingHTTPServer` sets `daemon_threads = True`), and the SIGTERM stderr line promising to finish in-flight requests; say what actually happens, and that the new bound is what puts a ceiling on shutdown — research R6
+- [X] T032 [P] Extend the module docstring of `src/robot_army/web/server.py` so the two bounds join the three properties already listed there as requirements rather than implementation choices, since a future reader removing either would reopen RA-13
+- [X] T033 [P] Add a short paragraph to `README.md`, in the section covering the web interface, saying what the two numbers are, that a `503` from this interface means the connection cap and not a failure, and where the refusal count is recorded — written for the author's future self, per Principle V
+- [X] T034 Run `uv run pytest -q` and confirm the whole suite passes, including every pre-existing web test unchanged — SC-008, and the constitution's "implementation is not complete until the unit test suite passes"
+- [X] T035 Run `uv run ruff check` and `uv run ruff format --check` (or whatever the repository's configured lint entry point is) over the changed files and fix anything reported
+- [X] T036 Walk [quickstart.md](quickstart.md) steps 1 through 4 against a live `robot-army serve`, confirming each expected outcome including the descriptor count staying bounded under a held flood
 
 ---
 
@@ -218,3 +218,22 @@ large. Messages explain why, not what, per the constitution's Development Workfl
   that is a new feature with a new plan.
 - Do not implement `handle_timeout`; it is a `BaseServer` method `serve_forever()` never calls
   (research R1).
+
+---
+
+## Completion notes
+
+- **T002** was satisfied during planning: all three upstream facts were read out of CPython
+  3.14.7 and are quoted in [research.md](research.md) R1, R2, and R6.
+- **T014** found nothing to fix. `BoundHandler` inherits `timeout`; the integration tests
+  confirm it reaches the socket.
+- One change outside the task list: `serve()` computed `int(port or config.web.port)`, so
+  `serve(config, port=0)` — a real request, meaning "let the kernel choose" — was silently
+  answered with the configured port instead. It is now `port if port is not None`. Found
+  because T027 needs an ephemeral port, and left fixed because a silently ignored argument is
+  the kind of thing that is only ever found this way.
+- Quickstart steps 1–4 were walked against a live `robot-army serve` on 2026-09-04: a silent
+  connection closed after 15.0s with nothing on stderr, 60 offered connections left the
+  process holding 36 descriptors (4 baseline plus the cap of 32), further connections received
+  the `503`, three saturation episodes printed three lines, and `web.stop` recorded
+  `refused_over_capacity: 47`.

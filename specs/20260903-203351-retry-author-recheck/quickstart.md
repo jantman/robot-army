@@ -20,11 +20,11 @@ from the other direction and is the cheaper rehearsal.
 
 ```bash
 uv run pytest -q
-uv run ruff check src tests
-uv run mypy src
+uv run ruff check src/ tests/
 ```
 
-All three must pass before this is finished (Development Workflow).
+Both must pass before this is finished (Development Workflow). These are the two
+commands CI runs; the project carries no type checker.
 
 The tests that speak directly to the requirements:
 

@@ -712,6 +712,56 @@ def _dispatch_item(
             reason="dispatcher selected it and capacity exists",
         )
 
+    # -- the author (issue #119, FR-014, FR-015) ---------------------------
+    #
+    # Deliberately *outside* the ``skip_gates`` block below. No caller passes that flag
+    # today, so this changes nothing now — but a check whose whole documented character is
+    # "this cannot be disabled" must not sit under a flag named *skip gates*, in the file
+    # where the next reader is most likely to trust the surrounding structure (research R8).
+    # Placing it here also covers ``resume`` and ``restart``, which reach the launch through
+    # this same function.
+    #
+    # This is defence in depth, not the fix: ``operations.retry`` is where the live check
+    # happens. What it replaces is worse than nothing, though --- the launch used to build
+    # its ``Issue`` with ``author=config.github.author``, asserting a fact it had never
+    # read, which made the code *read* as though a check happened downstream and removed the
+    # last natural place to notice that none did.
+    if item.author is None or item.author != config.github.author:
+        cause = "unrecorded" if item.author is None else "mismatch"
+        reason = (
+            f"work item {item_id} has no recorded issue author, so it cannot be verified "
+            f"— run `robot-army retry {item_id}` to re-read the issue and re-check it"
+            if item.author is None
+            else (
+                f"issue author {item.author!r} is not the configured author "
+                f"{config.github.author!r} (FR-007 security boundary; this cannot be "
+                f"disabled)"
+            )
+        )
+        audit.record(
+            "dispatch.author",
+            outcome="error",
+            entity_type="work_item",
+            entity_id=item_id,
+            detail={
+                "recorded_author": item.author,
+                "configured_author": config.github.author,
+                "cause": cause,
+            },
+            dry_run=dry_run,
+        )
+        _fail(
+            conn,
+            audit,
+            item_id,
+            reason,
+            blocked=True,
+            boundaries=boundaries,
+            config=config,
+            item=item,
+        )
+        return False
+
     # -- gates -------------------------------------------------------------
     if not skip_gates:
         try:
@@ -796,7 +846,10 @@ def _dispatch_item(
         body=item.body,
         url=item.source_url,
         labels=tuple(item.label_list),
-        author=config.github.author,
+        # The author this item's issue actually had, recorded when the issue was read
+        # (issue #119). It is provably equal to ``config.github.author`` by the time we get
+        # here — but equal because it was *compared* above, not because it was assigned.
+        author=item.author,
         state="open",
     )
     session_id = str(uuid.uuid4())

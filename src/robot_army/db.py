@@ -267,6 +267,7 @@ def insert_work_item(
     title: str,
     body: str,
     labels: str,
+    author: str,
     dry_run: bool,
 ) -> int | None:
     """Insert a ``discovered`` row, or return ``None`` if it already exists.
@@ -274,14 +275,19 @@ def insert_work_item(
     The row is written *before* eligibility is evaluated, so an evaluation interrupted
     halfway is observable as a ``discovered`` row on the next start rather than as
     nothing at all (data-model.md's interruption table).
+
+    ``author`` is required rather than defaulted, because a default is exactly the
+    fabrication migration 011 exists to delete: the only correct value is the one the read
+    that produced this row reported, and a caller that cannot supply it has no business
+    creating the row.
     """
     now = utcnow()
     cursor = conn.execute(
         """
         INSERT OR IGNORE INTO work_items
             (source, source_id, source_url, repo_key, issue_number, title, body,
-             labels, state, dry_run, discovered_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             labels, author, state, dry_run, discovered_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source,
@@ -292,6 +298,7 @@ def insert_work_item(
             title,
             body,
             labels,
+            author,
             str(WorkItemState.DISCOVERED),
             int(dry_run),
             now,

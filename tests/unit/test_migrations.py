@@ -125,6 +125,7 @@ def test_work_item_identity_is_unique_per_dry_run_flag(tmp_path):
                 title="t",
                 body="b",
                 labels="[]",
+                author="jantman",
                 dry_run=dry_run,
             )
 
@@ -510,7 +511,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 10
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 11
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -1091,7 +1092,7 @@ def test_migration_010_creates_both_hold_tables_with_no_backfill(tmp_path):
     upgraded database is correct the instant the tables exist."""
     conn, (start, end) = db.open_database(tmp_path / "state.db")
     assert (start, end) == (0, SCHEMA_VERSION)
-    assert current_version(conn) == 10
+    assert current_version(conn) == SCHEMA_VERSION
 
     item_columns = {row["name"] for row in conn.execute("PRAGMA table_info(item_holds)")}
     assert item_columns == {"work_item_id", "held_at", "held_by"}
@@ -1135,4 +1136,95 @@ def test_migration_010_holds_carry_no_nullable_provenance(tmp_path):
         db.upsert_repo(conn, repo_key="demo", settings_fingerprint=None, trust_verified=True)
     with pytest.raises(sqlite3.IntegrityError), db.transaction(conn):
         conn.execute("INSERT INTO repo_holds VALUES ('demo', 't', NULL)")
+    conn.close()
+
+
+# -- migration 011: the recorded issue author (issue #119, RA-01) -------------
+
+
+def _run_only_010(conn: sqlite3.Connection) -> None:
+    """Bring a database to exactly the 010-era schema, as one in the field would be."""
+    conn.execute("BEGIN")
+    for step in migrations.MIGRATIONS[:10]:
+        step(conn)
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+
+
+def test_migration_011_adds_the_author_column_to_a_010_era_database(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_010(conn)
+    assert current_version(conn) == 10
+    assert "author" not in {
+        row["name"] for row in conn.execute("PRAGMA table_info(work_items)")
+    }
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (10, SCHEMA_VERSION)
+    assert "author" in {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
+    conn.close()
+
+
+def test_migration_011_leaves_pre_existing_rows_with_a_null_author(tmp_path):
+    """No backfill, and the contrast with migration 008 is the argument. 008 backfilled a
+    fact it could derive; writing ``config.github.author`` here would be an unverified claim
+    in the one column that exists to hold a verified one. ``NULL`` means *never recorded*,
+    which is a state ``dispatch`` refuses rather than trusts."""
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_010(conn)
+    conn.execute("BEGIN")
+    conn.execute(
+        "INSERT INTO repos (repo_key, onboarded_at, fingerprint_approved_at, "
+        "trust_verified_at) VALUES ('demo', 't', 't', 't')"
+    )
+    conn.execute(
+        """
+        INSERT INTO work_items
+            (source, source_id, source_url, repo_key, issue_number, title, body, labels,
+             state, dry_run, discovered_at, updated_at)
+        VALUES ('github', 'demo#1', 'u', 'demo', 1, 't', 'b', '[]', 'ready', 0, 'x', 'x')
+        """
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    row = conn.execute("SELECT state, author FROM work_items WHERE source_id = 'demo#1'").fetchone()
+    assert row["state"] == "ready", "the migration adds; it does not rewrite"
+    assert row["author"] is None, "a pre-011 row's provenance cannot be established"
+    conn.close()
+
+
+def test_migration_011_is_idempotent(tmp_path):
+    """Re-running the ladder against an up-to-date database applies nothing. SQLite has no
+    ``ADD COLUMN IF NOT EXISTS``, so a second application would raise rather than pass
+    quietly — which is exactly what makes this worth asserting."""
+    conn, _ = db.open_database(tmp_path / "state.db")
+    assert migrate(conn) == (SCHEMA_VERSION, SCHEMA_VERSION)
+    conn.close()
+
+
+def test_a_killed_migration_011_leaves_the_column_absent_and_re_runs(tmp_path, monkeypatch):
+    """Interruption tolerance for the newest rung. ``user_version`` advances as the
+    migration's last statement inside its transaction, so a crash rolls back the ALTER and
+    the version together and the next start applies the whole thing."""
+    conn = db.connect(tmp_path / "state.db")
+    _run_only_010(conn)
+
+    def _explode(connection: sqlite3.Connection) -> None:
+        migrations._migration_011(connection)
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:10], _explode))
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+    assert current_version(conn) == 10
+    assert "author" not in {
+        row["name"] for row in conn.execute("PRAGMA table_info(work_items)")
+    }
+
+    monkeypatch.undo()
+    assert migrate(conn) == (10, SCHEMA_VERSION)
+    assert "author" in {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
     conn.close()

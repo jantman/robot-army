@@ -128,6 +128,7 @@ def test_a_dispatched_item_previews_from_its_own_worktree(wired, tmp_path, repo_
             title=ISSUE.title,
             body=ISSUE.body,
             labels='["robot-army"]',
+            author=ISSUE.author,
             dry_run=False,
         )
         # State is irrelevant here — the preview reads the worktree and the branch, not

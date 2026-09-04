@@ -428,6 +428,50 @@ sqlite3 -header -column ~/.local/state/robot-army/state.db \
    WHERE board_column IS NOT NULL'
 ```
 
+### `work_items.author` — who wrote the issue, and why the column exists at all
+
+Added by migration 011 (issue #119, RA-01). One nullable column, no table, no state.
+
+| Value | Means | Written by |
+|---|---|---|
+| a login | who wrote the issue, as the last read of it reported | the poller at discovery; `retry` on every successful re-read |
+| `NULL` | **never recorded** — a row predating migration 011 | nobody; there is no backfill |
+
+**Why it exists.** The author check is the control that stops "anyone may open an issue on a
+public repository" becoming "anyone may run an agent in my checkout". It was enforced in
+exactly one place — `poll.evaluate` — and `retry` returned an author-rejected item to the
+queue without re-running it, because `dispatch.check_gates` takes a `RepoConfig` and cannot
+see an issue at all. `_dispatch_item` then built its `Issue` with
+`author=config.github.author`: a value **asserted, never read**, which made the code look as
+though a check happened downstream and removed the last natural place to notice that none
+did. This column is what turns that assertion into a comparison.
+
+The alternative was a second HTTP read on the dispatch path, which today makes none and
+would have had to grow its own timeout, retry and backoff to gain one. A nullable column
+costs one string compare and behaves identically on a redispatch.
+
+**`NULL` is not "no author".** It is *this row's provenance cannot be established*, and that
+is a real state: a `ready` row from before migration 011 may have reached `ready` through the
+very defect the migration exists to close, and no query answers which. So `NULL` refuses the
+dispatch, and the refusal names `robot-army retry <id>` as the recovery — which re-reads the
+issue and writes the column for the first time. The upgrade heals itself along the path the
+fix already hardens.
+
+**Nothing is backfilled**, and the contrast with migration 008 is the argument. 008
+backfilled `sessions.transcript_checked_at` because it could derive the right answer — those
+sessions really had been judged. Writing `config.github.author` here would be the opposite:
+an unverified claim in the one column whose entire purpose is to hold a verified one, which
+is what migration 005 refuses to do with clone paths, in the same words.
+
+`retry` refreshes `title`, `body`, `labels` and `author` together from the read it performs,
+on the refused path as well as the allowed one, so a blocked item on the queue describes the
+issue as it currently is rather than as it was at discovery.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  'SELECT id, state, author FROM work_items WHERE author IS NULL'
+```
+
 ### The card creation sequence, and where it can be killed
 
 Creating an issue from a card is four steps, each in its own transaction, because every seam

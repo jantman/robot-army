@@ -35,8 +35,7 @@ Single Python package: `src/robot_army/`, `tests/` at the repository root.
 
 **Purpose**: establish that what breaks later was broken by this change.
 
-- [ ] T001 Record a green baseline: run `uv run pytest -q`, `uv run ruff check src tests`
-      and `uv run mypy src` on `speckit/20260903-203351-retry-author-recheck` and note the
+- [X] T001 Record a green baseline: run `uv run pytest -q` and `uv run ruff check src/ tests/` on `speckit/20260903-203351-retry-author-recheck` and note the
       test count, so a later failure is attributable rather than argued about
 
 ---
@@ -49,23 +48,23 @@ Single Python package: `src/robot_army/`, `tests/` at the repository root.
 tested before it if that is the preferred order — the refusal in US1 reads the *live* issue,
 never the column.
 
-- [ ] T002 Add `SCHEMA_011_SQL` and `_migration_011` to `src/robot_army/migrations.py`,
+- [X] T002 Add `SCHEMA_011_SQL` and `_migration_011` to `src/robot_army/migrations.py`,
       append `_migration_011` to `MIGRATIONS` (making `SCHEMA_VERSION` 11), with
       `ALTER TABLE work_items ADD COLUMN author TEXT` and a comment saying what `NULL`
       means and why there is no backfill, per [data-model.md](data-model.md) and
       [R7](research.md)
-- [ ] T003 [P] Add `author: str | None = None` to `WorkItem` in `src/robot_army/models.py`,
+- [X] T003 [P] Add `author: str | None = None` to `WorkItem` in `src/robot_army/models.py`,
       with a comment distinguishing "never recorded" from "no author"
-- [ ] T004 Add an `author: str` keyword parameter to `db.insert_work_item` in
+- [X] T004 Add an `author: str` keyword parameter to `db.insert_work_item` in
       `src/robot_army/db.py` and include the column in its `INSERT` statement (depends on
       T002, T003)
-- [ ] T005 Pass `author=issue.author` from `poll.poll_repo`'s `db.insert_work_item` call in
+- [X] T005 Pass `author=issue.author` from `poll.poll_repo`'s `db.insert_work_item` call in
       `src/robot_army/poll.py` (depends on T004)
-- [ ] T006 Add `author: str = "jantman"` to `seed_item` in `tests/conftest.py` and pass it
+- [X] T006 Add `author: str = "jantman"` to `seed_item` in `tests/conftest.py` and pass it
       through to `db.insert_work_item`, defaulting to the login the `config` fixture already
       sets as `github.author` so existing dispatch tests keep testing what they were written
       to test ([R10](research.md)) (depends on T004)
-- [ ] T007 [P] Add a migration test to `tests/unit/test_migrations.py`: `SCHEMA_VERSION` is
+- [X] T007 [P] Add a migration test to `tests/unit/test_migrations.py`: `SCHEMA_VERSION` is
       11, the column exists after migrating, a row written by migration 010's schema
       survives with `author IS NULL`, and re-running `migrate` is a no-op (depends on T002)
 
@@ -82,24 +81,24 @@ condition refuses the retry and leaves the item blocked with a current reason.
 `robot-army retry <id>` and by `POST /item/<id>/retry`, stays `failed`, and the refusal
 names the author condition.
 
-- [ ] T008 [US1] In `operations.retry` (`src/robot_army/operations.py`), after
+- [X] T008 [US1] In `operations.retry` (`src/robot_army/operations.py`), after
       `dispatch.check_gates` passes, read the issue via
       `ctx.boundaries.issue_reader.get_issue(item.repo_key, item.issue_number)`; refuse on
       `BoundaryError` with cause `issue_unreachable` and exit `EXIT_FAILED`, and refuse on a
       `None` return with cause `issue_absent` and the same exit code, using the wording in
       [contracts/retry.md](contracts/retry.md). Never fall back to the item's stored copy
       ([R3](research.md))
-- [ ] T009 [US1] In the same function, call `poll.evaluate(issue, config=ctx.config,
+- [X] T009 [US1] In the same function, call `poll.evaluate(issue, config=ctx.config,
       repo_key=item.repo_key, onboarded=True)` and refuse with `EXIT_PRECONDITION` when the
       verdict is ineligible, quoting `Eligibility.reason` verbatim as its own line and
       writing that reason to the item's `blocked_reason` (FR-005). Do not read
       `blocked_reason` to decide anything ([R2](research.md)) (depends on T008)
-- [ ] T010 [US1] Add the audit records from
+- [X] T010 [US1] Add the audit records from
       [contracts/audit-records.md](contracts/audit-records.md) to `operations.retry`:
       `retry.blocked` for a refusal reached before the read, and `retry.evaluate` carrying
       `eligible`, `reason`, `author` and `refreshed` for every invocation that attempted one
       — on the allowed path as well as both refused ones (depends on T009)
-- [ ] T011 [P] [US1] New `tests/unit/test_operations_retry.py` covering, one test each: the
+- [X] T011 [P] [US1] New `tests/unit/test_operations_retry.py` covering, one test each: the
       author condition refuses; a removed label refuses and reports the label rather than
       the stored reason; a closed issue refuses; an item that failed for a non-eligibility
       reason is still re-evaluated (FR-007); an unreachable source refuses without consulting
@@ -107,7 +106,7 @@ names the author condition.
       `failure_reason` and `blocked_reason` cleared; a refusal rewrites `blocked_reason` to
       the current reason; and the three audit records appear with the fields the contract
       names (depends on T010)
-- [ ] T012 [P] [US1] Extend `tests/unit/test_web_actions.py`: an author-rejected item posted
+- [X] T012 [P] [US1] Extend `tests/unit/test_web_actions.py`: an author-rejected item posted
       to `/item/<id>/retry` gets `409` with the author reason in the body and stays `failed`,
       proving both front ends share the refusal (SC-001) (depends on T010)
 
@@ -124,14 +123,14 @@ outcomes.
 **Independent Test**: edit an issue's title, body and labels after discovery, retry the
 item, and find the item carrying the new values — whether the retry was allowed or refused.
 
-- [ ] T013 [US2] In `operations.retry`, immediately after a successful read and *before*
+- [X] T013 [US2] In `operations.retry`, immediately after a successful read and *before*
       the verdict is consulted, write `title`, `body`, `labels`
       (`states.dumps_labels(list(issue.labels))`) and `author` through
       `db.update_work_item_columns` in its own transaction, so the refused path refreshes
       too (FR-009) and an interruption between the refresh and the transition leaves the
       item blocked with accurate content rather than queued with stale content
       ([R5](research.md)) (depends on T008, and on T002 for the column)
-- [ ] T014 [P] [US2] Add to `tests/unit/test_operations_retry.py`: a successful retry stores
+- [X] T014 [P] [US2] Add to `tests/unit/test_operations_retry.py`: a successful retry stores
       the freshly read title, body, labels and author; a *refused* retry stores them as well;
       and the stored `labels` round-trips through `WorkItem.label_list` to the issue's tuple
       (depends on T013)
@@ -148,14 +147,14 @@ eligibility re-checked, author included.
 
 **Independent Test**: read both strings; each names the re-read and the author.
 
-- [ ] T015 [P] [US3] Replace the `retry` `ActionSpec` description in
+- [X] T015 [P] [US3] Replace the `retry` `ActionSpec` description in
       `src/robot_army/web/pages.py` with the wording in
       [contracts/retry.md](contracts/retry.md). Leave `confirm`, `item_states` and
       `legal_actions` untouched — the button still shows on author-rejected rows, and
       [contracts/retry.md](contracts/retry.md) says why hiding it would be worse
-- [ ] T016 [P] [US3] Update the `retry` parser's `help` in `src/robot_army/cli.py` to say
+- [X] T016 [P] [US3] Update the `retry` parser's `help` in `src/robot_army/cli.py` to say
       the same thing
-- [ ] T017 [P] [US3] Add a test asserting both strings mention re-reading the issue and
+- [X] T017 [P] [US3] Add a test asserting both strings mention re-reading the issue and
       checking eligibility including the author — in `tests/unit/test_web_actions.py` for
       the `ActionSpec` and alongside the existing CLI parser tests for the help text
       (depends on T015, T016)
@@ -174,17 +173,17 @@ builds.
 **Independent Test**: a `ready` item whose recorded author is foreign, and one whose author
 is `NULL`, are each refused into `failed` with no worktree, branch or session created.
 
-- [ ] T018 [US4] In `dispatch._dispatch_item` (`src/robot_army/dispatch.py`), after the
+- [X] T018 [US4] In `dispatch._dispatch_item` (`src/robot_army/dispatch.py`), after the
       `repos.resolve` refusal and the `DISPATCHING` transition but **outside** the
       `if not skip_gates:` block ([R8](research.md)), refuse via `_fail(..., blocked=True)`
       when `item.author is None` (naming `retry` as the recovery, FR-015) or when
       `item.author != config.github.author` (FR-014), returning `False` before any worktree
       work begins (depends on T003)
-- [ ] T019 [US4] In the same file, replace `author=config.github.author` in the `Issue`
+- [X] T019 [US4] In the same file, replace `author=config.github.author` in the `Issue`
       constructed for the launch with `author=item.author`, and add the `dispatch.author`
       audit record from [contracts/audit-records.md](contracts/audit-records.md) carrying
       `recorded_author`, `configured_author` and `cause` (depends on T018)
-- [ ] T020 [P] [US4] Add to `tests/integration/test_dispatch.py`: a foreign recorded author
+- [X] T020 [P] [US4] Add to `tests/integration/test_dispatch.py`: a foreign recorded author
       is refused, the item is `failed` with the author named in `blocked_reason`, and
       `version_control` was asked to create no worktree; a `NULL` author is refused with a
       reason naming `retry`; a matching author dispatches exactly as before; and the
@@ -197,19 +196,31 @@ did not read.
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T021 [P] Update `docs/security-analysis.md`: mark RA-01 resolved in the High table and
+- [X] T021 [P] Update `docs/security-analysis.md`: mark RA-01 resolved in the High table and
       add a **Resolved** note to its section naming the commit's mechanism; add a note to
       RA-04 saying the retry path is closed and the poll-to-dispatch path is not, so the
       finding is not read as fully closed (FR-018)
-- [ ] T022 [P] Add a `work_items.author` section to `docs/state.md` in the style of the
+- [X] T022 [P] Add a `work_items.author` section to `docs/state.md` in the style of the
       existing spec-kit and board column sections: what the column holds, what `NULL` means,
       why there is no backfill, and a `sqlite3` line for reading it
-- [ ] T023 [P] Update the `retry` mentions in `README.md` so the described behaviour matches
+- [X] T023 [P] Update the `retry` mentions in `README.md` so the described behaviour matches
       the new one
-- [ ] T024 Run `uv run pytest -q`, `uv run ruff check src tests` and `uv run mypy src`; all
-      three must pass before the feature is complete (Development Workflow)
-- [ ] T025 Walk [quickstart.md](quickstart.md) against a real installation, or record which
+- [X] T024 Run `uv run pytest -q` and `uv run ruff check src/ tests/` — the two commands CI
+      runs; both must pass before the feature is complete (Development Workflow)
+- [X] T025 Walk [quickstart.md](quickstart.md) against a real installation, or record which
       scenarios were exercised only by the suite and why
+
+**T025 result.** Scenario 6 (the interface text) was run against the real CLI. Scenarios
+1–5 were run against a real SQLite database on disk — migration 011 applied to
+`user_version` 11, the author-rejected retry refused at exit 3 quoting the poller's own
+sentence, the refused path's content refresh observed, both read failures refused at exit 1
+with distinct messages, both dispatch refusals observed with no worktree created, and all
+five audit records read back off the log. The issue source was a fake reader rather than
+GitHub: the boundary it stands in for is exercised for real by the existing suite, and the
+alternative is an outside-authored issue on an onboarded repository, which cannot be
+manufactured on demand. What the fake cannot prove is that `GitHubReader.get_issue` reports
+the author GitHub actually returns — that is the only part of this feature not covered
+end-to-end, and it is the same gap `robot-army prompt` already has on the same call.
 
 ---
 

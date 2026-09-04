@@ -81,6 +81,7 @@ def prepare_item(conn, audit, config, clone: Path):
             title="Add a thing",
             body="",
             labels="[]",
+            author="jantman",
             dry_run=False,
         )
         db.update_work_item_columns(

@@ -1303,3 +1303,167 @@ def test_an_unconfirmed_launch_leaves_no_comment_claiming_a_session(
     assert all("dispatched a session" not in body for body in bodies)
     assert all("reassigned this issue" not in body for body in bodies)
     assert all("could not start a session" in body for body in bodies)
+
+
+# -- the author backstop (issue #119, RA-01) ---------------------------------
+#
+# ``operations.retry`` is where the live author check happens; these cover the second,
+# independent refusal point. It exists because the launch used to build its ``Issue`` with
+# ``author=config.github.author`` --- asserting a fact it had never read, which made the
+# code *read* as though a check happened downstream and removed the last natural place to
+# notice that none did.
+
+
+def test_an_item_whose_recorded_author_is_not_the_configured_one_is_refused(
+    conn, audit, config, tmp_path, layout
+):
+    display = StubDisplay()
+    boundaries = make_boundaries(audit, display=display, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config, author="mallory")
+
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    item = db.get_work_item(conn, item_id)
+    assert item.state is WorkItemState.FAILED
+    assert "mallory" in (item.blocked_reason or "")
+    assert "cannot be disabled" in (item.blocked_reason or "")
+    assert display.opened == []
+    assert item.worktree_path is None, "nothing may be created for a refused author"
+    assert item.branch is None
+
+
+def test_an_item_with_no_recorded_author_is_refused_and_pointed_at_retry(
+    conn, audit, config, tmp_path, layout
+):
+    """The pre-migration-011 shape. Trusting such a row would reproduce the hole --- it may
+    have reached ``ready`` through the very defect this closes, and nothing can tell after
+    the fact. Refusing it *into* ``retry``, which re-reads the issue and writes the column
+    for the first time, makes the upgrade self-healing along the path this change hardens.
+    """
+    display = StubDisplay()
+    boundaries = make_boundaries(audit, display=display, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config)
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, item_id, author=None)
+
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    item = db.get_work_item(conn, item_id)
+    assert item.state is WorkItemState.FAILED
+    assert "no recorded issue author" in (item.blocked_reason or "")
+    assert f"robot-army retry {item_id}" in (item.blocked_reason or "")
+    assert display.opened == []
+
+
+def test_the_author_refusal_records_both_halves_of_the_comparison(
+    conn, audit, config, tmp_path, layout
+):
+    """The reason string on the row is written for the queue page. Reconstruction needs the
+    recorded author *and* the configured one, because a future reader has to be able to see
+    which comparison failed without re-deriving either side."""
+    boundaries = make_boundaries(audit, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config, author="mallory")
+
+    dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    records = [
+        json.loads(line)
+        for path in sorted(layout.log_dir.glob("audit-*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("action") == "dispatch.author"
+    ]
+    assert len(records) == 1
+    detail = records[0]["detail"]
+    assert detail == {
+        "recorded_author": "mallory",
+        "configured_author": "jantman",
+        "cause": "mismatch",
+    }
+
+
+def test_a_passing_author_check_writes_no_record_of_its_own(
+    conn, audit, config, tmp_path, layout
+):
+    """The omission the plan's Constitution Check claims, asserted so a later "helpful"
+    addition has to argue with a test. One string comparison against a column already in
+    the loaded row, passing on every healthy dispatch, immediately followed by a
+    ``state.work_item`` record naming the item."""
+    boundaries = make_boundaries(
+        audit, host=StubSessionHost(confirm=True), hooks=SubprocessHookRunner(audit)
+    )
+    item_id = ready_item(conn, config)
+
+    assert dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    actions = [
+        json.loads(line).get("action")
+        for path in sorted(layout.log_dir.glob("audit-*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert "dispatch.author" not in actions
+
+
+def test_the_launched_issue_carries_the_recorded_author_not_an_asserted_one(
+    conn, audit, config, tmp_path, layout, monkeypatch
+):
+    """The line this change deletes. ``author=config.github.author`` was equal to the right
+    value by assignment; it is now equal by comparison, and the value handed to the launch
+    is the one that was read."""
+    seen: list[str] = []
+    real = dispatch.build_launch_plan
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["issue"].author)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dispatch, "build_launch_plan", spy)
+    boundaries = make_boundaries(
+        audit, host=StubSessionHost(confirm=True), hooks=SubprocessHookRunner(audit)
+    )
+    item_id = ready_item(conn, config)
+
+    dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    assert seen == [db.get_work_item(conn, item_id).author]
+    assert seen == ["jantman"]

@@ -491,6 +491,46 @@ CREATE TABLE repo_holds (
 );
 """
 
+SCHEMA_011_SQL = """
+-- Who wrote the issue this item came from (issue #119, RA-01).
+--
+-- The author check is the control that stops "anyone can open an issue on a public
+-- repository" becoming "anyone can run an agent in my checkout". It was enforced in exactly
+-- one place -- poll.evaluate -- and `retry` returned an author-rejected item to the queue
+-- without re-running it, because `dispatch.check_gates` takes a RepoConfig and cannot see
+-- an issue at all. `dispatch` then *asserted* `author=config.github.author` into the Issue
+-- it built, which made the code read as though a check had happened downstream.
+--
+-- This column is what lets that assertion become a comparison. The alternative was a second
+-- HTTP read on the dispatch path, which today makes none and would have had to grow its own
+-- timeout, retry and backoff to gain one; a nullable column costs one string compare and
+-- behaves identically on a redispatch.
+--
+-- NULL means *never recorded* -- a row written before this migration -- and it is not "no
+-- author" and not "unknown but probably fine". It is `this row's provenance cannot be
+-- established`, which is a real and load-bearing state: a `ready` row from before this
+-- migration may have reached `ready` through the very defect being fixed, and no query
+-- answers which. So NULL refuses the dispatch and names `retry` as the recovery, which
+-- re-reads the issue and writes this column for the first time. The upgrade heals itself
+-- along the path this change hardens.
+--
+-- No backfill, deliberately, and the contrast with migration 008 is the whole argument.
+-- 008 backfilled `sessions.transcript_checked_at` because it could derive the right answer:
+-- those sessions really had been judged by the old inline check. Writing
+-- `config.github.author` here would be the opposite -- an unverified claim in the one
+-- column whose entire purpose is to hold a verified one. Migration 005 refuses the same
+-- thing about clone paths, in the same words.
+--
+-- Nullable rather than NOT NULL DEFAULT '': a default would make every pre-migration row
+-- indistinguishable from an issue written by an author whose login is the empty string, and
+-- would silently give the two the same treatment. SQLite cannot add a NOT NULL column
+-- without one anyway, so the choice is between a lie and a NULL that means something.
+--
+-- No index. Nothing queries by author; the only read is by primary key, on an item the
+-- dispatcher is already holding.
+ALTER TABLE work_items ADD COLUMN author TEXT;
+"""
+
 
 def _migration_001(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_001_SQL):
@@ -542,6 +582,11 @@ def _migration_010(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_011(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_011_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -554,6 +599,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_008,
     _migration_009,
     _migration_010,
+    _migration_011,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

@@ -67,6 +67,15 @@ class WorkItem:
     dry_run: bool
     discovered_at: str
     updated_at: str
+    #: Who wrote the issue, as the last read of it reported (issue #119). The fact
+    #: ``dispatch`` compares against ``config.github.author`` instead of asserting it.
+    #:
+    #: ``None`` means *never recorded* — a row written before migration 011 — which is a
+    #: different thing from "no author" and from "unknown but presumably fine". Such a row
+    #: may have reached ``ready`` through the defect migration 011 exists to close, and
+    #: nothing can tell after the fact, so it is refused rather than trusted. Nothing
+    #: backfills it: ``retry`` re-reads the issue and writes it for the first time.
+    author: str | None = None
     worktree_path: str | None = None
     branch: str | None = None
     prepare_output: str | None = None

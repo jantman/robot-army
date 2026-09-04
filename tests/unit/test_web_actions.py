@@ -12,7 +12,7 @@ import json
 import threading
 
 import pytest
-from tests.conftest import beat, seed_item, seed_session
+from tests.conftest import beat, make_issue, seed_item, seed_session
 
 from robot_army import db, operations
 from robot_army.states import SessionState, WorkItemState
@@ -448,6 +448,26 @@ def test_retry_is_refused_with_the_reason_while_the_block_still_holds(web, conn)
     assert state_of(conn, item_id) == WorkItemState.FAILED
 
 
+def test_retry_refuses_an_author_rejected_item_through_the_web_too(web, conn, config, monkeypatch):
+    """RA-01's worst path. The blocked section of the queue is exactly where an
+    author-rejected item appears, and its `retry` control's confirmation used to promise
+    the block would be re-verified while `operations.retry` re-checked only the
+    repository's own conditions. Both front ends call the same function, which is what
+    makes closing it once close it everywhere."""
+    monkeypatch.setattr(
+        operations.dispatch, "is_trusted", lambda path, trust_file=None: (True, "trusted in test")
+    )
+    item_id = seed_item(conn, state="failed", clone_path=config.repos["demo"].path)
+    web.reader.issues = [make_issue(number=42, author="mallory")]
+
+    response = web.post_json(f"/item/{item_id}/retry")
+
+    assert response.status == 409
+    reason = response.json()["reason"]
+    assert "mallory" in reason and "jantman" in reason
+    assert state_of(conn, item_id) == WorkItemState.FAILED
+
+
 def test_retry_moves_a_failed_item_back_to_ready_when_it_can(web, conn, config, monkeypatch):
     # The gate that would otherwise refuse here is the trust check, which reads the real
     # ~/.claude.json. The web calls `operations.retry` with exactly the arguments the CLI
@@ -461,6 +481,9 @@ def test_retry_moves_a_failed_item_back_to_ready_when_it_can(web, conn, config, 
     item_id = seed_item(conn, state="failed", clone_path=config.repos["demo"].path)
     with db.transaction(conn):
         db.update_work_item_columns(conn, item_id, failure_reason="a transient thing")
+    # Since issue #119 the retry re-reads the issue and re-runs `poll.evaluate`, so the
+    # reader has to know about it. An eligible issue is what "when it can" now means.
+    web.reader.issues = [make_issue(number=42)]
     assert web.post_json(f"/item/{item_id}/retry").status == 303
     row = db.get_work_item(conn, item_id)
     assert row.state is WorkItemState.READY
@@ -537,6 +560,8 @@ def test_every_confirmed_action_lands_on_a_200(web, conn, config, monkeypatch, a
     state = {"abandon": "interrupted", "cancel": "active", "retry": "failed"}[action]
     item_id = seed_item(conn, state=state, clone_path=config.repos["demo"].path)
     seed_session(conn, item_id, state="running" if state == "active" else "lost")
+    # `retry` re-reads its issue since issue #119; the other two never touch the reader.
+    web.reader.issues = [make_issue(number=42)]
 
     response = web.post(
         f"/item/{item_id}/{action}",

@@ -15,7 +15,7 @@ A module-level constant in `src/robot_army/web/server.py`, beside the existing `
 | `Content-Security-Policy` | `str` | `frame-ancestors 'none'; default-src 'self'; base-uri 'none'; form-action 'self'` |
 | `X-Frame-Options` | `str` | `DENY` |
 | `X-Content-Type-Options` | `str` | `nosniff` |
-| `Referrer-Policy` | `str` | `no-referrer` |
+| `Referrer-Policy` | `str` | `same-origin` |
 
 Typed `dict[str, str]`. Immutable in practice — nothing writes to it — and never copied by
 reference into a response: the merge in `__post_init__` produces a new dict each time, so a

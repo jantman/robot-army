@@ -151,9 +151,19 @@ SECURITY_HEADERS: dict[str, str] = {
     # Matters most on the ``.json`` responses and the two assets: a browser guessing a type
     # other than the one declared is the whole of that attack.
     "X-Content-Type-Options": "nosniff",
-    # The audit and item views link out to ``github.com``. Following one must not tell the
-    # destination this interface's address, port, and the path being looked at.
-    "Referrer-Policy": "no-referrer",
+    # The audit and item views link out to ``github.com`` and ``trello.com``. Following one
+    # must not tell the destination this interface's address, port, and the path being
+    # looked at.
+    #
+    # ``same-origin`` rather than the stricter ``no-referrer``, and the difference is
+    # load-bearing: :func:`_referring_view` reads the ``Referer`` of a POST to send the
+    # author back to the list they acted from, so abandoning an item from ``/interrupted``
+    # returns to ``/interrupted`` rather than to the item. ``no-referrer`` would suppress
+    # that header on our own forms too, and the feature would degrade to its fallback
+    # everywhere — silently, and invisibly to the tests, which supply a ``Referer`` the
+    # browser would no longer be sending. ``same-origin`` withholds it from exactly the
+    # destinations this header exists to withhold it from, and from nothing else.
+    "Referrer-Policy": "same-origin",
 }
 
 

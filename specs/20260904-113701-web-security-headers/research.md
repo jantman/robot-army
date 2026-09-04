@@ -61,7 +61,7 @@ closed by the data structure rather than by a check.
 | `Content-Security-Policy` | `frame-ancestors 'none'; default-src 'self'; base-uri 'none'; form-action 'self'` |
 | `X-Frame-Options` | `DENY` |
 | `X-Content-Type-Options` | `nosniff` |
-| `Referrer-Policy` | `no-referrer` |
+| `Referrer-Policy` | `same-origin` |
 
 **Rationale**: Verified against what the pages actually do, since a policy that refuses something
 the interface needs is worse than no policy:
@@ -82,9 +82,15 @@ the interface needs is worse than no policy:
 - `form-action 'self'`: every form on every page posts to this server.
 - `nosniff` matters most on the `.json` responses and the two static assets, where a browser
   guessing a type other than the declared one is the whole attack.
-- `no-referrer`: the audit and item views link out to `github.com` and `trello.com`. Without
+- `same-origin`: the audit and item views link out to `github.com` and `trello.com`. Without
   this, following one hands the destination the interface's address, port and the path being
-  viewed.
+  viewed. **Not `no-referrer`**, which the issue proposed: `_referring_view` reads the
+  `Referer` of a POST so an action taken from `/interrupted` returns there rather than to the
+  item, and `no-referrer` suppresses the header on our own forms too. That would degrade the
+  feature to its fallback everywhere while `test_the_redirect_returns_to_the_referring_view`
+  kept passing, because a unit test supplies a `Referer` the browser would have stopped
+  sending. `same-origin` withholds it from exactly the destinations this header exists to
+  withhold it from, and from nothing else.
 
 **Alternatives considered**: adding `object-src 'none'` and `frame-src 'none'` for completeness —
 both are already covered by `default-src 'self'` given the interface embeds nothing, and a longer

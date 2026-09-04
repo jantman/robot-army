@@ -14,7 +14,7 @@ Present on **every** response, whatever its status, method, content type or rout
 | `Content-Security-Policy` | `frame-ancestors 'none'; default-src 'self'; base-uri 'none'; form-action 'self'` |
 | `X-Frame-Options` | `DENY` |
 | `X-Content-Type-Options` | `nosniff` |
-| `Referrer-Policy` | `no-referrer` |
+| `Referrer-Policy` | `same-origin` |
 
 The values are constant. They do not vary by route, by request, by configuration, or by whether
 the caller asked for HTML or JSON.
@@ -41,9 +41,10 @@ the caller asked for HTML or JSON.
 - **`form-action 'self'`** — every form on every page submits to this server.
 - **`nosniff`** — a `.json` response is JSON and a stylesheet is a stylesheet; the browser may
   not guess otherwise.
-- **`no-referrer`** — the audit and item views link out to `github.com` and `trello.com`.
+- **`same-origin`** — the audit and item views link out to `github.com` and `trello.com`.
   Following one must not tell the destination the interface's address, port, or the path being
-  viewed.
+  viewed. Requests to this server still carry their referrer, because `_referring_view` reads
+  it to send the author back to the list they acted from.
 
 ## Headers a response keeps
 

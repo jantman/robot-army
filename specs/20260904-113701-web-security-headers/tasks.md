@@ -104,10 +104,10 @@ with a clean console — stylesheet applied, script running, ten-second refresh 
 **Goal**: A declared content type is final, and following a `github.com` link out of the interface
 tells the destination nothing about where the interface lives.
 
-**Independent Test**: `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` appear
+**Independent Test**: `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin` appear
 on an HTML page, a JSON response and a static asset alike.
 
-- [X] T015 [US3] Add `"X-Content-Type-Options": "nosniff"` and `"Referrer-Policy": "no-referrer"` to `SECURITY_HEADERS` in `src/robot_army/web/server.py`, with a comment noting that `nosniff` matters most on the `.json` responses and the two assets, and that `no-referrer` exists because the audit and item views link out to `github.com`
+- [X] T015 [US3] Add `"X-Content-Type-Options": "nosniff"` and `"Referrer-Policy": "same-origin"` to `SECURITY_HEADERS` in `src/robot_army/web/server.py`, with a comment noting that `nosniff` matters most on the `.json` responses and the two assets, and that the policy is `same-origin` rather than `no-referrer` because the audit and item views link out to `github.com` and `trello.com` while `_referring_view` still needs the header on our own forms
 - [X] T016 [US3] Add to `tests/unit/test_web_security_headers.py` a test asserting both values on an HTML page, on a `.json` response and on both static assets — the three content types the browser could otherwise be tempted to re-guess
 
 **Checkpoint**: all four headers from [contracts/http-headers.md](./contracts/http-headers.md) are

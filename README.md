@@ -213,9 +213,10 @@ That is the accepted model, so the mitigations are the ones that matter:
   rather than the click. The same policy adds `default-src 'self'`, `base-uri 'none'` and
   `form-action 'self'` — free here, because these pages load nothing external by design: no web
   font, no CDN, no icon set, no inline script or style. Every response also sends
-  `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`, the latter so that
+  `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`, the latter so that
   following a `github.com` or `trello.com` link out of a view does not hand it this
-  interface's address.
+  interface's address — `same-origin` and not `no-referrer`, because a POST's own `Referer`
+  is what returns me to the list I acted from.
 
 From outside the house I connect my existing VPN and use the same LAN address. Nothing is
 published, no tunnel is configured, and no port is forwarded.

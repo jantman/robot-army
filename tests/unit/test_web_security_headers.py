@@ -200,7 +200,29 @@ def test_nothing_is_sniffed_and_nothing_leaks_a_referrer(web, conn):
     responses = every_response(web, conn)
     for name in ("html page", "json page", "css", "js"):
         assert responses[name].headers["X-Content-Type-Options"] == "nosniff", name
-        assert responses[name].headers["Referrer-Policy"] == "no-referrer", name
+        assert responses[name].headers["Referrer-Policy"] == "same-origin", name
+
+
+def test_the_referrer_policy_does_not_break_returning_to_the_referring_view(web, conn):
+    """Why the policy is ``same-origin`` and not the stricter ``no-referrer``.
+
+    ``_referring_view`` reads the ``Referer`` of a POST so that abandoning an item from
+    ``/interrupted`` returns there rather than to the item. Under ``no-referrer`` a browser
+    stops sending that header **on our own forms too**, and the feature quietly degrades to
+    its fallback everywhere — while every test of it keeps passing, because a test supplies
+    a ``Referer`` the browser would no longer send. That is the failure this asserts
+    against: the policy must be one that still permits a same-origin referrer.
+    """
+    assert server.SECURITY_HEADERS["Referrer-Policy"] == "same-origin"
+
+    item_id = seed_item(conn, issue_number=7, state="interrupted")
+    response = web.post(
+        f"/item/{item_id}/abandon",
+        headers={"Referer": "http://localhost:8420/interrupted"},
+    )
+    assert response.headers["Location"].startswith("/interrupted"), (
+        "the feature this policy has to leave working"
+    )
 
 
 # -- nothing displaced (FR-006) ---------------------------------------------

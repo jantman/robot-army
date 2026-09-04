@@ -8,9 +8,10 @@
 
 Every response the web interface emits gains four constant headers — a content policy whose
 first directive is `frame-ancestors 'none'`, the legacy `X-Frame-Options: DENY`, `nosniff`, and
-`no-referrer`. They are attached in `Response.__post_init__`, which is the single point all five
-existing response paths and every future one pass through, merged *under* any headers the caller
-passed so no existing header is displaced. No handler, guard, route or check changes.
+`same-origin` referrers. They are attached in `Response.__post_init__`, which is the single
+point all five existing response paths and every future one pass through, merged *under* any
+headers the caller passed so no existing header is displaced. No handler, guard, route or check
+changes.
 
 ## Technical Context
 
@@ -95,14 +96,16 @@ README.md                # CHANGED: one paragraph on what the interface sends an
 ```
 
 **Structure Decision**: The existing single-project layout is used unchanged. The whole source
-change is confined to `src/robot_army/web/server.py`: a `SECURITY_HEADERS` constant beside the
-existing `NO_STORE`, and a `__post_init__` on the `Response` dataclass at line 116. `html.py` and
+change is confined to `src/robot_army/web/server.py`: a `SECURITY_HEADERS` constant directly
+above the `Response` dataclass — not beside `NO_STORE`, which sits 1150 lines further down and
+would leave `__post_init__` referring forward to a constant nobody reading it can see — and a
+`__post_init__` on that dataclass. `html.py` and
 `pages.py` are read during this work — to confirm the policy refuses nothing the pages do — but
 are not edited.
 
 ## Implementation Outline
 
-1. **`SECURITY_HEADERS` constant** in `server.py`, next to `NO_STORE`, carrying the four
+1. **`SECURITY_HEADERS` constant** in `server.py`, above `Response`, carrying the four
    name/value pairs from [contracts/http-headers.md](./contracts/http-headers.md), with a comment
    saying what each is for and — for the CSP — why the strict form is free here.
 2. **`Response.__post_init__`** merges the constant under the caller's headers:

@@ -49,7 +49,7 @@ curl -sS -o /dev/null -D - -X POST -H 'Origin: http://127.0.0.1:8420' \
 Content-Security-Policy: frame-ancestors 'none'; default-src 'self'; base-uri 'none'; form-action 'self'
 X-Frame-Options: DENY
 X-Content-Type-Options: nosniff
-Referrer-Policy: no-referrer
+Referrer-Policy: same-origin
 ```
 
 and keeps what it carried before — `Cache-Control: no-store` on `/active`, `Cache-Control:

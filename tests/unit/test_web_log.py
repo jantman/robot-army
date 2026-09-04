@@ -355,6 +355,35 @@ def test_a_cursor_whose_offset_is_zero_advances_to_the_previous_file(ctx, layout
     ]
 
 
+@pytest.mark.parametrize("offset", [10**9, 2**62, -1])
+def test_a_cursor_offset_outside_the_file_is_clamped(ctx, layout, offset):
+    """The cursor is a URL parameter, so its byte offset is client input.
+
+    Unclamped, an offset past the end of the file sent ``_lines_backwards`` seeking and
+    reading past EOF in 64 KiB steps. Those reads yield no lines, and the byte budget only
+    counts lines that *are* yielded — so the budget never fired and the cost was linear in
+    the offset rather than in the file. A cursor near ``2**63``, which ``_encode_cursor``
+    will happily mint, would have held the request thread and the connection and audit handle
+    it carries for years. Negative is the same mistake mirrored.
+    """
+    write_log(layout, TODAY, [record(n) for n in range(5)])
+    cursor = operations._encode_cursor(f"audit-{TODAY}.jsonl", offset)
+
+    started = time.monotonic()
+    page = operations.read_log_page(ctx, cursor=cursor)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, f"a crafted cursor took {elapsed:.2f}s"
+    assert page.data["bytes_scanned"] <= operations.LOG_SCAN_BUDGET_BYTES
+    if offset < 0:
+        # Below the start of the file is a page that covers nothing, not a page that starts
+        # over — the file is finished, so the scan moves on and there is nothing older.
+        assert page.data["records"] == []
+    else:
+        # Past the end is the end: the newest records, exactly as with no cursor at all.
+        assert page.data["records"] == operations.read_log_page(ctx).data["records"]
+
+
 def test_an_append_between_pages_does_not_repeat_a_record(ctx, layout):
     """The daemon writes to today's file between two requests of a page turn. A cursor
     counting matches from the end names a different record after an append; one naming a byte

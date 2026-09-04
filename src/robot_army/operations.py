@@ -4119,8 +4119,9 @@ def _lines_backwards(
         for part, start in zip(reversed(parts), reversed(offsets), strict=True):
             if part.strip():
                 yield part, start
-    if carry.strip():
-        yield carry, 0
+    # No trailing flush of ``carry``: the loop only ends once ``position`` reaches zero, and
+    # that final pass is the one branch that sets ``carry`` empty and emits its own first
+    # part as a whole line. The file's first record leaves here from inside the loop.
 
 
 @dataclass(slots=True)
@@ -4254,13 +4255,24 @@ def read_log_page(
     )
     for path in files[start_index:]:
         try:
-            end_offset = path.stat().st_size if start_offset is None else start_offset
+            size = path.stat().st_size
         except OSError:
             # Vanished between the glob and the stat. Counted, for the same reason the read
             # failure inside the scan is counted: the silence must not be silent.
             skipped += 1
             start_offset = None
             continue
+        # Clamped, always, because the offset arrives in a URL and is therefore client input.
+        # Unclamped, an offset past the end of the file made ``_lines_backwards`` seek and
+        # read past EOF in block-sized steps; those reads yield no lines, and the byte budget
+        # only counts lines that *are* yielded, so it never fired. The cost was linear in the
+        # offset rather than in the file, which defeats the ceiling this whole function
+        # exists to keep — a minted cursor near ``2**63`` would have held the request thread,
+        # and the SQLite connection and audit handle it carries, effectively forever.
+        #
+        # Clamping is also the honest reading of an honest cursor whose file has since been
+        # rewritten smaller: the newest record it can still name is at the end of the file.
+        end_offset = size if start_offset is None else max(0, min(start_offset, size))
         scan = _scan_file_backwards(
             path,
             judge=judge,

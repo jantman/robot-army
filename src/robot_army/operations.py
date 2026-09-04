@@ -57,7 +57,7 @@ from robot_army.cardstates import NEVER_PARKED, CardState
 from robot_army.config import Config
 from robot_army.effects import Boundaries, EffectLevel, wire
 from robot_army.migrations import SCHEMA_VERSION
-from robot_army.models import ANOMALY_KINDS
+from robot_army.models import ANOMALY_KINDS, WorkItem
 from robot_army.states import (
     TERMINAL_SESSION_STATES,
     SessionState,
@@ -2598,16 +2598,18 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
     # item is still ``failed`` with accurate content and its old reason, which the next
     # retry corrects completely. The other order would leave an item *in the queue*
     # carrying content nobody re-read, which is the thing this function exists to prevent.
-    refreshed = ["title", "body", "labels", "author"]
+    #
+    # One dict rather than a call plus a hand-written list of what it wrote: the record's
+    # ``refreshed`` field has to name exactly the columns that changed, and two copies
+    # would drift the first time a fifth column joined.
+    refresh: dict[str, Any] = {
+        "title": issue.title,
+        "body": issue.body,
+        "labels": dumps_labels(list(issue.labels)),
+        "author": issue.author,
+    }
     with db.transaction(ctx.conn):
-        db.update_work_item_columns(
-            ctx.conn,
-            item_id,
-            title=issue.title,
-            body=issue.body,
-            labels=dumps_labels(list(issue.labels)),
-            author=issue.author,
-        )
+        db.update_work_item_columns(ctx.conn, item_id, **refresh)
 
     # -- the verdict (FR-002) ----------------------------------------------
     #
@@ -2628,7 +2630,7 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
             "eligible": verdict.eligible,
             "reason": verdict.reason,
             "author": issue.author,
-            "refreshed": refreshed,
+            "refreshed": list(refresh),
         },
         dry_run=item.dry_run,
     )
@@ -2661,7 +2663,7 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
 
 
 def _retry_unread(
-    ctx: Context, item: Any, *, cause: str, message: str, error: str | None
+    ctx: Context, item: WorkItem, *, cause: str, message: str, error: str | None
 ) -> Result:
     """A retry that could not read its issue. Refuses, and says which way it failed.
 

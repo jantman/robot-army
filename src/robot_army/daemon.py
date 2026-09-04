@@ -46,6 +46,7 @@ from robot_army import (
     spool,
 )
 from robot_army.audit import AuditLog
+from robot_army.boundaries.kitty import describe_refusals
 from robot_army.effects import Boundaries, EffectLevel
 from robot_army.migrations import SCHEMA_VERSION
 
@@ -225,9 +226,14 @@ def check_preconditions(
     # kitty instance *is* the product. At effect levels where the display is simulated,
     # the simulated probe answers, so this check is level-appropriate without branching.
     if boundaries.display.probe() is None:
+        # Whatever was refused is named here too, so the startup problem distinguishes a
+        # terminal that is not running from one being impersonated (RA-15). The simulated
+        # display has no refusals, so this reads exactly as before at those levels.
+        refusals = getattr(boundaries.display, "refusals", ())
         problems.append(
             f"no terminal control socket answered {config.terminal.socket_glob!r}. "
             "kitty must be running with `allow_remote_control yes` and `listen_on` set"
+            + describe_refusals(refusals)
         )
 
     return problems

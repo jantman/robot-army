@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from robot_army.boundaries import BoundaryError, DisplayHandle
+from robot_army.paths import unsafe_ancestor
 from robot_army.subproc import run
 
 if TYPE_CHECKING:
@@ -60,39 +61,22 @@ def _refuse(candidate: str) -> str | None:
         return "not a socket"
     if info.st_uid != os.getuid():
         return f"owned by uid {info.st_uid}"
-    return _unsafe_directory(Path(path))
+    return unsafe_ancestor(Path(path))
 
 
-def _unsafe_directory(candidate: Path) -> str | None:
-    """The first directory above ``candidate`` a stranger could rearrange, as a reason.
+def describe_refusals(refusals: tuple[dict[str, str], ...]) -> str:
+    """The refused candidates as a trailing sentence, or nothing at all.
 
-    ``lstat`` describes the file at an instant; ``kitty @ --to`` resolves the name again
-    a moment later. If any directory on the path lets somebody else unlink an entry, the
-    name inspected and the name used can be different files, and the ownership check
-    becomes a check with a window after it.
-
-    The sticky bit is the exemption rather than an oversight: it restricts unlinking and
-    renaming to the entry's owner, which is precisely the missing property — and it is
-    why ``/tmp`` (root-owned, ``1777``) may hold a socket even though a name in it is
-    worth nothing on its own. A directory owned by a third party is refused whatever its
-    mode, because its owner can always replace what is inside it.
-
-    Walked to the filesystem root rather than stopping at the parent, so there is no
-    "how far up is far enough" to get wrong: a hostile directory anywhere on the path is
-    the same attack. Four ``stat`` calls for the runtime directory, two for ``/tmp``.
+    Three surfaces report a missing socket — the diagnostic, the daemon's startup check,
+    and the error every launch failure quotes — and all three used to say the same thing
+    whether nothing was running or something was answering in kitty's place. Those send a
+    maintainer to opposite ends of the machine, so they get different words; when there
+    are no refusals the wording is exactly what it was.
     """
-    ours = os.getuid()
-    for directory in candidate.parents:
-        try:
-            info = os.lstat(directory)
-        except OSError as exc:
-            return f"directory {directory} cannot be inspected: {exc.strerror}"
-        if info.st_uid not in (ours, 0):
-            return f"directory {directory} is owned by uid {info.st_uid}"
-        writable_by_others = bool(info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
-        if writable_by_others and not info.st_mode & stat.S_ISVTX:
-            return f"directory {directory} is writable by others without the sticky bit"
-    return None
+    if not refusals:
+        return ""
+    listed = "; ".join(f"{r['socket']} ({r['reason']})" for r in refusals)
+    return f" {len(refusals)} candidate(s) were found and refused: {listed}"
 
 
 class KittyDisplay:
@@ -178,6 +162,7 @@ class KittyDisplay:
             raise BoundaryError(
                 f"no kitty control socket answered {self._config.terminal.socket_glob!r}; "
                 "is kitty running with allow_remote_control and listen_on set?"
+                + describe_refusals(self.refusals)
             )
         return socket
 

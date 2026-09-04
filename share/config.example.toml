@@ -52,7 +52,12 @@ branch_prefix   = "robot-army"    # branches are <prefix>/<something>
 binary          = "claude"
 
 [terminal]
-socket_glob           = "/tmp/mykitty-*"   # kitty appends its PID, so this is a glob
+# Match `listen_on unix:${XDG_RUNTIME_DIR}/mykitty` in kitty.conf. Under the
+# runtime directory rather than /tmp because /tmp is world-writable: a glob
+# rooted there matches names any local user can create, and whichever answers
+# first would receive every launch. The daemon refuses a candidate it does not
+# own, so /tmp still works and only warns — but this is the setup to have.
+socket_glob           = "/run/user/1000/mykitty-*"  # kitty appends its PID: a glob
 probe_timeout_seconds = 2
 binary                = "kitty"
 
@@ -206,8 +211,14 @@ post_create = [
 
 # Injected into the session's environment. Sessions inherit the terminal
 # daemon's environment, not the daemon's, so anything needed must be explicit.
+#
+# NOT A PLACE FOR A CREDENTIAL. These are passed to the terminal as `--env
+# KEY=VALUE` arguments, so they sit in the kitty client's argv and any local
+# process can read them from /proc/<pid>/cmdline while a session launches. The
+# same is true of the composed prompt. A local development URL is fine; a
+# password in that URL is not.
 [repos."you/example-repo".env]
-DATABASE_URL = "postgresql://localhost/example_dev"
+DATABASE_URL = "postgresql://localhost/example_dev"   # no password in it, deliberately
 PORT         = "5199"
 
 # A second repo, minimal: everything else inherited.

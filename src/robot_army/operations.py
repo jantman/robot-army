@@ -4450,14 +4450,23 @@ def doctor(ctx: Context, *, trust_file: Path | None = None) -> Result:
     # Deliberately the REAL display, not the wired one. `doctor` reports on the machine,
     # and at a simulated effect level the wired probe would cheerfully answer with a
     # fake socket — which is the opposite of what a diagnostic command is for.
-    from robot_army.boundaries.kitty import KittyDisplay
+    from robot_army.boundaries.kitty import KittyDisplay, describe_refusals
 
-    socket = KittyDisplay(ctx.config, ctx.audit).probe()
+    display = KittyDisplay(ctx.config, ctx.audit)
+    socket = display.probe()
     checks.append(
         (
             "terminal socket",
             socket is not None,
-            socket or f"nothing answered {ctx.config.terminal.socket_glob!r}",
+            socket
+            or (
+                # "nothing answered" and "something answered and was refused" are
+                # different machines to go and look at (RA-15). A diagnostic that
+                # reported an impostor as an absence would hide the one fact the
+                # maintainer most needs.
+                f"nothing answered {ctx.config.terminal.socket_glob!r}"
+                + describe_refusals(display.refusals)
+            ),
         )
     )
 

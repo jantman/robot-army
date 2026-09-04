@@ -139,10 +139,19 @@ the author recorded on the item, is a backstop rather than the gate.
 Two things are easy to overlook:
 
 - **kitty must be running with a control socket.** `kitty.conf` needs
-  `listen_on unix:/tmp/mykitty` and `allow_remote_control yes`. Kitty appends its PID, so
-  configure the **glob**, never a fixed path.
+  `listen_on unix:${XDG_RUNTIME_DIR}/mykitty` and `allow_remote_control yes`. Kitty expands
+  environment variables there and appends its PID, so configure the **glob**, never a fixed
+  path. Under the runtime directory and not `/tmp`: `/tmp` is world-writable, so any local
+  user can create a socket matching the glob and — because the daemon takes whichever answers
+  first, and keeps it — receive every launch instead of kitty. The daemon refuses a socket it
+  does not own, so an existing `/tmp` setup still works and only warns, but the runtime
+  directory is nobody else's to write in. Not `unix:@mykitty` either: an abstract socket
+  carries no filesystem permissions at all, so any local process can connect to it.
 - **Start the daemon by hand after graphical login**, not at boot. A daemon started before
   login has no display environment and no kitty to launch into.
+- **A launch is visible in the process table.** The composed prompt and every `[repos.*] env`
+  value are passed to kitty as command arguments, so any local process can read them from
+  `/proc/<pid>/cmdline` while the session starts. Do not put a credential in `env`.
 
 `doctor` catches the failure that cost the most time during the spike: a kitty instance
 carrying `CLAUDE_CODE_CHILD_SESSION` in its environment silently disables transcript

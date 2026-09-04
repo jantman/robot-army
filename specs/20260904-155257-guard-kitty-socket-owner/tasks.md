@@ -107,11 +107,11 @@ runtime directory; an existing `/tmp` configuration still loads, with one warnin
 **Independent test**: load a configuration setting no pattern and check the default; load one
 rooted in a world-writable non-sticky directory and check the warning and that loading succeeds.
 
-- [ ] T012 [P] [US3] In `tests/unit/test_config.py`, add the failing cases: with `XDG_RUNTIME_DIR` set, the default `socket_glob` is `<runtime dir>/mykitty-*`; with it unset, the default is under the state directory and is not under `/tmp`; a configuration whose pattern is rooted in a `0777` non-sticky directory loads successfully and produces a warning naming the recommended location; `/tmp/mykitty-*` produces no new warning, because `/tmp` is sticky; and the existing no-wildcard warning is unchanged.
-- [ ] T013 [US3] In `src/robot_army/config.py`, make `TerminalConfig.socket_glob` a `field(default_factory=...)` computing `f"{runtime_dir()}/mykitty-*"`, import `runtime_dir` from `robot_army.paths`, use the same call as the loader's `_str` default, and delete the two `# noqa: S108` comments that existed only because the default was a `/tmp` literal.
-- [ ] T014 [US3] In `src/robot_army/config.py`, add the load-time warning: take the pattern's longest wildcard-free leading directory, and if it exists and fails the directory half of the acceptance rule, warn that another local user could place a socket there, name `$XDG_RUNTIME_DIR/mykitty-*`, and state that the daemon refuses any candidate it does not own. A directory that does not exist is not warned about.
-- [ ] T015 [P] [US3] In `share/config.example.toml`, change the `socket_glob` line to the runtime-directory form with a comment saying why it is not `/tmp`, keeping the existing note that kitty appends its PID.
-- [ ] T016 [P] [US3] In `README.md`, change the documented `listen_on` line to `unix:${XDG_RUNTIME_DIR}/mykitty` (kitty expands environment variables and appends `-<pid>`, verified against kitty 0.48.2), say in one sentence why not `/tmp`, and warn against the abstract form `unix:@mykitty`, which carries no filesystem permissions at all.
+- [X] T012 [P] [US3] In `tests/unit/test_config.py`, add the failing cases: with `XDG_RUNTIME_DIR` set, the default `socket_glob` is `<runtime dir>/mykitty-*`; with it unset, the default is under the state directory and is not under `/tmp`; a configuration whose pattern is rooted in a `0777` non-sticky directory loads successfully and produces a warning naming the recommended location; `/tmp/mykitty-*` produces no new warning, because `/tmp` is sticky; and the existing no-wildcard warning is unchanged.
+- [X] T013 [US3] In `src/robot_army/config.py`, make `TerminalConfig.socket_glob` a `field(default_factory=...)` computing `f"{runtime_dir()}/mykitty-*"`, import `runtime_dir` from `robot_army.paths`, use the same call as the loader's `_str` default, and delete the two `# noqa: S108` comments that existed only because the default was a `/tmp` literal.
+- [X] T014 [US3] In `src/robot_army/config.py`, add the load-time warning: take the pattern's longest wildcard-free leading directory, and if it exists and fails the directory half of the acceptance rule, warn that another local user could place a socket there, name `$XDG_RUNTIME_DIR/mykitty-*`, and state that the daemon refuses any candidate it does not own. A directory that does not exist is not warned about.
+- [X] T015 [P] [US3] In `share/config.example.toml`, change the `socket_glob` line to the runtime-directory form with a comment saying why it is not `/tmp`, keeping the existing note that kitty appends its PID.
+- [X] T016 [P] [US3] In `README.md`, change the documented `listen_on` line to `unix:${XDG_RUNTIME_DIR}/mykitty` (kitty expands environment variables and appends `-<pid>`, verified against kitty 0.48.2), say in one sentence why not `/tmp`, and warn against the abstract form `unix:@mykitty`, which carries no filesystem permissions at all.
 
 **Checkpoint**: a maintainer following the README builds the safe setup; the maintainer who
 already has `/tmp/mykitty-*` starts unchanged and is told once why the other location is better.
@@ -126,10 +126,10 @@ three distinguishable answers on every surface that reports a missing socket.
 **Independent test**: run the diagnostic against a pattern matching only refused candidates and
 read the detail; run it against nothing at all and confirm today's wording is untouched.
 
-- [ ] T017 [US4] In `src/robot_army/boundaries/kitty.py`, extend the `BoundaryError` raised by `_require_socket` so that when refusals were recorded it names them and their reasons, and when there were none it keeps today's message word for word. This is the message `attach` and every launch failure already quote.
-- [ ] T018 [P] [US4] In `src/robot_army/operations.py`, compose the `doctor` terminal-socket check's detail from the same refusals: the socket when one was found, today's `nothing answered '<pattern>'` when no candidate matched, and the refusals with their reasons when candidates matched and were refused.
-- [ ] T019 [P] [US4] In `src/robot_army/daemon.py`, make the startup problem for a missing socket carry the same three-way distinction, keeping the existing "kitty must be running with `allow_remote_control yes` and `listen_on` set" guidance for the case where nothing matched.
-- [ ] T020 [US4] In `tests/unit/test_kitty_socket_trust.py`, add cases asserting all three shapes of the `BoundaryError` message, and in `tests/unit/test_doctor_projects.py` add a case that the diagnostic's terminal-socket detail names a refusal and its reason when every candidate is refused, and is unchanged when none matched.
+- [X] T017 [US4] In `src/robot_army/boundaries/kitty.py`, extend the `BoundaryError` raised by `_require_socket` so that when refusals were recorded it names them and their reasons, and when there were none it keeps today's message word for word. This is the message `attach` and every launch failure already quote.
+- [X] T018 [P] [US4] In `src/robot_army/operations.py`, compose the `doctor` terminal-socket check's detail from the same refusals: the socket when one was found, today's `nothing answered '<pattern>'` when no candidate matched, and the refusals with their reasons when candidates matched and were refused.
+- [X] T019 [P] [US4] In `src/robot_army/daemon.py`, make the startup problem for a missing socket carry the same three-way distinction, keeping the existing "kitty must be running with `allow_remote_control yes` and `listen_on` set" guidance for the case where nothing matched.
+- [X] T020 [US4] In `tests/unit/test_kitty_socket_trust.py`, add cases asserting all three shapes of the `BoundaryError` message, and in `tests/unit/test_doctor_projects.py` add a case that the diagnostic's terminal-socket detail names a refusal and its reason when every candidate is refused, and is unchanged when none matched.
 
 **Checkpoint**: the maintainer can tell the three failures apart without reading the audit log.
 
@@ -143,8 +143,8 @@ otherwise walk into it.
 **Independent test**: read both documents and confirm each states that launch arguments are
 visible to other local processes.
 
-- [ ] T021 [P] [US5] In `share/config.example.toml`, add a comment to the `[repos.*] env` block stating that these values are passed as command arguments and are readable by any local process while a session launches — so a credential does not belong there — and reconsider the shipped `DATABASE_URL` example in that light.
-- [ ] T022 [P] [US5] In `README.md`, state once, where dispatch is described, that the composed prompt and every `env` value reach the terminal as command arguments and are therefore visible in the process table for the life of the launch.
+- [X] T021 [P] [US5] In `share/config.example.toml`, add a comment to the `[repos.*] env` block stating that these values are passed as command arguments and are readable by any local process while a session launches — so a credential does not belong there — and reconsider the shipped `DATABASE_URL` example in that light.
+- [X] T022 [P] [US5] In `README.md`, state once, where dispatch is described, that the composed prompt and every `env` value reach the terminal as command arguments and are therefore visible in the process table for the life of the launch.
 
 **Checkpoint**: the residual exposure is documented rather than implied.
 
@@ -152,9 +152,9 @@ visible to other local processes.
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T023 In `docs/security-analysis.md`, mark RA-15 resolved: what now refuses the impostor (the ownership and directory rule, before the probe), what changed by default (the socket location), what is deliberately only a warning (an existing shared-directory pattern), and what remains true (launch arguments in the process table, now documented).
-- [ ] T024 Run the by-hand proof in [quickstart.md](quickstart.md) — most importantly the pair that plants a listener in a `0777` directory and then sets the sticky bit on the same directory — and confirm each expected outcome.
-- [ ] T025 Run `uv run pytest` and `uv run ruff check src/ tests/` — the two gates CI runs; the whole suite must pass before the feature is complete (constitution, Development Workflow).
+- [X] T023 In `docs/security-analysis.md`, mark RA-15 resolved (the file is git-ignored on purpose — publishing it hands a reader the attack paths — so this edit lands in the working tree and not in the pull request): what now refuses the impostor (the ownership and directory rule, before the probe), what changed by default (the socket location), what is deliberately only a warning (an existing shared-directory pattern), and what remains true (launch arguments in the process table, now documented).
+- [X] T024 Run the by-hand proof in [quickstart.md](quickstart.md) — most importantly the pair that plants a listener in a `0777` directory and then sets the sticky bit on the same directory — and confirm each expected outcome.
+- [X] T025 Run `uv run pytest` and `uv run ruff check src/ tests/` — the two gates CI runs; the whole suite must pass before the feature is complete (constitution, Development Workflow).
 
 ---
 

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from tests.conftest import config_dict, monkey_token
 
-from robot_army.config import ConfigError, parse
+from robot_army.config import ConfigError, TerminalConfig, parse
 from robot_army.effects import EffectLevel
 
 
@@ -1525,3 +1527,74 @@ def test_the_recognised_columns_are_the_two_github_templates_offer():
     from robot_army.config import RECOGNISED_DISPATCH_COLUMNS
 
     assert RECOGNISED_DISPATCH_COLUMNS == ("ready", "todo", "to do")
+
+
+def parse_without_socket_glob(repo_clone, layout, tmp_path, **overrides):
+    """Parse a config that names no ``socket_glob``, so the built-in default is what loads."""
+    monkey_token()
+    raw = config_dict(repo_clone, layout, tmp_path / "worktrees", **overrides)
+    del raw["terminal"]["socket_glob"]
+    return parse(raw, tmp_path / "config.toml")
+
+
+def test_the_default_socket_glob_is_the_per_user_runtime_directory(
+    repo_clone, layout, tmp_path, monkeypatch
+):
+    """RA-15: the shipped default must not be somewhere every local user can write."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    config = parse_without_socket_glob(repo_clone, layout, tmp_path)
+    assert config.terminal.socket_glob == f"{tmp_path / 'run-user'}/mykitty-*"
+    assert TerminalConfig().socket_glob == config.terminal.socket_glob
+
+
+def test_the_default_socket_glob_without_a_runtime_directory_is_not_tmp(
+    repo_clone, layout, tmp_path, monkeypatch
+):
+    """A session started outside a graphical login has no XDG_RUNTIME_DIR.
+
+    The fallback must stay somewhere this user owns — silently landing back in /tmp would
+    reinstate the finding on exactly the machines least likely to be watched.
+    """
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-home"))
+    config = parse_without_socket_glob(repo_clone, layout, tmp_path)
+    assert config.terminal.socket_glob == f"{tmp_path / 'state-home'}/mykitty-*"
+
+    # And with nothing set at all, under this user's own home rather than a shared
+    # directory. Asserted separately because pytest's own tmp_path lives under /tmp,
+    # so "does not start with /tmp" is not a claim this test can make about itself.
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    assert TerminalConfig().socket_glob == f"{Path.home() / '.local' / 'state'}/mykitty-*"
+
+
+def test_a_socket_glob_in_a_world_writable_directory_warns_but_loads(
+    repo_clone, layout, tmp_path
+):
+    """A warning, not an error: the discovery check already refuses what it must.
+
+    Refusing to load would stop the daemon on a machine configured exactly as the README
+    used to say, which is a fix nobody keeps.
+    """
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)  # chmod, not mkdir(mode=...): the umask would take the bits back
+    config = build(repo_clone, layout, tmp_path, terminal={"socket_glob": f"{shared}/kitty-*"})
+    warning = next(w for w in config.warnings if "socket_glob" in w)
+    assert str(shared) in warning
+    assert "XDG_RUNTIME_DIR" in warning
+
+
+def test_the_shipped_tmp_socket_glob_does_not_warn(repo_clone, layout, tmp_path):
+    """``/tmp`` is world-writable *and* sticky, so nobody can swap an entry in it."""
+    config = build(repo_clone, layout, tmp_path, terminal={"socket_glob": "/tmp/mykitty-*"})
+    assert not [w for w in config.warnings if "socket_glob" in w and "writable" in w]
+
+
+def test_a_socket_glob_in_a_directory_that_does_not_exist_does_not_warn(
+    repo_clone, layout, tmp_path
+):
+    """Nothing to judge yet, and the daemon will refuse it at discovery if it appears unsafe."""
+    config = build(
+        repo_clone, layout, tmp_path, terminal={"socket_glob": f"{tmp_path}/not-yet/kitty-*"}
+    )
+    assert not [w for w in config.warnings if "socket_glob" in w and "writable" in w]

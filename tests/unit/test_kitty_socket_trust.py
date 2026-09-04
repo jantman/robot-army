@@ -393,3 +393,130 @@ class _Owned:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._info, name)
+
+
+# -- US4: the three failures are three different sentences -------------------
+
+
+def require(config: Config, audit: AuditLog, pattern: str) -> str:
+    """The message every launch failure and ``attach`` quotes."""
+    from robot_army.boundaries import BoundaryError
+
+    with pytest.raises(BoundaryError) as caught:
+        display(config, audit, pattern)._require_socket()
+    return str(caught.value)
+
+
+def test_the_error_when_nothing_matched_is_unchanged(
+    config: Config, audit: AuditLog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", answering())
+    message = require(config, audit, str(tmp_path / "nothing-*"))
+    assert message.endswith("is kitty running with allow_remote_control and listen_on set?")
+
+
+def test_the_error_when_a_candidate_was_refused_says_so(
+    config: Config, audit: AuditLog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Nothing is running" and "something is answering for kitty" are opposite errands."""
+    (tmp_path / "sock-z").write_text("planted")
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", answering())
+
+    message = require(config, audit, str(tmp_path / "sock-*"))
+
+    assert "1 candidate(s) were found and refused" in message
+    assert f"unix:{tmp_path}/sock-z (not a socket)" in message
+
+
+def test_the_error_when_a_candidate_answered_is_not_raised(
+    config: Config, audit: AuditLog, tmp_path: Path, socket_at: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    socket_at(tmp_path / "sock-a")
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", answering())
+    assert display(config, audit, str(tmp_path / "sock-*"))._require_socket() == (
+        f"unix:{tmp_path}/sock-a"
+    )
+
+
+def doctor_socket_check(config: Config, audit: AuditLog, conn: Any, pattern: str) -> str:
+    from tests.conftest import make_boundaries
+
+    from robot_army import operations
+    from robot_army.effects import EffectLevel
+
+    ctx = operations.Context(
+        config=replace(config, terminal=replace(config.terminal, socket_glob=pattern)),
+        conn=conn,
+        audit=audit,
+        boundaries=make_boundaries(audit),
+        effect_level=EffectLevel.LIVE,
+    )
+    check = next(c for c in operations.doctor(ctx).data["checks"] if c["name"] == "terminal socket")
+    return str(check["detail"])
+
+
+def test_doctor_names_the_refusal_rather_than_reporting_an_absence(
+    config: Config,
+    audit: AuditLog,
+    conn: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before RA-15 was fixed, `doctor` reported the impostor's socket as healthy.
+
+    Reporting it as "nothing answered" instead would be the second-worst answer: the
+    maintainer goes to restart a terminal that is already running.
+    """
+    (tmp_path / "sock-z").write_text("planted")
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", answering())
+
+    detail = doctor_socket_check(config, audit, conn, str(tmp_path / "sock-*"))
+
+    assert "were found and refused" in detail
+    assert "not a socket" in detail
+
+
+def test_doctor_is_unchanged_when_nothing_matched(
+    config: Config,
+    audit: AuditLog,
+    conn: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", answering())
+    detail = doctor_socket_check(config, audit, conn, str(tmp_path / "nothing-*"))
+    assert detail == f"nothing answered '{tmp_path}/nothing-*'"
+
+
+def test_the_daemon_will_not_start_and_says_what_it_refused(
+    config: Config,
+    audit: AuditLog,
+    conn: Any,
+    layout: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The startup check makes the same distinction, against the real display.
+
+    A daemon that refuses to start is the right outcome — the socket it would dispatch
+    into is not the maintainer's — but "no socket" and "a socket I would not use" are
+    different problems and get different words.
+    """
+    from tests.conftest import make_boundaries
+
+    from robot_army.daemon import check_preconditions
+
+    (tmp_path / "sock-z").write_text("planted")
+    monkeypatch.setattr("robot_army.boundaries.kitty.run", answering())
+    pattern = str(tmp_path / "sock-*")
+
+    problems = check_preconditions(
+        config=replace(config, terminal=replace(config.terminal, socket_glob=pattern)),
+        layout=layout,
+        boundaries=make_boundaries(audit, display=display(config, audit, pattern)),
+        conn=conn,
+    )
+
+    problem = next(p for p in problems if "no terminal control socket answered" in p)
+    assert "were found and refused" in problem
+    assert "not a socket" in problem

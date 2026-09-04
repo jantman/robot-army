@@ -80,7 +80,8 @@ to learn about them.
 
 ## Interface text
 
-The web `ActionSpec` description and the CLI `retry --help` text both become:
+The web `ActionSpec` description and the CLI subparser's `description` — what
+`robot-army retry --help` prints — both become:
 
 > Move a failed item back to the queue. The issue is re-read from GitHub and its
 > eligibility re-checked — author included — along with the repository's own conditions.
@@ -89,6 +90,11 @@ The web `ActionSpec` description and the CLI `retry --help` text both become:
 The clause about the author is not decoration. It is the sentence whose absence made the
 old text false in the one place it mattered ([R9](../research.md)), and naming the re-read
 is what warns the maintainer that this operation now depends on the network.
+
+The one-line `help` in `robot-army --help`'s subcommand listing stays terse — "re-read the
+issue, re-check eligibility, and move a failed item back to ready" — because that listing is
+scanned, not read. It still names the re-read, which is the part a maintainer needs before
+they decide to look further.
 
 ## What does not change
 

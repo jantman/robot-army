@@ -78,9 +78,10 @@ operation.
 path may return an item to the queue on stored content (SC-002, SC-005); pre-existing rows
 must remain readable (FR-017).
 
-**Scale/Scope**: 5 source files (`operations.py`, `dispatch.py`, `db.py`, `migrations.py`,
-`web/pages.py`), 1 CLI help string, `tests/conftest.py`, 3 documentation files. No new
-module, no new dependency, no new configuration key, no new state, no new transition.
+**Scale/Scope**: 8 source files (`operations.py`, `dispatch.py`, `db.py`, `migrations.py`,
+`models.py`, `poll.py`, `cli.py`, `web/pages.py`), `tests/conftest.py` plus the six test
+modules that call `db.insert_work_item` directly, and 3 documentation files. No new module,
+no new dependency, no new configuration key, no new state, no new transition.
 
 ## Constitution Check
 

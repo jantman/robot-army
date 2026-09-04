@@ -180,3 +180,17 @@ tests testing what they were written to test, while a test of the refusal passes
 `FakeIssueReader` needs nothing: it already implements `get_issue`, already records
 `get_issue_calls`, and already carries `raise_on_get_issue` for the transport-failure path
 — all added for the prompt-preview feature, which reads issues the same way.
+
+*Revised during implementation.* Six test modules call `db.insert_work_item` directly rather
+than through `seed_item`, standing in for what the poller writes, and each needed the author
+passed. `insert_work_item` takes `author` as a **required** keyword rather than a defaulted
+one, deliberately: a default is exactly the fabrication migration 011 exists to delete, and
+the only correct value is the one the read that produced the row reported. Six mechanical
+call-site edits are a smaller price than a default that would silently write the wrong thing
+the first time a new caller forgot.
+
+Two existing assertions in `test_migrations.py` hard-coded the ladder length as `10`. One is
+the test whose whole point is that the constant derives from the tuple, so it is updated to
+`11`; the other asserted `current_version(conn) == 10` inside migration 010's test, where
+what it meant was "fully migrated" — it now says `SCHEMA_VERSION`, so the next migration
+does not break it again.

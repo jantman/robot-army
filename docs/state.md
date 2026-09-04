@@ -467,6 +467,19 @@ is what migration 005 refuses to do with clone paths, in the same words.
 on the refused path as well as the allowed one, so a blocked item on the queue describes the
 issue as it currently is rather than as it was at discovery.
 
+**One upgrade wrinkle, worth knowing before it surprises me.** `resume` and `restart` reach
+the launch through `dispatch_item` too, so a pre-011 item sitting in `interrupted` is
+refused into `failed` the first time I try to resume it. The named recovery still works —
+`retry` applies to a `failed` item, re-reads the issue and writes the author — but the item
+comes back as `ready`, so the next dispatch is a *fresh* session rather than a resumed one.
+The worktree survives; the previous transcript's context does not.
+
+That is the right trade rather than an oversight. Exempting an in-flight item would be
+trusting it precisely because it is already in flight, which is the reasoning that produced
+RA-01 — and an item interrupted *after* the old bug queued it is exactly the one that must
+not be resumed. It costs at most one session's context, once, on items that were mid-flight
+at the upgrade.
+
 ```bash
 sqlite3 -header -column ~/.local/state/robot-army/state.db \
   'SELECT id, state, author FROM work_items WHERE author IS NULL'

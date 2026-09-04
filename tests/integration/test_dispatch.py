@@ -1467,3 +1467,42 @@ def test_the_launched_issue_carries_the_recorded_author_not_an_asserted_one(
 
     assert seen == [db.get_work_item(conn, item_id).author]
     assert seen == ["jantman"]
+
+
+def test_resume_of_a_pre_migration_item_refuses_into_a_state_retry_can_recover(
+    conn, audit, config, tmp_path, layout
+):
+    """`resume` and `restart` reach the launch through `dispatch_item`, so a pre-011 item
+    is refused there too. That is deliberate — exempting an item because it is already
+    in flight would be trusting it for the reason RA-01 existed, and an item interrupted
+    *after* the old bug queued it is exactly the one that must not be resumed.
+
+    What matters is that the named recovery is reachable: the refusal must leave the item
+    in `failed`, because that is the only state `retry` accepts. A refusal that left it
+    `interrupted` would point at a command that would then refuse it.
+    """
+    from tests.conftest import seed_session
+
+    from robot_army import operations
+
+    boundaries = make_boundaries(audit, host=StubSessionHost(confirm=True))
+    item_id = ready_item(conn, config)
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, item_id, author=None)
+    conn.execute("UPDATE work_items SET state = 'interrupted' WHERE id = ?", (item_id,))
+    conn.commit()
+    seed_session(conn, item_id, state="lost")
+
+    ctx = operations.Context(
+        config=config,
+        conn=conn,
+        audit=audit,
+        boundaries=boundaries,
+        effect_level=boundaries.level,
+    )
+    result = operations.resume(ctx, item_id)
+
+    assert result.code != 0
+    item = db.get_work_item(conn, item_id)
+    assert item.state is WorkItemState.FAILED, "retry only accepts failed items"
+    assert f"robot-army retry {item_id}" in (item.blocked_reason or "")

@@ -104,7 +104,7 @@ def test_simulated_rows_are_absent_by_default_and_marked_when_asked_for(web, con
     assert 'class="sim"' in web.get("/queue?include_simulated=1").text
 
 
-def test_interrupted_view_carries_the_four_signals_and_their_age(web, conn):
+def test_interrupted_view_carries_every_signal_and_their_age(web, conn):
     item_id = seed_item(conn, state="interrupted")
     seed_session(conn, item_id, state="lost")
     payload = web.get_json("/interrupted").json()
@@ -113,7 +113,9 @@ def test_interrupted_view_carries_the_four_signals_and_their_age(web, conn):
         "uncommitted_changes",
         "commits_on_branch",
         "issue_closed",
-        "open_pr",
+        "pull_requests",
+        "pull_requests_at",
+        "pull_requests_known",
         "signals_age_seconds",
         "local_signals_age_seconds",
         "worktree_missing",

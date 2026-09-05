@@ -511,7 +511,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 12
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 13
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -1307,3 +1307,85 @@ def test_migration_012_is_reached_from_an_older_database(tmp_path):
     assert "resolved_at" in columns
     row = conn.execute("SELECT * FROM anomalies WHERE entity_id = 's-old'").fetchone()
     assert row["resolved_at"] is None, "an existing anomaly comes through open"
+
+
+# -- migration 013 (issue #143) ---------------------------------------------
+
+
+def test_migration_013_is_reached_from_a_012_era_database_with_rows_in_it(tmp_path):
+    """The upgrade path that actually exists, with a populated table to come through it.
+
+    Both columns are added to ``work_items``, which is the busiest table in the database, so
+    the thing worth pinning is that an existing row survives readable rather than that the
+    ``ALTER`` ran.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    conn.execute("BEGIN")
+    for index, migration in enumerate(migrations.MIGRATIONS[:12], start=1):
+        migration(conn)
+        conn.execute(f"PRAGMA user_version = {index}")
+    conn.commit()
+    assert current_version(conn) == 12
+    conn.execute(
+        "INSERT INTO repos (repo_key, onboarded_at, fingerprint_approved_at) "
+        "VALUES ('jantman/demo', '2026-09-05T00:00:00Z', '2026-09-05T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO work_items (source, source_id, source_url, repo_key, issue_number, "
+        "title, body, labels, state, dry_run, discovered_at, updated_at) "
+        "VALUES ('github', 'jantman/demo#7', 'https://github.com/jantman/demo/issues/7', "
+        "'jantman/demo', 7, 'a title', 'a body', '[]', 'done', 0, "
+        "'2026-09-05T00:00:00Z', '2026-09-05T00:00:00Z')"
+    )
+    conn.commit()
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (12, SCHEMA_VERSION)
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(work_items)")}
+    assert {"pull_requests", "pull_requests_at"} <= columns
+    row = conn.execute("SELECT * FROM work_items WHERE issue_number = 7").fetchone()
+    assert row["title"] == "a title", "the existing row must come through untouched"
+    assert row["pull_requests"] is None, (
+        "nothing is backfilled: a pre-013 row has never been looked up, and NULL is what "
+        "says so — '[]' would claim GitHub was asked and answered none"
+    )
+    assert row["pull_requests_at"] is None
+
+
+def test_a_killed_migration_013_leaves_user_version_at_twelve_and_re_runs(
+    tmp_path, monkeypatch
+):
+    """``ADD COLUMN`` on an existing column errors, so a half-applied pair would make every
+    later run fail permanently. The ladder's transaction is what stops that, and the
+    property is tested rather than assumed — as it is for 005."""
+    conn = db.connect(tmp_path / "state.db")
+    conn.execute("BEGIN")
+    for index, migration in enumerate(migrations.MIGRATIONS[:12], start=1):
+        migration(conn)
+        conn.execute(f"PRAGMA user_version = {index}")
+    conn.commit()
+
+    def _explode(connection: sqlite3.Connection) -> None:
+        migrations._migration_013(connection)
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(
+        migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:12], _explode)
+    )
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+
+    assert current_version(conn) == 12
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(work_items)")}
+    assert not ({"pull_requests", "pull_requests_at"} & columns), (
+        "no half-applied column may be observable"
+    )
+
+    monkeypatch.undo()
+    start, end = migrate(conn)
+
+    assert (start, end) == (12, SCHEMA_VERSION)
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(work_items)")}
+    assert {"pull_requests", "pull_requests_at"} <= columns
+    conn.close()

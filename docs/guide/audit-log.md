@@ -456,6 +456,36 @@ silently. So `windows_closed` counts only closes the system itself performed.
 A worker that is **not yet idle** produces no record at all — not an action, not a column,
 not an anomaly. It is listed with the other documented gaps below.
 
+## The issue #143 actions
+
+Three actions for the pull requests a work item has. None of them is an intent/outcome pair,
+because every one of them is a read or a note about one: nothing here writes to GitHub.
+
+| Action | When | Notable detail |
+|---|---|---|
+| `work_item.pull_requests` | The set a work item has **changes** — first discovery, a new pull request, or a state change | `from` and `to` as `number:state` lists, and `first_check` marking the one transition whose "before" is not a set at all. Written inside the same transaction as the column update |
+| `reconcile.pull_requests_check` | A lookup fails | `error`, with the item it was for and the failure. The stored answer is left exactly as it was, so the log is the only place that says the attempt happened at all |
+| `github.pull_requests.partial` | A GraphQL response carrying **both** data and errors — a deleted or inaccessible issue does this | The error type and count, before the read is failed. The same record `github.project.partial` writes for a board read, under its own name: a pull-request failure filed as a *project* failure is a record answering the wrong question |
+
+`first_check` is the field worth knowing about. `NULL` → `[]` and `[{…}]` → `[]` both end
+with no pull request, and they are not the same event: the first is "we looked for the first
+time and found none", the second is "the one it had went away". Without the flag the log
+could not tell them apart afterwards.
+
+`reconcile.pull_requests_check` is what makes a failed lookup visible at all. A failure writes
+neither column, so the row itself is unchanged and the interface simply keeps showing an
+answer that grows older — deliberately, because "I could not ask" is not "there are none". The
+log is where the attempt and its error live.
+
+### The pull-request refresh writes nothing when nothing changed
+
+The same rule as phase observation above, for the same reason and with the same accounting.
+One record per **change**, not per reconciliation pass: with a 60-second cycle and sessions
+that run for hours, a record per pass would be thousands of lines a day saying a pull request
+did not change. `reconcile.pass` carries `pull_request_changes`, so a cycle in which nothing
+moved is still accounted for, and `work_items.pull_requests_at` on the row carries the last
+confirmation.
+
 ## What is deliberately not logged
 
 Principle III permits gaps only when they are named and justified in the feature plan. The
@@ -472,6 +502,7 @@ the log knows what its silence means:
 | Individual board **reads** made within a poll cycle — the freshness re-read before a move, and the comment fetch on the recovery path | Same reasoning as the GitHub one, and the same limit: they change no state outside the process, and the cycle *is* logged with what it evaluated and what it decided about each card. Every board **write** is an intent/outcome pair, without exception |
 | A **notification never attempted** because the process died between a state transition and the send | The state change itself is fully recorded, so nothing the system *did* is unreconstructable. What is lost is the knowledge that I was not told. Closing it would need a durable outbound queue with its own retry and persistence, which is more machinery than an optional stretch feature is worth — the gap is named here rather than hidden |
 | A **passing** dispatch-time clone re-verification | The worktree-creation record that follows on the same item milliseconds later already implies it passed, so a record here would be one line per dispatch answering a question the next line answers anyway. Every **failure** is logged, and the two that mean the machine changed under an approval also raise an anomaly. See the milestone 005 section above |
+| A reconciliation pass in which an item's **pull-request set did not change** | Same disproportion as the phase row below, and the same accounting: with a 60-second cycle almost every check confirms an unchanged set. Every change is recorded individually with what it changed from, `reconcile.pass` counts them, and the row's own `pull_requests_at` carries the last confirmation — so neither the answer nor its age is unreconstructable. Every **failure** to look is logged individually. See the issue #143 section above |
 | A reconciliation pass in which **no lifecycle phase changed** | Same disproportion as the heartbeat: a 60-second cycle against work that moves every few hours. Every transition is recorded individually, and the pass summary counts the changes, so nothing about the progression is unreconstructable. See the milestone 007 section above |
 | The individual **file reads** behind Spec Kit detection and phase observation | Four `stat` calls per dispatch and a handful per active item per cycle. They change no state outside the process, and the *decision* they support is logged — logging each read would bury it |
 | A repository that **has never had a project board** and does not have one now | Not an action and not a failure — it is the ordinary condition of most repositories, and it would otherwise write a record a minute forever for every one of them. Nothing is persisted for such a repository either, so `status` stays quiet about it too. A board that *goes away* is different and **is** recorded: that is a change, and the author should hear about it |

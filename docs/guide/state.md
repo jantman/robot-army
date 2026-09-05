@@ -379,6 +379,64 @@ sqlite3 -header -column ~/.local/state/robot-army/state.db \
   'SELECT id, state, speckit_phase, speckit_feature_dir FROM work_items WHERE speckit_phase IS NOT NULL'
 ```
 
+### `work_items` pull-request columns — what the work produced
+
+Added by migration 013. Two nullable columns, no table and no state machine, for the same
+reason the spec-kit columns above have neither: nothing decides anything on these. They
+display, and the `wait_for_merge` gate and the closed-issue sweep are untouched by them.
+
+| Column | Meaning |
+|---|---|
+| `pull_requests` | JSON array of `{number, url, state}` sorted by number, where `state` is `open`, `merged` or `closed` |
+| `pull_requests_at` | When that set was last **successfully** confirmed |
+
+**`NULL` and `[]` are different answers, and the whole feature turns on it.**
+
+| Value | Means | Shown as |
+|---|---|---|
+| `NULL` | never looked up — a row predating the migration, an item never dispatched and so without a branch, or a simulated one nothing may ask GitHub about | `not checked` |
+| `'[]'` | GitHub was asked, and there is no pull request | `none` |
+| `'[{…}]'` | these, as of `pull_requests_at` | the links |
+
+Collapsing the first two would put "there is no pull request" on the page on the strength of
+never having asked — the same distinction `speckit_baseline` above and `author` below draw,
+and drawn here because a surface acts on it.
+
+`pull_requests_at` advances only on success. A failed lookup writes **neither** column, so
+the stored answer stands and the age shown beside it keeps growing, which is the truth: the
+age of the answer, not of the last attempt. The failure goes to the log as
+`reconcile.pull_requests_check`.
+
+The refresh is not routed through the general column updater, and that is deliberate:
+`updated_at` must not move. This runs every reconciliation pass for every live item and almost
+every run confirms an unchanged set, so the general updater would push `updated_at` forward
+once a minute for every item in the system — turning a column that means "when this item last
+changed" into "when the daemon last looked".
+
+**Which items are re-checked, and why it stops.** One query, `db.list_pull_request_candidates`,
+asking whether the answer can still change. An item with a branch and not simulated, and any
+one of:
+
+1. in `active`, `awaiting_review` or `interrupted` — a pull request can appear at any moment;
+2. still holding a pull request recorded as `open` — because an issue can be closed by hand
+   while its pull request is open, which would otherwise freeze the page at `open` for ever;
+3. holding an **empty** set with a session still `starting` or `running` — because a worker
+   that has not opened a pull request yet may still open one, and an empty set is not settled
+   the way `merged` is.
+
+Clause 3 closes a race clause 2 alone loses permanently: close the issue by hand mid-session
+and the item goes `done` holding `[]`, after which a pull request opened by the still-running
+session would never be seen and the page would read `none` for ever.
+
+Each clause runs out on its own — the state changes, the pull requests settle, the session
+ends — which is what lets this ship with no interval, no cap and no configuration key. Nothing
+is backfilled: an item that finished before migration 013 keeps its `NULL`.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  'SELECT id, state, pull_requests, pull_requests_at FROM work_items WHERE pull_requests IS NOT NULL'
+```
+
 ### The board's poll bookkeeping lives in `poll_state`
 
 Under the synthetic key `trello:board:<board_id>`. `poll_state` has no foreign key and no

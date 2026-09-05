@@ -324,6 +324,78 @@ def update_work_item_columns(
     )
 
 
+def list_pull_request_candidates(conn: sqlite3.Connection) -> list[WorkItem]:
+    """Work items whose pull-request answer can still change (issue #143).
+
+    The whole candidate rule, in one query, because it is one question: *can this item's
+    answer still change?* Doing it in SQL rather than by filtering a listing in Python is
+    what keeps the cost proportional to the answer instead of to the history — the terminal
+    half would otherwise rebuild every work item ever finished into a dataclass once a
+    minute, to discard nearly all of them.
+
+    Three clauses, and each is load-bearing:
+
+    * **A live state** — ``active``, ``awaiting_review``, ``interrupted``. A pull request can
+      appear or change at any moment.
+    * **A stored pull request still open**, whatever the state. ``reconcile`` marks an item
+      ``done`` the moment its issue closes, and an issue can be closed by hand while its
+      pull request is open; without this the page would read ``open`` for ever.
+    * **A stored *empty* set with a session still running.** An empty set is not settled the
+      way ``merged`` is: the worker that has not opened a pull request yet may still open
+      one. Bounded by the session, so it stops as soon as no process could produce one.
+
+    Each clause runs out on its own, which is what lets this feature have no interval, no
+    cap and no configuration key. ``pull_requests IS NOT NULL`` on the last two is what
+    keeps "never looked up" from being backfilled: a terminal row from before migration 013
+    is history, and reads as *not checked* because that is what it is.
+
+    Simulated rows and rows without a branch are excluded here rather than skipped by the
+    caller, because both are "there is no question to ask" rather than "the answer has not
+    changed" — and asking GitHub about a simulated row is the outward effect dry-run exists
+    to avoid.
+    """
+    cursor = conn.execute(
+        """
+        SELECT * FROM work_items
+         WHERE dry_run = 0
+           AND branch IS NOT NULL AND branch != ''
+           AND (
+                 state IN ('active', 'awaiting_review', 'interrupted')
+              OR (pull_requests IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM json_each(work_items.pull_requests)
+                     WHERE json_extract(json_each.value, '$.state') = 'open'))
+              OR (pull_requests = '[]' AND EXISTS (
+                    SELECT 1 FROM sessions
+                     WHERE sessions.work_item_id = work_items.id
+                       AND sessions.state IN ('starting', 'running')))
+           )
+         ORDER BY id
+        """
+    )
+    return _rows(cursor, WorkItem)
+
+
+def record_pull_requests(
+    conn: sqlite3.Connection, item_id: int, *, found: str, at: str
+) -> None:
+    """Store one item's pull-request set and when it was confirmed (issue #143).
+
+    Its own statement rather than ``update_work_item_columns`` for one reason:
+    ``updated_at`` must not move. This runs every reconcile pass for every live item, and
+    almost every run confirms an unchanged set — so routing it through the general updater
+    would push ``updated_at`` forward once a minute for every item in the system, making a
+    column that means "when this item last changed" mean "when the daemon last looked",
+    and quietly falsifying every age derived from it.
+
+    Both columns are written together, always. The unchanged case writes the identical
+    text back, which keeps one path through the code and costs one row.
+    """
+    conn.execute(
+        "UPDATE work_items SET pull_requests = ?, pull_requests_at = ? WHERE id = ?",
+        (found, at, item_id),
+    )
+
+
 def list_cleanup_candidates(
     conn: sqlite3.Connection, *, include_simulated: bool = False
 ) -> list[WorkItem]:

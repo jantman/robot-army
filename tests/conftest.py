@@ -253,10 +253,13 @@ class FakeIssueReader:
         self.etag = etag
         self.status = 200
         self.closed: dict[tuple[str, int], bool] = {}
-        self.open_prs: dict[tuple[str, int], Any] = {}
+        #: Keyed by branch, and answered as a *list*: a work item may have several pull
+        #: requests, and the empty list means "GitHub answered, and there are none" — the
+        #: state a test must be able to set apart from ``raise_on_remote``.
+        self.pull_requests: dict[tuple[str, str], list[Any]] = {}
         self.poll_calls: list[tuple[str, str | None]] = []
         self.closed_calls: list[tuple[str, int]] = []
-        self.pr_calls: list[tuple[str, str]] = []
+        self.pr_calls: list[tuple[str, int, str]] = []
         self.raise_on_poll: Exception | None = None
         # Project board answers (issue #48). ``None`` on either means the test has said
         # nothing about boards, and the reader behaves like a repository with none.
@@ -306,11 +309,14 @@ class FakeIssueReader:
             raise self.raise_on_remote
         return self.closed.get((repo_key, number), False)
 
-    def open_pr_for_branch(self, repo_key: str, branch: str) -> Any:
-        # Keyed by branch, because that is what the caller asks about: milestone 002's
-        # resume signals want "is there an open PR for *this* branch", not for the issue.
-        self.pr_calls.append((repo_key, branch))
-        return self.open_prs.get((repo_key, branch))
+    def pull_requests_for(self, repo_key: str, issue_number: int, branch: str) -> list[Any]:
+        # Keyed by branch alone, though the real read asks by branch *and* issue: a test
+        # setting one answer for one work item does not care which half of the query found
+        # it, and the call is recorded in full so a test that does care can assert on it.
+        self.pr_calls.append((repo_key, issue_number, branch))
+        if self.raise_on_remote is not None:
+            raise self.raise_on_remote
+        return list(self.pull_requests.get((repo_key, branch), []))
 
     def list_issues_since(
         self, repo_key: str, since: str, *, author: str | None = None, limit: int = 100

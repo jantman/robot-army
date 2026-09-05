@@ -15,7 +15,7 @@ import pytest
 from tests.conftest import make_boundaries, seed_item
 
 from robot_army import db, operations
-from robot_army.boundaries import PullRequest, TransportError
+from robot_army.boundaries import TransportError
 
 
 @pytest.fixture
@@ -178,7 +178,7 @@ def test_the_two_ages_do_not_overwrite_each_other(ctx, conn, monkeypatch):
         "uncommitted_changes",
         "commits_on_branch",
         "issue_closed",
-        "open_pull_request",
+        "pull_requests",
     }
 
 
@@ -305,16 +305,41 @@ def test_a_simulated_row_never_reaches_github(ctx, conn):
     assert ctx.boundaries.issue_reader.closed_calls == []
 
 
-def test_an_open_pull_request_is_reported_by_url(ctx, conn):
+def test_the_pull_requests_come_from_the_row_and_cost_no_github_call(ctx, conn):
+    """Issue #143. The pull-request half used to be asked of GitHub *while a page rendered*.
+    It is now whatever the reconcile pass stored, which is what lets a page render with
+    GitHub unreachable and what stops this answer disagreeing with every other surface."""
     item = _item(conn)
-    ctx.boundaries.issue_reader.open_prs[("demo", "robot-army/42")] = PullRequest(
-        number=7, url="https://github.com/x/demo/pull/7", state="open"
+    with db.transaction(conn):
+        db.record_pull_requests(
+            conn,
+            item.id,
+            found='[{"number":7,"url":"https://github.com/x/demo/pull/7","state":"open"}]',
+            at="2026-09-05T22:00:00Z",
+        )
+    stored = db.get_work_item(conn, item.id)
+
+    signals = operations.resume_signals(ctx, stored)
+
+    assert signals["pull_requests"] == [
+        {"number": 7, "url": "https://github.com/x/demo/pull/7", "state": "open"}
+    ]
+    assert signals["pull_requests_at"] == "2026-09-05T22:00:00Z"
+    assert signals["pull_requests_known"] is True
+    assert ctx.boundaries.issue_reader.pr_calls == [], (
+        "rendering must not ask GitHub about a pull request"
     )
-    signals = operations.resume_signals(ctx, item)
-    assert signals["open_pull_request"] == "https://github.com/x/demo/pull/7"
 
 
-def test_the_merged_view_still_returns_all_four_signals(ctx, conn):
+def test_a_never_checked_item_is_not_reported_as_having_none(ctx, conn):
+    """The three states, at the one place they are decided. An empty list with
+    ``pull_requests_known`` false is *we have not asked* — not *there are none*."""
+    signals = operations.resume_signals(ctx, _item(conn))
+    assert signals["pull_requests"] == []
+    assert signals["pull_requests_known"] is False
+
+
+def test_the_merged_view_still_returns_every_signal(ctx, conn):
     """``show`` and the item page both call this; splitting must not have narrowed it."""
     item = _item(conn)
     signals = operations.resume_signals(ctx, item)
@@ -323,7 +348,9 @@ def test_the_merged_view_still_returns_all_four_signals(ctx, conn):
         "uncommitted_changes",
         "commits_on_branch",
         "issue_closed",
-        "open_pull_request",
+        "pull_requests",
+        "pull_requests_at",
+        "pull_requests_known",
     ):
         assert key in signals, key
 

@@ -127,6 +127,15 @@ class PollResult:
 
 @dataclass(frozen=True, slots=True)
 class PullRequest:
+    """One pull request, as some work item's surface will show it.
+
+    ``state`` is ``open``, ``merged`` or ``closed`` — **normalised at the boundary**, so
+    nothing above it ever sees GitHub's upper-case enum, in the same way ``Repo``'s
+    ``verified_origin`` never holds a raw remote URL. Merged is a state here rather than a
+    separate boolean because GitHub's own schema says so, which is what makes "was it
+    merged?" a display concern and not a second field to reconcile.
+    """
+
     number: int
     url: str
     state: str
@@ -431,7 +440,17 @@ class IssueSourceReader(Protocol):
 
     def is_closed(self, repo_key: str, number: int) -> bool: ...
 
-    def open_pr_for_branch(self, repo_key: str, branch: str) -> PullRequest | None: ...
+    def pull_requests_for(
+        self, repo_key: str, issue_number: int, branch: str
+    ) -> list[PullRequest]:
+        """Every pull request a work item has, by branch **and** by issue link (#143).
+
+        One set rather than two lookups: neither route is a superset of the other. An empty
+        list means GitHub answered and there are none; a failure raises. That distinction is
+        stored and rendered, so hollowing a failure out into ``[]`` would print a confident
+        "no pull request" earned by a failed request.
+        """
+        ...
 
     def list_issues_since(
         self, repo_key: str, since: str, *, author: str | None = None, limit: int = 100

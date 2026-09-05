@@ -201,6 +201,36 @@ query($pid: ID!, $after: String) {
 }
 """
 
+#: Both relationships issue #143 names, in one request (research R1).
+#:
+#: There is no REST endpoint for the pull requests *linked to an issue* — the nearest is the
+#: preview timeline API, which returns every cross-reference and so answers a strictly
+#: broader question. So GraphQL here is not a preference; it is the only thing that answers
+#: what was asked. That the branch half rides along for free is the bonus that makes one
+#: request enough.
+#:
+#: Two arguments are load-bearing and both are tested. ``includeClosedPrs: true`` and the
+#: explicit ``states:`` list each keep **merged** pull requests in the answer, and a merged
+#: pull request is the case the maintainer most wants to see — without either, the ordinary
+#: successful outcome of a session silently disappears from the interface.
+#:
+#: ``state`` is the enum ``OPEN | MERGED | CLOSED``, so "was it merged?" is a state rather
+#: than a second boolean field to read and reconcile.
+_PULL_REQUESTS = """
+query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
+        nodes { number url state }
+      }
+    }
+    pullRequests(headRefName: $branch, first: 20, states: [OPEN, CLOSED, MERGED]) {
+      nodes { number url state }
+    }
+  }
+}
+"""
+
 
 class GitHubReader:
     """Reads. Selected at **every** effect level (FR-052)."""
@@ -349,7 +379,9 @@ class GitHubReader:
         """A repo key is ``owner/name``; percent-encode each segment, not the slash."""
         return "/".join(quote(part, safe="") for part in repo_key.split("/", 1))
 
-    def _graphql(self, document: str, variables: dict[str, Any]) -> dict[str, Any]:
+    def _graphql(
+        self, document: str, variables: dict[str, Any], *, operation: str = "project"
+    ) -> dict[str, Any]:
         """POST one GraphQL document and return ``data``. Raises rather than hollowing out.
 
         **This must not be bypassed, and the reason is invisible from the call site.**
@@ -365,6 +397,12 @@ class GitHubReader:
         A response carrying **both** data and errors is treated as failure too. A partly
         believed board is worse than no board: the half that is missing is invisible, so
         the order would be confidently wrong rather than absent.
+
+        ``operation`` names the caller in that partial-response record. It exists because
+        the name stopped being a constant the moment a second caller did: a pull-request
+        lookup logged as ``github.project.partial`` is a record answering the wrong
+        question, and Principle III's standard is reconstruction from the log alone. The
+        default keeps every board read on the name ``audit-log.md`` documents.
         """
         response = self._request(
             "POST", "/graphql", json_body={"query": document, "variables": variables}
@@ -376,7 +414,7 @@ class GitHubReader:
             kind = first.get("type", "GRAPHQL_ERROR")
             message = first.get("message", "no message")
             self._audit.record(
-                "github.project.partial" if payload.get("data") else "github.graphql",
+                f"github.{operation}.partial" if payload.get("data") else "github.graphql",
                 outcome="error",
                 target="/graphql",
                 detail={
@@ -469,22 +507,61 @@ class GitHubReader:
             raise TransportError(f"issue {repo_key}#{number} is not accessible")
         return issue.state == "closed"
 
-    def open_pr_for_branch(self, repo_key: str, branch: str) -> PullRequest | None:
-        owner = repo_key.split("/", 1)[0]
-        response = self._request(
-            "GET",
-            f"/repos/{self._repo_path(repo_key)}/pulls",
-            params={"state": "open", "head": f"{owner}:{branch}", "per_page": 1},
+    def pull_requests_for(
+        self, repo_key: str, issue_number: int, branch: str
+    ) -> list[PullRequest]:
+        """Every pull request this work item has, by either route (issue #143).
+
+        Both routes the issue names, deduplicated into one set: pull requests opened from
+        ``branch``, and pull requests GitHub itself reports as linked to ``issue_number``.
+        Neither is a superset of the other — a session's pull request may never mention its
+        issue, and a pull request linked to the issue may come from a branch we never made
+        — which is why the answer is a set and not a choice between two lookups.
+
+        An empty list means **GitHub answered, and there are none**. A failure raises, and
+        never hollows out into ``[]``: the caller stores the difference and every surface
+        renders it, so returning an empty list for "I could not ask" would put a confident
+        "no pull request" on the page on the strength of a failed request.
+        """
+        owner, _, name = repo_key.partition("/")
+        data = self._graphql(
+            _PULL_REQUESTS,
+            {"owner": owner, "name": name, "number": int(issue_number), "branch": branch},
+            operation="pull_requests",
         )
-        payloads = response.json()
-        if not payloads:
-            return None
-        payload = payloads[0]
-        return PullRequest(
-            number=int(payload["number"]),
-            url=str(payload["html_url"]),
-            state=str(payload["state"]),
-        )
+        repository = data.get("repository") or {}
+        issue = repository.get("issue") or {}
+        # A null ``issue`` alongside a GraphQL ``errors`` array never reaches here —
+        # ``_graphql`` has already raised. A null one *without* errors, which GitHub does
+        # not currently produce, means only that the issue route contributed nothing; the
+        # branch route's answer still stands and is still worth returning.
+        nodes = [
+            *((issue.get("closedByPullRequestsReferences") or {}).get("nodes") or []),
+            *((repository.get("pullRequests") or {}).get("nodes") or []),
+        ]
+        found: dict[int, PullRequest] = {}
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            number, url = node.get("number"), node.get("url")
+            if number is None or not url:
+                continue
+            if int(number) in found:
+                # Found by both routes, which is the ordinary case rather than the odd one:
+                # a session opens the pull request from its branch *and* says "Closes #n".
+                continue
+            found[int(number)] = PullRequest(
+                number=int(number),
+                # Lower-cased at the boundary so nothing above it ever sees GitHub's
+                # upper-case enum. A value outside the three we know is passed through
+                # rather than mapped to a guess — showing GitHub's word is better than
+                # inventing one.
+                url=str(url),
+                state=str(node.get("state") or "").lower(),
+            )
+        # Sorted so the same set always serialises to the same text, which is what lets the
+        # refresh detect "nothing changed" with a string comparison instead of a diff.
+        return [found[number] for number in sorted(found)]
 
     def list_issues_since(
         self, repo_key: str, since: str, *, author: str | None = None, limit: int = 100

@@ -778,10 +778,16 @@ def write(
             # comment claiming the opposite — turned an unwritable state directory into a
             # failure report for a file that had already been written correctly, and
             # pre-empted the "already exists; pass --force" message on the other path.
+            #
+            # The wording says what is *missing* and claims nothing about the outcome,
+            # because this runs on all three paths — success, the refusal, and a failed
+            # write — and the caller prints what actually happened on the very next line.
+            # Saying it here too would be a second place for the two to disagree, which is
+            # exactly how the first version of this warning came to assert "the write
+            # succeeded" underneath a refusal.
             if notes is not None:
                 print(
-                    f"warning: the write succeeded but could not be recorded in the audit "
-                    f"log: {exc}",
+                    f"warning: no audit record was written for this run: {exc}",
                     file=notes,
                 )
 

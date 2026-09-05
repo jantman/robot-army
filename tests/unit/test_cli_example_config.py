@@ -202,7 +202,7 @@ def test_an_unwritable_audit_log_is_announced_rather_than_swallowed(
     try:
         main(["example-config", "--output", str(destination)])
         err = capsys.readouterr().err
-        assert "audit log" in err
+        assert "audit record" in err
         assert "wrote" in err
     finally:
         state.chmod(0o700)
@@ -217,7 +217,35 @@ def test_the_refusal_message_survives_an_unwritable_audit_log(tmp_path, isolated
     destination.write_text("# mine\n", encoding="utf-8")
     try:
         assert main(["example-config", "--output", str(destination)]) == EXIT_PRECONDITION
-        assert "--force" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "--force" in err
+        # The warning must not claim an outcome. A second review finding on #137: the first
+        # version of it said "the write succeeded" unconditionally, so this exact
+        # combination — refusal plus unwritable log — printed a self-contradiction above a
+        # refusal, for a file that was never written.
+        assert "succeeded" not in err, f"the audit warning contradicts the refusal:\n{err}"
         assert destination.read_text(encoding="utf-8") == "# mine\n"
     finally:
+        state.chmod(0o700)
+
+
+def test_a_failed_write_and_an_unwritable_log_do_not_claim_success(tmp_path, isolated_home, capsys):
+    """The third path `_record` runs on, and the third place the wording could lie.
+
+    Both the destination and the audit log are unwritable. Nothing was written and nothing
+    was recorded, so neither line may suggest otherwise.
+    """
+    state = isolated_home / ".local/state"
+    state.mkdir(parents=True)
+    state.chmod(0o500)
+    directory = tmp_path / "readonly"
+    directory.mkdir()
+    directory.chmod(0o500)
+    try:
+        assert main(["example-config", "--output", str(directory / "config.toml")]) == EXIT_FAILED
+        err = capsys.readouterr().err
+        assert "could not write" in err
+        assert "succeeded" not in err, f"the audit warning claims a write that failed:\n{err}"
+    finally:
+        directory.chmod(0o700)
         state.chmod(0o700)

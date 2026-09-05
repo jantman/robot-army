@@ -675,3 +675,41 @@ def test_the_listing_error_detail_does_not_grow_without_bound(conn, audit, layou
 
     errors = [r for r in records(layout, "window.list") if r["outcome"] == "error"]
     assert errors[-1]["detail"]["candidates"] == [outstanding]
+
+
+def test_a_transient_close_failure_is_never_settled(conn, audit, layout):
+    """Contract W4's "not settled, retried" row, which was unreachable as first written.
+
+    `close()` returned ``False`` for *every* failure — a genuinely missing window, a
+    transient non-zero exit, a timeout — because `_kitty` passes ``check=False`` and never
+    raises for any of them. The sweep settles an item on ``False``, so a real failure marked
+    the item answered-for and leaked its window for the life of the process, with nothing
+    recorded as an error. Found in review of PR #141.
+
+    Only a missing window may answer ``False`` now; everything else raises. This asserts the
+    consequence rather than the mechanism: a failure that later stops failing must still be
+    able to close the window.
+    """
+
+    class TransientlyBroken(SimulatedDisplay):
+        def __init__(self, audit) -> None:
+            super().__init__(audit)
+            self.broken = True
+
+        def close(self, handle: DisplayHandle) -> bool:
+            if self.broken:
+                raise BoundaryError("kitty close-window failed: connection refused")
+            return super().close(handle)
+
+    display = TransientlyBroken(audit)
+    item = finished_item(conn)
+    open_window(display, item)
+
+    for _ in range(5):
+        assert sweep(conn, audit, display) == 0
+    assert [r for r in records(layout, "window.close") if r["outcome"] == "error"]
+
+    display.broken = False
+    assert sweep(conn, audit, display) == 1, (
+        "a window whose close kept failing must still be closable once it stops"
+    )

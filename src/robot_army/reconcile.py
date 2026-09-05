@@ -1488,10 +1488,16 @@ def _close_finished_windows(
                 detail={"window_id": handle.window_id, "title": handle.title},
             )
             continue
-        # ``False`` means the terminal had no such window — the maintainer closed it first,
-        # in the moments between the listing above and this call. That is success and the
-        # item is still settled; it is simply not something *this* pass did, and counting
-        # it would overstate the system's own work in the summary and the log.
+        # ``False`` means one specific thing: the terminal had no such window, because the
+        # maintainer closed it in the moments between the listing above and this call. That
+        # is success — the item is still settled, since nothing will ever need doing for it
+        # again — but it is not something *this* pass did, and counting it would overstate
+        # the system's own work in the summary and the log.
+        #
+        # Every *other* way a close can fail raises instead, and is handled above. That
+        # split is load-bearing rather than tidy: a transient failure or a timeout reported
+        # as ``False`` would settle the item and leak its window for the life of the
+        # process, with nothing recorded as an error.
         if really_closed:
             closed += 1
 

@@ -100,6 +100,14 @@ extra call to the terminal, so the row below is now true as originally written.
 | closed | counted in `windows_closed` |
 | the window had already gone | **success**, not a failure (FR-014), and the item is still settled — there is nothing left to do. **Not counted**: this pass did not close it, and a `windows_closed` including windows somebody else closed would overstate the system's own work |
 | the close failed | recorded as `window.close` with the window id and item id; **the sweep continues to the next window** (FR-013); not counted; **its item is not settled**, so it is retried next pass |
+
+**"Failed" and "there was nothing to close" must not collapse together, and at first they did.**
+`_kitty` passes `check=False`, so a transient non-zero exit and a timeout both arrived looking
+exactly like a missing window, `close` answered `False` for all three, and the sweep settled the
+item — leaking its window for the life of the process with nothing recorded as an error. The row
+above was unreachable as implemented. `KittyDisplay.close` now returns `False` **only** for kitty's
+measured `No matching windows` on a non-timed-out call, and raises otherwise, so the existing
+`BoundaryError` handling does the right thing. Found in review of PR #141.
 | the listing itself failed | recorded once for the pass; the sweep returns 0; the pass completes normally; **nothing is settled**, because the question was not answered |
 
 A `BoundaryError` from either the listing or a close is caught. Reconciliation never raises for an
@@ -135,6 +143,17 @@ branch, and must not grow one — `reconcile.py` naming the effect level fails
 
 `SimulatedDisplay.list_by_var` answers from its own in-memory window map, so a simulated run
 exercises the whole decision path against windows it "opened" itself.
+
+## W9 — Volatile state, and what a restart costs
+
+`_WINDOWS_SETTLED` is process-local and defined to be lost on restart. That is reboot behaviour, so
+it belongs in [`state.md`](../../../docs/guide/state.md) under CLAUDE.md's third trigger — which the
+plan missed by reasoning only about the "database table" trigger. Added in review of PR #141.
+
+The property that makes it safe to lose: it is a *memory of having already done something harmless*,
+so forgetting it repeats the harmless thing (one `kitty @ ls`) and nothing else. A restart mid-sweep
+loses nothing at all, because the sweep writes no state — windows already closed are simply absent
+from the next listing.
 
 ## W8 — Untouched, and confirmed by reading the diff
 

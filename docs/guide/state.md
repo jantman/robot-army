@@ -541,6 +541,22 @@ the next poll restores the mapping from it one card at a time. The marker is a *
 marker, not the primary key** — with a mapping row present the card's comments are never read
 at all.
 
+### Three things that live only in memory
+
+Deliberately, and each for the same reason: the thing they save is cheaper to re-derive than a
+table is to keep correct.
+
+| | Lost on restart | Cost of losing it |
+|---|---|---|
+| The capacity hold's signature | yes | one extra `dispatch.at_capacity` record |
+| The notifier's per-cycle counter | yes | a handful of extra messages in one cycle |
+| Which finished items' windows have been dealt with | yes | one extra `kitty @ ls` per outstanding item, once |
+
+None of them can be wrong in a way that matters: each is a *memory of having already done
+something harmless*, so forgetting it repeats the harmless thing and nothing else. That is the test
+a candidate for this list has to pass — and it is why "which windows are closed" qualifies while
+"which worktrees were removed" would not.
+
 ## What a reboot does
 
 Every session is gone; every `active` row still says `active`. On the next start:
@@ -614,6 +630,7 @@ summary:
 | After a capacity snapshot, before the dispatch it authorised | Nothing written. The next pass takes a fresh snapshot; a snapshot is never stored, so it cannot be stale |
 | Between two dispatches in one pass | Earlier items dispatched, later ones still `ready`. The next pass re-observes and re-plans — `select_and_dispatch` holds no cross-pass state |
 | During a capacity hold, before its signature was recorded | No `dispatch.at_capacity` record for this hold. The next pass sees no remembered signature and writes one. Worst case is one extra record, never a missing hold |
+| Mid-sweep of a finished item's terminal windows, or a restart at any point | Nothing is written, because the sweep writes no state at all. Windows already closed stay closed and are simply absent from the next listing; the rest are taken next pass. The one casualty is the in-memory set of items whose windows have been dealt with, and losing it costs exactly one extra `kitty @ ls` per outstanding item — the same trade, and the same reasoning, as the capacity hold's signature above |
 | After `git worktree remove`, before the branch half | Worktree gone, branch present, `cleanup_state` unwritten. The next pass finds the directory already absent, treats git's "not a working tree" as a refusal about its *record* rather than about the contents, completes the branch half, and records the outcome |
 | After both cleanup removals, before the row is written | Both gone, `cleanup_state` still `NULL`. The next pass re-attempts, both steps refuse harmlessly, and the row is written `done` |
 | During the containment fetch | Nothing removed. Containment is unproven, so the branch is retained and the item is reconsidered. The failure direction is always *keep* |

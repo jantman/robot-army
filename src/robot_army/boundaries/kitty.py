@@ -30,6 +30,15 @@ if TYPE_CHECKING:
 
 LAUNCH_TIMEOUT = 20.0
 
+#: What kitty says when ``--match id:N`` names no window, measured on 0.48.2:
+#: ``Error: No matching windows for expression: id:999999``, exit **1**.
+#:
+#: Matched as a substring because it is the only signal kitty gives, and the direction of a
+#: mismatch is the safe one: if the wording ever changes, a genuinely-gone window starts
+#: raising instead of returning ``False``, so the sweep retries it and logs an error rather
+#: than silently marking it dealt with. A leaked window is the worse failure of the two.
+NO_SUCH_WINDOW = "No matching windows"
+
 
 def _refuse(candidate: str) -> str | None:
     """Why this candidate must not be spoken to, or ``None`` if it may be.
@@ -287,10 +296,21 @@ class KittyDisplay:
                 timeout=LAUNCH_TIMEOUT,
                 action="kitty.subprocess",
             )
-            outcome["closed"] = bool(result.ok)
-            if not result.ok:
+            if result.ok:
+                outcome["closed"] = True
+                return True
+            # **"It failed" and "there was nothing to close" are different answers, and
+            # collapsing them leaks a window permanently.** `_kitty` passes `check=False`,
+            # so a transient non-zero exit and a timeout arrive here looking exactly like a
+            # window that was already gone. The caller settles an item on ``False`` — that
+            # is the whole point of returning it — so a real failure reported as ``False``
+            # would mark the item answered-for and never revisit it, with nothing logged as
+            # an error. Caught in review of the pull request that added this return value.
+            if not result.timed_out and NO_SUCH_WINDOW in result.output:
+                outcome["closed"] = False
                 outcome["output"] = result.output
-            return bool(result.ok)
+                return False
+            raise BoundaryError(f"kitty close-window failed: {result.output}")
 
     def find_by_var(self, key: str, value: str) -> DisplayHandle | None:
         """Exact lookup by user variable.

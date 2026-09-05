@@ -22,8 +22,9 @@ from typing import Any
 
 import pytest
 
-from robot_army.boundaries import DisplayHandle
+from robot_army.boundaries import BoundaryError, DisplayHandle
 from robot_army.boundaries.kitty import KittyDisplay, SimulatedDisplay
+from robot_army.subproc import Completed
 
 
 class FakeKitty(KittyDisplay):
@@ -211,27 +212,37 @@ def test_both_implementations_agree_on_an_empty_answer(audit, key):
 
 
 class ClosingKitty(KittyDisplay):
-    """A ``KittyDisplay`` whose ``kitty @ close-window`` exit status the test dictates."""
+    """A ``KittyDisplay`` whose ``kitty @ close-window`` result the test dictates.
 
-    def __init__(self, audit, *, ok: bool) -> None:
+    Returns a real ``Completed`` rather than a stand-in object. A ``SimpleNamespace`` was
+    used first and silently lacked ``timed_out``, so it could not have exercised the branch
+    that tells a timeout apart from a missing window — a fake that is missing a field the
+    production code reads is a fake that agrees with whatever the code happens to do.
+    """
+
+    def __init__(
+        self, audit, *, returncode: int = 0, stderr: str = "", timed_out: bool = False
+    ) -> None:
         self._audit = audit
-        self._ok = ok
+        self._returncode = returncode
+        self._stderr = stderr
+        self._timed_out = timed_out
         self.calls: list[list[str]] = []
 
     def _kitty(self, args, *, timeout, action):
-        from types import SimpleNamespace
-
         self.calls.append(args)
-        return SimpleNamespace(
-            ok=self._ok,
-            returncode=0 if self._ok else 1,
-            output="" if self._ok else "No matching windows for expression: id:52",
+        return Completed(
+            argv=tuple(args),
+            returncode=self._returncode,
             stdout="",
+            stderr=self._stderr,
+            duration=0.01,
+            timed_out=self._timed_out,
         )
 
 
 def test_close_returns_true_when_kitty_closed_a_window(audit):
-    display = ClosingKitty(audit, ok=True)
+    display = ClosingKitty(audit)
 
     assert display.close(DisplayHandle(window_id=52)) is True
     assert display.calls == [["close-window", "--match", "id:52"]]
@@ -244,7 +255,9 @@ def test_close_returns_false_when_no_window_matched(audit):
     ``_kitty`` passes ``check=False``, so that status was being discarded and an
     already-closed window read as a successful close. The signal was there the whole time.
     """
-    display = ClosingKitty(audit, ok=False)
+    display = ClosingKitty(
+        audit, returncode=1, stderr="Error: No matching windows for expression: id:52"
+    )
 
     assert display.close(DisplayHandle(window_id=52)) is False
 
@@ -252,7 +265,9 @@ def test_close_returns_false_when_no_window_matched(audit):
 def test_a_failed_close_records_the_terminals_own_words(audit, layout):
     """Principle III: a ``False`` with an unusual cause must stay reconstructable, so the
     reason is recorded rather than collapsed into a bare boolean."""
-    ClosingKitty(audit, ok=False).close(DisplayHandle(window_id=52))
+    ClosingKitty(
+        audit, returncode=1, stderr="Error: No matching windows for expression: id:52"
+    ).close(DisplayHandle(window_id=52))
 
     written = [
         json.loads(line)
@@ -281,3 +296,30 @@ def test_the_simulated_close_reports_the_same_distinction(audit):
 
     assert display.close(handle) is True
     assert display.close(handle) is False, "closing it twice must not report two closes"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "timed_out"),
+    [
+        (1, "Error: connection refused", False),
+        (2, "", False),
+        (0, "", True),
+        (1, "Error: No matching windows for expression: id:52", True),
+    ],
+    ids=["other-error", "no-output", "timeout", "timeout-with-the-right-words"],
+)
+def test_any_failure_that_is_not_a_missing_window_raises(audit, returncode, stderr, timed_out):
+    """The distinction the caller's settling depends on, and the bug that made it necessary.
+
+    ``close`` returning ``False`` tells the sweep "there is nothing here, mark this item
+    answered for". Reporting a transient failure or a timeout that way would settle the item
+    and leak its window for the life of the process, with nothing recorded as an error —
+    which is exactly what happened before review caught it.
+
+    The last case matters most: a timeout that happens to have captured the no-match message
+    before the kill is still a timeout, and must not be read as a clean answer.
+    """
+    display = ClosingKitty(audit, returncode=returncode, stderr=stderr, timed_out=timed_out)
+
+    with pytest.raises(BoundaryError):
+        display.close(DisplayHandle(window_id=52))

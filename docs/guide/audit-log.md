@@ -444,8 +444,12 @@ existed.
 | `reconcile.pass` | **Changed** | Gains `windows_closed` |
 
 A window that was *already* gone by the time it was closed — the maintainer got there first —
-is **success**, not a failure, and writes no error record. Kitty exits zero for an id that no
-longer matches, and inventing a failure the terminal never reported would be its own small lie.
+is **success**, not a failure, and writes no error record. **Kitty exits 1** for an id that no
+longer matches, saying `No matching windows`; the boundary turns exactly that into a `False`
+rather than raising, and the sweep treats it as settled-but-not-counted. Every *other* non-zero
+exit, and every timeout, raises instead and is recorded — the two must not collapse together,
+because a real failure reported as "nothing was there" would settle the item and leak its window
+silently. So `windows_closed` counts only closes the system itself performed.
 
 ### The one thing retirement does not write
 

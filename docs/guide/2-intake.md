@@ -111,6 +111,13 @@ often pasted from a log, and `src/robot_army` and `docs/roadmap.md` both look ex
 `owner/name`; filtering against the onboarded set means an unknown reference cannot select
 anything, so the worst case is a held card rather than an issue filed somewhere I never named.
 
+The reference can sit anywhere in the title or the description, and a card is prose: ending a
+sentence with the repository is the ordinary way to write one. Punctuation after the reference
+ends it rather than joining it, so `Names jantman/demo.` counts, as do a trailing comma, colon,
+bracket, question mark, and a clone URL's `.git` suffix on either spelling. Until issue #71
+the full stop was read as part of the name, and such a card was held asking for the repository
+it had just named — silently, since nothing can be filed in the wrong place by it.
+
 ## Saying which repository outright
 
 Plenty of cards mention two or three onboarded repositories on purpose — a traceback from one

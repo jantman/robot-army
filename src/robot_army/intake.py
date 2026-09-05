@@ -561,17 +561,41 @@ def tracked_card_ids(
 
 # -- repository resolution (R8) ---------------------------------------------
 
+#: The ``name`` half of a repository reference, and the answer to issue #71.
+#:
+#: A dot is legal *inside* a repository name — ``you/foo.github.io`` is a real repository —
+#: and legal at the *start* of one: ``owner/.github`` is where GitHub itself keeps a
+#: profile's community health files. What no repository name does is **end** with a dot, so
+#: that is the only end this constrains, and constraining it is what keeps a sentence's full
+#: stop outside the capture. Before this, the flat greedy class swallowed it: a card reading
+#: "Names jantman/robot-army." proposed the candidate ``jantman/robot-army.``, which is
+#: onboarded nowhere, so the card was held asking for the repository it had just named.
+#: Ending a sentence with the repository's name is the most ordinary way to write one.
+_NAME = r"[A-Za-z0-9._-]*[A-Za-z0-9_-]"
+
 #: A GitHub URL naming a repository, in any of the shapes a pasted link takes.
-_URL_REF = re.compile(
-    r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?(?=[/#?\s)\]]|$)"
-)
+#:
+#: It ends where the name ends and needs no trailing lookahead: every character that can
+#: follow — ``/``, ``#``, ``?``, a comma, a closing bracket, a full stop, a space — is
+#: already outside the name's character class or outside its boundary rule. The lookahead
+#: it used to carry listed the punctuation it would tolerate, and a link ending a clause
+#: with anything not on that list (``…/demo, then``, ``…/demo!``, ``…/demo: why``) matched
+#: nothing at all.
+_URL_REF = re.compile(rf"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9._-]+)/({_NAME})")
 
 #: A bare ``owner/name``. **This pattern is the reason R8 exists.** On its own it matches
 #: ``src/robot_army``, ``docs/roadmap.md``, and any two-segment path in a pasted log — and
 #: a card description is semi-untrusted text that may be pasted from one. It is never used
 #: to *select* a repository, only to propose a candidate that the configured set must then
 #: confirm.
-_BARE_REF = re.compile(r"(?<![\w/.-])([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)(?![\w/.-])")
+#:
+#: Unlike the URL form it does need a trailing boundary, because that is the whole of what
+#: separates ``you/demo`` from the first two segments of ``you/demo/sub`` or of a pasted
+#: path. ``(?!\.?[\w/-])`` reads as "not in the middle of one": a following dot is allowed
+#: only when nothing name-shaped follows *it*, so ``jantman/demo.`` ends a sentence while
+#: ``you/demo.md/notes`` — where the name really does continue — proposes nothing rather
+#: than the truncation ``you/demo``.
+_BARE_REF = re.compile(rf"(?<![\w/.-])([A-Za-z0-9._-]+)/({_NAME})(?!\.?[\w/-])")
 
 #: An absolute or ``~``-relative filesystem path, matched against configured clone paths.
 _PATH_REF = re.compile(r"(?<!\S)(~?/[^\s'\"`,;)\]]+)")
@@ -681,9 +705,9 @@ def resolve_repository(
         return declared
 
     for owner, name in _URL_REF.findall(text):
-        _offer(found, f"{owner}/{name}", onboarded, f"github.com/{owner}/{name}")
+        _offer(found, _repo_key(owner, name), onboarded, f"github.com/{owner}/{name}")
     for owner, name in _BARE_REF.findall(text):
-        _offer(found, f"{owner}/{name}", onboarded, f"{owner}/{name}")
+        _offer(found, _repo_key(owner, name), onboarded, f"{owner}/{name}")
     for raw in _PATH_REF.findall(text):
         key = _key_for_path(raw, onboarded)
         if key is not None:
@@ -801,15 +825,34 @@ def _key_for_reference(raw: str, onboarded: dict[str, RepoConfig]) -> str | None
     """
     found: dict[str, str] = {}
     for owner, name in _URL_REF.findall(raw):
-        _offer(found, f"{owner}/{name}", onboarded, raw)
+        _offer(found, _repo_key(owner, name), onboarded, raw)
     if not found:
         for owner, name in _BARE_REF.findall(raw):
-            _offer(found, f"{owner}/{name}", onboarded, raw)
+            _offer(found, _repo_key(owner, name), onboarded, raw)
     if not found:
         return _key_for_path(raw, onboarded)
     if len(found) > 1:
         return None
     return next(iter(found))
+
+
+def _repo_key(owner: str, name: str) -> str:
+    """The candidate key a matched reference proposes, with any ``.git`` suffix dropped.
+
+    ``jantman/demo.git`` is how a clone URL spells ``jantman/demo``, and GitHub refuses a
+    repository name ending in ``.git``, so the suffix can only ever be that spelling —
+    stripping it cannot shadow a real repository. It lived inside ``_URL_REF`` before,
+    which meant the pasted link resolved and the same thing typed without the host did
+    not; the two recognisers are supposed to differ in what they match, not in what a
+    match means.
+
+    A name that is *only* ``.git`` is left alone. It is the dot-leading form the ``.github``
+    repository is a real example of, and turning it into an empty name would propose the
+    nonsense key ``owner/``.
+    """
+    if name.endswith(".git") and name != ".git":
+        name = name[: -len(".git")]
+    return f"{owner}/{name}"
 
 
 def _offer(

@@ -490,8 +490,12 @@ def reconcile(
     # sees a state that is neither ``starting`` nor ``running``, and leaves it — so the
     # ``orphan_session`` that fires today is never *reached*, rather than being suppressed
     # by a flag saying "this one was retired". There is a second, independent reason it
-    # cannot fire: ``scan`` is a snapshot but ``RegistryEntry.alive()`` re-reads ``/proc``
-    # at call time, so even an open row would take the reclaim branch, not the report one.
+    # cannot fire there: ``scan`` is a snapshot but ``RegistryEntry.alive()`` re-reads
+    # ``/proc`` at call time, so even an open row would take the reclaim branch.
+    #
+    # ``_orphan_sweep`` needed the same property and did **not** have it — it read the
+    # snapshot directly — so it raised an anomaly against every worker this sweep retired.
+    # Review of PR #140 caught it. It now re-checks liveness itself; see its docstring.
     result.retired += _retire_finished_sessions(
         conn, boundaries=boundaries, audit=audit, scan=scan, proc_root=proc_root
     )
@@ -533,7 +537,12 @@ def reconcile(
 
     # -- the orphan sweep (FR-043, M0 F17) ---------------------------------
     result.orphans += _orphan_sweep(
-        conn, audit=audit, config=config, scan=scan, claimed_pids=claimed_pids
+        conn,
+        audit=audit,
+        config=config,
+        scan=scan,
+        claimed_pids=claimed_pids,
+        proc_root=proc_root,
     )
 
     # -- anomalies that have resolved themselves (issue #138) --------------
@@ -1158,12 +1167,30 @@ def _orphan_sweep(
     config: Config,
     scan: sessions.RegistryScan,
     claimed_pids: set[int],
+    proc_root: Path | None = None,
 ) -> int:
     """Live worker processes under the worktree root that match no ``active`` row.
 
     This is the M0 F17 case made visible: the wrapper died, dtach tore down its socket,
     and the worker carried on reparented. Without this sweep the daemon would report
     ``interrupted`` while a real session was still editing files.
+
+    **"Live" is re-established here, not inherited from the scan.** ``scan`` is taken once
+    at the top of the pass and filters on liveness *at that moment*; several sweeps run
+    between then and here, and one of them — ``_retire_finished_sessions`` — deliberately
+    kills processes. Trusting the snapshot therefore raised a fresh ``orphan_session``
+    against the very worker this pass had just retired on purpose, on every ordinary
+    successful item: none of the three guards below catches it, because the pid was never
+    claimed (only ``active`` items claim), the cwd really is under the worktree root, and
+    the row is ``lost`` rather than ``running``. The anomaly was then resolved later in the
+    same pass by ``_resolve_orphan_anomalies``, so ``robot-army anomalies`` looked clean
+    while ``result.orphans`` was inflated and a raise/resolve pair was written to the log
+    for every successful retirement.
+
+    The re-check costs one ``/proc`` read per candidate and makes the docstring above true
+    rather than aspirational. It cannot suppress a genuine report: an orphan is by
+    definition a process that is *running* unaccounted for, so a pid that is gone by the
+    time we ask is not one.
     """
     found = 0
     for entry in scan.entries:
@@ -1171,6 +1198,8 @@ def _orphan_sweep(
             continue
         if not sessions.under_root(entry.cwd, config.worktree_root):
             continue  # the maintainer's own session; none of our business
+        if not entry.alive(proc_root=proc_root):
+            continue  # gone since the scan — including anything retired earlier this pass
         row = (
             conn.execute(
                 "SELECT id, work_item_id, state FROM sessions WHERE session_id = ?",
@@ -1226,8 +1255,11 @@ def _resolve_orphan_anomalies(
     process is what the report was about, and it is gone.
 
     Positioned after ``_orphan_sweep`` so what it leaves describes the pass as it ends. The
-    two cannot fight: that sweep raises only for processes it can see alive, and this
-    resolves only ones it can see gone.
+    two cannot fight, because that sweep raises only for processes it can see alive *now*
+    and this resolves only ones it can see gone. That symmetry is load-bearing and was not
+    free: until PR #140's review, ``_orphan_sweep`` trusted the pass's opening snapshot, so
+    every retirement produced a raise here and a resolve immediately after — leaving the
+    listing correct while the counters and the log both lied.
     """
     resolved = 0
     for anomaly in db.open_orphan_session_anomalies(conn):

@@ -654,3 +654,76 @@ def test_a_retired_session_lets_cleanup_reclaim_the_worktree_in_the_same_pass(
         "the worktree must stop being deferred once nothing is running in it"
     )
     assert vcs.removals, "cleanup never got as far as asking git to remove the worktree"
+
+
+# -- the orphan sweep must not report what this pass just killed -------------
+
+
+def test_a_full_pass_raises_no_orphan_for_the_session_it_retired(
+    conn, config, audit, layout, registry, proc
+):
+    """Found in review of PR #140, and the tests above all missed it.
+
+    ``_orphan_sweep`` reads the pass's ``scan`` snapshot directly and never re-checked
+    liveness. None of its three guards catches a session this pass retired: the pid was
+    never in ``claimed_pids`` (only ``active`` items claim), the cwd really is under the
+    worktree root, and the row is ``lost`` rather than ``running``. So every ordinary
+    successful retirement raised a fresh ``orphan_session`` against the worker it had just
+    deliberately killed.
+
+    It went unnoticed because ``_resolve_orphan_anomalies`` runs later in the same pass and
+    resolved it, leaving ``robot-army anomalies`` clean — which is all the earlier test
+    asserted. The damage was in the two places nobody was looking: ``result.orphans``
+    counted a phantom, and the log gained a raise/resolve pair for every successful item,
+    on exactly the path this feature exists to make quiet.
+
+    The assertions are therefore on the counters and the records, not on the final listing.
+    """
+    finished_item(conn, config, registry, proc)
+
+    result = reconcile.reconcile(
+        conn,
+        boundaries=make_boundaries(audit, host=KillingHost(proc)),
+        audit=audit,
+        config=config,
+        layout=layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+
+    assert result.retired == 1
+    assert result.orphans == 0, "the sweep reported the worker this pass just retired"
+    assert result.anomalies_resolved == 0, (
+        "nothing should need resolving; nothing should have been raised"
+    )
+    assert records(layout, "anomaly.resolved") == []
+    assert db.list_anomalies(conn, unacknowledged_only=False) == []
+
+
+def test_a_genuine_orphan_is_still_reported_after_the_liveness_recheck(
+    conn, config, audit, layout, registry, proc, boundaries
+):
+    """The property the re-check must not cost: a worker that really is running
+    unaccounted for is still reported. This is M0 F17 — the wrapper died and the worker
+    carried on, reparented — and it is the reason the sweep exists at all."""
+    item = seed_item(conn, repo_key=REPO, state="interrupted")
+    seed_session(conn, item, state="lost", session_id="ghost", pid=91234)
+    cwd = Path(config.worktree_root) / "issue-99"
+    cwd.mkdir(parents=True, exist_ok=True)
+    write_registry(
+        registry, pid=91234, session_id="ghost", proc_start="91234", cwd=str(cwd)
+    )
+    write_proc(proc, 91234, starttime="91234", cwd=str(cwd))
+
+    result = reconcile.reconcile(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+
+    assert result.orphans == 1
+    assert [a.entity_id for a in db.list_anomalies(conn)] == ["ghost"]

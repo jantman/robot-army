@@ -140,8 +140,18 @@ Three halves, each load-bearing:
   `orphan_session` that fires today is never reached — no suppression list, no special case, no
   "was this retired?" flag.
 
-There is a second, independent reason the anomaly cannot fire: `scan` is captured once at the top
-of the pass, but `RegistryEntry.alive()` re-reads `/proc` at call time. Even if the row were
+**Corrected after review of PR #140.** This reasoning covered `_sweep_stale_sessions` and stopped
+there, but `_orphan_sweep` runs later in the same pass, reads the same snapshot *directly*, and did
+not re-check liveness. None of its guards catches a retired session, so it raised an
+`orphan_session` against every worker retirement killed — cleared moments later by
+`_resolve_orphan_anomalies`, which is why the listing looked clean while `result.orphans` counted a
+phantom and the log gained a raise/resolve pair per successful item. The sweep now re-checks
+liveness itself. The lesson is narrower than "check both sweeps": a snapshot taken at the top of a
+pass stops being true the moment a sweep in that pass changes the world, and this feature is the
+first thing in `reconcile()` that does.
+
+There is a second, independent reason the anomaly cannot fire *there*: `scan` is captured once at
+the top of the pass, but `RegistryEntry.alive()` re-reads `/proc` at call time. Even if the row were
 somehow left open, the process is gone by then and `reclaim_stale_session` would take `reclaimed`
 rather than `reported`. Belt and braces, and worth a test each.
 

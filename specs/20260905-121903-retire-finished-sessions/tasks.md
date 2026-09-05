@@ -92,6 +92,10 @@ does this against items 45 and 54.
 - [X] T019 [US1] ~~Add a branch to `apply_record` in `src/robot_army/spool.py` for a late exit record.~~ **Measured during implementation: no bug exists.** `_already_applied` already returns `True` for an `exit` whose session row is in any terminal state, `lost` included, so the record is a duplicate, the file is unlinked, and the drain counts it. `spool.py` is unchanged; research R7 is corrected in place and the tests in T020 stay, because retirement makes this race routine
 - [X] T020 [P] [US1] Add cases to `tests/unit/test_spool.py`: an exit record arriving against a `lost` row settles quietly, is logged, and **the spool file is gone afterwards**; the same record applied twice is a duplicate rather than an error; and a kill between the signal and the settle leaves a dead process under an open row that the next pass's `_sweep_stale_sessions` reclaims with no manual step
 
+### Found in review
+
+- [X] T047 [US1] Make `_orphan_sweep` in `src/robot_army/reconcile.py` re-check `entry.alive(proc_root=...)` before raising, instead of trusting the pass's opening `scan` snapshot, and pass `proc_root` to it from `reconcile()`. Without this every ordinary retirement raised an `orphan_session` against the worker it had just killed — invisible in `robot-army anomalies` because `_resolve_orphan_anomalies` cleared it in the same pass, but visible as an inflated `result.orphans` and a raise/resolve pair in the log for every successful item. Add both regression cases to `tests/unit/test_session_retirement.py`: a full pass asserting `orphans == 0` and no `anomaly.resolved` record, and a genuine live orphan still being reported. Contract C7 and research R4 corrected to match
+
 **Checkpoint**: User Story 1 is complete and independently deliverable. This alone answers #138 and
 unwedges the machine — run [quickstart.md](./quickstart.md) Scenario 1 against items 45 and 54.
 

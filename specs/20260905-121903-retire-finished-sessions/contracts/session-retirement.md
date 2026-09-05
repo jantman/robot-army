@@ -108,7 +108,16 @@ Read the diff and confirm each is unchanged:
 - `cleanup.py` — both guards unchanged (FR-015)
 - `states.py` — no new state, no new edge in either transition table
 - `models.py::ANOMALY_KINDS` — no new kind
-- `_orphan_sweep` — unchanged
+- ~~`_orphan_sweep` — unchanged~~ **This clause was wrong and is withdrawn.** Review of PR #140
+  showed the sweep reads the pass's opening `scan` snapshot and never re-checked liveness, so
+  none of its three guards catches a session retired earlier in the same pass: the pid was
+  never in `claimed_pids` (only `active` items claim), the cwd is under the worktree root, and
+  the row is `lost` rather than `running`. It therefore raised a fresh `orphan_session` against
+  every worker retirement had just killed. `_resolve_orphan_anomalies` cleared it later in the
+  same pass, which is why the listing looked right while `result.orphans` counted a phantom and
+  the log gained a raise/resolve pair per successful item. The sweep now re-checks
+  `entry.alive(proc_root=...)` before raising, which makes its own docstring true and cannot
+  suppress a genuine report — an orphan is by definition a process that is still running.
 - `_resolve_closed_issues` — unchanged
 - `sessions.parse_entry`'s `.key` refusal and `KNOWN_VERSIONS` gate — unchanged
 

@@ -121,6 +121,108 @@ def test_a_bare_owner_name_resolves_when_it_is_onboarded(resolve, multi_config):
     assert resolve(multi_config, "jantman/demo is broken", "").repo_key == "jantman/demo"
 
 
+# -- where the reference sits in the sentence (issue #71) -------------------
+#
+# A card is prose, and prose puts punctuation after a repository name. The bug this table
+# exists for was the plainest sentence of the lot — "Names jantman/demo." — held for
+# needs_info because the full stop was captured into the name, and the failure was silent:
+# nothing is ever filed in the wrong repository by it, the card is simply never filed, and
+# the author is asked to restate what they already wrote correctly. One case per shape,
+# because the character that broke it was the one nobody thought to try.
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Names jantman/demo.",
+        "Names jantman/demo",
+        "Names jantman/demo and nothing else",
+        "See jantman/demo, then stop",
+        "fix jantman/demo!",
+        "Is it jantman/demo?",
+        "in jantman/demo: details",
+        "one; jantman/demo; two",
+        "(jantman/demo)",
+        "[jantman/demo]",
+        'ends with "jantman/demo".',
+        "trailing dots jantman/demo...",
+        "jantman/demo's tests fail",
+        "Names jantman/demo.\nAnd a second line.",
+    ],
+)
+def test_punctuation_after_a_bare_reference_never_hides_it(resolve, multi_config, body):
+    assert resolve(multi_config, "", body).repo_key == "jantman/demo"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "See https://github.com/jantman/demo.",
+        "see https://github.com/jantman/demo, then read it",
+        "read https://github.com/jantman/demo!",
+        "why https://github.com/jantman/demo: the tests",
+        "(https://github.com/jantman/demo)",
+        "[https://github.com/jantman/demo]",
+        "https://github.com/jantman/demo/issues/71",
+        "https://github.com/jantman/demo?tab=readme",
+    ],
+)
+def test_punctuation_after_a_pasted_link_never_hides_it(resolve, multi_config, body):
+    """The same defect, one recogniser over: the link form tolerated a listed set of
+    following characters and matched *nothing at all* after any other, so a link ending a
+    clause with a comma or a colon was as invisible as the bare form ending a sentence."""
+    assert resolve(multi_config, "", body).repo_key == "jantman/demo"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "clone jantman/demo.git",
+        "clone jantman/demo.git.",
+        "https://github.com/jantman/demo.git",
+        "github.com/jantman/demo.git.",
+    ],
+)
+def test_a_clone_urls_git_suffix_is_never_part_of_the_name(resolve, multi_config, body):
+    """``.git`` was stripped from a pasted link and not from the same thing typed without
+    the host, which made the two spellings disagree for no reason an author could see. The
+    two recognisers differ in what they match, not in what a match means."""
+    assert resolve(multi_config, "", body).repo_key == "jantman/demo"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "see jantman/demo/sub for it",
+        "the file jantman/demo.md/notes",
+        "under vendor/jantman/demo somewhere",
+    ],
+)
+def test_a_reference_that_is_only_the_start_of_a_longer_path_is_not_accepted(
+    resolve, multi_config, body
+):
+    """Allowing a full stop to end a reference must not let one begin inside a path.
+    Every line here contains the characters of ``jantman/demo`` and names no repository."""
+    assert not resolve(multi_config, "", body).resolvable
+
+
+def test_a_repository_whose_name_contains_dots_still_resolves(resolve, tmp_path, layout, conn):
+    """The boundary is the bug, not the dot: ``foo.github.io`` is an ordinary repository
+    name, and it has to survive both inside a sentence and at the end of one."""
+    monkey_token()
+    pages = make_repo(tmp_path / "clones" / "pages")
+    raw = config_dict(pages, layout, tmp_path / "worktrees")
+    raw["repos"] = {}
+    onboard_repo(conn, "jantman/foo.github.io", pages)
+    config = parse(raw, tmp_path / "config.toml")
+    for body in (
+        "the site jantman/foo.github.io is stale",
+        "the site is jantman/foo.github.io.",
+        "https://github.com/jantman/foo.github.io.",
+    ):
+        assert resolve(config, "", body).repo_key == "jantman/foo.github.io"
+
+
 def test_a_local_path_inside_an_onboarded_clone_resolves(resolve, multi_config):
     clone = multi_config.repos["jantman/demo"].path
     result = resolve(multi_config, "", f"the failure is in {clone}/src/thing.py")
@@ -329,6 +431,7 @@ def test_a_declaration_selects_a_repository_that_has_no_repos_section(resolve, m
         "\trobot-army :\tjantman/demo",
         "`robot-army: jantman/demo`",
         "robot-army: `jantman/demo`",
+        "robot-army: jantman/demo.",
     ],
 )
 def test_the_tolerances_the_grammar_deliberately_has(resolve, multi_config, line):

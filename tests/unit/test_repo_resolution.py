@@ -206,6 +206,26 @@ def test_a_reference_that_is_only_the_start_of_a_longer_path_is_not_accepted(
     assert not resolve(multi_config, "", body).resolvable
 
 
+def test_a_repository_whose_name_begins_with_a_dot_resolves(resolve, tmp_path, layout, conn):
+    """``owner/.github`` is where GitHub keeps a profile's community health files, so a
+    leading dot is part of a real name rather than punctuation. Only the *trailing* dot is
+    ever the sentence's, and the declaration line is checked here too because it runs the
+    same two recognisers — a name this rule refused would be unnameable even outright."""
+    monkey_token()
+    health = make_repo(tmp_path / "clones" / "health")
+    raw = config_dict(health, layout, tmp_path / "worktrees")
+    raw["repos"] = {}
+    onboard_repo(conn, "jantman/.github", health)
+    config = parse(raw, tmp_path / "config.toml")
+    for body in (
+        "jantman/.github needs an issue template",
+        "it lives in jantman/.github.",
+        "https://github.com/jantman/.github",
+        "robot-army: jantman/.github",
+    ):
+        assert resolve(config, "", body).repo_key == "jantman/.github", body
+
+
 def test_a_repository_whose_name_contains_dots_still_resolves(resolve, tmp_path, layout, conn):
     """The boundary is the bug, not the dot: ``foo.github.io`` is an ordinary repository
     name, and it has to survive both inside a sentence and at the end of one."""

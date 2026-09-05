@@ -564,13 +564,14 @@ def tracked_card_ids(
 #: The ``name`` half of a repository reference, and the answer to issue #71.
 #:
 #: A dot is legal *inside* a repository name — ``you/foo.github.io`` is a real repository —
-#: but a name never begins or ends with one. Requiring a non-dot at each end is therefore
-#: not a narrowing of what GitHub allows, and it is what keeps a sentence's full stop
-#: outside the capture. Before this, the flat greedy class swallowed it: a card reading
+#: and legal at the *start* of one: ``owner/.github`` is where GitHub itself keeps a
+#: profile's community health files. What no repository name does is **end** with a dot, so
+#: that is the only end this constrains, and constraining it is what keeps a sentence's full
+#: stop outside the capture. Before this, the flat greedy class swallowed it: a card reading
 #: "Names jantman/robot-army." proposed the candidate ``jantman/robot-army.``, which is
 #: onboarded nowhere, so the card was held asking for the repository it had just named.
 #: Ending a sentence with the repository's name is the most ordinary way to write one.
-_NAME = r"[A-Za-z0-9_-](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?"
+_NAME = r"[A-Za-z0-9._-]*[A-Za-z0-9_-]"
 
 #: A GitHub URL naming a repository, in any of the shapes a pasted link takes.
 #:
@@ -844,8 +845,12 @@ def _repo_key(owner: str, name: str) -> str:
     which meant the pasted link resolved and the same thing typed without the host did
     not; the two recognisers are supposed to differ in what they match, not in what a
     match means.
+
+    A name that is *only* ``.git`` is left alone. It is the dot-leading form the ``.github``
+    repository is a real example of, and turning it into an empty name would propose the
+    nonsense key ``owner/``.
     """
-    if name.endswith(".git"):
+    if name.endswith(".git") and name != ".git":
         name = name[: -len(".git")]
     return f"{owner}/{name}"
 

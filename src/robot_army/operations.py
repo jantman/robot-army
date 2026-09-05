@@ -1646,7 +1646,7 @@ def _numbering_lines(numbering: speckit.Numbering) -> list[str]:
         return [
             "spec kit: the feature numbering could not be determined",
             f"  {speckit.INIT_OPTIONS}: {numbering.reason}.",
-            "  If it does not say \"timestamp\", two sessions running at once can claim the",
+            '  If it does not say "timestamp", two sessions running at once can claim the',
             '  same feature number. Set "feature_numbering": "timestamp" to be sure.',
             "",
         ]

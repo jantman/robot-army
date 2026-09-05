@@ -102,15 +102,18 @@ record, and — once per distinct reason — as a comment on the card itself.
   > this card gives more than one `robot-army:` line and they name different repositories
   > (jantman/demo, jantman/other); it must name exactly one
 
-- No declaration and nothing recognised in the text — **unchanged from today**:
+- No declaration and nothing recognised in the text — the existing reason, which now also
+  mentions the line, since it is the one instruction a card mentioning several repositories
+  can actually obey:
 
   > no onboarded repository could be identified from this card. Name one by its GitHub URL,
-  > its owner/name, or its local path — onboarded: jantman/demo, jantman/other
+  > its owner/name, or its local path, or by a line reading `robot-army: <repo>` and nothing
+  > else — onboarded: jantman/demo, jantman/other
 
-- No declaration and two repositories named in the text — **unchanged from today**:
+- No declaration and two repositories named in the text — likewise:
 
   > this card names 2 onboarded repositories (jantman/demo, jantman/other); it must name
-  > exactly one
+  > exactly one, or say which by a line reading `robot-army: <repo>` and nothing else
 
 The comment left on the card carries the reason and then tells the author how to fix it,
 including the shape of the line, so the card alone is enough to act on.

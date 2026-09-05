@@ -349,3 +349,70 @@ def test_a_filesystem_path_inside_a_sectionless_clone_resolves_it(
 
     assert outcome.issues_created == 1
     assert boundaries.issue_writer.created[0][0] == "jantman/sectionless"
+
+
+# -- naming the repository outright (milestone 116) -------------------------
+
+
+def test_a_card_naming_two_repositories_files_in_the_one_it_declares(
+    conn, board_config, audit, tmp_path
+):
+    """The reported problem, end to end. Two onboarded repositories are named in the card's
+    text and the card is still filed — in the one its ``robot-army:`` line picks — and the
+    line survives into the issue, where it records the choice for whoever reads it next."""
+    other = make_repo(tmp_path / "clones" / "other")
+    onboard_repo(conn, "jantman/other", other)
+
+    declaring = card(
+        title="Fix the widget",
+        body=(
+            f"Broken in https://github.com/{REPO}, and jantman/other has the same bug.\n"
+            f"robot-army: {REPO}"
+        ),
+    )
+    boundaries = make_board_boundaries(audit, cards=[declaring])
+    outcome = run(conn, board_config, audit, boundaries)
+
+    assert outcome.issues_created == 1
+    (repo_key, _title, body) = boundaries.issue_writer.created[0][:3]
+    assert repo_key == REPO
+    # FR-015: the description reaches the issue verbatim, declaration included. It is not
+    # scaffolding to be cleaned up — it is the record of which repository was chosen.
+    assert f"> robot-army: {REPO}" in body
+
+
+def test_the_evaluation_record_says_how_the_repository_was_chosen(
+    conn, board_config, audit, layout, tmp_path
+):
+    """FR-014 and SC-005. "jantman/demo" without "because the author said so" is half an
+    answer on a card that names three repositories, and Principle III's standard is
+    reconstruction from the log alone."""
+    import json
+
+    other = make_repo(tmp_path / "clones" / "other")
+    onboard_repo(conn, "jantman/other", other)
+
+    boundaries = make_board_boundaries(
+        audit,
+        cards=[
+            card("declared", body=f"jantman/other too\nrobot-army: {REPO}"),
+            card("disagreeing", body=f"robot-army: {REPO}\nrobot-army: jantman/other"),
+            card("scanned", body=f"https://github.com/{REPO}"),
+        ],
+    )
+    run(conn, board_config, audit, boundaries)
+    audit.close()
+
+    sources = {
+        record["entity_id"]: record["detail"]["source"]
+        for path in sorted(layout.log_dir.glob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        for record in [json.loads(line)]
+        if record["action"] == "trello.evaluated" and "source" in record.get("detail", {})
+    }
+    assert sources == {
+        "declared": "declaration",
+        "disagreeing": "declaration",
+        "scanned": "scan",
+    }

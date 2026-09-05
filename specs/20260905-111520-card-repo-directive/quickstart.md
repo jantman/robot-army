@@ -38,7 +38,8 @@ uv run pytest tests/unit/test_intake_poll.py -q         # the held reason and th
    ```
 
    The card is listed with the reason `this card names 2 onboarded repositories (…); it must
-   name exactly one`, and a comment saying so has appeared on the card itself.
+   name exactly one, or say which by a line reading \`robot-army: <repo>\` and nothing
+   else`, and a comment saying so has appeared on the card itself.
 
 3. **Add the line.** Edit the card's description and add, on its own line:
 

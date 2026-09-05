@@ -82,27 +82,40 @@ freeze at `open` forever, and why the rule terminates: once every stored pull re
 reached a terminal state before migration 013 are **not** backfilled; their `pull_requests`
 stays `NULL` and reads as "not checked" (R4).
 
-Lookups are cached within the pass on `(repo_key, issue_number, branch)`, following
-`_resolve_closed_issues`.
+**No per-pass cache**, unlike `_resolve_closed_issues`. It could never hit:
+`idx_work_items_identity` is unique on `(source, source_id, dry_run)` and `source_id` is
+`repo#issue`, so two non-simulated items cannot share an issue, and simulated ones are
+skipped by rule 1. One lookup per candidate, and a cache that cannot hit is a claim no test
+can back.
 
 ## C3 — Writing what was learned
 
 On success, build the new list per C1 and serialise it with
 `json.dumps(…, separators=(",", ":"))`.
 
-**If the serialised text equals the stored `pull_requests` text**, write `pull_requests_at`
-alone and record nothing. This is the omission Principle III's exception path covers, enumerated
-in `plan.md` and identical to `_observe_speckit`'s (R8).
+**If the serialised text equals the stored `pull_requests` text**, write it back with a fresh
+`pull_requests_at` and record nothing. This is the omission Principle III's exception path
+covers, enumerated in `plan.md` and identical to `_observe_speckit`'s (R8).
 
 **If it differs**, in one `db.transaction`:
 
 1. `audit.record("work_item.pull_requests", outcome="ok", entity_type="work_item",
    entity_id=item.id, target=f"{repo_key}#{issue_number}", dry_run=item.dry_run, detail=…)`
    where `detail` carries `{"from": [<number>:<state>, …], "to": [<number>:<state>, …]}`.
-2. `db.update_work_item_columns(conn, item.id, pull_requests=<text>, pull_requests_at=utcnow())`.
+2. `db.record_pull_requests(conn, item.id, found=<text>, at=utcnow())`.
 
-Record first, then write, both inside the transaction — the order `speckit.record_phase` uses,
-so a crash cannot produce one without the other.
+`db.record_pull_requests` rather than `db.update_work_item_columns`, and the reason is
+`updated_at`. This runs every pass for every live item and almost every run confirms an
+unchanged set, so the general updater would push `updated_at` forward once a minute for every
+item in the system — turning a column that means "when this item last changed" into "when the
+daemon last looked", and falsifying every age derived from it. The unchanged case takes the
+same statement and writes the identical text back, so there is one path rather than two.
+
+Record first, then write, both inside the transaction — the order `speckit.record_phase` uses.
+The audit log is an append-only file rather than a table, so a rollback cannot unwrite the
+record: the order is chosen so the failure that *can* happen is a record for a change that did
+not land, which the next pass corrects by writing the same change again. The other order risks
+the opposite — a committed change with no record — which Principle III does not tolerate.
 
 On `TransportError`:
 

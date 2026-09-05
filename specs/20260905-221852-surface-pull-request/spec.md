@@ -113,7 +113,8 @@ recorded rather than silently swallowed.
 ### Edge Cases
 
 - **The item has no branch.** Nothing has been dispatched, so there is nothing to look up and
-  no pull request can exist. The item reads as having none, and no GitHub call is made for it.
+  no pull request can exist yet. No GitHub call is made for it, and the item reads as *not
+  checked* rather than as *none* — "none" is GitHub's answer, and GitHub was never asked.
 - **A simulated (dry-run) item.** No outward-facing call is made for it under any
   circumstance; its pull-request field reads as unknown, exactly as its other GitHub-derived
   signals do.

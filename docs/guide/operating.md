@@ -119,6 +119,40 @@ cancel, retry, attach a terminal, acknowledge an anomaly, hold and release an it
 repository, pause and resume dispatch, and force a poll or a reconciliation. Every one of
 them has a terminal equivalent, verified by a test rather than by intention.
 
+**Where the pull request is.** A session's whole purpose is to open one, so the item page
+names every pull request the issue has — by number, with its state, linked — beside the
+branch, and `/active` carries a `PR` column so "has this one produced anything yet?" is a
+glance rather than a tap per row. On `/interrupted`, the resume-decision block shows the same
+thing, which is what the `open PR` line there used to be.
+
+Two relationships count, and they are not the same one: a pull request opened **from the
+item's branch**, and a pull request **GitHub reports as linked to the issue** — the "Closes
+#42" relationship its own interface shows. Either qualifies, both together count once, and an
+issue whose first attempt was closed and second opened has two. The listing shows the highest
+number, which is the most recent attempt, and `+1` for each older one; the item page lists
+them all.
+
+Three answers, and telling them apart is the point:
+
+| On the page | Means |
+|---|---|
+| `#144 (merged)` | that pull request, as of the confirmation time shown beside it |
+| `none` | GitHub was asked, and there is no pull request |
+| `not checked` / `?` | nobody has asked — an item never dispatched, a simulated one, or one that finished before this existed |
+
+`none` and `not checked` are never rendered the same way, deliberately. Answering "there is
+no pull request" on the strength of never having looked is the one thing this must not do.
+
+None of it costs a request while a page renders. The daemon's reconciliation pass establishes
+the answer and stores it on the work item, and every view reads what is stored — so these
+pages render with GitHub unreachable, showing the last answer and how old it is. That
+replaced a live lookup the resume-decision block used to make, which was both slower and
+free to disagree with everything else on the screen.
+
+Items stop being re-checked once every pull request they have is merged or closed: nothing
+can change after that, so nothing is spent. An item that finished before this existed reads
+`not checked` for good — nothing is backfilled.
+
 Resume and restart here obey the session cap, the pause and holds exactly as the terminal
 does, and say so on the page rather than appearing to work and then quietly doing nothing.
 There is no `--force` button: the answer to a refusal is the control that lifts the

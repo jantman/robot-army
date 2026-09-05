@@ -99,6 +99,33 @@ sqlite3 ~/.local/state/robot-army/state.db 'PRAGMA user_version'
 
 There are no downgrades. The rollback plan is restoring the file from backup.
 
+### `anomalies` — two different ways a row leaves the list
+
+| Column | Meaning |
+|---|---|
+| `acknowledged_at` | I looked at this and dismissed it (`robot-army anomalies --acknowledge <id>`) |
+| `resolved_at` | The system re-checked and the condition no longer holds |
+
+They are separate columns because they are separate facts, and `--all` has to be able to
+tell them apart: "this stopped being true" and "somebody dismissed it" say very different
+things about whether the underlying problem was dealt with. Only `orphan_session` is ever
+resolved automatically — it is the only kind whose truth can be positively re-established as
+false, because both places that raise it record the pid *and* the process start time, so a
+recycled pid answers correctly rather than reading as still-alive. An anomaly whose detail
+carries no pid is left alone permanently: "I could not check" must never be stored as "it is
+fine".
+
+A row with either stamp set drops out of the partial unique index that keeps a 60-second
+reconciliation loop from writing 1,440 identical rows a day. **That is load-bearing, and
+getting it wrong is silent**: a resolved row left inside the index would stop the same
+condition from ever being reported again, with no error anywhere — the symptom would be an
+anomaly that simply never arrives. Migration 12 rebuilds the index for exactly this reason,
+and a test raises, resolves, and re-raises to prove the recurrence still lands.
+
+Nothing is backfilled. Every row that existed before schema 12 comes through with
+`resolved_at` NULL, which is correct: whether its condition still holds is a question for
+the next reconciliation pass, not for a migration.
+
 ### `repos` — what I approved, and where
 
 One row per onboarded repository. **The row is what makes a repository known**: since

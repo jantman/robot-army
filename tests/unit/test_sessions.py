@@ -9,6 +9,7 @@ version, a truncated file, an absent directory, and a ``procStart`` that disagre
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -290,3 +291,139 @@ def test_a_populated_registry_directory_is_not_missing(tmp_path):
     write_proc(proc, 4242, starttime="777")
     scan = sessions.scan(registry_dir=registry, proc_root=proc)
     assert scan.directory_missing is False
+
+
+# -- the idle clock retirement hangs off (issue #138) -------------------------
+#
+# These are failure-path tests almost all the way down, and deliberately so. The whole
+# safety argument for ending a process on the strength of an undocumented file is that
+# every way of *failing* to establish idleness returns None rather than a number.
+
+
+def entry_for(tmp_path: Path, **kwargs) -> sessions.RegistryEntry:
+    """Parse one registry file and hand back the entry, bypassing the liveness filter."""
+    registry, _ = build(tmp_path, **kwargs)
+    parsed = sessions.parse_entry(registry / "4242.json")
+    assert parsed.entry is not None, parsed.error
+    return parsed.entry
+
+
+def test_status_updated_at_is_parsed_and_gives_an_idle_duration(tmp_path):
+    entry = entry_for(tmp_path, status="idle", status_updated_at=1_000_000_000_000)
+
+    assert entry.status_updated_at == 1_000_000_000_000
+    assert entry.idle_for(now_ms=1_000_000_060_000) == 60.0
+
+
+def test_an_absent_status_updated_at_is_not_idle_at_any_age(tmp_path):
+    """The conftest default. Every caller written before retirement existed lands here."""
+    entry = entry_for(tmp_path, status="idle")
+
+    assert entry.status_updated_at is None
+    assert entry.idle_for(now_ms=9_999_999_999_999) is None
+
+
+@pytest.mark.parametrize("value", ["1000000000000", 1e12, True, None, [], {"a": 1}])
+def test_a_status_updated_at_of_the_wrong_type_is_treated_as_absent(tmp_path, value):
+    """A wrong type must not raise: a worker upgrade cannot be allowed to take the daemon
+    down. ``True`` is in the list because bool is an int subclass in Python."""
+    entry = entry_for(tmp_path, status="idle", status_updated_at=value)
+
+    assert entry.status_updated_at is None
+    assert entry.idle_for(now_ms=9_999_999_999_999) is None
+
+
+@pytest.mark.parametrize("status", ["busy", "compacting", "", None, "Idle", "IDLE"])
+def test_only_the_exact_status_idle_counts_as_idle(tmp_path, status):
+    """Matched for equality, not against an enumerated set of busy values: the things a
+    worker can be doing are not ours to enumerate and will grow without telling us."""
+    entry = entry_for(tmp_path, status=status, status_updated_at=1_000_000_000_000)
+
+    assert entry.idle_for(now_ms=9_999_999_999_999) is None
+
+
+def test_a_status_updated_at_in_the_future_is_not_idle(tmp_path):
+    """A clock that disagrees with ours is not evidence of anything, and a negative
+    duration compared against a threshold would read as "idle for ages"."""
+    entry = entry_for(tmp_path, status="idle", status_updated_at=2_000_000_000_000)
+
+    assert entry.idle_for(now_ms=1_000_000_000_000) is None
+
+
+def test_idle_for_defaults_to_the_wall_clock(tmp_path):
+    """The production call passes no ``now_ms``."""
+    entry = entry_for(
+        tmp_path, status="idle", status_updated_at=int(time.time() * 1000) - 120_000
+    )
+
+    measured = entry.idle_for()
+    assert measured is not None
+    assert 110 < measured < 200
+
+
+def test_the_degraded_proc_path_is_never_idle(tmp_path):
+    """``scan_via_proc`` cannot see a status at all, so nothing found that way is ever
+    retirable — the degraded path must not become a way to end processes blind."""
+    proc = tmp_path / "proc"
+    write_proc(proc, 4242, exe="/usr/bin/claude")
+
+    scan = sessions.scan_via_proc(("claude",), proc_root=proc)
+    assert scan.entries
+    assert all(e.idle_for(now_ms=9_999_999_999_999) is None for e in scan.entries)
+
+
+def test_reading_the_idle_fields_opens_no_file_beyond_the_registry_entry(tmp_path):
+    """T008. The new fields come from the already-decoded payload, so the credential
+    prohibition is untouched — asserted mechanically rather than by inspection."""
+    registry = tmp_path / "registry"
+    proc = tmp_path / "proc"
+    write_registry(
+        registry,
+        pid=4242,
+        session_id="s-1",
+        proc_start="1",
+        status_updated_at=1_000_000_000_000,
+    )
+    write_proc(proc, 4242, starttime="1")
+    secret = registry / "4242.deadbeef.key"
+    secret.write_text("super-secret-session-credential", encoding="utf-8")
+    secret.chmod(0o600)
+
+    opened: list[str] = []
+    real_read_text = Path.read_text
+
+    def recording_read_text(self, *args, **kwargs):
+        opened.append(str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "read_text", recording_read_text)
+        scan = sessions.scan(registry_dir=registry, proc_root=proc)
+
+    assert scan.entries[0].idle_for(now_ms=1_000_000_060_000) == 60.0
+    assert [p for p in opened if p.startswith(str(registry))] == [str(registry / "4242.json")]
+
+
+@pytest.mark.skipif(
+    not (Path.home() / ".claude" / "sessions").is_dir(),
+    reason="no live session registry on this machine",
+)
+def test_this_machines_real_registry_carries_the_idle_fields():
+    """The premise issue #138's fix rests on, checked against reality rather than assumed.
+
+    If a worker release drops these fields this test fails loudly, which is the outcome
+    wanted: retirement would silently stop happening otherwise, and the symptom — sessions
+    piling up again — looks nothing like its cause.
+    """
+    live = sorted((Path.home() / ".claude" / "sessions").glob("*.json"))
+    if not live:
+        pytest.skip("no registry files present")
+    payloads = [json.loads(p.read_text(encoding="utf-8")) for p in live]
+    usable = [p for p in payloads if sessions.version_is_known(p.get("version"))]
+    if not usable:
+        pytest.skip("no registry file of a known version")
+
+    assert any("status" in p for p in usable), "no live entry carries `status`"
+    assert any(isinstance(p.get("statusUpdatedAt"), int) for p in usable), (
+        "no live entry carries an integer `statusUpdatedAt`; retirement can never fire"
+    )

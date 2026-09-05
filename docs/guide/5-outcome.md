@@ -115,6 +115,54 @@ by the effect level and never has been: `robot-army health --notify` takes no
 `--effect-level` flag, so gating it would silently disable the dead-man's switch whenever
 I am running the daemon at `local`.
 
+## The session's ending
+
+A worker never ends itself. It does the work, opens the pull request, and then sits at a
+prompt waiting for someone to type — which is the whole point of these being *interactive*
+sessions, and is also why the exit record that closes a session row never arrived.
+
+Everything downstream of that was working exactly as designed, and the sum of it was a bug.
+Merging the PR closes the issue; the next reconciliation pass moves the item to `done`; a
+live worker under a `done` item is precisely what `orphan_session` reports; and the session
+row is left open on purpose, because reporting fewer running sessions than exist would
+oversubscribe the cap. So **the ordinary successful path ended in an anomaly and a capacity
+slot held for as long as the machine stayed up.** Three successful items at
+`max_concurrent_sessions = 3` were enough to stop dispatch permanently, reporting only that
+the machine was full — and the worktrees could never be reclaimed either, because cleanup's
+session guard kept recording `skipped`, which means "not yet". That is issue #138.
+
+So the lifecycle has an ending now. An item that is `done` **and** whose worker has been
+idle for **30 minutes** has that worker stopped: the process ends, its kitty tab closes with
+it, the row closes with a reason naming retirement, and the slot comes back.
+
+**`done` is the whole precondition, and it means more than it looks like.** The only thing
+in the system that writes that state is the pass that observed the issue closed, so `done`
+*is* "the work was accepted". A test asserts that stays true, because a second route to
+`done` would quietly widen which workers get stopped.
+
+**`abandoned` and `failed` keep their workers.** Those are the states where the work is not
+finished and the session may be exactly what I am about to attach to. `robot-army cancel
+<id>` is the route out of those, and it now settles a terminal item's session correctly
+rather than reporting an ending it did not observe.
+
+**Idle is measured, not assumed.** The worker's own session registry entry carries a
+`status` and the moment it last changed, and idleness is that pair and nothing else. A
+status that is not exactly `idle`, an absent or malformed timestamp, a missing registry
+entry, a registry that cannot be read — every one of them means *not retired*, and the
+question is asked again next pass. Being wrong about that file can delay a retirement; it
+cannot cause one. Transcript file mtime was tried first and measured wrong: it ran 29 and
+163 minutes ahead of the last record actually inside the file.
+
+**Nothing is destroyed.** This is the difference between retirement and the cleanup below,
+and it is why one is on by default and the other is not. The transcript survives untouched
+and `claude --resume <session-id>` brings the session back, so a worker ended while I was
+reading it costs a keystroke, not work. The worktree, the branch and the item's state are
+not touched at all. There is no configuration key, because there is nothing to guard.
+
+If the process survives the attempt, nothing is settled: the row stays open, the slot stays
+held, and `orphan_session` is raised — "I tried and could not" is never recorded as "it is
+gone".
+
 ## Cleaning up
 
 A prepared worktree was measured at up to 499 MB, so disk is a real constraint — but

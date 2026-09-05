@@ -93,7 +93,8 @@ saying no repository was identified.
 
 1. **Given** a card whose line names something that is not an onboarded repository, **When**
    it is held, **Then** the reason quotes what the line said, states that it matched no
-   onboarded repository, and lists the onboarded repositories.
+   onboarded repository, and lists the onboarded repositories — and this holds whether or not
+   the card carries another line that would have resolved.
 2. **Given** a card carrying two such lines naming two different onboarded repositories,
    **When** it is evaluated, **Then** it is held with a reason saying the card gives more than
    one such line and they disagree.
@@ -124,6 +125,10 @@ saying no repository was identified.
   a reference counts.
 - **A line with the prefix and nothing after it.** `robot-army:` alone says nothing about which
   repository is meant and MUST be treated as if it were not there, rather than as an error.
+- **One good line and one bad one.** A card carrying a declaration that selects an onboarded
+  repository *and* a second declaration that selects nothing MUST be held, not resolved to the
+  good one. The author wrote both lines; quietly acting on one of them and discarding the
+  other is how a typo becomes an issue filed in the wrong place.
 - **The line names an onboarded repository that has no `[repos.*]` section.** Onboarding, not
   configuration, is what makes a repository selectable everywhere else in the system, and this
   line MUST NOT be an exception.
@@ -137,8 +142,10 @@ saying no repository was identified.
 - **FR-001**: The system MUST recognise, on any single line of a card's text, a declaration of
   the form `robot-army: <reference>` where the line contains nothing else, and treat it as the
   author naming the repository the card is for.
-- **FR-002**: Recognition MUST be insensitive to letter case in the prefix and MUST tolerate
-  leading and trailing whitespace on the line and around the reference.
+- **FR-002**: Recognition MUST be insensitive to letter case in the prefix, MUST tolerate
+  leading and trailing whitespace on the line and around the reference, and MUST tolerate the
+  line or the reference being written in backticks, since that is how the documentation
+  renders it and copying from the documentation is how the line will usually be written.
 - **FR-003**: A line that contains anything besides the prefix and a single reference MUST NOT
   be recognised, and MUST leave the card's resolution exactly as it is today.
 - **FR-004**: A recognised declaration MUST accept the same three forms of reference the system
@@ -153,9 +160,10 @@ saying no repository was identified.
   distinct repository, the card MUST be held rather than resolved.
 - **FR-008**: When a card carries declarations that all select the same repository, the card
   MUST resolve to it.
-- **FR-009**: When a card carries at least one declaration and no declaration selects an
-  onboarded repository, the card MUST be held, and MUST NOT fall back to the ordinary scan of
-  the rest of the card's text.
+- **FR-009**: When a card carries at least one declaration and any one of its declarations
+  fails to select an onboarded repository, the card MUST be held, and MUST NOT fall back to
+  the ordinary scan of the rest of the card's text. A declaration the author wrote is never
+  silently ignored.
 - **FR-010**: When a card carries no recognised declaration, resolution MUST behave exactly as
   it does today.
 - **FR-011**: The held reason for a card whose declaration matched nothing MUST quote the

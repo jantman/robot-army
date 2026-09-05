@@ -99,6 +99,55 @@ opposite. It now re-reads the issue from GitHub and re-runs the same verdict, so
 blocked because somebody else wrote it stays blocked. A second comparison at dispatch, against
 the author recorded on the item, is a backstop rather than the gate.
 
+### The one thing onboarding warns about rather than refuses
+
+If the repository uses Spec Kit and numbers its feature directories by scanning, the approval
+screen says so before it asks:
+
+```
+spec kit: this repository numbers feature directories by scanning
+  feature_numbering is "sequential" in .specify/init-options.json.
+  Two sessions running at once scan the same specs/ and cannot see each other's
+  worktrees, so both can claim the same number. Nothing here prevents that.
+  Set "feature_numbering": "timestamp" in that file to number by time instead.
+```
+
+`/speckit-specify` picks a number by scanning `specs/` for the highest one already used — a
+scan of **one worktree**. With one worktree per issue, that scan cannot see a number a sibling
+worktree claimed ten minutes ago, so two concurrent sessions take the same one. It happened
+twice here: `012` and `014` each name two different features.
+
+**Nothing in this daemon can catch that, which is why this is a warning and not a check.** The
+losing session's claim exists only as untracked files in another worktree — not on a branch,
+not in a ref, not in anything git can be asked about. Widening a search from "this worktree" to
+"every ref in the repository" finds nothing and picks the same number. The only thing that
+closes the race is `"feature_numbering": "timestamp"` in the repository's own
+`.specify/init-options.json`, which names directories by the second and cannot collide.
+
+So it is said once, at the moment I am already reading a screen about a repository and
+deciding whether to trust it, and then never again. Onboarding is not blocked, the exit code
+does not change, and nothing is written into the repository. Ignoring it is a real choice: a
+duplicate prefix breaks no tooling, because Spec Kit resolves a feature by full path. What is
+lost is that "spec 012" stops being an unambiguous name for anything.
+
+Two things it deliberately does **not** do. It does not warn about a repository that is not a
+Spec Kit project, whatever files are lying around in it — detection has to say yes first. And
+it does not report a `.specify/init-options.json` it could not parse as unsafe; that gets its
+own wording, because "this is set to scanning" and "I could not read this file" are different
+things to be told:
+
+```
+spec kit: the feature numbering could not be determined
+  .specify/init-options.json: not a JSON object.
+  If it does not say "timestamp", two sessions running at once can claim the
+  same feature number. Set "feature_numbering": "timestamp" to be sure.
+```
+
+This is checked at onboarding only. A repository that installs Spec Kit afterwards is not
+warned until the next `onboard --reapprove`, which is a deliberate limit rather than an
+oversight — the alternative is a line about numbering on every dispatch, forever, for a
+problem this size.
+
 ## Two things that are easy to overlook
 
 - **kitty must be running with a control socket.** `kitty.conf` needs

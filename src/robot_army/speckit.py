@@ -57,6 +57,27 @@ COMMAND_PATH = ".claude/commands/speckit.{name}.md"
 #: a layout this does not recognise is a detection miss, never an error (FR-005).
 SPECS_DIR = "specs"
 
+#: Where a Spec Kit installation records how it was set up, including how it numbers new
+#: feature directories. Read at onboarding only (issue #41).
+INIT_OPTIONS = ".specify/init-options.json"
+
+#: The one ``feature_numbering`` that cannot collide between two concurrent sessions.
+#: Everything else numbers by scanning ``specs/`` for the highest number already used —
+#: a scan of one worktree, which cannot see the number a sibling worktree has just taken.
+SAFE_NUMBERING = "timestamp"
+
+#: ``init-options.json`` holds seven short keys. Anything past this is not that file, and
+#: is not parsed to find out what it is instead.
+_MAX_INIT_OPTIONS = 64 * 1024
+
+#: What a ``feature_numbering`` has to look like before it is quoted back onto the approval
+#: screen. That screen is what a human uses to decide whether to trust a repository, and
+#: this value comes out of that repository's own files: a value containing a newline could
+#: add lines to the screen, and a long one could push the committed permission settings out
+#: of scrollback. Restricting what may be echoed makes "the screen cannot be composed by
+#: the thing being approved" a property rather than a hope (research R8).
+_PLAIN_VALUE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+
 #: The ladder, lowest rung first. ``implement`` is last and is the only rung not evidenced
 #: by a file appearing — see ``observe``.
 RUNGS: tuple[str, ...] = ("specify", "plan", "tasks", "implement")
@@ -178,6 +199,32 @@ class Phase:
     feature_dir: str
 
 
+@dataclass(frozen=True, slots=True)
+class Numbering:
+    """How a repository's Spec Kit installation names new feature directories.
+
+    Shaped after :class:`Detection` — a verdict, the evidence, and a sentence fit to print —
+    and derived on demand for the same reason: a value cached at onboarding is exactly what
+    would stop a repository which later fixes its numbering from being treated as fixed.
+
+    ``kind`` is three named outcomes rather than two booleans because three states cannot be
+    encoded in two flags without inventing a fourth combination that never occurs and that
+    every reader then has to reason about anyway.
+    """
+
+    #: ``"timestamp"``, ``"scanned"``, or ``"unknown"``.
+    kind: str
+    #: What ``feature_numbering`` said, when it said something safe to quote back.
+    value: str | None = None
+    #: One sentence naming the evidence. Printed verbatim for ``unknown``.
+    reason: str = ""
+
+    @property
+    def safe(self) -> bool:
+        """Can two concurrent sessions be relied upon not to take the same number?"""
+        return self.kind == SAFE_NUMBERING
+
+
 def _exists(root: Path, relative: str) -> bool:
     """``Path.exists()`` that answers False for every reason a path can be unusable.
 
@@ -254,6 +301,86 @@ def detect(root: str | Path) -> Detection:
         scaffolding=True,
         commands=commands,
         form=form,
+    )
+
+
+def numbering(root: str | Path) -> Numbering:
+    """How this repository numbers feature directories (issue #41).
+
+    Read at onboarding, and nowhere else. Spec numbers are assigned by ``/speckit-specify``
+    scanning ``specs/`` for the highest number already used — a scan of **one worktree**.
+    With one worktree per issue, that scan cannot see a number a sibling worktree claimed
+    minutes ago, so two concurrent sessions take the same one. It has happened twice here.
+
+    **No check this daemon could perform would catch that**, which is why this reports a
+    setting rather than watching for a collision. The losing session's claim exists only as
+    untracked files on a filesystem nothing queries: not on a branch, not in a ref, not in
+    anything git can be asked about. Widening a search from "this worktree" to "all refs"
+    finds nothing and picks the same number. What *does* close the race is the repository's
+    own ``feature_numbering``, which is a fact about the repository — and onboarding is
+    where facts about a repository are put in front of the person approving it.
+
+    Never raises. Every way this can fail is one of the three kinds:
+
+    * ``timestamp`` — collision-free by construction. Nothing to say.
+    * ``scanned`` — numbers come from a scan. **Absent counts**: no file, or no key, is not
+      a missing answer but a known one, because scanning is what Spec Kit does when nothing
+      says otherwise. That is the case issue #41 was actually filed about.
+    * ``unknown`` — the file is there and cannot be trusted to say. Reported as *unknown*
+      rather than folded into ``scanned``, because claiming "this is not timestamp" about a
+      file nobody could parse asserts something this function does not know.
+
+    The caller decides what to do with it; this reads and classifies. Detection gates the
+    call — a stray ``init-options.json`` in a directory with no Spec Kit in it is not read,
+    for the same reason :func:`record_phase` gates observation on detection.
+    """
+    path = Path(root) / INIT_OPTIONS
+    try:
+        with path.open(encoding="utf-8") as handle:
+            # Bounded rather than slurped: one character past the cap is enough to know the
+            # file is too big, and reading the rest of whatever is really there serves
+            # nothing.
+            text = handle.read(_MAX_INIT_OPTIONS + 1)
+    except FileNotFoundError:
+        return Numbering(
+            kind="scanned", reason=f"no {INIT_OPTIONS}, and scanning is the default"
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        return Numbering(kind="unknown", reason=f"could not be read: {exc}")
+
+    if len(text) > _MAX_INIT_OPTIONS:
+        return Numbering(kind="unknown", reason="too large to be a spec kit options file")
+
+    try:
+        options = json.loads(text)
+    except ValueError as exc:
+        # The decoder's message names a line and a column and never quotes the input, so it
+        # is safe to put on the screen. That is not true of the input itself.
+        return Numbering(kind="unknown", reason=f"invalid JSON: {exc}")
+
+    if not isinstance(options, dict):
+        return Numbering(kind="unknown", reason="not a JSON object")
+
+    if "feature_numbering" not in options:
+        # ``branch_numbering`` is deliberately not consulted. It is deprecated in Spec Kit's
+        # own documentation, and a repository still using it lands here — reported as
+        # scanned, which is both true of it and the advice it needs.
+        return Numbering(
+            kind="scanned", reason=f"no feature_numbering in {INIT_OPTIONS}"
+        )
+
+    value = options["feature_numbering"]
+    if not isinstance(value, str) or not _PLAIN_VALUE.match(value):
+        # The value itself is **not** repeated into the reason. Everything above is either
+        # this module's own text or a decoder message; this is the one branch where the
+        # offending bytes are in hand, and they are exactly the bytes that failed the test
+        # for being safe to print.
+        return Numbering(kind="unknown", reason="feature_numbering is not a plain value")
+
+    if value == SAFE_NUMBERING:
+        return Numbering(kind=SAFE_NUMBERING, value=value, reason="numbered by timestamp")
+    return Numbering(
+        kind="scanned", value=value, reason=f'feature_numbering is "{value}"'
     )
 
 

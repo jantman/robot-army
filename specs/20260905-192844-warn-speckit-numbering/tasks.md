@@ -34,7 +34,7 @@ Single Python project: `src/robot_army/`, `tests/unit/`, `tests/integration/`, `
 
 **Purpose**: nothing to set up. Recorded so its absence is a decision rather than an oversight.
 
-- [ ] T001 Confirm the working tree is clean and `uv run pytest` passes before any change, so a
+- [X] T001 Confirm the working tree is clean and `uv run pytest` passes before any change, so a
       later failure is attributable to this feature — no file changes
 
 **Checkpoint**: baseline green.
@@ -48,21 +48,21 @@ must answer for.
 
 **⚠️ CRITICAL**: no user story can begin until T003 exists.
 
-- [ ] T002 Add an `init_options: str | None = None` parameter to `make_speckit_tree` in
+- [X] T002 Add an `init_options: str | None = None` parameter to `make_speckit_tree` in
       `tests/conftest.py` that writes its value verbatim to `.specify/init-options.json` when given
       — raw text rather than a dict, so one parameter builds the valid, the malformed and the
       hostile cases
-- [ ] T003 Add `INIT_OPTIONS`, `SAFE_NUMBERING`, the `Numbering` dataclass and `numbering()` to
+- [X] T003 Add `INIT_OPTIONS`, `SAFE_NUMBERING`, the `Numbering` dataclass and `numbering()` to
       `src/robot_army/speckit.py`, implementing the nine ordered rules in
       [data-model.md](data-model.md) — including the 64 KiB bound and the
       `[A-Za-z0-9_.-]{1,32}` guard on the echoed value. Docstrings explain *why*, per the
       repository's conventions; the module must still import nothing from `config`
-- [ ] T004 [P] Write `tests/unit/test_speckit_numbering.py` covering one case per rule: absent
+- [X] T004 [P] Write `tests/unit/test_speckit_numbering.py` covering one case per rule: absent
       file, `timestamp`, `sequential`, an unrecognised legible value, absent key, invalid JSON,
       a JSON array, a non-string value, a value with a newline in it, an over-length value, a file
       over the size bound, and an unreadable file (chmod 000, skipped when running as root as the
       existing detection tests do)
-- [ ] T005 [P] Assert in `tests/unit/test_speckit_numbering.py` that no failure path raises and
+- [X] T005 [P] Assert in `tests/unit/test_speckit_numbering.py` that no failure path raises and
       that the hostile value never appears in `reason` — the two promises FR-007 and FR-008 make
 
 **Checkpoint**: `uv run pytest tests/unit/test_speckit_numbering.py` green. The reader answers
@@ -78,16 +78,16 @@ correctly for every row of the outcomes table with nothing calling it yet.
 one with no `init-options.json`; the block appears ahead of the prompt in both, with the two
 different sentences, and answering `y` onboards normally.
 
-- [ ] T006 [US1] In `src/robot_army/operations.py`, import `speckit` and, in `onboard`, ask
+- [X] T006 [US1] In `src/robot_army/operations.py`, import `speckit` and, in `onboard`, ask
       `speckit.detect(clone_path)` and — only when detected — `speckit.numbering(clone_path)`,
       after the committed-settings block and before `result.flush_to(out)`
-- [ ] T007 [US1] Add `_numbering_lines()` to `src/robot_army/operations.py` rendering the scanned
+- [X] T007 [US1] Add `_numbering_lines()` to `src/robot_army/operations.py` rendering the scanned
       block exactly as [contracts/numbering-warning.md](contracts/numbering-warning.md) gives it,
       with the configured-value and the not-set wordings as separate sentences
-- [ ] T008 [US1] Add integration tests to `tests/integration/test_onboard.py`: the block appears
+- [X] T008 [US1] Add integration tests to `tests/integration/test_onboard.py`: the block appears
       for `sequential`, appears with the not-set wording when the file is absent, sits before the
       prompt, and does not change the exit code or the record written on approval
-- [ ] T009 [US1] Add an integration test to `tests/integration/test_onboard.py` asserting the
+- [X] T009 [US1] Add an integration test to `tests/integration/test_onboard.py` asserting the
       onboarded clone is unmodified afterwards — FR-011, and the promise `speckit.py` already makes
 
 **Checkpoint**: the feature does its job. Everything after this is making sure it does not do it in
@@ -103,11 +103,11 @@ without the lifecycle commands.
 **Independent Test**: onboard each of those three and compare the screen against what the same run
 produced before this feature.
 
-- [ ] T010 [US2] Add integration tests to `tests/integration/test_onboard.py` asserting no
+- [X] T010 [US2] Add integration tests to `tests/integration/test_onboard.py` asserting no
       numbering line for `"feature_numbering": "timestamp"`, for a clone with no `.specify/` at
       all, and for a clone with `.specify/init-options.json` but no Spec Kit scaffolding — the
       last proving detection gates the read
-- [ ] T011 [US2] Add an integration test to `tests/integration/test_onboard.py` for scaffolding
+- [X] T011 [US2] Add an integration test to `tests/integration/test_onboard.py` for scaffolding
       present but a lifecycle command missing: detection says no, so the block is absent even
       though the file says `sequential`
 
@@ -122,9 +122,9 @@ produced before this feature.
 **Independent Test**: onboard a clone with invalid JSON and one with a JSON array; each shows the
 unknown block with its own reason, and onboarding proceeds.
 
-- [ ] T012 [US3] Extend `_numbering_lines()` in `src/robot_army/operations.py` with the unknown
+- [X] T012 [US3] Extend `_numbering_lines()` in `src/robot_army/operations.py` with the unknown
       block, printing `Numbering.reason` verbatim on its own line
-- [ ] T013 [US3] Add integration tests to `tests/integration/test_onboard.py`: invalid JSON and a
+- [X] T013 [US3] Add integration tests to `tests/integration/test_onboard.py`: invalid JSON and a
       JSON array each produce the unknown wording rather than the scanned wording, and neither
       changes the exit code
 
@@ -139,11 +139,11 @@ unknown block with its own reason, and onboarding proceeds.
 **Independent Test**: run each of the four repository shapes in JSON mode and read the three keys;
 approve one and read the audit line.
 
-- [ ] T014 [US4] Add `speckit`, `speckit_numbering` and `speckit_numbering_value` to the
+- [X] T014 [US4] Add `speckit`, `speckit_numbering` and `speckit_numbering_value` to the
       `result.data` dictionary in `onboard`, in `src/robot_army/operations.py`
-- [ ] T015 [US4] Add `speckit` and `speckit_numbering` to the `repo.onboard` audit detail in
+- [X] T015 [US4] Add `speckit` and `speckit_numbering` to the `repo.onboard` audit detail in
       `src/robot_army/operations.py` (FR-013)
-- [ ] T016 [US4] Add integration tests to `tests/integration/test_onboard.py`: the three JSON keys
+- [X] T016 [US4] Add integration tests to `tests/integration/test_onboard.py`: the three JSON keys
       for each shape, `null` numbering when the repository is not a Spec Kit project, no warning
       prose anywhere in the JSON document, and the two fields present on the recorded
       `repo.onboard` line
@@ -154,15 +154,15 @@ approve one and read the audit line.
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T017 [P] Update the "Adding a repository" section of `docs/guide/1-setup.md` with what the
+- [X] T017 [P] Update the "Adding a repository" section of `docs/guide/1-setup.md` with what the
       warning says, why it cannot be a dispatch-time check, and that ignoring it is a choice —
       the page the runtime guidance names for onboarding changes
-- [ ] T018 [P] Update `docs/guide/audit-log.md`: the two new `repo.onboard` detail fields in the
+- [X] T018 [P] Update `docs/guide/audit-log.md`: the two new `repo.onboard` detail fields in the
       milestone-005 detail table, and this read added to the deliberately-unlogged table beside
       the Spec Kit detection reads it belongs with
-- [ ] T019 Run `uv run pytest` — the whole suite must pass, including
+- [X] T019 Run `uv run pytest` — the whole suite must pass, including
       `tests/unit/test_docs_links.py`, which checks the links the two doc tasks add
-- [ ] T020 Walk [quickstart.md](quickstart.md) against a scratch clone, confirming the screen reads
+- [X] T020 Walk [quickstart.md](quickstart.md) against a scratch clone, confirming the screen reads
       the way the contract says and that the clone is untouched afterwards
 
 ---

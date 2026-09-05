@@ -1485,6 +1485,7 @@ def make_speckit_tree(
     scaffolding: bool = True,
     commands: str | None = "skills",
     features: dict[str, list[str]] | None = None,
+    init_options: str | None = None,
 ) -> Path:
     """Build a directory that looks like a Spec Kit checkout, in parts.
 
@@ -1498,6 +1499,14 @@ def make_speckit_tree(
     ``{"006-old": ["spec.md", "plan.md", "tasks.md"]}`` builds a finished-looking feature.
     A ``tasks.md`` is written with unticked boxes unless the name is ``tasks-done.md``,
     which writes a ticked one under the real filename.
+
+    ``init_options`` is written **verbatim** to ``.specify/init-options.json`` — raw text
+    rather than a mapping to serialise, because half the cases that matter to
+    ``speckit.numbering`` are files that are not valid JSON at all, or are valid JSON of
+    the wrong shape, or carry a value chosen to look like screen output. A ``dict``
+    parameter could express none of them, and a second parameter for "but broken" would be
+    two ways to say one thing. ``None`` writes no file, which is its own case: Spec Kit's
+    default numbering is what a repository with no such file gets.
     """
     root.mkdir(parents=True, exist_ok=True)
     if scaffolding:
@@ -1509,6 +1518,12 @@ def make_speckit_tree(
         (root / ".specify" / "memory" / "constitution.md").write_text(
             "# Constitution\n", encoding="utf-8"
         )
+
+    if init_options is not None:
+        # Deliberately independent of ``scaffolding``: "the options file is here but the
+        # scaffolding is not" is the shape that proves detection gates the read.
+        (root / ".specify").mkdir(parents=True, exist_ok=True)
+        (root / ".specify" / "init-options.json").write_text(init_options, encoding="utf-8")
 
     def write_skill(name: str) -> None:
         path = root / ".claude" / "skills" / f"speckit-{name}" / "SKILL.md"

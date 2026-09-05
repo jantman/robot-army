@@ -1622,6 +1622,54 @@ def _fingerprint_diff_lines(previous: dict[str, str], current: dict[str, str]) -
     return lines
 
 
+def _numbering_lines(numbering: speckit.Numbering) -> list[str]:
+    """The advisory block about feature numbering, or nothing (issue #41).
+
+    Called only for a repository Spec Kit detection said yes to, and only for a numbering
+    that is not the collision-free one — so an empty list means the caller asked about a
+    repository that is fine, and the screen is byte-identical to what it was before this
+    existed.
+
+    **"Nothing here prevents that" is load-bearing.** Issue #41 established that no check
+    this system could perform would catch the collision: the competing number exists only as
+    untracked files in a sibling worktree, invisible to every git query. A warning that left
+    the reader expecting the daemon to catch it would be worse than no warning.
+
+    The two ``scanned`` wordings differ in exactly one sentence, because "change this
+    setting" and "add this setting" are different instructions to the person who has to
+    carry them out.
+    """
+    if numbering.safe:
+        return []
+
+    if numbering.kind == "unknown":
+        return [
+            "spec kit: the feature numbering could not be determined",
+            f"  {speckit.INIT_OPTIONS}: {numbering.reason}.",
+            "  If it does not say \"timestamp\", two sessions running at once can claim the",
+            '  same feature number. Set "feature_numbering": "timestamp" to be sure.',
+            "",
+        ]
+
+    if numbering.value is None:
+        opening = [
+            f"  feature_numbering is not set in {speckit.INIT_OPTIONS}, and scanning is",
+            "  the default.",
+        ]
+    else:
+        opening = [
+            f'  feature_numbering is "{numbering.value}" in {speckit.INIT_OPTIONS}.',
+        ]
+    return [
+        "spec kit: this repository numbers feature directories by scanning",
+        *opening,
+        "  Two sessions running at once scan the same specs/ and cannot see each other's",
+        "  worktrees, so both can claim the same number. Nothing here prevents that.",
+        '  Set "feature_numbering": "timestamp" in that file to number by time instead.',
+        "",
+    ]
+
+
 def onboard(
     ctx: Context,
     repo_key: str,
@@ -1665,6 +1713,15 @@ def onboard(
     fingerprint = dispatch.compute_fingerprint(ctx.boundaries, str(clone_path), base_ref)
     existing = db.get_repo(ctx.conn, repo_key)
 
+    # Issue #41. Detection gates the read: a stray ``init-options.json`` in a directory with
+    # no Spec Kit in it says nothing, and ``.specify/`` is not a rare enough name to carry
+    # meaning alone. Read from the working tree rather than the base ref, unlike the
+    # committed settings above — those are read at the ref because a session honours the
+    # *committed* file, whereas numbering is a property of the repository that nothing here
+    # honours at all, and is what ``speckit.detect`` two lines up already answers from.
+    is_speckit = speckit.detect(clone_path).detected
+    numbering = speckit.numbering(clone_path) if is_speckit else None
+
     result.data = {
         "repo_key": repo_key,
         "clone_path": str(clone_path),
@@ -1680,6 +1737,11 @@ def onboard(
         "previously_onboarded": existing is not None,
         "previous_fingerprint": existing.fingerprint if existing else None,
         "previous_clone_path": existing.clone_path if existing else None,
+        # ``null`` numbering means *not asked*, not "no answer": the repository is not a
+        # Spec Kit project, so nothing read the file.
+        "speckit": is_speckit,
+        "speckit_numbering": numbering.kind if numbering else None,
+        "speckit_numbering_value": numbering.value if numbering else None,
     }
 
     # These three lines come **first**, ahead of trust and the committed settings, because
@@ -1717,6 +1779,13 @@ def onboard(
     if reapprove and existing is not None:
         result.lines.extend(_fingerprint_diff_lines(existing.fingerprint, fingerprint))
         result.say()
+
+    # Last on the screen, and that position is fixed by two constraints at once. It must
+    # reach the maintainer before the prompt, which the flush point below guarantees; and it
+    # must not push the committed permission settings further from the top, because that
+    # text is the thing on this screen that most needs reading (milestone 011).
+    if numbering is not None:
+        result.lines.extend(_numbering_lines(numbering))
 
     # THE flush point, and the only one. Everything above is the approval screen —
     # *which repository, where, verified how, trusted or not, and what it will honour
@@ -1809,6 +1878,11 @@ def onboard(
                 "fingerprint": fingerprint,
                 "trusted": trusted,
                 "reapprove": reapprove,
+                # What the maintainer was looking at when they said yes (issue #41). The
+                # verdict but not the value: this record answers *what was approved*, and
+                # the verdict is that.
+                "speckit": is_speckit,
+                "speckit_numbering": numbering.kind if numbering else None,
             },
         ),
         db.transaction(ctx.conn),

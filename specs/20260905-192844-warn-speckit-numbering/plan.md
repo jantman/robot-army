@@ -153,9 +153,10 @@ argument for why it does it that way. The screen belongs in `operations.onboard`
 function owns the approval screen and its ordering, and because `speckit.py` deliberately answers
 questions rather than composing output — the same split `repos.py` announces in its own docstring.
 
-**One import edge is added**: `operations` → `speckit`. `speckit.py`'s docstring forbids it
-importing `config`; it says nothing about being imported, and `operations` already imports `db`,
-`dispatch`, and `repos`, of which `dispatch` imports `speckit`. No cycle is created.
+**No import edge is added.** Planning assumed one would be — `operations` → `speckit` — and
+implementation found `operations` already imports `speckit`, for the preview and prompt paths. The
+constraint that mattered is unchanged and still holds: `speckit.py` must not import `config`, and
+does not.
 
 ## Complexity Tracking
 

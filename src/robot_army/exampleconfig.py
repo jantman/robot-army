@@ -34,6 +34,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 from robot_army.audit import AuditLog
 from robot_army.config import _KNOWN_KEYS, _REPO_KEYS
@@ -149,7 +150,7 @@ SECTIONS: tuple[SectionSpec, ...] = (
             ),
             KeySpec(
                 "socket_dir",
-                '"~/.local/state/robot-army"',
+                '"/run/user/1000/robot-army"',
                 "the daemon's own control sockets",
                 active=False,
                 why_commented="defaults to $XDG_RUNTIME_DIR/robot-army; set only to move it",
@@ -731,7 +732,13 @@ def render() -> str:
     return "\n".join(lines) + "\n"
 
 
-def write(path: Path, *, force: bool = False, audit: AuditLog | None = None) -> None:
+def write(
+    path: Path,
+    *,
+    force: bool = False,
+    audit: AuditLog | None = None,
+    notes: TextIO | None = None,
+) -> None:
     """Render to ``path`` atomically, refusing to replace an existing file unless told to.
 
     Atomic because of where this usually lands. The destination is the file the daemon will
@@ -740,8 +747,14 @@ def write(path: Path, *, force: bool = False, audit: AuditLog | None = None) -> 
     syntax error nobody typed. Rendering happens entirely before the first byte is written,
     so a drift error cannot truncate a file that was already there either.
 
-    ``audit`` is optional and its failure is not this function's failure: the file is the
-    point, and a log that cannot be opened must not cost the author their config.
+    ``audit`` is optional and **its failure is never this function's failure**: the file is
+    the point, and a log that cannot be opened must not cost the author their config. An
+    audit failure is announced on ``notes`` instead — silence would be the silent failure
+    Principle III forbids, but so would refusing to write a config because the log directory
+    is read-only.
+
+    ``notes`` is where those announcements go; the CLI passes ``sys.stderr``, the same way
+    ``operations.prompt_preview`` keeps its commentary off the stream carrying the document.
     """
     text = render()
     destination = Path(path).expanduser()
@@ -760,10 +773,17 @@ def write(path: Path, *, force: bool = False, audit: AuditLog | None = None) -> 
                 target=recorded_target,
                 detail=detail,
             )
-        except OSError:
-            # Reported by the caller on stderr. Swallowing it here would be the silent
-            # failure Principle III forbids; failing the write over it would be worse.
-            raise
+        except OSError as exc:
+            # Announced, never raised. Re-raising here — which this used to do, under a
+            # comment claiming the opposite — turned an unwritable state directory into a
+            # failure report for a file that had already been written correctly, and
+            # pre-empted the "already exists; pass --force" message on the other path.
+            if notes is not None:
+                print(
+                    f"warning: the write succeeded but could not be recorded in the audit "
+                    f"log: {exc}",
+                    file=notes,
+                )
 
     if destination.exists() and not force:
         _record("failure", {"force": force, "error": "file exists"})

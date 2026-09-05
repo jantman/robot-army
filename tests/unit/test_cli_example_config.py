@@ -168,3 +168,56 @@ def test_stdout_writes_no_record(isolated_home):
     """The documented Principle III exception: nothing outside the process changed."""
     main(["example-config"])
     assert not [r for r in records(isolated_home) if r["action"] == "example_config.write"]
+
+
+def test_an_unwritable_audit_log_does_not_fail_the_write(tmp_path, isolated_home, capsys):
+    """The config is the point; the log is not allowed to cost you it.
+
+    Regression for a review finding on #137. ``_record`` caught ``OSError`` and immediately
+    re-raised it, under a comment claiming the opposite. An unwritable state directory then
+    turned a config that had already been written correctly — ``os.replace`` having run — into
+    ``could not write <path>`` and a non-zero exit.
+    """
+    state = isolated_home / ".local/state"
+    state.mkdir(parents=True)
+    state.chmod(0o500)
+    destination = tmp_path / "target" / "config.toml"
+    destination.parent.mkdir()
+    try:
+        assert main(["example-config", "--output", str(destination)]) == EXIT_OK
+        assert destination.read_text(encoding="utf-8") == render()
+    finally:
+        state.chmod(0o700)
+
+
+def test_an_unwritable_audit_log_is_announced_rather_than_swallowed(
+    tmp_path, isolated_home, capsys
+):
+    """Not failing is not the same as not saying. Silence here would be a Principle III gap."""
+    state = isolated_home / ".local/state"
+    state.mkdir(parents=True)
+    state.chmod(0o500)
+    destination = tmp_path / "target" / "config.toml"
+    destination.parent.mkdir()
+    try:
+        main(["example-config", "--output", str(destination)])
+        err = capsys.readouterr().err
+        assert "audit log" in err
+        assert "wrote" in err
+    finally:
+        state.chmod(0o700)
+
+
+def test_the_refusal_message_survives_an_unwritable_audit_log(tmp_path, isolated_home, capsys):
+    """The other half of the same bug: the failure-path record pre-empted the real message."""
+    state = isolated_home / ".local/state"
+    state.mkdir(parents=True)
+    state.chmod(0o500)
+    destination = tmp_path / "config.toml"
+    destination.write_text("# mine\n", encoding="utf-8")
+    try:
+        assert main(["example-config", "--output", str(destination)]) == EXIT_PRECONDITION
+        assert "--force" in capsys.readouterr().err
+        assert destination.read_text(encoding="utf-8") == "# mine\n"
+    finally:
+        state.chmod(0o700)

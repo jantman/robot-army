@@ -16,7 +16,7 @@ repo_root = "~/GIT"  # where clones live; a repository's default location is <re
 worktree_root = "~/worktrees"  # where per-issue worktrees are created
 # state_dir = "~/.local/state/robot-army"  # database, logs and the heartbeat
 #   (defaults to $XDG_STATE_HOME/robot-army; set only to move it)
-# socket_dir = "~/.local/state/robot-army"  # the daemon's own control sockets
+# socket_dir = "/run/user/1000/robot-army"  # the daemon's own control sockets
 #   (defaults to $XDG_RUNTIME_DIR/robot-army; set only to move it)
 
 # The issue source, and the one section you cannot leave alone: author is the

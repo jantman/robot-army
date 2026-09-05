@@ -282,9 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
         parser_for = sub.add_parser(verb, help=blurb)
         target = parser_for.add_mutually_exclusive_group(required=True)
         target.add_argument("item_id", type=int, nargs="?", help="the work item to act on")
-        target.add_argument(
-            "--repo", default=None, help="a repository key, e.g. owner/name"
-        )
+        target.add_argument("--repo", default=None, help="a repository key, e.g. owner/name")
 
     sub.add_parser("holds", help="every hold in force, including ones holding nothing")
 
@@ -475,7 +473,7 @@ def _example_config(args: argparse.Namespace) -> int:
     # honoured here. The plan records that limitation rather than hiding it.
     audit = AuditLog(Layout.default().state_dir / "logs", component="cli")
     try:
-        write(destination, force=args.force, audit=audit)
+        write(destination, force=args.force, audit=audit, notes=sys.stderr)
     except FileExistsError:
         print(f"{destination} already exists; pass --force to replace it", file=sys.stderr)
         return EXIT_PRECONDITION

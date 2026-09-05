@@ -300,3 +300,31 @@ def test_specs_are_immutable():
     assert dataclasses.fields(KeySpec)
     with pytest.raises(dataclasses.FrozenInstanceError):
         KeySpec("port", "8420", "the port").name = "other"  # type: ignore[misc]
+
+
+def test_the_socket_dir_example_matches_where_sockets_actually_go(parsed):
+    """Regression for a review finding on #137.
+
+    ``socket_dir``'s illustrative value was copy-pasted from ``state_dir`` above it, so the
+    example showed a state path for a key whose default comes from ``runtime_dir()`` — and
+    contradicted the note on its own line. An illustrative value that illustrates the wrong
+    thing is worse than none, because it is the line someone uncomments.
+    """
+    line = next(ln for ln in parsed["paths"] if ln.lstrip("# ").startswith("socket_dir"))
+    value = line.split("=", 1)[1].split("#")[0].strip().strip('"')
+    assert "/run/user/" in value, (
+        f"socket_dir illustrates {value!r}; it defaults under $XDG_RUNTIME_DIR, "
+        "not the state directory"
+    )
+    assert "state" not in value
+
+
+def test_every_commented_key_illustrates_what_its_reason_describes(parsed):
+    """The general form of the bug above: a value and its note must not contradict.
+
+    Only the two path keys are checked mechanically — they are the ones whose reason names a
+    specific directory, so the claim is checkable. Elsewhere the note is prose.
+    """
+    for key, expected in (("state_dir", "state"), ("socket_dir", "run/user")):
+        line = next(ln for ln in parsed["paths"] if ln.lstrip("# ").startswith(key))
+        assert expected in line, f"[paths] {key}'s example value contradicts its own comment"

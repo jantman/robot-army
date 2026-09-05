@@ -1474,7 +1474,7 @@ def _close_finished_windows(
         if item_id not in candidates:
             continue
         try:
-            boundaries.display.close(handle)
+            really_closed = boundaries.display.close(handle)
         except BoundaryError as exc:
             # One terminal refusing must not abandon the sweep: every other window is still
             # considered, and this one is simply reconsidered next pass — which is what
@@ -1488,7 +1488,12 @@ def _close_finished_windows(
                 detail={"window_id": handle.window_id, "title": handle.title},
             )
             continue
-        closed += 1
+        # ``False`` means the terminal had no such window — the maintainer closed it first,
+        # in the moments between the listing above and this call. That is success and the
+        # item is still settled; it is simply not something *this* pass did, and counting
+        # it would overstate the system's own work in the summary and the log.
+        if really_closed:
+            closed += 1
 
     # Everything the listing answered for is settled, including the candidates that turned
     # out to have no windows at all — that is the answer, and it cannot change.

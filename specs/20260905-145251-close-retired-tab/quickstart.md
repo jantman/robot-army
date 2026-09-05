@@ -94,7 +94,7 @@ Repeat with a `failed` item and assert the window survives.
 |---|---|
 | The display raises when listing windows | recorded once for the pass; the pass completes; `windows_closed == 0` |
 | One close raises, a second window also qualifies | the second is still closed; the failure is recorded; the failed one is not counted |
-| A window vanished between the listing and the close | **success** — not recorded as a failure, not counted |
+| A window vanished between the listing and the close | **success** — not recorded as a failure, and **not counted**, because this pass did not close it. `close()` tells the two apart: kitty exits 1 with `No matching windows` |
 | No candidate items at all | the display is **never called** — assert on the stub, since this is what keeps a machine with no kitty from logging 1,440 failures a day (research R6) |
 
 The last row is a test about a call that must *not* happen, which is easy to omit and is the whole

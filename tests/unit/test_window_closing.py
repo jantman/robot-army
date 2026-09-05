@@ -112,23 +112,23 @@ class CloseRaises(SimulatedDisplay):
         self.refuse: int | None = None
         self.closed: list[int] = []
 
-    def close(self, handle: DisplayHandle) -> None:
+    def close(self, handle: DisplayHandle) -> bool:
         if handle.window_id == self.refuse:
             raise BoundaryError("kitty close-window failed")
         self.closed.append(handle.window_id)
-        super().close(handle)
+        return super().close(handle)
 
 
 class WindowVanished(SimulatedDisplay):
-    """``close`` succeeds against a window the maintainer already closed.
+    """The maintainer closed the window between the listing and the close.
 
-    kitty's ``close-window --match id:`` exits zero for an id that no longer matches, so
-    this is what the real boundary does — the point is that the sweep must not invent a
-    failure the terminal never reported.
+    kitty answers this by exiting **1** with ``No matching windows`` — measured, because
+    the obvious guess is that it exits 0. The boundary turns that into ``False``: not an
+    error, and not something this pass did either.
     """
 
-    def close(self, handle: DisplayHandle) -> None:
-        self._windows.pop(handle.window_id, None)
+    def close(self, handle: DisplayHandle) -> bool:
+        return False
 
 
 class CountingDisplay(SimulatedDisplay):
@@ -303,15 +303,28 @@ def test_one_close_failing_does_not_stop_the_others(conn, audit, layout):
     assert failures[0]["detail"]["window_id"] == stubborn
 
 
-def test_a_window_that_had_already_gone_is_success_not_failure(conn, audit, layout):
-    """FR-014. The maintainer closed it first; kitty exits zero for an id that no longer
-    matches. Reporting a failure the terminal never reported would be its own small lie."""
+def test_a_window_that_had_already_gone_is_success_but_is_not_counted(conn, audit, layout):
+    """FR-014 and contract W4, which promised both halves and only got one at first.
+
+    The maintainer closed the tab between the listing and the close. That is **success** —
+    no error record, and the item is settled, because there is nothing left to do. It is
+    also **not counted**, because this pass did not do it, and a `windows_closed` that
+    included windows somebody else closed would overstate the system's own work in the
+    summary and the audit log.
+
+    Caught in review of PR #141: the contract asserted "not counted" while the code counted
+    every call that did not raise. Both are now true because ``close`` reports which
+    happened — kitty exits 1 with ``No matching windows``, so the answer was there all
+    along and was being discarded by ``check=False``.
+    """
     display = WindowVanished(audit)
     item = finished_item(conn)
     open_window(display, item)
 
-    assert sweep(conn, audit, display) == 1
+    assert sweep(conn, audit, display) == 0
     assert [r for r in records(layout, "window.close") if r["outcome"] == "error"] == []
+    # Settled all the same: nothing will ever need doing for this item again.
+    assert sweep(conn, audit, display) == 0
 
 
 def test_the_display_is_never_consulted_when_nothing_qualifies(conn, audit):

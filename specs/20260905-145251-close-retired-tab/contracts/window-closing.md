@@ -85,12 +85,20 @@ marker.
 ## W4 — Closing
 
 `display.close(handle)`, which already logs intent and outcome through `audit.action`
-(`kitty.close_window`). Nothing about that call is re-implemented.
+(`kitty.close_window`). It returns **whether a window was really closed**.
+
+*That return value was added in review of PR #141.* This table promised "not counted" for a window
+that had already gone, while the code counted every call that did not raise and the matching test
+asserted the count — the contract stated a guarantee the implementation did not provide. The review
+supposed it *could* not be provided, on the grounds that `kitty @ close-window` exits 0 for an id
+that no longer matches. Measured: it exits **1**, with `No matching windows for expression: id:N`.
+`_kitty` passes `check=False`, so the answer was in hand and being discarded. Returning it costs no
+extra call to the terminal, so the row below is now true as originally written.
 
 | Outcome | Effect |
 |---|---|
 | closed | counted in `windows_closed` |
-| the window had already gone | **success**, not a failure (FR-014). Not counted, not recorded as an error |
+| the window had already gone | **success**, not a failure (FR-014), and the item is still settled — there is nothing left to do. **Not counted**: this pass did not close it, and a `windows_closed` including windows somebody else closed would overstate the system's own work |
 | the close failed | recorded as `window.close` with the window id and item id; **the sweep continues to the next window** (FR-013); not counted; **its item is not settled**, so it is retried next pass |
 | the listing itself failed | recorded once for the pass; the sweep returns 0; the pass completes normally; **nothing is settled**, because the question was not answered |
 

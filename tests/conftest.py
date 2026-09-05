@@ -710,8 +710,8 @@ class StubDisplay:
     def is_open(self, handle) -> bool:
         return True
 
-    def close(self, handle) -> None:
-        return None
+    def close(self, handle) -> bool:
+        return True
 
     def find_by_var(self, key: str, value: str):
         return None

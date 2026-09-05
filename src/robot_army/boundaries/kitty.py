@@ -266,13 +266,31 @@ class KittyDisplay:
     def is_open(self, handle: DisplayHandle) -> bool:
         return any(w.get("id") == handle.window_id for w in self._windows())
 
-    def close(self, handle: DisplayHandle) -> None:
-        with self._audit.action("kitty.close_window", target=str(handle.window_id)):
-            self._kitty(
+    def close(self, handle: DisplayHandle) -> bool:
+        """Close one window. ``True`` if kitty really closed one.
+
+        **Measured, because the obvious assumption is wrong**: ``kitty @ close-window``
+        against an id that no longer matches exits **1** with ``No matching windows for
+        expression: id:N``, not 0. ``_kitty`` passes ``check=False``, so that failure was
+        being swallowed and an already-closed window read as a successful close — which
+        made ``windows_closed`` overstate what the system had done.
+
+        Returning the answer costs nothing: the exit status is already in hand. A ``False``
+        with an unusual cause is still fully reconstructable, because ``kitty.subprocess``
+        records the command and its output either way.
+        """
+        with self._audit.action(
+            "kitty.close_window", target=str(handle.window_id)
+        ) as outcome:
+            result = self._kitty(
                 ["close-window", "--match", f"id:{handle.window_id}"],
                 timeout=LAUNCH_TIMEOUT,
                 action="kitty.subprocess",
             )
+            outcome["closed"] = bool(result.ok)
+            if not result.ok:
+                outcome["output"] = result.output
+            return bool(result.ok)
 
     def find_by_var(self, key: str, value: str) -> DisplayHandle | None:
         """Exact lookup by user variable.
@@ -396,11 +414,17 @@ class SimulatedDisplay:
     def is_open(self, handle: DisplayHandle) -> bool:
         return handle.window_id in self._windows
 
-    def close(self, handle: DisplayHandle) -> None:
-        self._windows.pop(handle.window_id, None)
+    def close(self, handle: DisplayHandle) -> bool:
+        """``True`` only if this object was holding that window, mirroring the real one."""
+        removed = self._windows.pop(handle.window_id, None) is not None
         self._audit.record(
-            "kitty.close_window", outcome="ok", target=str(handle.window_id), simulated=True
+            "kitty.close_window",
+            outcome="ok",
+            target=str(handle.window_id),
+            simulated=True,
+            detail={"closed": removed},
         )
+        return removed
 
     def find_by_var(self, key: str, value: str) -> DisplayHandle | None:
         for handle in self._windows.values():

@@ -847,7 +847,14 @@ class Display(Protocol):
 
     def is_open(self, handle: DisplayHandle) -> bool: ...
 
-    def close(self, handle: DisplayHandle) -> None: ...
+    def close(self, handle: DisplayHandle) -> bool:
+        """Close this window. ``True`` if one was really closed, ``False`` if none matched.
+
+        The distinction is not decoration: a window the maintainer had already closed
+        looks identical to one this call took down, and counting both would overstate
+        what the system did in the reconcile summary and the audit log.
+        """
+        ...
 
     def find_by_var(self, key: str, value: str) -> DisplayHandle | None: ...
 

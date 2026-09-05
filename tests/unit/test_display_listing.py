@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from robot_army.boundaries import DisplayHandle
 from robot_army.boundaries.kitty import KittyDisplay, SimulatedDisplay
 
 
@@ -200,3 +201,83 @@ def test_the_simulated_close_is_recorded_as_simulated(audit, layout):
 def test_both_implementations_agree_on_an_empty_answer(audit, key):
     assert SimulatedDisplay(audit).list_by_var(key) == []
     assert FakeKitty([]).list_by_var(key) == []
+
+
+# -- close() reports whether it acted (found in review of PR #141) -----------
+#
+# `windows_closed` counted every call that did not raise, so a window the maintainer had
+# already closed was counted as a close the system performed. The fix was available for
+# free: kitty answers this itself.
+
+
+class ClosingKitty(KittyDisplay):
+    """A ``KittyDisplay`` whose ``kitty @ close-window`` exit status the test dictates."""
+
+    def __init__(self, audit, *, ok: bool) -> None:
+        self._audit = audit
+        self._ok = ok
+        self.calls: list[list[str]] = []
+
+    def _kitty(self, args, *, timeout, action):
+        from types import SimpleNamespace
+
+        self.calls.append(args)
+        return SimpleNamespace(
+            ok=self._ok,
+            returncode=0 if self._ok else 1,
+            output="" if self._ok else "No matching windows for expression: id:52",
+            stdout="",
+        )
+
+
+def test_close_returns_true_when_kitty_closed_a_window(audit):
+    display = ClosingKitty(audit, ok=True)
+
+    assert display.close(DisplayHandle(window_id=52)) is True
+    assert display.calls == [["close-window", "--match", "id:52"]]
+
+
+def test_close_returns_false_when_no_window_matched(audit):
+    """**Measured, not assumed**: `kitty @ close-window --match id:999999` exits **1** with
+    ``No matching windows for expression``, not 0.
+
+    ``_kitty`` passes ``check=False``, so that status was being discarded and an
+    already-closed window read as a successful close. The signal was there the whole time.
+    """
+    display = ClosingKitty(audit, ok=False)
+
+    assert display.close(DisplayHandle(window_id=52)) is False
+
+
+def test_a_failed_close_records_the_terminals_own_words(audit, layout):
+    """Principle III: a ``False`` with an unusual cause must stay reconstructable, so the
+    reason is recorded rather than collapsed into a bare boolean."""
+    ClosingKitty(audit, ok=False).close(DisplayHandle(window_id=52))
+
+    written = [
+        json.loads(line)
+        for path in layout.log_dir.glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    # ``audit.action`` writes an intent record and an outcome record; the answer is on the
+    # second, and the pair is what makes an irreversible act reconstructable if the process
+    # dies between them.
+    closes = [
+        r
+        for r in written
+        if r["action"] == "kitty.close_window" and r["kind"] == "outcome"
+    ]
+    assert len(closes) == 1
+    assert closes[0]["detail"]["closed"] is False
+    assert "No matching windows" in closes[0]["detail"]["output"]
+
+
+def test_the_simulated_close_reports_the_same_distinction(audit):
+    """The two implementations must agree, or a simulated run rehearses different arithmetic
+    from a live one."""
+    display = simulated(audit, [{"title": "a", "user_vars": {"ra_item": "45"}}])
+    handle = display.list_by_var("ra_item")[0]
+
+    assert display.close(handle) is True
+    assert display.close(handle) is False, "closing it twice must not report two closes"

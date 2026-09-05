@@ -57,7 +57,19 @@ $ grep -rn "\.close_window(\|\.close(" src/robot_army/ | grep -v boundaries/kitt
 **Zero callers.** This feature is the first, which means Principle III's before-and-after record
 comes for free through the existing `audit.action` context.
 
-**Decision**: reuse it unchanged.
+**Decision**: reuse it, with one change made in review of PR #141 — it now returns whether a window
+was really closed.
+
+`windows_closed` counted every call that did not raise, so a window the maintainer had closed a
+moment earlier was counted as a close the system performed. The review supposed that could not be
+fixed, because `kitty @ close-window` was assumed to exit 0 for an id that no longer matches.
+**Measured on kitty 0.48.2: it exits 1**, with `No matching windows for expression: id:N`. `_kitty`
+passes `check=False`, so the status was already in hand and simply discarded. Returning it costs
+nothing and makes contract W4 true as written.
+
+Worth noting how that assumption nearly cost more than the bug: had it gone unchecked, the fix would
+have been to weaken the contract to match the code, rather than to strengthen the code to match the
+contract.
 
 ---
 
@@ -176,7 +188,7 @@ window goes in the same pass rather than the next.
 | # | Decision | Rejected alternative |
 |---|---|---|
 | R1 | Close windows explicitly; `--hold` and the launch path stay exactly as they are | Dropping `--hold`, which would restore the M0 F11 failure it was added to fix |
-| R2 | Reuse the existing `close()` | Writing a second close path |
+| R2 | Reuse `close()`, returning whether it acted (added in review; kitty exits 1 for a missing window, so the signal was free) | Writing a second close path; weakening contract W4 to match a counter that overstated |
 | R3 | Identity from the `ra_item` marker | The stored `window_id`, which kitty renumbers on restart |
 | R4 | New `list_by_var(key)`; one listing per pass | Looping `find_by_var`; reading `foreground_processes` |
 | R5 | Reuse `cleanup.live_sessions` | A fourth definition of "still running" |

@@ -126,7 +126,7 @@ what the operation actually returned lands later as `web.resume.result`.
 
 `web.start` records the address and port the interface is actually listening on, on every
 start. Under the exposure model in
-[002's spec](../specs/002-web-ui/spec.md) the bind address *is* the access policy, so it is
+[002's spec](https://github.com/jantman/robot-army/blob/main/specs/002-web-ui/spec.md) the bind address *is* the access policy, so it is
 the one fact that is never allowed to be silent.
 
 ## Intent and outcome
@@ -372,7 +372,7 @@ extension hooks are instructions an agent chooses to follow rather than callback
 report that never arrives is indistinguishable from a phase not yet reached; everything here
 is read from files in the worktree instead. The argument, and the three conditions that would
 make hooks worth revisiting, are in
-[the 007 spec](../specs/007-speckit-extensions/spec.md#out-of-scope).
+[the 007 spec](https://github.com/jantman/robot-army/blob/main/specs/007-speckit-extensions/spec.md#out-of-scope).
 
 ### Phase observation writes nothing when nothing changed
 
@@ -416,7 +416,7 @@ point of that check, and scope names are not secrets.
 ## What is deliberately not logged
 
 Principle III permits gaps only when they are named and justified in the feature plan. The
-full argument is in [plan.md](../specs/001-minimum-daemon/plan.md); the list, so a reader of
+full argument is in [plan.md](https://github.com/jantman/robot-army/blob/main/specs/001-minimum-daemon/plan.md); the list, so a reader of
 the log knows what its silence means:
 
 | Gap | Why |
@@ -561,6 +561,42 @@ process that inherited that number, and reporting it as `running` is the degrada
 a pid of `1` through the termination guard in #69.
 
 Nothing this feature added goes unlogged, and no Principle III exception is claimed.
+
+## The `example_config.write` action
+
+`robot-army example-config` renders the commented example configuration. It records **only
+when it writes a file**, which is the one thing it can do that changes state outside the
+process.
+
+| Action | When | What it carries |
+|---|---|---|
+| `example_config.write` | Once per `--output` invocation, on **every** path | `target`, the absolute destination; `detail.force`, whether `--force` was given; and on success `detail.bytes`, or on failure `detail.error` |
+
+The target is absolute even when the author typed a relative path. A relative path is only
+interpretable if you also know the working directory the command ran in, which the record
+does not carry — and reconstruction from the log alone is the standard.
+
+**A refusal is recorded as a failure, not as nothing.** Declining to overwrite an existing
+file writes an outcome of `failure` carrying `error: "file exists"`, because "I ran it and
+nothing changed" is exactly the question this log exists to answer. An I/O failure records the operating
+system's own message the same way.
+
+### The two documented exceptions
+
+**Rendering to standard output writes nothing.** No file is created, no request is made,
+nothing outside the process is mutated, so there is no action to reconstruct. Under
+Principle III's exception path this is named here and in
+[the feature plan](https://github.com/jantman/robot-army/blob/main/specs/20260905-124257-docs-overhaul-example-config/plan.md)
+rather than left as an undocumented gap.
+
+**The record goes to the default layout's log directory.** This command is routed before the
+configuration is loaded — it exists to be run on a machine that has none — so a non-default
+`[paths] state_dir` cannot be honoured here and the record lands under
+`$XDG_STATE_HOME/robot-army/logs/` regardless.
+
+**And a log that cannot be written never fails the write.** The file is the point; a
+read-only state directory must not cost the author their config. The failure is announced on
+stderr instead, so it is neither silent nor fatal.
 
 ## The `prompt.preview` action
 

@@ -191,8 +191,11 @@ the document distinguishes them, and that no warning sentence appears anywhere i
   whatever files it happens to contain.
 - **FR-006**: No warning MUST be shown when the configured numbering is `timestamp`.
 - **FR-007**: A `.specify/init-options.json` that cannot be read, cannot be parsed, is not a JSON
-  object, or holds a non-string `feature_numbering` MUST produce a distinct "could not determine"
-  message rather than either silence or the ordinary warning.
+  object, or holds a `feature_numbering` that is not a short, plainly-worded identifier MUST produce
+  a distinct "could not determine" message rather than either silence or the ordinary warning. The
+  value is quoted back onto a screen a human is using to decide whether to trust this repository,
+  so a value that could add, forge, or flood lines on that screen is not quoted back — it is
+  reported as undetermined.
 - **FR-008**: Reading the numbering MUST NOT raise, whatever the state of the filesystem. Every
   failure is one of the outcomes above.
 - **FR-009**: The warning MUST appear before the approval prompt, on the same screen as the clone

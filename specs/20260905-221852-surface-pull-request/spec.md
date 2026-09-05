@@ -59,21 +59,23 @@ GitHub.
 
 ### User Story 2 - Spot pull requests across the lists (Priority: P2)
 
-The maintainer scans `/active`, `/queue` and `/interrupted` from a phone. Any item that has a
-pull request carries a compact, clickable marker in its row, so "this one has produced
-something" is visible without opening each item.
+The maintainer scans the listings from a phone. Any item that has a pull request carries a
+compact, clickable marker in its row, so "this one has produced something" is visible without
+opening each item. Listings whose rows cannot have a pull request — work that has not been
+dispatched and so has no branch — gain no always-empty column.
 
 **Why this priority**: The lists are the landing surfaces and the reason the web interface
 exists; a per-row marker turns a several-tap answer into a glance. It is P2 rather than P1
 because it is presentation over a fact User Story 1 already establishes.
 
 **Independent Test**: With one active item that has a pull request and one that does not, load
-`/active` and confirm exactly one row carries a link and the other carries a plain placeholder.
+the active listing and confirm exactly one row carries a link and the other carries a plain
+placeholder.
 
 **Acceptance Scenarios**:
 
-1. **Given** an active item with a known pull request, **When** the maintainer loads `/active`,
-   **Then** the row shows the pull request as a link labelled by its number.
+1. **Given** an active item with a known pull request, **When** the maintainer loads the active
+   listing, **Then** the row shows the pull request as a link labelled by its number.
 2. **Given** an item with no known pull request, **When** the maintainer loads a list
    containing it, **Then** its pull request cell shows a placeholder and no link.
 3. **Given** an item with more than one known pull request, **When** the maintainer loads a
@@ -170,8 +172,10 @@ recorded rather than silently swallowed.
 
 - **FR-013**: A work item's page MUST show every pull request known for that item — number,
   state, and a link — or state plainly that none is known.
-- **FR-014**: The active, queue and interrupted listings MUST show, per row, a link to the
-  item's pull request where one is known, and a plain placeholder where none is.
+- **FR-014**: Every listing whose rows can have a pull request MUST show, per row, a link to
+  the item's pull request where one is known, and a plain placeholder where none is. Rows that
+  cannot have one — an item that has never been dispatched, and so has no branch — MUST NOT
+  carry a column that is always empty.
 - **FR-015**: Where an item has several pull requests, a listing row MUST show one of them and
   indicate that there are more.
 - **FR-016**: Every surface MUST distinguish three states: a known pull request, a confirmed
@@ -205,6 +209,8 @@ recorded rather than silently swallowed.
 
 - **SC-001**: From the web interface's landing surfaces, the maintainer can reach the pull
   request for any item that has one in a single tap, without visiting GitHub to find it.
+- **SC-007**: A work item that has never been dispatched — and therefore can have no pull
+  request — costs no GitHub request and gains no empty column anywhere in the interface.
 - **SC-002**: For an item with no pull request, the interface never implies there is one, and
   never presents "we could not ask" as "there is none".
 - **SC-003**: A pull request opened during a session appears in the web interface within one

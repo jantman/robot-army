@@ -710,11 +710,20 @@ class StubDisplay:
     def is_open(self, handle) -> bool:
         return True
 
-    def close(self, handle) -> None:
-        return None
+    def close(self, handle) -> bool:
+        return True
 
     def find_by_var(self, key: str, value: str):
         return None
+
+    def list_by_var(self, key: str):
+        """No windows, deliberately.
+
+        Every existing test that wires this stub through ``reconcile()`` therefore proves
+        the window sweep closes nothing — which is the right default for a stub whose other
+        answers are equally inert.
+        """
+        return []
 
     def send_text(self, handle, text: str) -> None:
         return None
@@ -1059,7 +1068,7 @@ def _no_real_signals(monkeypatch: Any) -> Any:
 
 @pytest.fixture(autouse=True)
 def _forget_in_process_state() -> Any:
-    """Reset the two pieces of deliberately volatile state milestone 004 added.
+    """Reset the pieces of deliberately volatile state the daemon keeps in memory.
 
     The capacity hold's signature (R16) and the notifier's per-cycle counter (R15) live in
     process memory on purpose: losing them costs one extra audit record and a handful of
@@ -1067,15 +1076,23 @@ def _forget_in_process_state() -> Any:
     choice is that they are shared between tests in a way a database row is not — one
     test's hold would suppress the next test's record. Clearing them here is exactly what a
     daemon restart does, so the isolation is honest rather than a workaround.
+
+    ``reconcile``'s settled-window set joined them for the same reason and at the same
+    price: losing it costs one extra ``kitty @ ls`` after a restart. It is *more* prone to
+    the cross-test leak than the other two, because it is keyed on work item ids that every
+    test reuses from 1.
     """
     from robot_army import dispatch as dispatch_mod
     from robot_army import notifications as notifications_mod
+    from robot_army import reconcile as reconcile_mod
 
     dispatch_mod._HOLD.clear()
     notifications_mod.begin_cycle()
+    reconcile_mod.forget_settled_windows()
     yield
     dispatch_mod._HOLD.clear()
     notifications_mod.begin_cycle()
+    reconcile_mod.forget_settled_windows()
 
 
 @pytest.fixture

@@ -59,6 +59,10 @@ class ReconcileResult:
     #: *already* gone — the difference is whether this pass did the ending.
     retired: int = 0
     anomalies_resolved: int = 0
+    #: Terminal windows closed because the work they were opened for is finished. Every
+    #: launch passes ``--hold``, so a window outlives its process by design; nothing closed
+    #: one until this counter existed.
+    windows_closed: int = 0
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
@@ -80,6 +84,7 @@ class ReconcileResult:
             "speckit_phase_changes": self.speckit_phase_changes,
             "retired": self.retired,
             "anomalies_resolved": self.anomalies_resolved,
+            "windows_closed": self.windows_closed,
             "notes": self.notes,
         }
 
@@ -560,6 +565,21 @@ def reconcile(
 
     # -- stale sockets and prunable worktrees (FR-044) ---------------------
     result.stale_sockets += _sweep_sockets(conn, boundaries=boundaries, audit=audit, layout=layout)
+
+    # -- terminal windows outliving the work they were opened for (#138) ---
+    #
+    # With the other physical-residue sweeps, because it does the same kind of job: look at
+    # something outside the database, decide what is left over, and clean it up.
+    #
+    # After ``_retire_finished_sessions`` **and** ``_sweep_stale_sessions``, and both halves
+    # matter: a session retired earlier in this pass has had its row closed by then, so its
+    # item qualifies immediately and its window goes in the *same* pass rather than the
+    # next. Ordering is also what keeps the guard honest in the other direction — an item
+    # whose worker survived termination still has an open row here, so its windows stay.
+    result.windows_closed += _close_finished_windows(
+        conn, boundaries=boundaries, audit=audit
+    )
+
     result.prunable += _sweep_worktrees(conn, boundaries=boundaries, audit=audit, config=config)
 
     audit.record(
@@ -1342,6 +1362,153 @@ def _sweep_sockets(
         )
         stale += 1
     return stale
+
+
+#: The user variable every launched window carries, naming the work item it was opened for.
+#:
+#: Written by ``dispatch.build_launch_plan`` as ``user_vars={"ra_item": str(item_id)}`` and
+#: turned into ``--var ra_item=<id>`` by the display. **This is the identity**, and the
+#: recorded ``sessions.window_id`` deliberately is not: kitty numbers windows per kitty
+#: process and restarts from 1 when kitty restarts, so a stored 50 can name an unrelated
+#: window months later. Closing on a stored number would be the PID-reuse incident this
+#: project already carries two guards against, aimed at the maintainer's own screen.
+#:
+#: Nothing else sets this variable, so a window carrying it was opened by us, and a window
+#: without it is never ours to close whatever it appears to contain.
+WINDOW_ITEM_VAR = "ra_item"
+
+#: Items whose windows this process has already settled — closed, or looked for and found
+#: none. Volatile on purpose, and this is the second thing that made the gate below work.
+#:
+#: Without it the gate is dead after the first item ever finishes. ``done`` is terminal and
+#: rows are never deleted, so a completed item satisfies every database condition on **every
+#: future pass forever**, long after its window went. The candidate set would therefore never
+#: be empty again, ``kitty @ ls`` would run on every pass indefinitely, and a machine with no
+#: kitty would collect the ~1,440 failures a day the gate exists to prevent. Caught in review
+#: of the pull request that introduced it.
+#:
+#: Nothing new can appear for a settled item: ``done`` has no outgoing transition, so no
+#: dispatch can open it another window. Once a listing has answered for an item, the answer
+#: is final.
+#:
+#: In process memory rather than a column, following the precedent milestone 004 set for the
+#: capacity hold and the notifier's cycle counter: losing it costs **one** extra listing after
+#: a restart, which is far less than a table costs to keep correct.
+#:
+#: Keyed on ``(id, done_at)`` rather than the id alone. SQLite reuses a freed ``INTEGER
+#: PRIMARY KEY``, so ``purge_simulated`` deleting the highest rows lets a later item inherit
+#: a settled id and never have its window closed. The timestamp makes that collision
+#: impossible without costing anything.
+_WINDOWS_SETTLED: set[tuple[int, str | None]] = set()
+
+
+def forget_settled_windows() -> None:
+    """Drop the volatile window bookkeeping. Exactly what a daemon restart does."""
+    _WINDOWS_SETTLED.clear()
+
+
+def _close_finished_windows(
+    conn: sqlite3.Connection, *, boundaries: Boundaries, audit: AuditLog
+) -> int:
+    """Close the terminal windows of items that are finished (issue #138 follow-up).
+
+    Every window is launched with ``--hold`` so that a launch which fails instantly leaves
+    something readable — that window is often the only evidence of what went wrong (M0
+    F11). The consequence nobody had acted on is that a window outlives its process *by
+    design*: retirement ends the worker and the tab stays, one per completed item, forever.
+    ``Display.close`` has existed since M0 and had no caller until this function.
+
+    **The hold's purpose survives, and is preserved by the ``done`` gate rather than by a
+    second rule.** A failed launch's item never reaches ``done``, so its window is never a
+    candidate. ``failed`` and ``abandoned`` keep their windows indefinitely.
+
+    **The database is asked before the terminal is touched.** When nothing qualifies this
+    returns without listing windows at all, which is the ordinary state of an idle machine.
+    That is not an optimisation: a sweep that always listed would raise on every pass on a
+    machine with no kitty, writing ~1,440 failures a day. Gating on the candidate set makes
+    the failure that *is* recorded mean "there was work to do and the terminal could not be
+    reached".
+    """
+    candidates: dict[int, str | None] = {}
+    for item in db.list_work_items(
+        conn, include_simulated=True, states=[WorkItemState.DONE]
+    ):
+        sessions_for_item = db.list_sessions_for_item(conn, item.id)
+        if not sessions_for_item:
+            # A ``done`` item that never had a session — a rebuilt database. Nothing
+            # establishes that its session ended, and ``live_sessions`` answers the empty
+            # list both for "all of them finished" and for "there were never any". Only the
+            # first qualifies, so the two are told apart here rather than conflated.
+            continue
+        if (item.id, item.done_at) in _WINDOWS_SETTLED:
+            # Asked and answered in this process. See `_WINDOWS_SETTLED`: without this the
+            # gate below never fires again after the first item ever completes.
+            continue
+        if cleanup.live_sessions(conn, item.id):
+            # Something may still be running in one of this item's windows. The shared
+            # definition from issue #79, reused so the window rule cannot drift from the
+            # disk rule — including its deliberate choice to check *every* attempt rather
+            # than the latest.
+            continue
+        candidates[item.id] = item.done_at
+
+    if not candidates:
+        return 0
+
+    try:
+        windows = boundaries.display.list_by_var(WINDOW_ITEM_VAR)
+    except BoundaryError as exc:
+        audit.error("window.list", error=exc, detail={"candidates": sorted(candidates)})
+        # Nothing is settled: the question was not answered, so it is asked again next pass.
+        return 0
+
+    closed = 0
+    unfinished: set[int] = set()
+    for handle in windows:
+        raw = handle.user_vars.get(WINDOW_ITEM_VAR)
+        try:
+            item_id = int(str(raw))
+        except (TypeError, ValueError):
+            # A marker we cannot read is not evidence. Left alone, permanently.
+            continue
+        if item_id not in candidates:
+            continue
+        try:
+            really_closed = boundaries.display.close(handle)
+        except BoundaryError as exc:
+            # One terminal refusing must not abandon the sweep: every other window is still
+            # considered, and this one is simply reconsidered next pass — which is what
+            # keeping it out of the settled set below arranges.
+            unfinished.add(item_id)
+            audit.error(
+                "window.close",
+                error=exc,
+                entity_type="work_item",
+                entity_id=item_id,
+                detail={"window_id": handle.window_id, "title": handle.title},
+            )
+            continue
+        # ``False`` means one specific thing: the terminal had no such window, because the
+        # maintainer closed it in the moments between the listing above and this call. That
+        # is success — the item is still settled, since nothing will ever need doing for it
+        # again — but it is not something *this* pass did, and counting it would overstate
+        # the system's own work in the summary and the log.
+        #
+        # Every *other* way a close can fail raises instead, and is handled above. That
+        # split is load-bearing rather than tidy: a transient failure or a timeout reported
+        # as ``False`` would settle the item and leak its window for the life of the
+        # process, with nothing recorded as an error.
+        if really_closed:
+            closed += 1
+
+    # Everything the listing answered for is settled, including the candidates that turned
+    # out to have no windows at all — that is the answer, and it cannot change.
+    _WINDOWS_SETTLED.update(
+        (item_id, done_at)
+        for item_id, done_at in candidates.items()
+        if item_id not in unfinished
+    )
+    return closed
 
 
 def _sweep_worktrees(

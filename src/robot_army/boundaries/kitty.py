@@ -30,6 +30,15 @@ if TYPE_CHECKING:
 
 LAUNCH_TIMEOUT = 20.0
 
+#: What kitty says when ``--match id:N`` names no window, measured on 0.48.2:
+#: ``Error: No matching windows for expression: id:999999``, exit **1**.
+#:
+#: Matched as a substring because it is the only signal kitty gives, and the direction of a
+#: mismatch is the safe one: if the wording ever changes, a genuinely-gone window starts
+#: raising instead of returning ``False``, so the sweep retries it and logs an error rather
+#: than silently marking it dealt with. A leaked window is the worse failure of the two.
+NO_SUCH_WINDOW = "No matching windows"
+
 
 def _refuse(candidate: str) -> str | None:
     """Why this candidate must not be spoken to, or ``None`` if it may be.
@@ -266,13 +275,42 @@ class KittyDisplay:
     def is_open(self, handle: DisplayHandle) -> bool:
         return any(w.get("id") == handle.window_id for w in self._windows())
 
-    def close(self, handle: DisplayHandle) -> None:
-        with self._audit.action("kitty.close_window", target=str(handle.window_id)):
-            self._kitty(
+    def close(self, handle: DisplayHandle) -> bool:
+        """Close one window. ``True`` if kitty really closed one.
+
+        **Measured, because the obvious assumption is wrong**: ``kitty @ close-window``
+        against an id that no longer matches exits **1** with ``No matching windows for
+        expression: id:N``, not 0. ``_kitty`` passes ``check=False``, so that failure was
+        being swallowed and an already-closed window read as a successful close — which
+        made ``windows_closed`` overstate what the system had done.
+
+        Returning the answer costs nothing: the exit status is already in hand. A ``False``
+        with an unusual cause is still fully reconstructable, because ``kitty.subprocess``
+        records the command and its output either way.
+        """
+        with self._audit.action(
+            "kitty.close_window", target=str(handle.window_id)
+        ) as outcome:
+            result = self._kitty(
                 ["close-window", "--match", f"id:{handle.window_id}"],
                 timeout=LAUNCH_TIMEOUT,
                 action="kitty.subprocess",
             )
+            if result.ok:
+                outcome["closed"] = True
+                return True
+            # **"It failed" and "there was nothing to close" are different answers, and
+            # collapsing them leaks a window permanently.** `_kitty` passes `check=False`,
+            # so a transient non-zero exit and a timeout arrive here looking exactly like a
+            # window that was already gone. The caller settles an item on ``False`` — that
+            # is the whole point of returning it — so a real failure reported as ``False``
+            # would mark the item answered-for and never revisit it, with nothing logged as
+            # an error. Caught in review of the pull request that added this return value.
+            if not result.timed_out and NO_SUCH_WINDOW in result.output:
+                outcome["closed"] = False
+                outcome["output"] = result.output
+                return False
+            raise BoundaryError(f"kitty close-window failed: {result.output}")
 
     def find_by_var(self, key: str, value: str) -> DisplayHandle | None:
         """Exact lookup by user variable.
@@ -291,6 +329,32 @@ class KittyDisplay:
                     user_vars={str(k): str(v) for k, v in user_vars.items()},
                 )
         return None
+
+    def list_by_var(self, key: str) -> list[DisplayHandle]:
+        """Every window carrying ``key``. One ``kitty @ ls`` for the whole answer.
+
+        The sweep that closes a finished item's windows cannot use ``find_by_var``: it
+        needs *all* of an item's windows, because every attempt that was resumed or
+        restarted left one behind and they all carry the same marker. Looping the singular
+        lookup would also mean one subprocess per candidate item per pass.
+
+        A window with no user variables at all — everything the maintainer opened
+        themselves — is skipped here rather than filtered by the caller, so nothing that
+        this system did not open can reach a decision about closing it.
+        """
+        found: list[DisplayHandle] = []
+        for window in self._windows():
+            user_vars = window.get("user_vars") or {}
+            if key not in user_vars:
+                continue
+            found.append(
+                DisplayHandle(
+                    window_id=int(window["id"]),
+                    title=str(window.get("title") or ""),
+                    user_vars={str(k): str(v) for k, v in user_vars.items()},
+                )
+            )
+        return found
 
     def send_text(self, handle: DisplayHandle, text: str) -> None:
         """Type into a window. Terminated with ``\\r``, never ``\\n``.
@@ -370,17 +434,31 @@ class SimulatedDisplay:
     def is_open(self, handle: DisplayHandle) -> bool:
         return handle.window_id in self._windows
 
-    def close(self, handle: DisplayHandle) -> None:
-        self._windows.pop(handle.window_id, None)
+    def close(self, handle: DisplayHandle) -> bool:
+        """``True`` only if this object was holding that window, mirroring the real one."""
+        removed = self._windows.pop(handle.window_id, None) is not None
         self._audit.record(
-            "kitty.close_window", outcome="ok", target=str(handle.window_id), simulated=True
+            "kitty.close_window",
+            outcome="ok",
+            target=str(handle.window_id),
+            simulated=True,
+            detail={"closed": removed},
         )
+        return removed
 
     def find_by_var(self, key: str, value: str) -> DisplayHandle | None:
         for handle in self._windows.values():
             if handle.user_vars.get(key) == value:
                 return handle
         return None
+
+    def list_by_var(self, key: str) -> list[DisplayHandle]:
+        """Answered from the windows this object was asked to open.
+
+        A simulated run therefore exercises the whole decision path — listing, identifying
+        and closing — against windows it created itself, rather than skipping it.
+        """
+        return [handle for handle in self._windows.values() if key in handle.user_vars]
 
     def send_text(self, handle: DisplayHandle, text: str) -> None:
         self._audit.record(

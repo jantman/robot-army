@@ -847,9 +847,32 @@ class Display(Protocol):
 
     def is_open(self, handle: DisplayHandle) -> bool: ...
 
-    def close(self, handle: DisplayHandle) -> None: ...
+    def close(self, handle: DisplayHandle) -> bool:
+        """Close this window. ``True`` if one was really closed, ``False`` if none matched.
+
+        The distinction is not decoration: a window the maintainer had already closed
+        looks identical to one this call took down, and counting both would overstate
+        what the system did in the reconcile summary and the audit log.
+        """
+        ...
 
     def find_by_var(self, key: str, value: str) -> DisplayHandle | None: ...
+
+    def list_by_var(self, key: str) -> list[DisplayHandle]:
+        """Every window carrying ``key``, with its value readable from ``user_vars``.
+
+        Distinct from ``find_by_var``, which answers "is there one" and returns the first.
+        Two callers want different things and collapsing them would break one: the lookup
+        wants a single window by an exact value, and the window sweep wants *all* of an
+        item's windows without knowing in advance which values to ask about — issue #138's
+        follow-up, where a completed item may hold several windows because every attempt
+        that was resumed or restarted left one behind.
+
+        Answering it as a list also bounds the cost: the sweep lists once per pass and
+        decides in memory, where looping ``find_by_var`` would mean one call to the
+        terminal per candidate item.
+        """
+        ...
 
     def send_text(self, handle: DisplayHandle, text: str) -> None: ...
 

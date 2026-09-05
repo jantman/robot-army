@@ -429,6 +429,24 @@ process cannot be undone from this side — the intent is on disk before the sig
 | `anomaly.resolved` | **New** — when an `orphan_session`'s process is confirmed gone | The anomaly id, its kind and entity, the `pid` and `proc_start` that no longer match, and the reason. This is where "on what evidence" lives: there is deliberately no `resolved_reason` column, because Principle III already makes this log the reconstruction path |
 | `reconcile.pass` | **Changed** — as before, once per pass | Gains `retired` and `anomalies_resolved`. `retired` is deliberately separate from `reclaimed`: both close a session row, but one means "this pass ended the worker" and the other means "the worker was already gone" |
 
+### Closing the tab
+
+The follow-up to the above, and a correction: retirement ends the worker, and a **separate**
+sweep closes the window it was running in. `--hold` keeps every window open after its command
+exits — deliberately, so a failed launch leaves evidence — so nothing closed one until this
+existed.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `kitty.close_window` | **Newly reachable** — once per window closed | The action has existed since milestone 001 and had no caller at all until now. Intent and outcome both come from its own `audit.action` context; the target is the window id |
+| `window.list` | **New**, outcome `error` | The terminal could not be listed. Only reachable when something actually qualified for closing — the sweep asks the database first and returns before touching the terminal when nothing does, so this record means "there was work to do and kitty could not be reached" rather than "this machine has no kitty" |
+| `window.close` | **New**, outcome `error` | One window could not be closed. The sweep continues to the next one; this window is simply reconsidered next pass |
+| `reconcile.pass` | **Changed** | Gains `windows_closed` |
+
+A window that was *already* gone by the time it was closed — the maintainer got there first —
+is **success**, not a failure, and writes no error record. Kitty exits zero for an id that no
+longer matches, and inventing a failure the terminal never reported would be its own small lie.
+
 ### The one thing retirement does not write
 
 A worker that is **not yet idle** produces no record at all — not an action, not a column,
@@ -454,6 +472,7 @@ the log knows what its silence means:
 | The individual **file reads** behind Spec Kit detection and phase observation | Four `stat` calls per dispatch and a handful per active item per cycle. They change no state outside the process, and the *decision* they support is logged — logging each read would bury it |
 | A repository that **has never had a project board** and does not have one now | Not an action and not a failure — it is the ordinary condition of most repositories, and it would otherwise write a record a minute forever for every one of them. Nothing is persisted for such a repository either, so `status` stays quiet about it too. A board that *goes away* is different and **is** recorded: that is a change, and the author should hear about it |
 | The project board's **item sequence** on every read — the counts and the outcome are recorded instead | The order itself is recoverable from `work_items.board_position` at any instant, and it is not a question about an action the system *took*. Writing the same list every 60 seconds per repository would be ~1,440 copies a day drowning the records that matter. What is genuinely lost is history: from the log alone you cannot say what order the board was in three days ago. Every read, every failure, every fallback and every dispatch **is** recorded, so nothing the system did is unreconstructable |
+| A **window that simply does not qualify for closing** — its item is `failed`, or still has a live session | The pass runs every 60 seconds and a working machine has several such windows permanently, so a record each would be thousands a day carrying no news. The condition is re-derivable from the item's state at any instant, and everything the sweep *does* — every close, every failure to close, every failure to list — is recorded. Same reasoning as the row below, and as the transcript check |
 | A **retirement deferred because the worker was not idle yet** | The reconciliation loop runs every 60 seconds and a finished session may sit idle for hours, so recording "still busy" would write ~1,440 records a day carrying one bit. The condition is re-derivable at any instant from the worker's own registry entry, and the *decision that acts* — `session.retire` and everything after it — is logged in full. Precedent: the transcript check writes nothing for a session still inside its grace period, for the same reason. See the issue #138 section above |
 | **Read-only web requests** — every `GET` the interface serves | They change no state outside the process, so Principle III's own scope does not reach them. The exception is written down because the *volume* makes the omission visible: a page auto-refreshing every 10 seconds issues a `GET` every 10 seconds, and logging those would bury the record this project exists to keep readable. Nothing a `GET` does is unreconstructable — the data it read is in the database and in this log. **Every `POST` is logged**, without exception |
 

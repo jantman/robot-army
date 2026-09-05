@@ -292,6 +292,32 @@ class KittyDisplay:
                 )
         return None
 
+    def list_by_var(self, key: str) -> list[DisplayHandle]:
+        """Every window carrying ``key``. One ``kitty @ ls`` for the whole answer.
+
+        The sweep that closes a finished item's windows cannot use ``find_by_var``: it
+        needs *all* of an item's windows, because every attempt that was resumed or
+        restarted left one behind and they all carry the same marker. Looping the singular
+        lookup would also mean one subprocess per candidate item per pass.
+
+        A window with no user variables at all — everything the maintainer opened
+        themselves — is skipped here rather than filtered by the caller, so nothing that
+        this system did not open can reach a decision about closing it.
+        """
+        found: list[DisplayHandle] = []
+        for window in self._windows():
+            user_vars = window.get("user_vars") or {}
+            if key not in user_vars:
+                continue
+            found.append(
+                DisplayHandle(
+                    window_id=int(window["id"]),
+                    title=str(window.get("title") or ""),
+                    user_vars={str(k): str(v) for k, v in user_vars.items()},
+                )
+            )
+        return found
+
     def send_text(self, handle: DisplayHandle, text: str) -> None:
         """Type into a window. Terminated with ``\\r``, never ``\\n``.
 
@@ -381,6 +407,14 @@ class SimulatedDisplay:
             if handle.user_vars.get(key) == value:
                 return handle
         return None
+
+    def list_by_var(self, key: str) -> list[DisplayHandle]:
+        """Answered from the windows this object was asked to open.
+
+        A simulated run therefore exercises the whole decision path — listing, identifying
+        and closing — against windows it created itself, rather than skipping it.
+        """
+        return [handle for handle in self._windows.values() if key in handle.user_vars]
 
     def send_text(self, handle: DisplayHandle, text: str) -> None:
         self._audit.record(

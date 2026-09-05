@@ -716,6 +716,15 @@ class StubDisplay:
     def find_by_var(self, key: str, value: str):
         return None
 
+    def list_by_var(self, key: str):
+        """No windows, deliberately.
+
+        Every existing test that wires this stub through ``reconcile()`` therefore proves
+        the window sweep closes nothing — which is the right default for a stub whose other
+        answers are equally inert.
+        """
+        return []
+
     def send_text(self, handle, text: str) -> None:
         return None
 

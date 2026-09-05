@@ -132,8 +132,10 @@ the machine was full — and the worktrees could never be reclaimed either, beca
 session guard kept recording `skipped`, which means "not yet". That is issue #138.
 
 So the lifecycle has an ending now. An item that is `done` **and** whose worker has been
-idle for **30 minutes** has that worker stopped: the process ends, its kitty tab closes with
-it, the row closes with a reason naming retirement, and the slot comes back.
+idle for **30 minutes** has that worker stopped: the process ends, the row closes with a
+reason naming retirement, and the slot comes back. Its terminal tab goes too, on the same
+pass — see [the tab](#the-tab) below, which is a separate act and was originally, wrongly,
+assumed to be free.
 
 **`done` is the whole precondition, and it means more than it looks like.** The only thing
 in the system that writes that state is the pass that observed the issue closed, so `done`
@@ -144,6 +146,50 @@ in the system that writes that state is the pass that observed the issue closed,
 finished and the session may be exactly what I am about to attach to. `robot-army cancel
 <id>` is the route out of those, and it now settles a terminal item's session correctly
 rather than reporting an ending it did not observe.
+
+### The tab
+
+**The tab does not close by itself, and I assumed for one whole feature that it did.** The
+retirement work above shipped with a sentence here claiming the kitty tab "closes with" the
+worker, on the reasoning that the window hosts a chain — `kitty → dtach → wrapper → claude` —
+that exists only to run it. The first live retirement disproved that in the most direct way
+available: both workers gone, both records closed, both sockets gone, and both tabs still
+sitting there. I closed them by hand.
+
+The cause is one flag, passed on every launch since the very first milestone:
+
+```
+kitty @ launch --type=tab --hold --cwd … --title …
+```
+
+`--hold` keeps a window open **after its command exits**, so that a launch which fails
+instantly leaves something readable instead of a window that vanishes before I can see it.
+That window is often the only evidence of what went wrong, which is worth more than a tidy
+terminal. The chain was reasoned about; the flags were not read.
+
+So closing a tab is its own act, and it has its own rule:
+
+> A tab is closed when its work item is `done` and **none** of its sessions is still open.
+
+Three consequences worth knowing:
+
+- **`failed` and `abandoned` keep their tabs, indefinitely.** That is the whole point of
+  `--hold` and it survives untouched. The `done` gate is what preserves it — a failed launch
+  never reaches `done`, so its window is never a candidate.
+- **All of an item's tabs go, not just the last one.** A resumed or restarted item left a
+  window per attempt, all marked with the same item id, and a finished item leaves none of
+  them behind. The one place this narrows `--hold`: an item that failed, was retried, and
+  then succeeded loses its failed attempt's tab too. The failure is still in the log and in
+  the transcript.
+- **It is a sweep, not a step of retirement.** Which means a tab left behind by a crash
+  between the kill and the close is still cleaned up on the next pass, and so is one left by
+  a version of this that predates the rule.
+
+Which tab belongs to which item is decided by a marker the launch writes onto the window —
+`ra_item=<id>` — and **never** by the window number recorded on the session row. Kitty
+numbers windows per kitty process and starts again at 1 when it restarts, so a stored number
+can name something else entirely a week later. A window without the marker is never touched,
+whatever it contains.
 
 **Idle is measured, not assumed.** The worker's own session registry entry carries a
 `status` and the moment it last changed, and idleness is that pair and nothing else. A

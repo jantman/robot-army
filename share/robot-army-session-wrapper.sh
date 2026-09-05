@@ -19,12 +19,14 @@
 # upgrades (research.md R5). A file survives that, and survives a reboot.
 #
 # Usage:
-#   robot-army-session-wrapper <item-id> -- CMD [ARGS...]
+#   ROBOT_ARMY_SESSION_ID=<uuid> robot-army-session-wrapper <item-id> -- CMD [ARGS...]
 #
 # Environment (all supplied by the daemon via kitty's --env):
 #   ROBOT_ARMY_SPOOL_DIR   where to write exit records
 #   ROBOT_ARMY_LOG_DIR     where to write this session's human-readable log
-#   ROBOT_ARMY_SESSION_ID  the session id, if it is not discoverable from argv
+#   ROBOT_ARMY_SESSION_ID  the session id. REQUIRED, and the only source --- a
+#                          --session-id argument is passed through to the worker and is
+#                          otherwise ignored (RA-16; see the block below).
 
 set -uo pipefail
 
@@ -34,26 +36,44 @@ ITEM_ID="${1:?usage: robot-army-session-wrapper <item-id> -- CMD [ARGS...]}"
 shift
 [[ "${1:-}" == "--" ]] && shift
 
+# The item id names this session's log file. It is a SQLite row id, so an integer is its
+# true shape and nothing untrusted reaches it today --- but it is one edit away from the
+# same class of defect as RA-16, and the check is one line. Validated HERE, above the
+# mkdir and above every path built from it, so a refused value cannot name a file even in
+# the act of being refused. Do not move either check below the directory section.
+if [[ ! "$ITEM_ID" =~ ^[0-9]+$ ]]; then
+  echo "robot-army-session-wrapper: refusing an implausible item id" >&2
+  exit 2
+fi
+
 if [[ $# -eq 0 ]]; then
   echo "robot-army-session-wrapper: no command given" >&2
   exit 2
 fi
 
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/robot-army"
-SPOOL_DIR="${ROBOT_ARMY_SPOOL_DIR:-$STATE_DIR/spool/exits}"
-LOG_DIR="${ROBOT_ARMY_LOG_DIR:-$STATE_DIR/logs/sessions}"
-mkdir -p "$SPOOL_DIR" "$LOG_DIR" || {
-  echo "robot-army-session-wrapper: cannot create $SPOOL_DIR" >&2
-  exit 2
-}
-LOGFILE="$LOG_DIR/$ITEM_ID.log"
-
 # --- JSON helpers -----------------------------------------------------------
 # No jq: the wrapper must run in a bare environment (M0 F19).
 jesc() {
-  local s=$1
+  local s=$1 i ch esc
   s=${s//\\/\\\\}; s=${s//\"/\\\"}
   s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  # RA-48: JSON forbids every unescaped C0 character, not just the three with short forms
+  # above. A vertical tab or form feed pasted into an issue body used to be copied into the
+  # record raw, and Python's json.loads --- which is strict by default --- then refused the
+  # whole file. The session's own text quarantined its own exit record, and the session
+  # read as lost for no visible reason.
+  #
+  # The loop runs after the backslash substitution, so the backslashes it introduces are
+  # not themselves escaped. It runs unguarded: a `[[ $s == *[range]* ]]` pre-check would
+  # make bracket-range collation decide correctness, and it saves 0.08s on a 100KB prompt,
+  # which is not a trade worth making. 0 is absent because a NUL cannot reach a bash string
+  # through argv; 127 is absent because JSON permits it unescaped.
+  for i in 1 2 3 4 5 6 7 8 11 12 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do
+    printf -v ch '\\x%02x' "$i"
+    printf -v ch "$ch"
+    printf -v esc '\\u%04x' "$i"
+    s=${s//"$ch"/"$esc"}
+  done
   printf '%s' "$s"
 }
 jarr() {
@@ -63,22 +83,41 @@ jarr() {
 }
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# --- Recover the session id from argv ---------------------------------------
-# The daemon GENERATES the id and passes it via --session-id, so it is known before the
-# process starts (FR-020). Echoing it back makes the record self-describing, and it is
-# the join key the daemon uses on the way in.
+# --- The session id comes from the environment, and from nowhere else -------
+# The daemon GENERATES the id and passes it via --env, so it is known before the process
+# starts (FR-020). Echoing it back makes the record self-describing, and it is the join key
+# the daemon uses on the way in.
+#
+# This USED to be recovered by scanning argv for --session-id and taking the last match.
+# That was RA-16: argv's last element is the composed prompt, whose first bytes come from
+# the repository's own .claude/robot-army.md, which no gate checks. A prompt beginning
+# `--session-id=../../.claude/sessions/x` therefore beat the daemon's own id and steered
+# the write out of the spool and into a directory the daemon parses --- persistent,
+# remotely-plantable denial of session identification. The scan is gone rather than
+# reordered: with the env var always set by the launcher, a fallback would be a second
+# path with no caller, keeping the mechanism alive in weakened form.
 SESSION_ID="${ROBOT_ARMY_SESSION_ID:-}"
-prev=""
-for a in "$@"; do
-  [[ "$prev" == "--session-id" ]] && SESSION_ID="$a"
-  [[ "$a" == --session-id=* ]] && SESSION_ID="${a#--session-id=}"
-  prev="$a"
-done
 
 if [[ -z "$SESSION_ID" ]]; then
-  echo "robot-army-session-wrapper: no --session-id in argv and none in the environment" >&2
+  echo "robot-army-session-wrapper: ROBOT_ARMY_SESSION_ID is not set" >&2
   exit 2
 fi
+if [[ ! "$SESSION_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+  echo "robot-army-session-wrapper: refusing an implausible session id" >&2
+  exit 2
+fi
+
+# --- Directories ------------------------------------------------------------
+# Deliberately AFTER the identifiers are settled: everything below builds a path out of
+# one of them, so nothing above may create a file or a directory.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/robot-army"
+SPOOL_DIR="${ROBOT_ARMY_SPOOL_DIR:-$STATE_DIR/spool/exits}"
+LOG_DIR="${ROBOT_ARMY_LOG_DIR:-$STATE_DIR/logs/sessions}"
+mkdir -p "$SPOOL_DIR" "$LOG_DIR" || {
+  echo "robot-army-session-wrapper: cannot create $SPOOL_DIR" >&2
+  exit 2
+}
+LOGFILE="$LOG_DIR/$ITEM_ID.log"
 
 STARTED="$(now)"
 ARGV_JSON="$(jarr "$@")"

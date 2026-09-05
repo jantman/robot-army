@@ -108,6 +108,34 @@ def test_the_restoring_shape_differs_by_exactly_two_tokens(config, layout, audit
     )
 
 
+def test_the_launch_environment_carries_the_session_id(config, layout, audit):
+    """RA-16. Since the wrapper stopped recovering the id from argv, ``ROBOT_ARMY_SESSION_ID``
+    is its *only* source --- and nothing else in the suite fails if it goes missing, because
+    every other consumer reads the id from the plan directly.
+
+    So this is a guard rather than a behaviour test: without it, deleting one line of
+    ``build_launch_plan`` would leave a system that launches sessions which then refuse to
+    start, and the first evidence would be a session that never reaches ``active``."""
+    for overrides in ({}, {"resume_session_id": PRIOR}):
+        plan = plan_for(config, layout, audit, **overrides)
+        assert plan.env["ROBOT_ARMY_SESSION_ID"] == plan.session_id == CHOSEN, (
+            "the wrapper reads the session id from this variable and nowhere else"
+        )
+
+
+def test_a_repositorys_env_cannot_displace_the_session_id(config, layout, audit):
+    """Per-repository ``[repos.*] env`` is merged into the launch environment, and it is
+    configuration rather than untrusted input --- but the merge order decides whether a
+    stray key could unset the wrapper's one source of truth. Pinned, because the answer is
+    not visible from the call site."""
+    plan = plan_for(
+        config, layout, audit, env={"ROBOT_ARMY_SESSION_ID": "nonsense", "OTHER": "kept"}
+    )
+
+    assert plan.env["OTHER"] == "kept", "a repository's own variables still arrive"
+    assert plan.env["ROBOT_ARMY_SESSION_ID"] == CHOSEN
+
+
 # -- the real binary --------------------------------------------------------
 #
 # Everything above asserts what `build_launch_plan` composes. That is exactly the kind of

@@ -13,6 +13,7 @@ orphan sweep is what catches that, and it is why FR-043 exists.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -54,6 +55,10 @@ class ReconcileResult:
     cleaned: int = 0
     retained: int = 0
     speckit_phase_changes: int = 0
+    #: Work items whose pull-request set changed this pass (issue #143). A *change* count
+    #: rather than a check count, deliberately: with a 60-second cycle almost every check
+    #: finds nothing new, and a number that ticks up every pass would say nothing.
+    pull_request_changes: int = 0
     #: Sessions whose worker was ended because its work item is finished (issue #138).
     #: Distinct from ``reclaimed``, which counts rows closed because their process was
     #: *already* gone — the difference is whether this pass did the ending.
@@ -82,6 +87,7 @@ class ReconcileResult:
             "cleaned": self.cleaned,
             "retained": self.retained,
             "speckit_phase_changes": self.speckit_phase_changes,
+            "pull_request_changes": self.pull_request_changes,
             "retired": self.retired,
             "anomalies_resolved": self.anomalies_resolved,
             "windows_closed": self.windows_closed,
@@ -473,6 +479,18 @@ def reconcile(
         )
         result.dispatching_failed += 1
 
+    # -- what pull requests each item has (issue #143) ---------------------
+    #
+    # **Before** ``_resolve_closed_issues``, and the order is load-bearing. The ordinary
+    # successful ending is *pull request merges → issue closes → item goes done*. Refreshing
+    # first means the pass that retires an item has already recorded its pull request as
+    # ``merged``; refreshing after would freeze it at ``open``, and a done item is only
+    # re-checked by the narrow second clause in ``_refresh_pull_requests`` — so the page
+    # would carry a stale ``open`` for the whole of the following minute for no reason.
+    result.pull_request_changes += _refresh_pull_requests(
+        conn, boundaries=boundaries, audit=audit
+    )
+
     # -- issues that have been closed (FR-035, FR-042) ---------------------
     result.closed_done += _resolve_closed_issues(
         conn, boundaries=boundaries, audit=audit, config=config
@@ -649,6 +667,151 @@ def _interrupt(conn: sqlite3.Connection, audit: AuditLog, item_id: int, reason: 
             target=WorkItemState.INTERRUPTED,
             reason=reason,
         )
+
+
+def _refresh_pull_requests(
+    conn: sqlite3.Connection,
+    *,
+    boundaries: Boundaries,
+    audit: AuditLog,
+) -> int:
+    """Record what pull requests each work item has, so no page render has to ask (#143).
+
+    Every surface of this feature reads a stored answer. That is what makes rendering free
+    of GitHub entirely — and, less obviously, what makes the answers agree with each other:
+    before this, the resume-decision block asked GitHub live while a page rendered, and
+    nothing stopped it disagreeing with anything else on the screen.
+
+    **Which items are asked about**, and why the rule needs no interval and no cap. An item
+    qualifies when it has a branch, is not simulated, and either is in a state where a pull
+    request can still appear — ``active``, ``awaiting_review``, ``interrupted`` — or still
+    has a stored pull request recorded as ``open``.
+
+    The second clause is not decoration. ``_resolve_closed_issues`` moves an item to
+    ``done`` the moment its issue closes, and an issue can be closed by hand while its pull
+    request is still open; without the clause that item's page would read ``open`` forever.
+    With it, the item is re-checked only until every pull request it has is ``merged`` or
+    ``closed`` — at which point nothing can change and it is never asked about again. The
+    rule terminates itself, which is why this needs no configuration key.
+
+    **Nothing before migration 013 is backfilled.** An item that finished before this
+    existed keeps a ``NULL`` column and reads as "not checked", which is what it is. The
+    alternative is one GraphQL call per item of history, in a single pass, to re-litigate
+    finished work.
+
+    **No per-pass cache**, unlike ``_resolve_closed_issues`` beneath. It would never hit:
+    ``idx_work_items_identity`` is unique on ``(source, source_id, dry_run)`` and
+    ``source_id`` is ``repo#issue``, so two non-simulated items cannot share an issue — and
+    simulated ones never get here. A cache that cannot hit is a claim no test can back.
+    """
+    changed = 0
+    candidates = db.list_work_items(
+        conn,
+        include_simulated=True,
+        states=[
+            WorkItemState.ACTIVE,
+            WorkItemState.AWAITING_REVIEW,
+            WorkItemState.INTERRUPTED,
+            WorkItemState.DONE,
+            WorkItemState.ABANDONED,
+            WorkItemState.FAILED,
+        ],
+    )
+    for item in candidates:
+        if item.dry_run:
+            # FR-006, and the same decision ``_resolve_closed_issues`` makes: a simulated
+            # row exists to exercise the local machinery, and asking GitHub about it would
+            # be the dry-run mode causing exactly the outward effect it exists to avoid.
+            continue
+        if not item.branch:
+            # Nothing was ever dispatched, so no pull request can exist and there is
+            # nothing to ask. Not an error and not a finding — just no question.
+            continue
+        if not _pull_requests_wanted(item):
+            continue
+
+        try:
+            found = boundaries.issue_reader.pull_requests_for(
+                item.repo_key, item.issue_number, item.branch
+            )
+        except TransportError as exc:
+            # "I could not ask" is not "there are none". Neither column is written, so the
+            # stored answer stands and its age keeps growing — which is the truth, and which
+            # the interface shows. Recorded and moved on: one unreachable repository must
+            # not hide every other item's pull request.
+            audit.error(
+                "reconcile.pull_requests_check",
+                error=exc,
+                entity_type="work_item",
+                entity_id=item.id,
+            )
+            continue
+        if _record_pull_requests(conn, audit, item, found):
+            changed += 1
+    return changed
+
+
+def _pull_requests_wanted(item: WorkItem) -> bool:
+    """Can this item's pull-request answer still change? See ``_refresh_pull_requests``."""
+    if item.state in (
+        WorkItemState.ACTIVE,
+        WorkItemState.AWAITING_REVIEW,
+        WorkItemState.INTERRUPTED,
+    ):
+        return True
+    return any(pr.get("state") == "open" for pr in item.pull_request_list)
+
+
+def _record_pull_requests(
+    conn: sqlite3.Connection,
+    audit: AuditLog,
+    item: WorkItem,
+    found: list[Any],
+) -> bool:
+    """Store one item's set. Returns whether it changed.
+
+    An unchanged set advances ``pull_requests_at`` and writes **no** audit record. That is
+    the omission the feature plan enumerates under Principle III's exception path: with a
+    60-second cycle and sessions that run for hours, recording every unchanged check would
+    fill the log with lines saying a pull request did not change. Every transition is still
+    recorded with its time, and the column carries the last confirmation. It is the same
+    trade ``_observe_speckit`` makes, for the same reason.
+    """
+    fresh = json.dumps(
+        [{"number": pr.number, "url": pr.url, "state": pr.state} for pr in found],
+        separators=(",", ":"),
+    )
+    changed = fresh != item.pull_requests
+    with db.transaction(conn):
+        if changed:
+            # Record first, then write, inside the transaction — ``speckit.record_phase``'s
+            # order. The audit log is an append-only file rather than a table, so a rollback
+            # cannot unwrite the record: the order is chosen so the failure that *can*
+            # happen is a record for a change that did not land, which the next pass corrects
+            # by writing the same change again. The other order risks the opposite — a
+            # committed change with no record — which Principle III does not tolerate.
+            audit.record(
+                "work_item.pull_requests",
+                outcome="ok",
+                entity_type="work_item",
+                entity_id=item.id,
+                target=f"{item.repo_key}#{item.issue_number}",
+                dry_run=item.dry_run,
+                detail={
+                    "from": _pull_request_summary(item.pull_request_list),
+                    "to": [f"{pr.number}:{pr.state}" for pr in found],
+                    # ``NULL`` → ``[]`` is a real transition and the only one whose "before"
+                    # is not a set at all. Saying so here is what lets the log distinguish
+                    # "we first looked and found none" from "the one it had went away".
+                    "first_check": item.pull_requests is None,
+                },
+            )
+        db.record_pull_requests(conn, item.id, found=fresh, at=utcnow())
+    return changed
+
+
+def _pull_request_summary(stored: list[dict[str, Any]]) -> list[str]:
+    return [f"{pr.get('number')}:{pr.get('state')}" for pr in stored]
 
 
 def _resolve_closed_issues(

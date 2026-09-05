@@ -733,6 +733,10 @@ def active_view(
                     # running" from a phone, and a session five minutes into specify and one
                     # three hours into implement are the same row without it.
                     "spec-kit",
+                    # Issue #143. Every row here has a branch, so a pull request can appear
+                    # mid-session; without this the answer to "has this one produced
+                    # anything yet?" is a tap per row.
+                    "PR",
                     "started",
                     "elapsed",
                     "checkout",
@@ -745,6 +749,7 @@ def active_view(
                         row["title"],
                         span(row["session_state"] or "—"),
                         _speckit_badge(row),
+                        _pull_request_badge(row),
                         when(row["started_at"]),
                         human_age(row["elapsed_seconds"]),
                         join(
@@ -984,6 +989,11 @@ def queue_view(
                 include_simulated=include_simulated,
             )
             if not ready
+            # No pull-request column here, deliberately (issue #143). Every ``ready`` row
+            # is work that has never been dispatched, so it has no branch and can have no
+            # pull request — the column would be empty on every row of every render,
+            # forever, on the page with the most rows on it. The item's own page carries the
+            # field for the rare ``dispatching`` retry that does have one.
             else table(
                 ["#", "item", "repo", "issue", "title", "status", "ready since", ""],
                 [
@@ -1120,7 +1130,11 @@ def _signal_row(ctx: operations.Context, item: dict[str, Any]) -> dict[str, Any]
         "uncommitted_changes": signals.get("uncommitted_changes"),
         "commits_on_branch": signals.get("commits_on_branch"),
         "issue_closed": signals.get("issue_closed"),
-        "open_pr": signals.get("open_pull_request"),
+        # Issue #143: stored rather than fetched, so these three carry the reconcile pass's
+        # last confirmation rather than this view's cache window.
+        "pull_requests": signals.get("pull_requests"),
+        "pull_requests_at": signals.get("pull_requests_at"),
+        "pull_requests_known": signals.get("pull_requests_known"),
         "signals_age_seconds": signals.get("signals_age_seconds"),
         "local_signals_age_seconds": signals.get("local_signals_age_seconds"),
         "worktree_missing": not signals.get("worktree_present", False),
@@ -1144,13 +1158,13 @@ def _signals_cell(row: dict[str, Any]) -> Markup:
         tag("dd", "—" if row["commits_on_branch"] is None else str(row["commits_on_branch"])),
         tag("dt", "issue closed"),
         tag("dd", _tri(row["issue_closed"])),
-        tag("dt", "open PR"),
-        tag(
-            "dd",
-            a(row["open_pr"], "yes", rel="noreferrer noopener")
-            if github_link(row["open_pr"])
-            else _tri(bool(row["open_pr"]) if row["issue_closed"] is not None else None),
-        ),
+        # Issue #143. This row used to be a live ``open PR: yes`` asked of GitHub while the
+        # page rendered — the only pull-request link on the whole site, and one nothing
+        # stopped disagreeing with any other surface. It is now the stored set, which is no
+        # staler (the reconcile interval and this view's cache window are both 60 seconds)
+        # and is the same answer every other page shows.
+        tag("dt", "pull requests"),
+        tag("dd", _pull_request_badge(row)),
     ]
     footnote: list[Any] = []
     # Two footnotes, not one. The checkout pair and the GitHub pair are reused for lengths of
@@ -1181,6 +1195,22 @@ def _signals_cell(row: dict[str, Any]) -> Markup:
                 class_="meta",
             )
         )
+    # Its own footnote rather than a share of one of the two above, because its age is a
+    # different kind of thing: those are cache windows, this is when the daemon last
+    # confirmed the answer. "never checked" is said out loud for the same reason the cell
+    # says ``?`` — an unasked question must not read as an answered one.
+    if row.get("pull_requests_known"):
+        confirmed = row.get("pull_requests_at")
+        footnote.append(
+            span(
+                join(["pull requests confirmed ", when(confirmed)])
+                if confirmed
+                else "pull requests confirmed at an unrecorded time",
+                class_="meta",
+            )
+        )
+    else:
+        footnote.append(span("pull requests never checked", class_="meta"))
     if row.get("github_error"):
         footnote.append(span(f"GitHub unreachable: {row['github_error']}", class_="meta"))
     if row.get("worktree_error"):
@@ -1572,6 +1602,66 @@ def card_confirm_view(
 # -- /item/<id> (FR-015, FR-029) --------------------------------------------
 
 
+def _pull_request_link(pr: dict[str, Any]) -> Any:
+    """One pull request as ``#144 (merged)``, linked only if the URL is really GitHub's.
+
+    The URL came from the GitHub API rather than from a user, but it has been through the
+    database and is on its way into HTML, so it goes through the same gate every other
+    outbound href does. A URL that fails renders as plain text — the rule
+    :func:`github_link` states, applied to the one kind of link this feature adds.
+    """
+    label = f"#{pr.get('number')}"
+    state = pr.get("state")
+    text = f"{label} ({state})" if state else label
+    url = github_link(pr.get("url"))
+    return a(url, text, rel="noreferrer noopener") if url else span(text)
+
+
+def _pull_requests_cell(row: dict[str, Any]) -> Markup:
+    """Every known pull request, for a page with room to show them all.
+
+    Three states, never two. ``not checked`` is a NULL column — a row from before the
+    feature, an item never dispatched, or a simulated one — and it is emphatically not
+    ``none``, which is GitHub having answered. Rendering both as an em dash would put a
+    confident "there is no pull request" on the page, earned by never having asked.
+    """
+    if not row.get("pull_requests_known"):
+        return span("not checked", class_="empty")
+    found = row.get("pull_requests") or []
+    if not found:
+        return span("none")
+    links: list[Any] = []
+    for pr in found:
+        if links:
+            links.append(tag("br"))
+        links.append(_pull_request_link(pr))
+    confirmed = row.get("pull_requests_at")
+    if confirmed:
+        links.extend([tag("br"), span(join(["confirmed ", when(confirmed)]), class_="meta")])
+    return join(links)
+
+
+def _pull_request_badge(row: dict[str, Any]) -> Any:
+    """The same fact compressed to one listing cell.
+
+    The **last** pull request by number, which is FR-015's *one of them*: numbers are issued
+    in the order pull requests were opened, so the highest is the current attempt — the one
+    that represents the item's outcome when a first was closed and a second opened. The
+    others are not hidden, only deferred: ``+N`` says how many, and the item's own page
+    lists them all.
+    """
+    if not row.get("pull_requests_known"):
+        return span("?", class_="empty")
+    found = row.get("pull_requests") or []
+    if not found:
+        return span("—", class_="quiet")
+    latest = max(found, key=lambda pr: pr.get("number") or 0)
+    parts: list[Any] = [_pull_request_link(latest)]
+    if len(found) > 1:
+        parts.append(span(f" +{len(found) - 1}", class_="meta"))
+    return join(parts)
+
+
 def _cleanup_cell(item: dict[str, Any]) -> Any:
     """What cleanup decided about this item's disk, in one cell.
 
@@ -1654,6 +1744,11 @@ def item_view(
                         tag("dd", span(item["worktree_path"] or "—", class_="mono")),
                         tag("dt", "branch"),
                         tag("dd", span(item["branch"] or "—", class_="mono")),
+                        # Beside the branch, because that is where the reader already is
+                        # when the question "what did this produce?" occurs to them
+                        # (issue #143).
+                        tag("dt", "pull request"),
+                        tag("dd", _pull_requests_cell(item)),
                         tag("dt", "failure"),
                         tag("dd", item["failure_reason"] or "—"),
                         tag("dt", "blocked"),

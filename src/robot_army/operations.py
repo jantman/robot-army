@@ -716,6 +716,11 @@ def _item_dict(item: Any) -> dict[str, Any]:
         "speckit_feature_dir": item.speckit_feature_dir,
         "speckit_phase_at": item.speckit_phase_at,
         "speckit_baseline": item.speckit_baseline,
+        # Issue #143, and here rather than in each view for the reason every other field is
+        # here: the listings and the item page render the same rows through the same dict,
+        # so a pull request added to one surface cannot go missing from another, and the
+        # JSON payload carries what the HTML shows by construction.
+        **pull_request_view(item),
     }
 
 
@@ -1094,16 +1099,19 @@ def local_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
 
 
 def remote_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
-    """The two signals that reach GitHub, cached in-process for a minute (R9).
+    """The signal that reaches GitHub, cached in-process for a minute (R9).
 
     Every returned value carries ``signals_age_seconds``, so a cached answer is *visible*
     as stale rather than implied to be current. ``0`` means it was computed just now.
+
+    **It used to be two.** The pull-request half asked GitHub *while a page was rendering*,
+    which issue #143 replaced with the set the reconcile pass stores — see
+    :func:`pull_request_view`. That reads like a speed change and is really a correctness
+    one: nothing stopped the live answer here disagreeing with what every other surface
+    showed, and the freshness is identical anyway, since this cache's window and the
+    reconcile interval are both sixty seconds.
     """
-    empty: dict[str, Any] = {
-        "issue_closed": None,
-        "open_pull_request": None,
-        "signals_age_seconds": 0,
-    }
+    empty: dict[str, Any] = {"issue_closed": None, "signals_age_seconds": 0}
     repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
     if repo is None or not item.branch:
         return empty
@@ -1119,13 +1127,11 @@ def remote_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
         if cached is not None and now - cached[0] < REMOTE_SIGNAL_TTL_SECONDS:
             return {**cached[1], "signals_age_seconds": int(now - cached[0])}
 
-    fresh: dict[str, Any] = {"issue_closed": None, "open_pull_request": None}
+    fresh: dict[str, Any] = {"issue_closed": None}
     try:
         fresh["issue_closed"] = ctx.boundaries.issue_reader.is_closed(
             item.repo_key, item.issue_number
         )
-        pr = ctx.boundaries.issue_reader.open_pr_for_branch(item.repo_key, item.branch)
-        fresh["open_pull_request"] = pr.url if pr else None
     except TransportError as exc:
         # Not cached: "I could not ask" is not an answer, and caching it would suppress
         # the next attempt for a minute — the silent failure Principle III forbids.
@@ -1137,16 +1143,46 @@ def remote_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
     return {**fresh, "signals_age_seconds": 0}
 
 
-def resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
-    """All four signals (FR-048, FR-013). Split by cost; see R9 and the two halves above.
+def pull_request_view(item: Any) -> dict[str, Any]:
+    """What this item's pull requests are, read from its own row (issue #143).
 
-    Nothing here is persisted. Both halves are reused in-process on their own window — five
-    seconds for the checkout, a minute for GitHub — and each carries its own age, so a value
-    that was reused is visible as reused rather than implied to be current. The two ages stay
-    separate because the two windows differ by an order of magnitude and one number would
-    have to misreport one of them.
+    No network, no cache, no clock: the reconcile pass established this and the interface
+    only reads it. That is what lets every page render with GitHub unreachable, and it is
+    the single place the three states are decided.
+
+    ``pull_requests_known`` is the field that keeps them three. ``False`` with an empty list
+    means *never looked up*; ``True`` with an empty list means *looked up, and there are
+    none*. No caller may infer the difference from the list alone — that inference is
+    exactly the confident "there is no pull request", earned by never having asked, that the
+    whole feature exists to prevent.
     """
-    return {**local_resume_signals(ctx, item), **remote_resume_signals(ctx, item)}
+    return {
+        "pull_requests": item.pull_request_list,
+        "pull_requests_at": item.pull_requests_at,
+        "pull_requests_known": item.pull_requests is not None,
+    }
+
+
+def resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
+    """Every signal behind the resume decision (FR-048, FR-013), from three sources.
+
+    Split by cost; see R9 and the halves above. Nothing here is persisted by this function.
+    The checkout pair and the ``issue_closed`` answer are each reused in-process on their own
+    window — five seconds and a minute — and each carries its own age, so a value that was
+    reused is visible as reused rather than implied to be current. The two ages stay separate
+    because the two windows differ by an order of magnitude and one number would have to
+    misreport one of them.
+
+    The pull requests are the third source and behave unlike the other two: they are *stored*
+    rather than fetched, so their age is the reconcile pass's last confirmation rather than a
+    cache window, and it is carried as ``pull_requests_at`` rather than as a third seconds
+    count.
+    """
+    return {
+        **local_resume_signals(ctx, item),
+        **remote_resume_signals(ctx, item),
+        **pull_request_view(item),
+    }
 
 
 # -- prompt preview ---------------------------------------------------------

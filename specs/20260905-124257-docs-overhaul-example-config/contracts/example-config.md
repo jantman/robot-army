@@ -27,12 +27,28 @@ key = value  # what the key does
 Fixed, and chosen to read top-to-bottom as the pipeline the guide describes rather than as
 the loader's internal order:
 
-`paths` → `github` → `worker` → `dispatch` → `daemon` → `speckit` → `speckit.commands` →
-`trello` → `notifications` → `pushover` → `cleanup` → `hooks` → `terminal` → `web` →
-`health` → `repos."owner/name"`.
+`paths` → `github` → `worker` → `dispatch` → `daemon` → `speckit` → `trello` →
+`notifications` → `pushover` → `cleanup` → `hooks` → `terminal` → `web` → `health` →
+`repos."owner/name"`.
+
+That is exactly the fourteen sections of `_KNOWN_KEYS` plus one `[repos.*]` example, and
+the correspondence is one-to-one on purpose: it is what lets the completeness check run in
+both directions with no exemptions.
 
 The order is the generator's, not the loader's: `_KNOWN_KEYS` is a mapping to *sets*, which
 have no order, and iterating one would break byte-reproducibility (FR-016).
+
+**Table-valued keys stay in their parent section.** `[speckit] commands`, `[hooks]
+post_create`, `[repos.*] env`, `[repos.*] speckit_commands` and `[repos.*] post_create` all
+take a table or an array of tables. They are rendered as commented **inline** TOML —
+`# commands = { implement = "..." }` — rather than promoted to `[speckit.commands]` and
+`[repos."owner/name".env]` sub-sections of their own.
+
+The reason is the completeness check. A sub-section's keys (`implement`, or an arbitrary
+environment variable name) are not in `_KNOWN_KEYS`, so promoting them would require
+exempting those sections from the check that is the whole point of the design. The inline
+form is valid TOML, documents the option, keeps the key where the check can see it, and
+costs only that the multi-line table form is shown in the guide instead of here.
 
 ## Active versus commented
 

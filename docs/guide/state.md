@@ -30,7 +30,7 @@ them to the daemon, because a POST to a daemon that is down loses the record per
 and the daemon is legitimately down during restarts, upgrades, and reboots. A lost record
 would silently downgrade a clean completion into a phantom that reconciliation could only
 ever classify as `interrupted`. This is the single deliberate departure from the planning
-document; the reasoning is [research.md R5](../specs/001-minimum-daemon/research.md).
+document; the reasoning is [research.md R5](https://github.com/jantman/robot-army/blob/main/specs/001-minimum-daemon/research.md).
 
 **The lock file survives but the lock does not.** `flock` is released by the kernel when
 the holding process dies by any means, including `SIGKILL`. A stale `daemon.lock` file
@@ -550,7 +550,7 @@ on an item drops both halves for that item immediately.
 ## Interrupted at X → result on next start
 
 The full table is in
-[data-model.md](../specs/001-minimum-daemon/data-model.md#interruption-behaviour). The
+[data-model.md](https://github.com/jantman/robot-army/blob/main/specs/001-minimum-daemon/data-model.md#interruption-behaviour). The
 summary:
 
 | Interrupted at | Result |
@@ -590,7 +590,7 @@ summary:
 | After `git worktree remove`, before the branch half | Worktree gone, branch present, `cleanup_state` unwritten. The next pass finds the directory already absent, treats git's "not a working tree" as a refusal about its *record* rather than about the contents, completes the branch half, and records the outcome |
 | After both cleanup removals, before the row is written | Both gone, `cleanup_state` still `NULL`. The next pass re-attempts, both steps refuse harmlessly, and the row is written `done` |
 | During the containment fetch | Nothing removed. Containment is unproven, so the branch is retained and the item is reconsidered. The failure direction is always *keep* |
-| After a state transition, before its notification | State committed and logged; no message sent. The state change is fully reconstructible; the lost message is the named gap in [logging.md](logging.md) |
+| After a state transition, before its notification | State committed and logged; no message sent. The state change is fully reconstructible; the lost message is the named gap in [the audit log](audit-log.md) |
 | Mid-notification, after the POST left | Possibly delivered, recorded as attempted with its outcome. **No retry** — a duplicate notification is noise, and a retry loop is a Principle IV violation |
 | After `cancel` signalled the process, before the transaction committed | Rolled back: the item is still `active` and its session row still open, while the process is stopped. The reconciliation sweep resolves it — an open row under an item that is not `dispatching` or `active` is stale by definition, and this is why closing it at the command is belt rather than braces |
 | Mid-sweep of stale session rows | Rows already reclaimed are committed with their audit records; rows not yet reached stay open and are taken by the next pass. Each row is decided independently, so there is no cross-row state to lose |

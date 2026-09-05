@@ -1,0 +1,18 @@
+# GitHub Pages configuration for the built-in branch build.
+#
+# Pages is set to "Deploy from a branch", main, /docs. GitHub runs its own
+# pages-build-deployment job, so there is no workflow in this repository to maintain and
+# nothing to build locally. That is the whole reason this file is four settings long.
+title: robot-army
+description: A single-user daemon that turns labelled GitHub issues into interactive Claude Code sessions.
+theme: jekyll-theme-primer
+
+# The project's history lives in docs/ too and stays there — it is linked from commits and
+# issues, and moving it would break those links for nothing. It is excluded from the
+# published site rather than deleted, because it is a record of how this got here and not
+# documentation of how to use it.
+exclude:
+  - roadmap.md
+  - incident-2026-08-31-desktop-session-killed.md
+  - verification-2026-09-01-cleanup-guards.md
+  - initial-planning/

@@ -30,6 +30,7 @@ from robot_army.operations import (
     Context,
     Result,
 )
+from robot_army.paths import Layout
 from robot_army.states import WorkItemState
 
 READ_COMMANDS = frozenset(
@@ -227,6 +228,21 @@ def build_parser() -> argparse.ArgumentParser:
     purge = sub.add_parser("purge-simulated", help="remove dry-run rows (FR-058)")
     purge.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
 
+    example = sub.add_parser(
+        "example-config",
+        help="print a fully commented config.toml with every option in it",
+    )
+    example.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="write to PATH instead of stdout; refuses an existing file without --force",
+    )
+    example.add_argument(
+        "--force", action="store_true", help="allow --output to replace an existing file"
+    )
+
     # -- milestone 002 -----------------------------------------------------
     serve = sub.add_parser(
         "serve", help="run the web interface in the foreground, independently of the daemon"
@@ -345,6 +361,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         return _run(args)
+    if args.command == "example-config":
+        # Handled here, before ``load_config``, for the same class of reason ``serve`` is
+        # handled here: every command in ``_dispatch`` presumes a config that already
+        # loaded. This one exists to be run on a machine that has none, so routing it
+        # through the table would make it fail with "config file not found" — the exact
+        # situation it is for. A global ``--config`` is therefore accepted and ignored.
+        return _example_config(args)
     if args.command == "serve":
         # Handled here rather than in the table below because `serve` must never open the
         # database the way every other command does: the web process verifies the schema
@@ -422,6 +445,52 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_PRECONDITION
 
 
+def _example_config(args: argparse.Namespace) -> int:
+    """Render the example config to stdout, or atomically to ``--output``.
+
+    Reads nothing: not the config, not the environment, not the state directory. That is
+    what makes the output identical on every machine, which is what lets a test compare the
+    committed copy against a fresh render.
+    """
+    from robot_army.audit import AuditLog
+    from robot_army.exampleconfig import ExampleConfigError, render, write
+
+    if args.force and args.output is None:
+        print("--force applies to --output; there is nothing to force", file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.output is None:
+        try:
+            # stdout only, so `robot-army example-config > config.toml` produces the
+            # document and nothing else. No audit record: nothing outside this process
+            # changed, which is the exception the plan documents against Principle III.
+            sys.stdout.write(render())
+        except ExampleConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_FAILED
+        return EXIT_OK
+
+    destination = Path(args.output).expanduser()
+    # The default layout, because no config was read and so no [paths] state_dir can be
+    # honoured here. The plan records that limitation rather than hiding it.
+    audit = AuditLog(Layout.default().state_dir / "logs", component="cli")
+    try:
+        write(destination, force=args.force, audit=audit)
+    except FileExistsError:
+        print(f"{destination} already exists; pass --force to replace it", file=sys.stderr)
+        return EXIT_PRECONDITION
+    except ExampleConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAILED
+    except OSError as exc:
+        print(f"could not write {destination}: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    finally:
+        audit.close()
+    print(f"wrote {destination}", file=sys.stderr)
+    return EXIT_OK
+
+
 def _serve(args: argparse.Namespace) -> int:
     from robot_army.web.server import serve
 
@@ -459,16 +528,12 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "log": lambda: (
             _follow(ctx)
             if args.follow
-            else operations.read_log(
-                ctx, since=args.since, item_id=args.item, limit=args.limit
-            )
+            else operations.read_log(ctx, since=args.since, item_id=args.item, limit=args.limit)
         ),
         "anomalies": lambda: operations.anomalies(
             ctx, acknowledge=args.acknowledge, show_all=args.all, since=args.since
         ),
-        "health": lambda: operations.health_check(
-            ctx, max_age=args.max_age, do_notify=args.notify
-        ),
+        "health": lambda: operations.health_check(ctx, max_age=args.max_age, do_notify=args.notify),
         "doctor": lambda: operations.doctor(ctx),
         "poll": lambda: operations.poll_now(ctx, repo=args.repo),
         "reconcile": lambda: operations.reconcile_now(ctx),

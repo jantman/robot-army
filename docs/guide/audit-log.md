@@ -126,7 +126,7 @@ what the operation actually returned lands later as `web.resume.result`.
 
 `web.start` records the address and port the interface is actually listening on, on every
 start. Under the exposure model in
-[002's spec](../specs/002-web-ui/spec.md) the bind address *is* the access policy, so it is
+[002's spec](https://github.com/jantman/robot-army/blob/main/specs/002-web-ui/spec.md) the bind address *is* the access policy, so it is
 the one fact that is never allowed to be silent.
 
 ## Intent and outcome
@@ -372,7 +372,7 @@ extension hooks are instructions an agent chooses to follow rather than callback
 report that never arrives is indistinguishable from a phase not yet reached; everything here
 is read from files in the worktree instead. The argument, and the three conditions that would
 make hooks worth revisiting, are in
-[the 007 spec](../specs/007-speckit-extensions/spec.md#out-of-scope).
+[the 007 spec](https://github.com/jantman/robot-army/blob/main/specs/007-speckit-extensions/spec.md#out-of-scope).
 
 ### Phase observation writes nothing when nothing changed
 
@@ -416,7 +416,7 @@ point of that check, and scope names are not secrets.
 ## What is deliberately not logged
 
 Principle III permits gaps only when they are named and justified in the feature plan. The
-full argument is in [plan.md](../specs/001-minimum-daemon/plan.md); the list, so a reader of
+full argument is in [plan.md](https://github.com/jantman/robot-army/blob/main/specs/001-minimum-daemon/plan.md); the list, so a reader of
 the log knows what its silence means:
 
 | Gap | Why |

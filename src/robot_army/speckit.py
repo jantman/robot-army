@@ -76,7 +76,14 @@ _MAX_INIT_OPTIONS = 64 * 1024
 #: add lines to the screen, and a long one could push the committed permission settings out
 #: of scrollback. Restricting what may be echoed makes "the screen cannot be composed by
 #: the thing being approved" a property rather than a hope (research R8).
-_PLAIN_VALUE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+#:
+#: **Matched with** ``fullmatch``, and the pattern carries no ``^``/``$`` so that it cannot
+#: be matched any other way by mistake. ``$`` matches at the end of the string *or* just
+#: before one trailing newline, so ``re.match(r"^...$", "sequential\n")`` succeeds — and a
+#: value of ``"sequential\n"`` echoed onto the screen is exactly the extra line this guard
+#: exists to make impossible. Caught in review of PR #145; the newline test that missed it
+#: put the newline in the middle, where the character class rejects it either way.
+_PLAIN_VALUE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 
 #: The ladder, lowest rung first. ``implement`` is last and is the only rung not evidenced
 #: by a file appearing — see ``observe``.
@@ -370,7 +377,7 @@ def numbering(root: str | Path) -> Numbering:
         )
 
     value = options["feature_numbering"]
-    if not isinstance(value, str) or not _PLAIN_VALUE.match(value):
+    if not isinstance(value, str) or not _PLAIN_VALUE.fullmatch(value):
         # The value itself is **not** repeated into the reason. Everything above is either
         # this module's own text or a decoder message; this is the one branch where the
         # offending bytes are in hand, and they are exactly the bytes that failed the test

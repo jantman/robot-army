@@ -46,7 +46,10 @@ Ordered; the first rule that applies wins. Every step's failure is an outcome, n
 6. **There is no `feature_numbering` key** → `scanned`, `value=None`.
 7. **The value is not a string, is longer than 32 characters, or contains anything outside
    `[A-Za-z0-9_.-]`** → `unknown`, and the value itself is *not* quoted into the reason
-   (research R8).
+   (research R8). Matched with `fullmatch` and a pattern carrying no `^`/`$`: in Python `$`
+   matches at the end of the string *or* immediately before one trailing newline, so an
+   anchored `re.match` accepts `"sequential\n"` — which is precisely the extra line this
+   rule exists to keep off the screen. Found in review of PR #145.
 8. **The value is `timestamp`** → `timestamp`, `value="timestamp"`.
 9. **Otherwise** → `scanned`, `value=` the value.
 

@@ -90,6 +90,11 @@ only after it has been confirmed to be a string of at most 32 characters matchin
 `[A-Za-z0-9_.-]+`. A value with a newline in it could otherwise add lines to the screen; a
 100 KB one could push the committed permission settings out of scrollback.
 
+The match is a `fullmatch` against a pattern with no anchors of its own. An anchored
+`re.match(r"^...$", value)` would *not* be equivalent: Python's `$` matches immediately before
+one trailing newline, so `"sequential\n"` passes it. That escape was found in review of
+PR #145 and is now a test in its own right.
+
 A value failing that test produces the **unknown** block, and the value does not appear in the
 `reason`. That is the honest classification as well as the safe one: a file this system cannot
 make sense of is one whose numbering it does not know.

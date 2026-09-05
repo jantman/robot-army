@@ -17,6 +17,7 @@ approved.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -142,6 +143,44 @@ def test_a_value_with_a_newline_cannot_reach_the_screen(tmp_path: Path) -> None:
     assert result.value is None
     assert "forged" not in result.reason
     assert "\n" not in result.reason
+
+
+def test_a_trailing_newline_does_not_slip_past_the_guard(tmp_path: Path) -> None:
+    """The bug review of PR #145 found, kept as a test rather than as a fixed line.
+
+    ``$`` in Python matches at the end of the string *or* immediately before one trailing
+    newline, so ``re.match(r"^[A-Za-z0-9_.-]{1,32}$", "sequential\n")`` succeeds. That value
+    would have been classified ``scanned`` and echoed onto the approval screen carrying its
+    own line break — the precise thing the guard exists to prevent.
+
+    The newline test above missed it because it puts the newline in the *middle*, where the
+    character class rejects it whichever way the pattern is anchored. This one is the edge.
+    """
+    root = make_speckit_tree(
+        tmp_path / "repo", init_options='{"feature_numbering": "sequential\n"}'
+    )
+
+    result = speckit.numbering(root)
+
+    assert result.kind == "unknown"
+    assert result.value is None
+    assert "\n" not in result.reason
+
+
+def test_no_accepted_value_can_carry_whitespace_of_any_kind(tmp_path: Path) -> None:
+    """The general form of the case above, so the next anchoring mistake is caught too."""
+    for index, raw in enumerate(
+        ["timestamp\n", "\ntimestamp", "timestamp\r\n", "timestamp\t", "timestamp ", " timestamp"]
+    ):
+        root = make_speckit_tree(
+            tmp_path / f"repo-{index}", init_options=json.dumps({"feature_numbering": raw})
+        )
+
+        result = speckit.numbering(root)
+
+        assert result.kind == "unknown", raw
+        assert result.value is None, raw
+        assert result.safe is False, raw
 
 
 def test_an_over_length_value_is_unknown(tmp_path: Path) -> None:

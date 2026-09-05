@@ -1491,3 +1491,29 @@ def test_the_onboarding_record_says_what_the_maintainer_was_shown(
     assert detail["speckit"] is True
     assert detail["speckit_numbering"] == "scanned"
     assert "speckit_numbering_value" not in detail
+
+
+def test_a_trailing_newline_in_the_value_cannot_add_a_line_to_the_screen(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """The escape review of PR #145 found, asserted where it would have been visible.
+
+    A `feature_numbering` of `"sequential\\n"` passed the guard, because Python's `$` also
+    matches just before one trailing newline — and the value is printed. The screen gained a
+    line from a file inside the repository it was asking about.
+    """
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(
+        ctx,
+        tmp_path,
+        repo_root,
+        name="trailing",
+        init_options='{"feature_numbering": "sequential\\n"}',
+    )
+    text = "\n".join(result.lines)
+
+    assert "spec kit: the feature numbering could not be determined" in text
+    assert "sequential" not in text
+    assert result.data["speckit_numbering"] == "unknown"
+    assert result.data["speckit_numbering_value"] is None

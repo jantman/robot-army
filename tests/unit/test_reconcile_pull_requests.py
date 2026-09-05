@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from tests.conftest import FakeIssueReader, make_boundaries, seed_item
+from tests.conftest import FakeIssueReader, make_boundaries, seed_item, seed_session
 
 from robot_army import db, reconcile
 from robot_army.boundaries import PullRequest, TransportError
@@ -111,6 +111,31 @@ def test_a_done_item_whose_pull_requests_are_all_settled_is_never_asked_again(co
 
     assert refresh(conn, audit, reader) == 0
     assert reader.pr_calls == []
+
+
+def test_a_done_item_with_an_empty_set_is_rechecked_while_a_session_still_runs(conn, audit):
+    """The race the "all settled" rule alone would lose. Close the issue by hand while the
+    session is still working: the pass stores ``[]``, ``_resolve_closed_issues`` makes the
+    item ``done`` in the same pass, and the session then opens its pull request. Without
+    this clause the page would render a confident "none" for ever — exactly the failure the
+    feature exists to prevent."""
+    item_id = item(conn, state=WorkItemState.DONE, stored="[]")
+    seed_session(conn, item_id, state="running")
+
+    assert refresh(conn, audit, reader_with(PR_7_OPEN)) == 1
+    assert [pr["number"] for pr in stored_on(conn, item_id)] == [7]
+
+
+def test_a_done_item_with_an_empty_set_and_no_live_session_is_settled(conn, audit):
+    """And the clause still runs out. Once no session could open a pull request, an empty
+    set is as settled as a merged one, and the item stops costing anything."""
+    item_id = item(conn, state=WorkItemState.DONE, stored="[]")
+    seed_session(conn, item_id, state="exited_clean")
+    reader = reader_with(PR_7_OPEN)
+
+    assert refresh(conn, audit, reader) == 0
+    assert reader.pr_calls == []
+    assert stored_on(conn, item_id) == []
 
 
 def test_a_terminal_item_that_was_never_checked_is_not_backfilled(conn, audit):
@@ -337,3 +362,25 @@ def records(audit, layout, action):
         for line in path.read_text(encoding="utf-8").splitlines()
         if (record := json.loads(line))["action"] == action
     ]
+
+
+# -- a column we cannot read (models.pull_request_list) ---------------------
+
+
+def test_a_column_holding_the_wrong_shape_does_not_abort_the_pass(conn, audit):
+    """A column we cannot read is a column we do not have — and the guard has to reach the
+    *elements*, not stop at "is it a list". Every reader calls ``.get`` on what comes out, so
+    ``[144]`` would raise ``AttributeError`` inside the pass and take down the whole
+    reconciliation, not one item."""
+    item_id = item(conn, state=WorkItemState.DONE, stored="[144]")
+    other = item(conn, issue_number=43, branch="robot-army/43")
+
+    assert db.get_work_item(conn, item_id).pull_request_list == []
+    assert refresh(conn, audit, reader_with(PR_7_OPEN, branch="robot-army/43")) == 1
+    assert [pr["number"] for pr in stored_on(conn, other)] == [7]
+
+
+def test_unparseable_json_reads_as_no_pull_requests_rather_than_raising(conn, audit):
+    item_id = item(conn, stored="not json at all")
+
+    assert db.get_work_item(conn, item_id).pull_request_list == []

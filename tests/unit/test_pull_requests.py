@@ -27,15 +27,25 @@ def make_reader(config, audit, handler) -> GitHubReader:
 
 
 def graphql(*, linked: list[dict] | None = None, branch: list[dict] | None = None, issue=...):
-    """One ``data`` payload, with each half of the query set independently."""
+    """One ``data`` payload, with each half of the query set independently.
+
+    Branch-route nodes are given ``headRepositoryOwner: jantman`` unless they carry one
+    already, because that is what the real API returns for a branch in our own repository —
+    a fixture without it would be a fork, and every test here would be testing the fork
+    path by accident.
+    """
     node = {} if issue is ... else issue
     if node is not None:
         node = {"closedByPullRequestsReferences": {"nodes": linked or []}}
+    ours = [
+        {"headRepositoryOwner": {"login": "jantman"}, **node_}
+        for node_ in (branch or [])
+    ]
     return {
         "data": {
             "repository": {
                 "issue": node,
-                "pullRequests": {"nodes": branch or []},
+                "pullRequests": {"nodes": ours},
             }
         }
     }
@@ -154,6 +164,84 @@ def test_the_query_asks_for_merged_pull_requests_by_both_routes(config, audit):
         "number": 42,
         "branch": "robot-army/42",
     }
+
+
+def test_a_fork_branch_of_the_same_name_is_not_this_items_pull_request(config, audit):
+    """A head ref name belongs to nobody. The REST call this replaced passed
+    ``head=owner:branch`` and so could not match a fork; ``headRefName`` alone can, and on a
+    public repository that is enough for a stranger who names a branch after ours to have
+    their pull request stored and shown as this work item's."""
+    fork = {
+        "number": 99,
+        "url": "https://github.com/someone/demo/pull/99",
+        "state": "OPEN",
+        "headRepositoryOwner": {"login": "someone"},
+    }
+    reader = make_reader(config, audit, responder(graphql(branch=[fork, PR_7])))
+
+    found = reader.pull_requests_for("jantman/demo", 42, "robot-army/42")
+
+    assert [pr.number for pr in found] == [7]
+
+
+def test_a_branch_pull_request_whose_head_owner_is_unreadable_is_refused(config, audit):
+    """The field is absent when the head repository has been deleted. "I cannot tell whose
+    fork this came from" is not a reason to attribute it to ourselves."""
+    unknown = {"number": 99, "url": "https://github.com/x/demo/pull/99", "state": "OPEN"}
+    reader = make_reader(
+        config,
+        audit,
+        responder({"data": {"repository": {
+            "issue": {"closedByPullRequestsReferences": {"nodes": []}},
+            "pullRequests": {"nodes": [unknown]},
+        }}}),
+    )
+
+    assert reader.pull_requests_for("jantman/demo", 42, "robot-army/42") == []
+
+
+def test_the_ownership_check_does_not_reach_the_issue_route(config, audit):
+    """``closedByPullRequestsReferences`` is a link GitHub itself made from *our* issue, so
+    a pull request reaching us that way is ours to show whoever opened it — which is the
+    point of the second route existing at all."""
+    from_a_fork = {
+        "number": 99,
+        "url": "https://github.com/someone/demo/pull/99",
+        "state": "OPEN",
+    }
+    reader = make_reader(config, audit, responder(graphql(linked=[from_a_fork])))
+
+    assert [pr.number for pr in reader.pull_requests_for("jantman/demo", 42, "b")] == [99]
+
+
+def test_two_pull_requests_sharing_a_number_in_different_repositories_both_survive(
+    config, audit
+):
+    """An issue may legally be linked to a pull request in another repository, so a number
+    is not an identity. Keying on it would silently drop one and show the survivor's address
+    and state for both."""
+    elsewhere = {
+        "number": 7,
+        "url": "https://github.com/other/thing/pull/7",
+        "state": "MERGED",
+    }
+    reader = make_reader(config, audit, responder(graphql(linked=[elsewhere], branch=[PR_7])))
+
+    found = reader.pull_requests_for("jantman/demo", 42, "robot-army/42")
+
+    assert [(pr.number, pr.url) for pr in found] == [
+        (7, "https://github.com/jantman/demo/pull/7"),
+        (7, "https://github.com/other/thing/pull/7"),
+    ]
+
+
+def test_the_query_asks_who_owns_the_head_branch(config, audit):
+    seen: list[dict] = []
+    reader = make_reader(config, audit, responder(graphql(), seen))
+
+    reader.pull_requests_for("jantman/demo", 42, "robot-army/42")
+
+    assert "headRepositoryOwner" in seen[0]["query"]
 
 
 def test_a_transport_failure_raises_rather_than_returning_an_empty_list(config, audit):

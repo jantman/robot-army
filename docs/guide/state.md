@@ -413,13 +413,24 @@ every run confirms an unchanged set, so the general updater would push `updated_
 once a minute for every item in the system — turning a column that means "when this item last
 changed" into "when the daemon last looked".
 
-**Which items are re-checked, and why it stops.** An item with a branch, not simulated, and
-either in `active`, `awaiting_review` or `interrupted`, or still holding a pull request
-recorded as `open`. That second clause exists because an issue can be closed by hand while
-its pull request is still open, which would otherwise freeze the page at `open` forever. Once
-every pull request an item has is `merged` or `closed`, nothing can change and the item is
-never asked about again — which is what lets this ship with no interval and no configuration
-key. Nothing is backfilled: an item that finished before migration 013 keeps its `NULL`.
+**Which items are re-checked, and why it stops.** One query, `db.list_pull_request_candidates`,
+asking whether the answer can still change. An item with a branch and not simulated, and any
+one of:
+
+1. in `active`, `awaiting_review` or `interrupted` — a pull request can appear at any moment;
+2. still holding a pull request recorded as `open` — because an issue can be closed by hand
+   while its pull request is open, which would otherwise freeze the page at `open` for ever;
+3. holding an **empty** set with a session still `starting` or `running` — because a worker
+   that has not opened a pull request yet may still open one, and an empty set is not settled
+   the way `merged` is.
+
+Clause 3 closes a race clause 2 alone loses permanently: close the issue by hand mid-session
+and the item goes `done` holding `[]`, after which a pull request opened by the still-running
+session would never be seen and the page would read `none` for ever.
+
+Each clause runs out on its own — the state changes, the pull requests settle, the session
+ends — which is what lets this ship with no interval, no cap and no configuration key. Nothing
+is backfilled: an item that finished before migration 013 keeps its `NULL`.
 
 ```bash
 sqlite3 -header -column ~/.local/state/robot-army/state.db \

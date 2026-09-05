@@ -316,3 +316,25 @@ the audit record and the column write share a transaction, but the audit log is 
 **file**, so a rollback cannot unwrite the record. The surviving failure is a record for a
 change that did not land — corrected by the next pass — which is the right way round, since the
 alternative ordering risks a committed change with no record at all.
+
+
+---
+
+## What review found, and what changed
+
+A `/code-review high` pass over the finished branch raised seven items. Six were real; all
+seven were acted on. The two that changed the design are written up as R11 and R12 in
+[research.md](./research.md), and the contract was corrected to match.
+
+| # | Finding | Change |
+|---|---|---|
+| 1 | A terminal item with a stored `[]` was never re-checked, so a pull request opened after the item went `done` rendered as a confident `none` for ever | Third candidate clause: an empty set is re-checked while a session is still running (R12) |
+| 2 | `show` printed the stored pull requests under "computed now, **never stored**", as a raw Python repr | A `pull req.` line in the item block; the three stored keys are excluded from the signals block |
+| 3 | `headRefName` dropped the owner qualification `head=owner:branch` had, so a fork's branch of the same name could be shown as this item's pull request | `headRepositoryOwner` requested and filtered, branch route only (R11) |
+| 4 | De-duplicating by number alone collided a linked pull request in another repository with this repository's | Keyed on URL; sorted by `(number, url)` |
+| 5 | `pull_request_list` checked "is it a list" but not its elements, so `[144]` would `AttributeError` and abort a whole reconciliation pass | The guard reaches the elements |
+| 6 | The candidate query materialised every historical item once a minute | The whole rule moved into `db.list_pull_request_candidates` (R13) |
+| 7 | A comment about lower-casing `state` sat above the `url=` line | Moved |
+
+Findings 1, 3 and 4 each have a test that fails without the fix. Finding 5's test asserts the
+thing that actually matters — that one unreadable column does not take down the pass around it.

@@ -682,17 +682,10 @@ def _refresh_pull_requests(
     before this, the resume-decision block asked GitHub live while a page rendered, and
     nothing stopped it disagreeing with anything else on the screen.
 
-    **Which items are asked about**, and why the rule needs no interval and no cap. An item
-    qualifies when it has a branch, is not simulated, and either is in a state where a pull
-    request can still appear — ``active``, ``awaiting_review``, ``interrupted`` — or still
-    has a stored pull request recorded as ``open``.
-
-    The second clause is not decoration. ``_resolve_closed_issues`` moves an item to
-    ``done`` the moment its issue closes, and an issue can be closed by hand while its pull
-    request is still open; without the clause that item's page would read ``open`` forever.
-    With it, the item is re-checked only until every pull request it has is ``merged`` or
-    ``closed`` — at which point nothing can change and it is never asked about again. The
-    rule terminates itself, which is why this needs no configuration key.
+    **Which items are asked about** is one SQL question, in
+    ``db.list_pull_request_candidates`` — *can this item's answer still change?* Its
+    docstring carries the three clauses and why each runs out on its own, which is what lets
+    this feature have no interval, no cap and no configuration key.
 
     **Nothing before migration 013 is backfilled.** An item that finished before this
     existed keeps a ``NULL`` column and reads as "not checked", which is what it is. The
@@ -702,34 +695,11 @@ def _refresh_pull_requests(
     **No per-pass cache**, unlike ``_resolve_closed_issues`` beneath. It would never hit:
     ``idx_work_items_identity`` is unique on ``(source, source_id, dry_run)`` and
     ``source_id`` is ``repo#issue``, so two non-simulated items cannot share an issue — and
-    simulated ones never get here. A cache that cannot hit is a claim no test can back.
+    simulated ones are excluded by the query. A cache that cannot hit is a claim no test can
+    back.
     """
     changed = 0
-    candidates = db.list_work_items(
-        conn,
-        include_simulated=True,
-        states=[
-            WorkItemState.ACTIVE,
-            WorkItemState.AWAITING_REVIEW,
-            WorkItemState.INTERRUPTED,
-            WorkItemState.DONE,
-            WorkItemState.ABANDONED,
-            WorkItemState.FAILED,
-        ],
-    )
-    for item in candidates:
-        if item.dry_run:
-            # FR-006, and the same decision ``_resolve_closed_issues`` makes: a simulated
-            # row exists to exercise the local machinery, and asking GitHub about it would
-            # be the dry-run mode causing exactly the outward effect it exists to avoid.
-            continue
-        if not item.branch:
-            # Nothing was ever dispatched, so no pull request can exist and there is
-            # nothing to ask. Not an error and not a finding — just no question.
-            continue
-        if not _pull_requests_wanted(item):
-            continue
-
+    for item in db.list_pull_request_candidates(conn):
         try:
             found = boundaries.issue_reader.pull_requests_for(
                 item.repo_key, item.issue_number, item.branch
@@ -749,17 +719,6 @@ def _refresh_pull_requests(
         if _record_pull_requests(conn, audit, item, found):
             changed += 1
     return changed
-
-
-def _pull_requests_wanted(item: WorkItem) -> bool:
-    """Can this item's pull-request answer still change? See ``_refresh_pull_requests``."""
-    if item.state in (
-        WorkItemState.ACTIVE,
-        WorkItemState.AWAITING_REVIEW,
-        WorkItemState.INTERRUPTED,
-    ):
-        return True
-    return any(pr.get("state") == "open" for pr in item.pull_request_list)
 
 
 def _record_pull_requests(

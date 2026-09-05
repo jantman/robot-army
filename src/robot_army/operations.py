@@ -846,6 +846,33 @@ def _anomaly_dict(anomaly: Any) -> dict[str, Any]:
 # -- show -------------------------------------------------------------------
 
 
+#: The three keys :func:`resume_signals` merges in from the work item's own row (issue
+#: #143). Everything else in that dict is computed for the call; these are read back from
+#: storage, so ``show`` prints them separately rather than under a heading that says
+#: nothing there is stored.
+_STORED_SIGNAL_KEYS = frozenset(
+    {"pull_requests", "pull_requests_at", "pull_requests_known"}
+)
+
+
+def _pull_request_line(item: Any) -> str:
+    """One line naming this item's pull requests, for the terminal (issue #143).
+
+    The three states the interface draws, in the words the terminal has room for. "not
+    checked" and "none" must not collapse into one phrase here for the same reason they must
+    not on the web page: one is an unasked question and the other is GitHub's answer.
+    """
+    if item.pull_requests is None:
+        return "(not checked)"
+    found = item.pull_request_list
+    if not found:
+        return f"(none, as of {timefmt.local(item.pull_requests_at)})"
+    listed = "  ".join(
+        f"#{pr.get('number')} {pr.get('state')} {pr.get('url')}" for pr in found
+    )
+    return f"{listed}  (as of {timefmt.local(item.pull_requests_at)})"
+
+
 def show(ctx: Context, item_id: int) -> Result:
     """Everything about one work item, including the FR-048 resume-decision signals."""
     result = Result()
@@ -876,6 +903,7 @@ def show(ctx: Context, item_id: int) -> Result:
     result.say(f"  state      : {item.state}")
     result.say(f"  worktree   : {item.worktree_path or '(none)'}")
     result.say(f"  branch     : {item.branch or '(none)'}")
+    result.say(f"  pull req.  : {_pull_request_line(item)}")
     if item.failure_reason:
         result.say(f"  failure    : {item.failure_reason}")
     if item.blocked_reason:
@@ -919,6 +947,12 @@ def show(ctx: Context, item_id: int) -> Result:
     result.say()
     result.say("resume-decision signals (computed now, never stored):")
     for key, value in signals.items():
+        # The pull-request keys are the one part of this dict that *is* stored, and they
+        # are printed above under `pull req.` where that is not a contradiction. Leaving
+        # them here would put a Python repr of a list of dicts in user-facing output,
+        # beneath a heading asserting the opposite of the truth about them.
+        if key in _STORED_SIGNAL_KEYS:
+            continue
         result.say(f"  {key:<22} {value}")
     if item.prepare_output:
         result.say()

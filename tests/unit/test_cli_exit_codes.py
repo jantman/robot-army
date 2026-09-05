@@ -306,6 +306,48 @@ def test_show_renders_an_items_history_and_resume_signals(config_file, layout, c
     assert "no session attempts yet" in out
 
 
+def test_show_names_the_pull_requests_outside_the_never_stored_block(
+    config_file, layout, capsys
+):
+    """Issue #143. The pull requests are read back from the row, so printing them under
+    "computed now, never stored" would assert the opposite of the truth about them — and
+    dumping the list into that block puts a Python repr in user-facing output."""
+    from robot_army import db
+
+    conn, _ = db.open_database(layout.db_path)
+    item_id = seed_item(conn)
+    with db.transaction(conn):
+        db.record_pull_requests(
+            conn,
+            item_id,
+            found='[{"number":144,"url":"https://github.com/x/demo/pull/144","state":"merged"}]',
+            at="2026-09-05T22:00:00Z",
+        )
+    conn.close()
+
+    assert run_cli(["show", str(item_id)], config_file) == EXIT_OK
+    out = capsys.readouterr().out
+
+    assert "#144 merged https://github.com/x/demo/pull/144" in out
+    assert "pull_requests " not in out, (
+        "the raw dict must not reach the signals block"
+    )
+    assert "{'number'" not in out, "no Python repr in user-facing output"
+
+
+def test_show_distinguishes_an_unasked_question_from_an_empty_answer(
+    config_file, layout, capsys
+):
+    from robot_army import db
+
+    conn, _ = db.open_database(layout.db_path)
+    item_id = seed_item(conn)
+    conn.close()
+
+    assert run_cli(["show", str(item_id)], config_file) == EXIT_OK
+    assert "(not checked)" in capsys.readouterr().out
+
+
 def test_the_exit_codes_are_the_documented_five():
     """A change here means contracts/cli.md changed, which should be deliberate."""
     assert (EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_PRECONDITION, EXIT_CHECK_FAILED) == (

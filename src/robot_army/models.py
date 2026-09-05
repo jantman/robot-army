@@ -155,7 +155,14 @@ class WorkItem:
             parsed = json.loads(self.pull_requests)
         except ValueError:
             return []
-        return parsed if isinstance(parsed, list) else []
+        if not isinstance(parsed, list):
+            return []
+        # Element-wise, not just "is it a list". Every reader of this calls ``.get`` on what
+        # comes out, so a column holding ``[144]`` would raise ``AttributeError`` inside a
+        # reconciliation pass — aborting the whole pass, not one item — and 500 the item
+        # page. The promise this property makes is silence, and silence has to reach the
+        # elements to be worth anything.
+        return [entry for entry in parsed if isinstance(entry, dict)]
 
     @property
     def cleanup_pending(self) -> bool:

@@ -216,6 +216,14 @@ query($pid: ID!, $after: String) {
 #:
 #: ``state`` is the enum ``OPEN | MERGED | CLOSED``, so "was it merged?" is a state rather
 #: than a second boolean field to read and reconcile.
+#:
+#: ``headRepositoryOwner`` is the one field here that is about trust rather than display.
+#: The REST call this replaced passed ``head=owner:branch``, which restricted matches to the
+#: repository owner's own branches; ``headRefName`` alone does not, and matches a branch of
+#: that name in **any** fork. On a public repository that is enough for a stranger's fork
+#: branch, named to match, to be stored and shown as this work item's pull request. The
+#: filter is applied below rather than in the query because GraphQL offers no
+#: ``headRepositoryOwner:`` argument on this connection.
 _PULL_REQUESTS = """
 query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
   repository(owner: $owner, name: $name) {
@@ -225,7 +233,7 @@ query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
       }
     }
     pullRequests(headRefName: $branch, first: 20, states: [OPEN, CLOSED, MERGED]) {
-      nodes { number url state }
+      nodes { number url state headRepositoryOwner { login } }
     }
   }
 }
@@ -535,33 +543,57 @@ class GitHubReader:
         # ``_graphql`` has already raised. A null one *without* errors, which GitHub does
         # not currently produce, means only that the issue route contributed nothing; the
         # branch route's answer still stands and is still worth returning.
-        nodes = [
-            *((issue.get("closedByPullRequestsReferences") or {}).get("nodes") or []),
-            *((repository.get("pullRequests") or {}).get("nodes") or []),
-        ]
-        found: dict[int, PullRequest] = {}
-        for node in nodes:
+        linked = (issue.get("closedByPullRequestsReferences") or {}).get("nodes") or []
+        from_branch = (repository.get("pullRequests") or {}).get("nodes") or []
+        found: dict[str, PullRequest] = {}
+        # The two routes are walked separately because only one of them needs the ownership
+        # check: ``closedByPullRequestsReferences`` is a link GitHub itself made from *our*
+        # issue, while ``headRefName`` matched a string that belongs to nobody.
+        walk = [*((node, False) for node in linked), *((node, True) for node in from_branch)]
+        for node, check_owner in walk:
             if not isinstance(node, dict):
                 continue
             number, url = node.get("number"), node.get("url")
             if number is None or not url:
                 continue
-            if int(number) in found:
+            if check_owner and not self._is_ours(node, owner):
+                # A head ref name is not owned by anybody. Matching one in a fork would let
+                # a stranger who names a branch after ours have their pull request stored
+                # and displayed as this work item's — see the note on ``_PULL_REQUESTS``.
+                continue
+            if str(url) in found:
                 # Found by both routes, which is the ordinary case rather than the odd one:
                 # a session opens the pull request from its branch *and* says "Closes #n".
                 continue
-            found[int(number)] = PullRequest(
+            found[str(url)] = PullRequest(
                 number=int(number),
+                url=str(url),
                 # Lower-cased at the boundary so nothing above it ever sees GitHub's
                 # upper-case enum. A value outside the three we know is passed through
                 # rather than mapped to a guess — showing GitHub's word is better than
                 # inventing one.
-                url=str(url),
                 state=str(node.get("state") or "").lower(),
             )
-        # Sorted so the same set always serialises to the same text, which is what lets the
-        # refresh detect "nothing changed" with a string comparison instead of a diff.
-        return [found[number] for number in sorted(found)]
+        # Keyed and ordered by **URL**, not by number. An issue may legally be linked to a
+        # pull request in another repository, so two entries can share a number while being
+        # different pull requests; keying on the number would silently drop one and show the
+        # survivor's address and state for both. Sorting keeps the same set serialising to
+        # the same text, which is what lets the refresh detect "nothing changed" with a
+        # string comparison instead of a diff.
+        return [found[url] for url in sorted(found, key=lambda u: (found[u].number, u))]
+
+    @staticmethod
+    def _is_ours(node: dict[str, Any], owner: str) -> bool:
+        """Was this branch-route pull request opened from a branch in *our* repository?
+
+        A missing or unreadable ``headRepositoryOwner`` answers **no**. The field is absent
+        when the head repository has been deleted, and "I cannot tell whose fork this came
+        from" is not a reason to attribute it to ourselves.
+        """
+        head = node.get("headRepositoryOwner")
+        if not isinstance(head, dict):
+            return False
+        return str(head.get("login") or "").lower() == owner.lower()
 
     def list_issues_since(
         self, repo_key: str, since: str, *, author: str | None = None, limit: int = 100

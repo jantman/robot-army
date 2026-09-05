@@ -134,6 +134,11 @@ that "we have not looked" can be said out loud instead of guessed at.
 existing `_resolve_closed_issues` already makes one REST call per candidate over the same
 three states, so this is the same order of magnitude as the pass already costs.
 
+> **Superseded in part by [R12](#r12--an-empty-set-on-a-terminal-item-is-not-settled-found-in-review) and [R13](#r13--the-candidate-rule-belongs-in-sql-found-in-review).** The two clauses above
+> are right but incomplete — they lose a race that leaves a terminal item reading `none` for
+> ever — and the rule now lives in SQL rather than in a Python filter over a listing. The
+> shipped rule is the one in `contracts/pull-request-discovery.md` C2.
+
 ## R5 — The signals block must stop calling GitHub, and this is what makes SC-004 true
 
 `operations.remote_resume_signals` currently calls `open_pr_for_branch` **while a page is being
@@ -204,6 +209,59 @@ item processed so far updated and every item after it untouched — a legitimate
 indistinguishable from a pass that has not run yet, and repaired by the next pass 60 seconds
 later. Nothing is staged, nothing is two-phase, and no item can hold a half-written set,
 because the set is one column written once.
+
+## R11 — A head ref name belongs to nobody (found in review)
+
+`open_pr_for_branch` passed `head=owner:branch` to REST, which restricted matches to the
+repository owner's own branches. `pullRequests(headRefName:)` has no such qualification and
+matches a branch of that name in **any** fork.
+
+**Decision**: request `headRepositoryOwner { login }` on the branch-route nodes and drop any
+whose owner is not the repository's, case-insensitively. An absent owner — which is what
+GitHub returns once the head repository has been deleted — is dropped too: "I cannot tell
+whose fork this came from" is not a reason to attribute it to ourselves.
+
+Not applied to the issue route. That link was made by GitHub from *our* issue, so a pull
+request reaching us that way is worth showing whoever opened it — which is the whole point of
+the second route existing.
+
+**Why it matters here specifically**: this repository is public (Principle V), so a stranger
+naming a fork branch after ours is a thing that can actually happen, and the consequence is a
+stranger's pull request stored and displayed as this work item's output.
+
+## R12 — An empty set on a terminal item is not settled (found in review)
+
+The candidate rule as first written re-checked a terminal item only if it already held a pull
+request recorded as `open`. That loses one race, and loses it permanently:
+
+1. The maintainer closes the issue by hand while the session is still working.
+2. The refresh runs first in the pass, finds nothing, and stores `[]`.
+3. `_resolve_closed_issues` makes the item `done` in the same pass.
+4. The session then opens its pull request.
+
+The item is now terminal with `pull_requests = '[]'` and never qualifies again, so every
+surface renders `none` — GitHub-answered, confident, and wrong — for ever. That is exactly the
+failure the feature's own docstrings claim to prevent.
+
+**Decision**: a third clause. A terminal item with an empty stored set is re-checked **while a
+session for it is `starting` or `running`**. Bounded by the session rather than by a timeout,
+so it still runs out on its own the moment no process could produce a pull request — no
+constant, no configuration key, and the self-terminating property intact.
+
+**Alternative rejected**: re-checking every terminal item with an empty set. That never
+terminates — every item ever dispatched that produced no pull request would cost an API call
+every 60 seconds, for ever, which is the unbounded growth the whole rule is shaped to avoid.
+
+## R13 — The candidate rule belongs in SQL (found in review)
+
+Listing the six candidate states and filtering in Python materialised every historical work
+item into a dataclass once a minute in order to discard nearly all of them — and after R12 the
+rule needed a session lookup as well.
+
+**Decision**: one query, `db.list_pull_request_candidates`, expressing the whole rule. It is
+the same question either way (*can this item's answer still change?*), the cost becomes
+proportional to the answer rather than to the history, and `json_each`/`json_extract` match
+the stored state exactly rather than by `LIKE` over JSON text.
 
 ## R10 — Dependencies
 

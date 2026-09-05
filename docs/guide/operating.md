@@ -149,9 +149,15 @@ pages render with GitHub unreachable, showing the last answer and how old it is.
 replaced a live lookup the resume-decision block used to make, which was both slower and
 free to disagree with everything else on the screen.
 
-Items stop being re-checked once every pull request they have is merged or closed: nothing
-can change after that, so nothing is spent. An item that finished before this existed reads
-`not checked` for good — nothing is backfilled.
+Items stop being re-checked once nothing about them can change: every pull request they have
+is merged or closed, or — for an item that finished with none — no session of theirs is still
+running that could open one. An item that finished before this existed reads `not checked` for
+good; nothing is backfilled.
+
+A pull request opened from a **fork's** branch is not shown as this item's, even when the
+branch has exactly our name, because a branch name belongs to nobody and this repository is
+public. One linked to the issue *is* shown whoever opened it — that link was made by GitHub
+from our own issue, which is a different kind of evidence.
 
 Resume and restart here obey the session cap, the pause and holds exactly as the terminal
 does, and say so on the page rather than appearing to work and then quietly doing nothing.

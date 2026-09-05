@@ -26,7 +26,7 @@ query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
       }
     }
     pullRequests(headRefName: $branch, first: 20, states: [OPEN, CLOSED, MERGED]) {
-      nodes { number url state }
+      nodes { number url state headRepositoryOwner { login } }
     }
   }
 }
@@ -40,10 +40,26 @@ from the answer.
 
 1. Take `issue.closedByPullRequestsReferences.nodes`, then `pullRequests.nodes`.
 2. Drop any node missing `number` or `url`.
-3. Lower-case `state`. A value that is not one of `open`, `merged`, `closed` is kept verbatim
+3. **From the branch route only**, drop any node whose `headRepositoryOwner.login` is not the
+   repository's owner, case-insensitively; an absent or unreadable owner is dropped too.
+4. Lower-case `state`. A value that is not one of `open`, `merged`, `closed` is kept verbatim
    and rendered as-is — inventing a state would be worse than showing GitHub's.
-4. De-duplicate on `number`, keeping the first occurrence (FR-003).
-5. Sort by `number` ascending.
+5. De-duplicate on **`url`**, keeping the first occurrence (FR-003).
+6. Sort by `(number, url)` ascending.
+
+Step 3 is a trust boundary, not a tidy-up. A head ref name belongs to nobody: `headRefName`
+matches a branch of that name in **any** fork, and the REST call this replaced could not,
+because it passed `head=owner:branch`. On a public repository the difference is enough for a
+stranger who names a branch after ours to have their pull request stored and displayed as
+this work item's. It is applied here rather than in the query because the connection offers
+no `headRepositoryOwner:` argument. It does **not** apply to the issue route: that link was
+made by GitHub from *our* issue, and a pull request reaching us that way is worth showing
+whoever opened it — which is the point of the second route existing.
+
+Step 5 keys on the URL and not the number because an issue may legally be linked to a pull
+request in **another repository**: two entries can share a number while being different pull
+requests, and keying on the number would silently drop one and show the survivor's address
+and state for both.
 
 Sorting is not cosmetic: it is what makes "did this change?" a string comparison in C3.
 
@@ -65,22 +81,37 @@ The position is load-bearing (R4). The ordinary ending is *pull request merges �
 item goes `done`*; refreshing first means the pass that retires an item has already recorded its
 pull request as `merged`, instead of freezing it at `open`.
 
-**Candidates**, evaluated per work item. Every rule but the last means *skip, silently, with no
-network call and no record*:
+**Candidates** are one SQL question — *can this item's answer still change?* —
+in `db.list_pull_request_candidates`, not a Python filter over a listing. Doing it in the
+query is what keeps the cost proportional to the answer rather than to the history: the
+terminal half would otherwise rebuild every work item ever finished into a dataclass once a
+minute and discard nearly all of them.
 
-| # | Condition | Outcome |
+An item qualifies when `dry_run = 0` **and** it has a non-empty `branch` **and** any one of:
+
+| # | Clause | Why it runs out |
 |---|---|---|
-| 1 | `item.dry_run` | SKIP — FR-006; a simulated row must cause no outward-facing effect |
-| 2 | `item.branch` is falsey | SKIP — FR-007; nothing was dispatched, so nothing can exist |
-| 3 | state is `active`, `awaiting_review` or `interrupted` | **REFRESH** |
-| 4 | any stored pull request has `state == "open"` | **REFRESH** — FR-008's second clause |
-| 5 | otherwise | SKIP |
+| 1 | state is `active`, `awaiting_review` or `interrupted` | the item leaves those states |
+| 2 | a stored pull request has `state = "open"` | it becomes `merged` or `closed`, and then nothing can change |
+| 3 | `pull_requests = '[]'` **and** a session is `starting` or `running` | the session ends |
 
-Rule 4 is why an item whose issue was closed by hand while its pull request stayed open does not
-freeze at `open` forever, and why the rule terminates: once every stored pull request is
-`merged` or `closed`, nothing can change and the item is never asked about again. Items that
-reached a terminal state before migration 013 are **not** backfilled; their `pull_requests`
-stays `NULL` and reads as "not checked" (R4).
+Clause 2 is why an item whose issue was closed by hand while its pull request stayed open does
+not freeze at `open` forever.
+
+Clause 3 closes the race clause 2 alone would lose, and it is not optional. Close the issue by
+hand while the session is still working: the pass stores `[]`, `_resolve_closed_issues` makes
+the item `done` in the same pass, and the session *then* opens its pull request. Without
+clause 3 the page renders a confident `none` for ever — the exact failure this feature exists
+to prevent. An empty set is not settled the way `merged` is; it is settled once no process
+could still produce one.
+
+`pull_requests IS NOT NULL` on clauses 2 and 3 is what keeps "never looked up" from being
+backfilled: an item that reached a terminal state before migration 013 is history, keeps its
+`NULL`, and reads as "not checked" (R4).
+
+Simulated rows and rows without a branch are excluded by the query rather than skipped by the
+caller, because both are *there is no question to ask* rather than *the answer has not
+changed* (FR-006, FR-007).
 
 **No per-pass cache**, unlike `_resolve_closed_issues`. It could never hit:
 `idx_work_items_identity` is unique on `(source, source_id, dry_run)` and `source_id` is

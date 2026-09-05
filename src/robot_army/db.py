@@ -728,16 +728,53 @@ def raise_anomaly(
 def list_anomalies(
     conn: sqlite3.Connection, *, unacknowledged_only: bool = True
 ) -> list[Anomaly]:
+    """Anomalies still needing attention, or every one ever recorded.
+
+    A resolved row is excluded by the same flag that excludes an acknowledged one, and that
+    is deliberately the only place the distinction is made: the CLI, ``status`` and the web
+    page are three callers of this one function, so they all became correct about issue
+    #138's self-resolving anomalies without any of them being edited.
+    """
     sql = "SELECT * FROM anomalies"
     if unacknowledged_only:
-        sql += " WHERE acknowledged_at IS NULL"
+        sql += " WHERE acknowledged_at IS NULL AND resolved_at IS NULL"
     sql += " ORDER BY detected_at DESC, id DESC"
     return _rows(conn.execute(sql), Anomaly)
+
+
+def open_orphan_session_anomalies(conn: sqlite3.Connection) -> list[Anomaly]:
+    """The population ``reconcile._resolve_orphan_anomalies`` re-checks (issue #138).
+
+    Narrow on purpose. ``orphan_session`` is the one kind whose condition can be positively
+    re-established as *false* — the process it names is gone — and every other kind has its
+    own settling story that this mechanism has no business guessing at.
+    """
+    return _rows(
+        conn.execute(
+            "SELECT * FROM anomalies WHERE kind = 'orphan_session' "
+            "AND acknowledged_at IS NULL AND resolved_at IS NULL ORDER BY id"
+        ),
+        Anomaly,
+    )
 
 
 def acknowledge_anomaly(conn: sqlite3.Connection, anomaly_id: int) -> bool:
     cursor = conn.execute(
         "UPDATE anomalies SET acknowledged_at = ? WHERE id = ? AND acknowledged_at IS NULL",
+        (utcnow(), anomaly_id),
+    )
+    return bool(cursor.rowcount)
+
+
+def resolve_anomaly(conn: sqlite3.Connection, anomaly_id: int) -> bool:
+    """Record that the condition no longer holds. ``True`` if this call changed anything.
+
+    The ``resolved_at IS NULL`` guard is what makes a repeated pass a genuine no-op rather
+    than a second write with the same effect, which is the same shape ``acknowledge_anomaly``
+    uses and the reason both return a boolean.
+    """
+    cursor = conn.execute(
+        "UPDATE anomalies SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL",
         (utcnow(), anomaly_id),
     )
     return bool(cursor.rowcount)

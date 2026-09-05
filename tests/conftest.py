@@ -843,15 +843,30 @@ def write_registry(
     cwd: str = "/tmp",
     version: str | None = "2.1.239",
     truncate: bool = False,
+    status: str | None = "idle",
+    status_updated_at: Any = None,
 ) -> Path:
+    """Write one fake ``~/.claude/sessions/<pid>.json``.
+
+    ``status_updated_at`` defaults to ``None``, which **omits the key**. That default is
+    load-bearing: an entry with no ``statusUpdatedAt`` is never retirable (issue #138), so
+    every caller written before retirement existed keeps producing a session this system
+    will leave alone. Tests that want a retirable session say so explicitly.
+
+    It is deliberately untyped so a test can write a string, a float or a bool into it and
+    prove the parser treats a wrong type as an absent field rather than raising.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
         "sessionId": session_id,
         "pid": pid,
         "procStart": proc_start,
         "cwd": cwd,
-        "status": "idle",
     }
+    if status is not None:
+        payload["status"] = status
+    if status_updated_at is not None:
+        payload["statusUpdatedAt"] = status_updated_at
     if version is not None:
         payload["version"] = version
     text = json.dumps(payload)
@@ -1412,8 +1427,14 @@ def seed_session(
     pid: int | None = 4321,
     exit_code: int | None = None,
     signal: int | None = None,
+    proc_start: str | None = None,
 ) -> int:
-    """Insert a session row directly, bypassing the state machine's launch path."""
+    """Insert a session row directly, bypassing the state machine's launch path.
+
+    ``proc_start`` is what dispatch records from ``confirm_session`` and is the PID-reuse
+    guard every termination path passes it to. It defaults to ``None`` — the pre-guard
+    shape — so a test that means to exercise identity must say so.
+    """
     attempt = db.next_attempt(conn, item_id)
     with db.transaction(conn):
         row_id = db.insert_session(
@@ -1425,8 +1446,9 @@ def seed_session(
             host_socket=host_socket,
         )
         conn.execute(
-            "UPDATE sessions SET state = ?, pid = ?, exit_code = ?, signal = ? WHERE id = ?",
-            (state, pid, exit_code, signal, row_id),
+            "UPDATE sessions SET state = ?, pid = ?, exit_code = ?, signal = ?, "
+            "proc_start = ? WHERE id = ?",
+            (state, pid, exit_code, signal, proc_start, row_id),
         )
     return row_id
 

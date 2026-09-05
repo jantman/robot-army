@@ -511,7 +511,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 11
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 12
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -1228,3 +1228,82 @@ def test_a_killed_migration_011_leaves_the_column_absent_and_re_runs(tmp_path, m
     assert migrate(conn) == (10, SCHEMA_VERSION)
     assert "author" in {row["name"] for row in conn.execute("PRAGMA table_info(work_items)")}
     conn.close()
+
+
+# -- migration 012: anomalies that resolve themselves (issue #138) -----------
+
+
+def test_migration_012_adds_resolved_at_and_leaves_existing_rows_open(tmp_path):
+    """No backfill, and none is possible: every pre-migration row is genuinely unresolved
+    until a pass re-checks it. The three anomalies live on the machine when this was written
+    include one whose process was already gone, and it is the *feature* that clears it, not
+    the migration."""
+    conn = db.connect(tmp_path / "state.db")
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO anomalies (kind, entity_type, entity_id, detail, detected_at) "
+        "VALUES ('orphan_session', 'session', 's-1', '{\"pid\": 1}', '2026-09-05T00:00:00Z')"
+    )
+    conn.commit()
+
+    rows = conn.execute("SELECT * FROM anomalies").fetchall()
+    assert [r["resolved_at"] for r in rows] == [None]
+
+
+def test_migration_012_rebuilds_the_partial_index_to_exclude_resolved_rows(tmp_path):
+    """The half that is silent when it is wrong.
+
+    The index is what stops a 60-second loop writing 1,440 rows a day for one condition. If
+    a resolved row stayed inside it, the same condition could never be reported again — no
+    error, no failing assertion, just an anomaly that never arrives.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    migrate(conn)
+
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'idx_anomalies_open'"
+    ).fetchone()["sql"]
+    assert "acknowledged_at IS NULL" in sql
+    assert "resolved_at IS NULL" in sql
+
+    def insert() -> None:
+        conn.execute(
+            "INSERT OR IGNORE INTO anomalies (kind, entity_type, entity_id, detail, "
+            "detected_at) VALUES ('orphan_session', 'session', 's-1', '{}', 'now')"
+        )
+
+    insert()
+    insert()
+    assert conn.execute("SELECT count(*) c FROM anomalies").fetchone()["c"] == 1, (
+        "an open anomaly must still be deduplicated"
+    )
+
+    conn.execute("UPDATE anomalies SET resolved_at = 'later'")
+    insert()
+    assert conn.execute("SELECT count(*) c FROM anomalies").fetchone()["c"] == 2, (
+        "a resolved row must leave the index so the condition can recur"
+    )
+
+
+def test_migration_012_is_reached_from_an_older_database(tmp_path):
+    """The upgrade path that actually exists: this machine's database was at 11."""
+    conn = db.connect(tmp_path / "state.db")
+    conn.execute("BEGIN")
+    for index, migration in enumerate(migrations.MIGRATIONS[:11], start=1):
+        migration(conn)
+        conn.execute(f"PRAGMA user_version = {index}")
+    conn.commit()
+    assert current_version(conn) == 11
+    conn.execute(
+        "INSERT INTO anomalies (kind, entity_type, entity_id, detail, detected_at) "
+        "VALUES ('orphan_session', 'session', 's-old', '{}', '2026-09-05T00:00:00Z')"
+    )
+    conn.commit()
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (11, SCHEMA_VERSION)
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(anomalies)")}
+    assert "resolved_at" in columns
+    row = conn.execute("SELECT * FROM anomalies WHERE entity_id = 's-old'").fetchone()
+    assert row["resolved_at"] is None, "an existing anomaly comes through open"

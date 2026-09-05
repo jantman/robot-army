@@ -196,11 +196,27 @@ uv run robot-army repos                # why is nothing happening for this repo
 uv run robot-army doctor               # environment and preconditions
 ```
 
+**An `orphan_session` whose process is gone now clears itself.** It is the only kind that
+does. Every other kind waits for `--acknowledge`, because `orphan_session` is the only one
+whose truth can be positively re-established as *false* — the pid and start time it recorded
+no longer name a live process. A resolved anomaly leaves the default listing and shows under
+`--all` marked `resolved` rather than `acknowledged`, which are different facts: one is the
+system re-checking, the other is me saying I looked. This exists because the list is read as
+*things needing attention*, and a list that is mostly stale teaches the habit of clearing it
+unread — which is how the one that mattered gets dismissed with the noise.
+
 Anomalies worth understanding rather than dismissing:
 
 - **`orphan_session`** — a live worker under the worktree root that no item claims.
   `interrupted` does *not* mean nothing is running: if the wrapper dies uncleanly the
   worker keeps going, reparented, while dtach tears down its socket.
+
+  **It no longer fires on the ordinary successful path.** It used to, for every item:
+  merging a PR closed the issue, the item went `done`, and the worker sat at its prompt
+  forever. Retirement (see [what happens after](5-outcome.md#the-sessions-ending)) ends that
+  worker before this sweep sees it. Seeing this anomaly for a `done` item now means
+  retirement *tried and could not* — the process survived the termination, so the row stays
+  open and the slot stays honestly subscribed.
 - **`no_transcript`** — the session ran and left nothing resumable. Raised by
   reconciliation five minutes after the session was confirmed, not at dispatch: the worker
   writes its transcript when it starts processing, so asking any earlier reports every

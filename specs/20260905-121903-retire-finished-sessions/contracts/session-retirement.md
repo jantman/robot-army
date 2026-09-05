@@ -47,11 +47,21 @@ In order:
 1. **Log the intent**, before anything is signalled: `session.retire`, entity `session`, carrying
    `item_id`, `session_id`, `pid`, `proc_start` and `idle_s`. Principle III: an irreversible act is
    logged before it happens.
-2. **Choose the host from the record**, never from the effect level in force (FR-011). The
-   discriminator is `session.dry_run and session.pid == 0 and session.proc_start is None`, exactly
-   as `operations.cancel` derives it and for the reasons its comment gives. Rule 2 of C2 means this
-   sweep never actually reaches a simulated row; the derivation is written the same way anyway, so
-   the two sites cannot drift.
+2. **Do not choose a host at all.** Use `boundaries.session_host` unconditionally.
+
+   *Revised during implementation.* This clause originally required the same record-driven
+   discriminator `operations.cancel` uses, "so the two sites cannot drift". Writing it that way
+   trips `test_only_cancel_selects_a_host_from_a_record`, whose own docstring says that if a second
+   module ever needs record-driven selection, that is the moment to ask whether the selection
+   belongs back in the wiring. Asked — and the answer is that this sweep does not need it: a
+   simulated row is `pid = 0` by construction, and C2 rule 2 has already skipped every one of them,
+   so the simulated branch would be unreachable. An unreachable branch that selects an
+   implementation is exactly the drift FR-053 exists to prevent, and duplicating the discriminator
+   to prevent drift between two sites when one of them can never run is the worse trade.
+
+   FR-011 is satisfied by *never consulting the effect level*, which this does by construction. If
+   the `pid` guard is ever loosened the failure is safe rather than silent: `terminate` refuses a
+   recorded pid of 0 outright and sends nothing, because `getpgid(0)` answers about the caller.
 3. **Terminate**: `host.terminate(handle, session.scope, expected_start=session.proc_start)`.
    Nothing about that call is re-implemented here — the pid-identity guard, the implausible-pid
    refusal, the scope-then-process-group escalation and the confirmation all belong to it (R5).

@@ -602,3 +602,141 @@ def test_a_live_row_with_pid_zero_is_refused_rather_than_simulated(conn, audit, 
     assert host.calls, "a non-dry-run row is never the simulated host's business"
     assert result.code == operations.EXIT_FAILED
     assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
+
+
+# -- stopping a session under a terminal item (issue #138) -------------------
+#
+# The automatic retirement sweep covers exactly one case: `done`, with a long-idle worker.
+# `abandoned` and `failed` are deliberately excluded — those are the states where the work
+# is *unfinished* and the session may be the very thing the maintainer is about to attach
+# to. This command is their only route out, and it did not work: it decided what to record
+# by asking whether the item was still `active`, so for a terminal item it killed the
+# process, confirmed it gone, and then reported that the session "had already recorded its
+# own ending" while leaving the row open. The slot stayed held, the anomaly stayed raised,
+# and the sentence the maintainer read was false in every clause.
+
+
+@pytest.mark.parametrize("state", ["done", "abandoned", "failed", "interrupted"])
+def test_a_confirmed_stop_closes_the_row_whatever_state_the_item_is_in(
+    conn, audit, config, state
+):
+    item_id, _row_id = seed_running(conn, audit, state=state)
+
+    result = operations.cancel(
+        ctx_with(conn, audit, config, OutcomeHost(confirmed())), item_id, force=True
+    )
+
+    assert result.code == 0
+    session = db.get_session(conn, SESSION)
+    assert session.state is SessionState.LOST, "the slot must come back"
+    assert session.ended_at is not None
+    assert result.data.get("settled_by") != "exit record"
+
+
+@pytest.mark.parametrize("state", ["done", "abandoned", "failed", "interrupted"])
+def test_stopping_a_terminal_items_session_leaves_the_item_where_it_is(
+    conn, audit, config, state
+):
+    """A finished item is still finished once its worker is shut down. Only an ``active``
+    item becomes ``interrupted``, because only there did work actually stop mid-flight —
+    and for most of these states ``interrupted`` is not even a legal destination."""
+    item_id, _row_id = seed_running(conn, audit, state=state)
+
+    operations.cancel(
+        ctx_with(conn, audit, config, OutcomeHost(confirmed())), item_id, force=True
+    )
+
+    assert db.get_work_item(conn, item_id).state is WorkItemState(state)
+
+
+def test_an_active_item_still_becomes_interrupted(conn, audit, config):
+    """The behaviour that must not regress while fixing the one above."""
+    item_id, _row_id = seed_running(conn, audit, state="active")
+
+    result = operations.cancel(
+        ctx_with(conn, audit, config, OutcomeHost(confirmed())), item_id, force=True
+    )
+
+    assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED
+    assert "is now interrupted" in "\n".join(result.lines)
+
+
+def test_the_message_says_what_actually_happened_to_a_finished_items_session(
+    conn, audit, config
+):
+    """SC-006. The old wording asserted an ending the system had not observed, about a
+    process it had just killed itself."""
+    item_id, _row_id = seed_running(conn, audit, state="done")
+
+    result = operations.cancel(
+        ctx_with(conn, audit, config, OutcomeHost(confirmed())), item_id, force=True
+    )
+    said = "\n".join(result.lines)
+
+    assert "had already recorded its own ending" not in said
+    assert "systemd scope" in said or "stopped session" in said
+    assert "left done" in said
+
+
+def test_a_genuine_exit_record_race_is_still_reported_as_such(conn, audit, config):
+    """The case the conflated test was there for in the first place, which must survive.
+
+    The daemon drains the exit spool in its own process, so a worker killed by our own
+    signal can record its ending between the confirmation and the settle. That is settled
+    by the exit record and must not be reported as a cancel that closed the row.
+    """
+    item_id, row_id = seed_running(conn, audit, state="active")
+
+    class SettlesFirst(OutcomeHost):
+        def terminate(self, handle, scope=None, **kwargs):
+            with db.transaction(conn):
+                transition_session(
+                    conn,
+                    audit,
+                    session_row_id=row_id,
+                    target=SessionState.EXITED_CLEAN,
+                    reason="the wrapper got its record in first",
+                )
+            return super().terminate(handle, scope, **kwargs)
+
+    result = operations.cancel(
+        ctx_with(conn, audit, config, SettlesFirst(confirmed())), item_id, force=True
+    )
+
+    assert result.data["settled_by"] == "exit record"
+    assert db.get_session(conn, SESSION).state is SessionState.EXITED_CLEAN
+
+
+def test_a_refusal_under_a_terminal_item_still_signals_nothing(conn, audit, config):
+    """FR-020. The guards are unchanged by the settling fix, and a refusal is a third
+    thing: neither "it stopped" nor "we signalled it and it survived"."""
+    item_id, _row_id = seed_running(conn, audit, state="done")
+    refusal = TerminationOutcome(
+        confirmed=False,
+        method="refused",
+        refused_reason="the recorded pid is 0, which cannot be a session process",
+        detail={"pid": 0, "signals_sent": 0},
+    )
+
+    result = operations.cancel(
+        ctx_with(conn, audit, config, OutcomeHost(refusal)), item_id, force=True
+    )
+
+    assert result.code != 0
+    assert "nothing was signalled" in "\n".join(result.lines)
+    assert db.get_session(conn, SESSION).state is SessionState.RUNNING
+    assert db.get_work_item(conn, item_id).state is WorkItemState.DONE
+
+
+def test_a_surviving_process_under_a_terminal_item_settles_nothing(conn, audit, config):
+    """FR-020, and the rule that carries this whole file: a cancel that could not verify
+    the session stopped changes nothing, so the slot stays honestly subscribed."""
+    item_id, _row_id = seed_running(conn, audit, state="done")
+
+    result = operations.cancel(
+        ctx_with(conn, audit, config, OutcomeHost(unconfirmed())), item_id, force=True
+    )
+
+    assert result.code != 0
+    assert db.get_session(conn, SESSION).state is SessionState.RUNNING
+    assert db.get_work_item(conn, item_id).state is WorkItemState.DONE

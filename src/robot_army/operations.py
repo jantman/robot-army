@@ -830,6 +830,11 @@ def _anomaly_dict(anomaly: Any) -> dict[str, Any]:
         "detail": audit_mod.redact(anomaly.detail_obj),
         "detected_at": anomaly.detected_at,
         "acknowledged_at": anomaly.acknowledged_at,
+        # Two different ways a row leaves the open list, kept apart deliberately (issue
+        # #138). "A maintainer looked at this" and "the system re-checked and it is no
+        # longer true" are not the same fact, and a reader of `--all` who cannot tell them
+        # apart cannot tell which conditions were actually dealt with.
+        "resolved_at": anomaly.resolved_at,
     }
 
 
@@ -2396,25 +2401,38 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
             ],
         )
 
-    # The item becomes `interrupted` and the worktree is left untouched: cancelling is
-    # about the process, not about the work.
+    # The worktree is left untouched either way: cancelling is about the process, not about
+    # the work.
     #
     # Re-read before settling. The daemon drains the exit spool in its own process while
     # this runs, so a worker killed by our own SIGTERM can record its ending before we get
     # here; forcing the transition then raises IllegalTransition and reports a perfectly
     # successful cancel as a failure. `dispatch.py` asks the same question at the
     # equivalent moment, for the same reason (milestone 013, 014 research R5).
+    #
+    # **These are two different questions and this used to conflate them** (issue #138).
+    # "The session already recorded its own ending" is the exit-record race above. "The item
+    # is not `active`" is something else entirely: a `done`, `abandoned` or `failed` item
+    # whose worker is still running, which is precisely what a maintainer reaches for this
+    # command to stop. Treating the second as the first meant cancel killed the process,
+    # confirmed it gone, and then reported that it "had already recorded its own ending" —
+    # while leaving the row open, so the slot stayed held and the orphan anomaly stayed
+    # raised. Every clause of that message was false.
     settled = db.get_session(ctx.conn, session.session_id)
     already_ended = settled is not None and settled.state in TERMINAL_SESSION_STATES
     current = db.get_work_item(ctx.conn, item_id)
-    already_moved = current is None or current.state is not WorkItemState.ACTIVE
-    if already_ended or already_moved:
+    if already_ended or current is None:
         result.data["settled_by"] = "exit record"
         return result.say(
             f"session {session.session_id} is gone; it had already recorded its own ending, "
             f"so item {item_id} was left as the exit record settled it"
         )
 
+    # An `active` item becomes `interrupted`: its work stopped mid-flight and the state has
+    # to say so. Any other state is left exactly where it is — a `done` item is still done
+    # once its finished worker is closed down, and `interrupted` is not a legal destination
+    # from most of them in any case.
+    moves_to_interrupted = current.state is WorkItemState.ACTIVE
     with db.transaction(ctx.conn):
         transition_session(
             ctx.conn,
@@ -2423,15 +2441,23 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
             target=SessionState.LOST,
             reason=f"stopped by cancel ({outcome.method}); process confirmed gone",
         )
-        transition_work_item(
-            ctx.conn,
-            ctx.audit,
-            item_id=item_id,
-            target=WorkItemState.INTERRUPTED,
-            reason=f"cancelled by the maintainer (session {session.session_id})",
-        )
+        if moves_to_interrupted:
+            transition_work_item(
+                ctx.conn,
+                ctx.audit,
+                item_id=item_id,
+                target=WorkItemState.INTERRUPTED,
+                reason=f"cancelled by the maintainer (session {session.session_id})",
+            )
 
-    tail = f"item {item_id} is now interrupted and its worktree is untouched"
+    result.data["item_state"] = str(
+        WorkItemState.INTERRUPTED if moves_to_interrupted else current.state
+    )
+    tail = (
+        f"item {item_id} is now interrupted and its worktree is untouched"
+        if moves_to_interrupted
+        else f"item {item_id} is left {current.state} and its worktree is untouched"
+    )
     if outcome.method == "already_gone":
         return result.say(
             f"session {session.session_id} had already ended: nothing left to stop; {tail}"
@@ -3934,9 +3960,19 @@ def anomalies(
         result.say("kinds this system can raise: " + ", ".join(ANOMALY_KINDS))
         return result
     for anomaly in rows:
+        # Only ever non-empty under `--all`, which is the only listing that includes a row
+        # that has left the open list. Naming *which* way it left is the point: an anomaly
+        # the system re-checked and found resolved is a different fact from one somebody
+        # dismissed, and #138 is what happens when a stale list gets cleared unread.
+        status = ""
+        if anomaly.resolved_at:
+            status = f"  resolved {timefmt.local(anomaly.resolved_at)}"
+        elif anomaly.acknowledged_at:
+            status = f"  acknowledged {timefmt.local(anomaly.acknowledged_at)}"
         result.say(
             f"[{anomaly.id}] {anomaly.kind}  {anomaly.entity_type or '—'}:"
             f"{anomaly.entity_id or '—'}  detected {timefmt.local(anomaly.detected_at)}"
+            f"{status}"
         )
         for key, value in anomaly.detail_obj.items():
             result.say(f"      {key}: {value}")

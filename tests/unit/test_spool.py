@@ -265,3 +265,76 @@ def test_one_bad_record_does_not_stop_the_drain(conn, audit, layout):
     assert result.quarantined == 1
     assert result.applied == 1
     assert db.get_work_item(conn, item_id).state is WorkItemState.AWAITING_REVIEW
+
+
+# -- a record that arrives after the session was retired (issue #138) ---------
+
+
+def test_an_exit_record_arriving_after_the_row_was_closed_settles_and_is_unlinked(
+    conn, audit, layout
+):
+    """The interruption path retirement makes routine, pinned rather than assumed.
+
+    Retirement terminates a worker and closes its row as ``lost``. The wrapper traps
+    nothing and SIGTERM ends bash outright, so it almost certainly writes no exit record —
+    but "almost certainly" is a race, not a guarantee, and if one does arrive it must not
+    attempt a transition out of a state the machine calls terminal.
+
+    The property this asserts already held before retirement existed: ``_already_applied``
+    treats every terminal session state, ``lost`` included, as "this exit is already
+    accounted for". Planning for this feature predicted a bug here and was wrong; the test
+    stays because retirement turns a rare race into a routine one, and the cost of that
+    prediction being right later is a spool file retried on every tick forever.
+    """
+    running_session(conn)
+    with db.transaction(conn):
+        conn.execute(
+            "UPDATE sessions SET state = 'lost', ended_at = '2026-09-05T00:00:00Z' "
+            "WHERE session_id = ?",
+            ("s-1",),
+        )
+    path = write_exit_record(layout.spool_dir, session_id="s-1", exit_code=0)
+
+    result = spool.drain(conn, audit=audit, layout=layout)
+
+    assert result.duplicates == 1
+    assert result.applied == 0
+    assert not path.exists(), (
+        "a late record must be unlinked; leaving it makes the drain retry it every tick "
+        "forever and log an error each time"
+    )
+    assert db.get_session(conn, "s-1").state is SessionState.LOST, (
+        "the retirement's own settlement stands; a late record does not rewrite it"
+    )
+
+
+def test_a_late_record_does_not_move_the_work_item(conn, audit, layout):
+    """A retired session's item is ``done``. A late exit record must not walk it anywhere
+    else — and cannot, because the item transition is guarded on ``active``."""
+    item_id, _ = running_session(conn)
+    with db.transaction(conn):
+        conn.execute(
+            "UPDATE sessions SET state = 'lost' WHERE session_id = ?", ("s-1",)
+        )
+        conn.execute("UPDATE work_items SET state = 'done' WHERE id = ?", (item_id,))
+    write_exit_record(layout.spool_dir, session_id="s-1", exit_code=1)
+
+    spool.drain(conn, audit=audit, layout=layout)
+
+    assert db.get_work_item(conn, item_id).state is WorkItemState.DONE
+
+
+def test_a_start_record_arriving_after_the_row_was_closed_is_also_absorbed(
+    conn, audit, layout
+):
+    """The other half of the same race, and the one an ``exit``-only guard would miss."""
+    running_session(conn)
+    with db.transaction(conn):
+        conn.execute("UPDATE sessions SET state = 'lost' WHERE session_id = ?", ("s-1",))
+    path = write_exit_record(layout.spool_dir, session_id="s-1", event="start")
+
+    result = spool.drain(conn, audit=audit, layout=layout)
+
+    assert result.duplicates == 1
+    assert not path.exists()
+    assert db.get_session(conn, "s-1").state is SessionState.LOST

@@ -198,18 +198,29 @@ The next pass's `_sweep_stale_sessions` finds an open row whose item is `done` a
 not alive, and takes the `reclaimed` branch. Self-healing within one tick, using code that already
 exists. Nothing is lost but a minute of a slot.
 
-**A late exit record.** The wrapper *may* still write one — unlikely, since it traps nothing and
-SIGTERM ends bash outright, but it is a race and not a guarantee. Today that record would be
-applied against a row already in `LOST`, `transition_session` would raise `IllegalTransition`,
-`spool.drain`'s catch-all would log `spool.apply` as an error, and — because the file is unlinked
-only after a successful commit — **the record would stay in the spool and be retried on every tick,
-forever**.
+**A late exit record.** The wrapper *may* still write one — unlikely, since it traps nothing
+and SIGTERM ends bash outright, but it is a race and not a guarantee.
 
-This is a pre-existing hazard: `operations.cancel` writes `LOST` and has the same race today.
-Retirement would make a rare path routine, so it is fixed here rather than inherited:
-`spool.apply_record` gains a branch for an exit record whose session row is already terminal. It
-records the late arrival, returns a verdict that lets the drain unlink the file, and does not
-attempt the transition. That is FR-008's second half and the spec's late-exit-record edge case.
+**Planning predicted a bug here and was wrong. Corrected during implementation, and the
+correction is left in place rather than tidied away**, because the reasoning that produced it
+is the kind that will be attempted again. The prediction was: the record is applied against a
+row already in ``LOST``, ``transition_session`` raises ``IllegalTransition``, ``spool.drain``'s
+catch-all logs an error, and — because the file is unlinked only after a successful commit —
+the record is retried on every tick forever.
+
+Every step of that is right except the first. ``spool.apply_record`` never reaches the
+transition: ``_already_applied`` returns ``True`` for an ``exit`` whose session row is in
+**any** terminal state, and ``LOST`` is one of the three it names. The record is a duplicate,
+the file is unlinked, and the drain counts it. Measured, not re-reasoned —
+``tests/unit/test_spool.py`` now pins it for ``exit`` and for ``start``.
+
+So no code changes here. The tests stay, because retirement turns a rare race into a routine
+one and this property is now load-bearing for it.
+
+One thing the prediction did get right and that is worth stating: a late record's *exit code*
+is discarded. That is the deliberate consequence of idempotency being keyed on
+``(session_id, event)``, it predates this feature, and changing it is not this feature's
+business.
 
 **Ordinary interruption** is covered by what already exists: every transition commits inside a
 transaction with its own audit record, and reconciliation is re-entrant by construction.
@@ -282,6 +293,6 @@ Principle I forbids.
 | R4 | After the closed-issue pass, before cleanup and before #28's sweep | anywhere after `_sweep_stale_sessions`, which would need a suppression flag for FR-009 |
 | R5 | Reuse `SessionHost.terminate` | a graceful in-worker exit over an undocumented socket |
 | R6 | The window closes because the process ends | asking kitty to close the window |
-| R7 | Fix the late-exit-record path in `spool.apply_record` | inheriting a record that retries in the spool forever |
+| R7 | ~~Fix the late-exit-record path~~ — **measured during implementation: not broken.** `_already_applied` already absorbs an exit against a `lost` row. Tests added, no code changed | the fix that was planned, which would have added a branch for a case that already worked |
 | R8 | `resolved_at` + a rebuilt partial index | reusing `acknowledged_at`; adding `resolved_reason` too |
 | R9 | Re-check with `procinfo.is_alive(pid, proc_start)` from the row's own detail | re-running the whole detection; resolving rows with no pid |

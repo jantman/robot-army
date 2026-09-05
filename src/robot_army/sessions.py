@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,14 @@ def version_is_known(value: object) -> bool:
     return parsed is not None and parsed in KNOWN_VERSIONS
 
 
+#: The one ``status`` value that means "this worker is waiting for someone to type".
+#:
+#: Compared for equality rather than matched against a set of "busy" values, because the
+#: set of things a worker can be doing is not ours to enumerate and will grow without
+#: telling us. An unrecognised status is therefore *not idle*, which is the safe direction.
+IDLE_STATUS = "idle"
+
+
 @dataclass(frozen=True, slots=True)
 class RegistryEntry:
     session_id: str
@@ -68,6 +77,9 @@ class RegistryEntry:
     status: str | None
     version: str | None
     source_file: str
+    #: ``statusUpdatedAt``: when the worker last changed what it was doing, in epoch
+    #: milliseconds. ``None`` when the field is absent or not an integer.
+    status_updated_at: int | None = None
 
     def alive(self, *, proc_root: Path | None = None) -> bool:
         """Liveness by ``pid`` **and** ``proc_start`` (FR-038).
@@ -76,6 +88,24 @@ class RegistryEntry:
         recycled one belonging to something unrelated must not read as a live session.
         """
         return procinfo.is_alive(self.pid, self.proc_start, root=proc_root)
+
+    def idle_for(self, *, now_ms: int | None = None) -> float | None:
+        """Seconds this worker has been idle, or ``None`` if that cannot be established.
+
+        ``None`` is not "zero seconds" and must never be treated as a number by a caller.
+        It is returned for every way of *not knowing*: a status that is not exactly
+        ``idle``, an absent or non-integer ``statusUpdatedAt``, and a timestamp in the
+        future (a clock that disagrees with ours is not evidence of anything).
+
+        The asymmetry is deliberate and is what makes issue #138's retirement safe to hang
+        off an undocumented file. Every unknown resolves to "not idle", so being wrong
+        about this registry can *delay* a retirement; it can never cause one.
+        """
+        if self.status != IDLE_STATUS or self.status_updated_at is None:
+            return None
+        now = int(time.time() * 1000) if now_ms is None else now_ms
+        elapsed = (now - self.status_updated_at) / 1000
+        return None if elapsed < 0 else elapsed
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,16 +188,40 @@ def parse_entry(path: Path) -> ParsedFile:
         return ParsedFile(error=f"{path.name}: missing sessionId or pid")
 
     proc_start = payload.get("procStart")
+
+    # `status` and `statusUpdatedAt` ARE now used for a control decision, and this comment
+    # used to say the opposite. Issue #138: the ordinary successful path ended with a
+    # worker idling at a prompt forever, holding a capacity slot and raising an
+    # `orphan_session` on every pass, because nothing in the system could tell "finished
+    # and waiting" from "still working". These two fields can, and no other observable
+    # could: transcript mtime was measured running 29 and 163 minutes ahead of the last
+    # record inside the same file, so it reports activity that did not happen.
+    #
+    # Depending on an undocumented file for something that ends a process is safe here for
+    # two reasons, and both must survive future editing. The `version` gate above already
+    # refuses a shape we have not seen. And `RegistryEntry.idle_for` resolves *every*
+    # unknown — absent status, unrecognised status, absent timestamp, wrong type, a
+    # timestamp from the future — to "not idle", so a registry that changes under us delays
+    # a retirement rather than causing one.
+    #
+    # `statusUpdatedAt` is epoch milliseconds. A non-integer is treated as absent rather
+    # than raising, for the same reason `sessionId` and `pid` are checked rather than
+    # trusted: a worker upgrade must not take the daemon down. `bool` is excluded
+    # explicitly because it is an `int` subclass in Python and `True` is not a timestamp.
+    status_updated_at = payload.get("statusUpdatedAt")
+    if not isinstance(status_updated_at, int) or isinstance(status_updated_at, bool):
+        status_updated_at = None
+
     return ParsedFile(
         entry=RegistryEntry(
             session_id=session_id,
             pid=pid,
             proc_start=str(proc_start) if proc_start is not None else None,
             cwd=str(payload["cwd"]) if payload.get("cwd") else None,
-            # `status` is displayed and never used for control decisions.
             status=str(payload["status"]) if payload.get("status") else None,
             version=str(version),
             source_file=str(path),
+            status_updated_at=status_updated_at,
         )
     )
 

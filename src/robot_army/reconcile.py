@@ -19,8 +19,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import cleanup, db, intake, notifications, repos, sessions, speckit
-from robot_army.boundaries import BoundaryError, TransportError
+from robot_army import cleanup, db, intake, notifications, procinfo, repos, sessions, speckit
+from robot_army.boundaries import BoundaryError, HostHandle, TransportError
 from robot_army.states import (
     SessionState,
     WorkItemState,
@@ -54,6 +54,11 @@ class ReconcileResult:
     cleaned: int = 0
     retained: int = 0
     speckit_phase_changes: int = 0
+    #: Sessions whose worker was ended because its work item is finished (issue #138).
+    #: Distinct from ``reclaimed``, which counts rows closed because their process was
+    #: *already* gone — the difference is whether this pass did the ending.
+    retired: int = 0
+    anomalies_resolved: int = 0
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
@@ -73,6 +78,8 @@ class ReconcileResult:
             "cleaned": self.cleaned,
             "retained": self.retained,
             "speckit_phase_changes": self.speckit_phase_changes,
+            "retired": self.retired,
+            "anomalies_resolved": self.anomalies_resolved,
             "notes": self.notes,
         }
 
@@ -466,6 +473,29 @@ def reconcile(
         conn, boundaries=boundaries, audit=audit, config=config
     )
 
+    # -- finished work that is still running a session (issue #138) --------
+    #
+    # Positioned deliberately, and all three halves are load-bearing.
+    #
+    # *After* ``_resolve_closed_issues``, because that pass is what produces the ``done``
+    # items this one acts on — so merging a pull request takes effect one tick later rather
+    # than two, and so ``done`` carries the meaning this sweep depends on.
+    #
+    # *Before* the cleanup block below, because cleanup's session guard is what records
+    # ``skipped``. Retiring first means a finished item's worktree is reclaimed in **this**
+    # pass rather than the next, instead of being reported "not yet" forever.
+    #
+    # *Before* ``_sweep_stale_sessions``, and this is what makes "no anomaly for the
+    # ordinary successful path" free. That sweep reaches a row this one has already closed,
+    # sees a state that is neither ``starting`` nor ``running``, and leaves it — so the
+    # ``orphan_session`` that fires today is never *reached*, rather than being suppressed
+    # by a flag saying "this one was retired". There is a second, independent reason it
+    # cannot fire: ``scan`` is a snapshot but ``RegistryEntry.alive()`` re-reads ``/proc``
+    # at call time, so even an open row would take the reclaim branch, not the report one.
+    result.retired += _retire_finished_sessions(
+        conn, boundaries=boundaries, audit=audit, scan=scan, proc_root=proc_root
+    )
+
     # -- reclaiming the disk of finished work (milestone 004, R10) ---------
     #
     # Immediately after ``_resolve_closed_issues`` and in the same pass, because that pass
@@ -504,6 +534,16 @@ def reconcile(
     # -- the orphan sweep (FR-043, M0 F17) ---------------------------------
     result.orphans += _orphan_sweep(
         conn, audit=audit, config=config, scan=scan, claimed_pids=claimed_pids
+    )
+
+    # -- anomalies that have resolved themselves (issue #138) --------------
+    #
+    # Last among the detectors, after the sweep that raises this kind, so what it leaves
+    # describes the pass as it ends — the same argument `_sweep_transcripts` carries for its
+    # own position. The two cannot fight: `_orphan_sweep` raises only for processes it can
+    # see alive, and this resolves only ones it can see gone.
+    result.anomalies_resolved += _resolve_orphan_anomalies(
+        conn, audit=audit, proc_root=proc_root
     )
 
     # -- how far Spec Kit runs have got (milestone 007, FR-012) ------------
@@ -676,6 +716,245 @@ def _resolve_closed_issues(
             )
         resolved += 1
     return resolved
+
+
+#: How long a finished item's worker must have been idle before we end it (issue #138).
+#:
+#: A worker never ends itself. It opens the pull request and then sits at a prompt, so the
+#: exit record that closes a session row never arrives, the slot is held forever, and the
+#: ordinary successful path terminates in an `orphan_session`. This constant is the only
+#: thing standing between that fix and ending a session the maintainer is in the middle of
+#: using, so it is set from measurement rather than taste.
+#:
+#: Measured on the two finished sessions that produced #138: idle for 84 and 198 minutes,
+#: with the work merged and the issue closed in both cases. 1800s sits far above any pause
+#: inside an agent's turn.
+#:
+#: **Erring long is nearly free; erring short is not, but neither is it expensive.** A
+#: threshold too high costs a capacity slot for a while longer. A threshold too low ends a
+#: session someone was reading — which destroys nothing: the transcript is untouched, the
+#: worktree is untouched, and `claude --resume <id>` brings the whole thing back. That
+#: asymmetry is why this is safe to have on with no configuration key to turn it off.
+#:
+#: A constant rather than configuration, deliberately — one caller, no second use in hand
+#: (Principle I), exactly as ``TRANSCRIPT_GRACE_SECONDS`` above. If the value proves wrong,
+#: the value changes.
+RETIRE_IDLE_SECONDS = 1800
+
+
+def _retire_finished_sessions(
+    conn: sqlite3.Connection,
+    *,
+    boundaries: Boundaries,
+    audit: AuditLog,
+    scan: sessions.RegistryScan,
+    proc_root: Path | None,
+) -> int:
+    """End the worker of a finished work item, so the successful path has an ending (#138).
+
+    Nothing in this system used to own the moment when a session's work had been accepted
+    and the session should stop. Every part behaved correctly and the whole produced, for
+    every successful item, an anomaly plus a capacity slot held for as long as the machine
+    stayed up. Three of those were enough to stop dispatch permanently at the shipped cap.
+
+    **The precondition is ``done`` and nothing else, and that is load-bearing.**
+    ``_resolve_closed_issues`` is the only thing in the codebase that writes that state, so
+    ``done`` already *means* "the source issue was observed closed" — no second API call,
+    no column, no matching on a transition's reason. ``tests/unit/test_done_single_writer``
+    keeps it true.
+
+    ``abandoned`` and ``failed`` items are deliberately untouched. Those are the states
+    where the work is *not* finished and the session may be the very thing the maintainer
+    is about to attach to; ``robot-army cancel`` is the route out of those.
+
+    Every rule but the last leaves the row exactly as found and writes **nothing at all** —
+    not a record, not a column. That silence is deliberate and is this feature's one
+    documented Principle III gap: a 60-second loop reporting "still busy" about a session
+    someone is using would write ~1,440 records a day carrying one bit, and the condition
+    is re-derivable from the registry at any instant. ``_sweep_transcripts`` sets the same
+    precedent for the same shape of decision.
+
+    Bounded by the number of open session rows, which the global cap bounds in turn.
+    """
+    retired = 0
+    for session in db.list_sessions(
+        conn,
+        include_simulated=True,
+        states=[SessionState.STARTING, SessionState.RUNNING],
+    ):
+        item = db.get_work_item(conn, session.work_item_id)
+        if item is None or item.state is not WorkItemState.DONE:
+            continue
+
+        # No process was ever recorded, so there is nothing to end. A simulated row is
+        # `_sweep_stale_sessions`'s business, which closes it without signalling anything;
+        # reaching the real session host with `pid=0` is the `killpg(getpgid(0), ...)`
+        # hazard `operations.cancel` documents at length. The question is "did this session
+        # have a process?", not "was the effect level live" — those differ at `no-remote`,
+        # and conflating them is issue #33.
+        if not session.pid:
+            continue
+
+        entry = scan.find(session.session_id)
+        if entry is None or not entry.alive(proc_root=proc_root):
+            # Nothing to end. `_sweep_stale_sessions` reclaims the row later in this pass.
+            continue
+
+        idle_s = entry.idle_for()
+        if idle_s is None or idle_s < RETIRE_IDLE_SECONDS:
+            # Busy, or idleness could not be established. Both mean "not yet", and the
+            # question is asked again next pass. See `RegistryEntry.idle_for` for why every
+            # unknown lands here rather than in the branch below.
+            continue
+
+        retired += _retire_one(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            session=session,
+            scan=scan,
+            proc_root=proc_root,
+            idle_s=idle_s,
+        )
+    return retired
+
+
+def _retire_one(
+    conn: sqlite3.Connection,
+    *,
+    boundaries: Boundaries,
+    audit: AuditLog,
+    session: Session,
+    scan: sessions.RegistryScan,
+    proc_root: Path | None,
+    idle_s: float,
+) -> int:
+    """Terminate one finished session and settle its row. Returns 1 if it was retired."""
+    detail = {
+        "item_id": session.work_item_id,
+        "session_id": session.session_id,
+        "pid": session.pid,
+        "proc_start": session.proc_start,
+        "idle_s": int(idle_s),
+    }
+    # Before the signal, not after. Ending a process cannot be undone from this side, and
+    # Principle III puts the burden on the irreversible act being visible even if the
+    # daemon dies between this line and the next.
+    audit.record("session.retire", outcome="ok", entity_type="session",
+                 entity_id=session.session_id, detail=detail, dry_run=bool(session.dry_run))
+
+    # **No host selection here, deliberately.** `operations.cancel` picks between the real
+    # and the simulated host by reading the record, and its own guard test says that if a
+    # second module ever needs to do that, it is the moment to ask whether the selection
+    # belongs back in the wiring. Asked, and the answer is that this sweep does not need it
+    # at all: a simulated row is `pid = 0` by construction — that signature is what
+    # `SimulatedSessionHost.confirm_session` writes precisely so nothing mistakes it for a
+    # process — and the `if not session.pid` guard above has already skipped every one of
+    # them. Reaching a simulated host from here is unreachable, and an unreachable branch
+    # that selects an implementation is exactly the drift FR-053 exists to prevent.
+    #
+    # If that guard is ever loosened, the failure is safe rather than silent: `terminate`
+    # refuses a recorded pid of 0 outright, sends nothing, and says so — because
+    # `getpgid(0)` asks about the *caller*, which is how signalling it would end the daemon.
+    handle = HostHandle(
+        socket_path=session.host_socket or "",
+        argv=(),
+        simulated=False,
+        pid=session.pid,
+    )
+
+    try:
+        outcome = boundaries.session_host.terminate(
+            handle, session.scope, expected_start=session.proc_start
+        )
+    except BoundaryError as exc:
+        # A pass never raises for an operational condition. The row is untouched, so the
+        # next pass tries again — and if the worker outlives every attempt, the row stays
+        # open and `_sweep_stale_sessions` reports it as the orphan it is.
+        audit.error(
+            "session.retire",
+            error=exc,
+            entity_type="session",
+            entity_id=session.session_id,
+            detail=detail,
+        )
+        return 0
+
+    result = {
+        **detail,
+        "method": outcome.method,
+        "confirmed": outcome.confirmed,
+        "escalated": outcome.escalated,
+    }
+    if outcome.refused_reason is not None:
+        # The boundary declined to act and sent nothing. Distinct from "it survived", and
+        # the message must not imply a signal was sent (069 S-K3).
+        audit.record(
+            "session.retire_refused",
+            outcome="error",
+            entity_type="session",
+            entity_id=session.session_id,
+            detail={**result, "refused_reason": outcome.refused_reason},
+            dry_run=bool(session.dry_run),
+        )
+        return 0
+    if not outcome.confirmed:
+        # We tried and could not, which is never recorded as "it is gone". Leaving the row
+        # open is what keeps the slot honestly subscribed and puts the session in front of
+        # `_sweep_stale_sessions`, which raises `orphan_session` for exactly this.
+        audit.record(
+            "session.retire_unconfirmed",
+            outcome="error",
+            entity_type="session",
+            entity_id=session.session_id,
+            detail=result,
+            dry_run=bool(session.dry_run),
+        )
+        return 0
+
+    # **Re-read before settling** (FR-008). The daemon drains the exit spool in its own
+    # process while this call is in flight, so a worker killed by our own signal can record
+    # its own ending before we get here. Settling the row we read *before* the signal would
+    # attempt a transition out of a terminal state and raise, reporting a perfectly
+    # successful retirement as a failure. `operations.cancel` and `dispatch.py` both ask
+    # the same question at the equivalent moment, for the same reason.
+    fresh = db.get_session(conn, session.session_id)
+    if fresh is None:
+        # The row went away entirely. Nothing holds a slot, which is the outcome wanted.
+        audit.record(
+            "session.retired",
+            outcome="ok",
+            entity_type="session",
+            entity_id=session.session_id,
+            detail={**result, "settled": "row is gone"},
+            dry_run=bool(session.dry_run),
+        )
+        return 1
+    with db.transaction(conn):
+        settled = reclaim_stale_session(
+            conn,
+            audit,
+            session=fresh,
+            scan=scan,
+            proc_root=proc_root,
+            reason=(
+                f"retired: the work item is done and its worker had been idle for "
+                f"{int(idle_s)}s"
+            ),
+        )
+    audit.record(
+        "session.retired",
+        outcome="ok",
+        entity_type="session",
+        entity_id=session.session_id,
+        detail={**result, "settled": settled},
+        dry_run=bool(session.dry_run),
+    )
+    # `left` means the row reached a terminal state between the decision and the settle —
+    # the daemon drained this session's own exit record in its own process while we were
+    # signalling. That is an ordinary outcome of a successful retirement, not a failure,
+    # and it is counted as one.
+    return 1 if settled in ("reclaimed", "left") else 0
 
 
 def _sweep_stale_sessions(
@@ -922,6 +1201,70 @@ def _orphan_sweep(
         if created:
             found += 1
     return found
+
+
+def _resolve_orphan_anomalies(
+    conn: sqlite3.Connection, *, audit: AuditLog, proc_root: Path | None
+) -> int:
+    """Close an ``orphan_session`` whose process is no longer there (issue #138).
+
+    ``robot-army anomalies`` is read as a list of things needing attention, and nothing ever
+    took a row off it but a maintainer typing ``--acknowledge``. A condition that resolved
+    itself therefore stayed on the list forever — the report that prompted this feature
+    named pid 498936, which had not existed for hours. The cost is not the row; it is that a
+    list which is mostly stale teaches the habit of clearing it without reading it, which is
+    how the anomaly that mattered gets acknowledged along with the noise.
+
+    **Only this kind, and only this condition.** ``orphan_session`` is the one anomaly whose
+    truth can be positively re-established as false, because both places that raise it write
+    the pid and the process start time into ``detail``. Every other kind has its own
+    settling story and none of them is guessed at here.
+
+    Identity, not the number: ``procinfo.is_alive`` compares ``/proc/<pid>/stat`` field 22
+    against the recorded start time, so a *recycled* pid — the number reused by an unrelated
+    process — answers ``False`` and the anomaly resolves, which is correct. The original
+    process is what the report was about, and it is gone.
+
+    Positioned after ``_orphan_sweep`` so what it leaves describes the pass as it ends. The
+    two cannot fight: that sweep raises only for processes it can see alive, and this
+    resolves only ones it can see gone.
+    """
+    resolved = 0
+    for anomaly in db.open_orphan_session_anomalies(conn):
+        try:
+            detail = anomaly.detail_obj
+        except (ValueError, TypeError):
+            detail = {}
+        pid = detail.get("pid") if isinstance(detail, dict) else None
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            # No evidence to re-check against. Left alone permanently and deliberately:
+            # "we could not check" must never be recorded as "it is fine".
+            continue
+        proc_start = detail.get("proc_start")
+        if procinfo.is_alive(pid, proc_start, root=proc_root):
+            continue
+
+        with db.transaction(conn):
+            if not db.resolve_anomaly(conn, anomaly.id):
+                continue
+            audit.record(
+                "anomaly.resolved",
+                outcome="ok",
+                entity_type="anomaly",
+                entity_id=str(anomaly.id),
+                detail={
+                    "kind": anomaly.kind,
+                    "anomaly_entity_id": anomaly.entity_id,
+                    "pid": pid,
+                    "proc_start": proc_start,
+                    "reason": (
+                        "the process this anomaly named is no longer running, so the "
+                        "condition it reported no longer holds"
+                    ),
+                },
+            )
+        resolved += 1
+    return resolved
 
 
 def _sweep_sockets(

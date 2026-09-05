@@ -552,6 +552,45 @@ def _migration_004(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+SCHEMA_012_SQL = """
+-- An anomaly can stop being true without anyone reading it (issue #138).
+--
+-- `acknowledged_at` records a maintainer saying "I have seen this". That is the only way a
+-- row has ever left the open list, which means a condition that resolved itself -- a worker
+-- whose process is simply gone -- left its report behind forever. The cost is not the row.
+-- It is that `robot-army anomalies` is read as a list of things needing attention, so a
+-- list that is mostly stale teaches the habit of clearing it without reading it, which is
+-- how the anomaly that mattered gets acknowledged along with the noise.
+--
+-- Deliberately NOT reused as `acknowledged_at`. "The system re-checked and this is no
+-- longer true" and "a human looked at this" are different facts, and `--all` would be
+-- unable to tell them apart. That distinction is the entire reason for a second column.
+--
+-- One column, not two: no `resolved_reason`. Principle III makes the audit log the
+-- reconstruction path, and `anomaly.resolved` carries the evidence -- the kind, the entity,
+-- and the pid and start time that no longer match. A reason column would duplicate the log
+-- somewhere nothing reads it back from.
+ALTER TABLE anomalies ADD COLUMN resolved_at TEXT;
+
+-- **The index has to be rebuilt, and this is the part that is easy to get wrong.**
+--
+-- The partial index is what stops a 60-second reconciliation loop producing 1,440 identical
+-- rows a day for one orphan. Acknowledging lifts a row out of it, which is what lets a
+-- genuinely new occurrence be recorded later. Resolution has to do exactly the same, and a
+-- resolved row left *inside* the index would silently block that condition from ever being
+-- reported again -- a worker retired today would make the next orphan under the same
+-- session id invisible. SQLite cannot alter an index in place, so it is dropped and rebuilt.
+--
+-- COALESCE is carried over unchanged and is still load-bearing: in SQLite two NULLs never
+-- compare equal, so indexing the bare columns would leave every anomaly with an unspecified
+-- entity colliding with nothing and duplicating on every pass.
+DROP INDEX idx_anomalies_open;
+CREATE UNIQUE INDEX idx_anomalies_open
+    ON anomalies (kind, COALESCE(entity_type, ''), COALESCE(entity_id, ''))
+    WHERE acknowledged_at IS NULL AND resolved_at IS NULL;
+"""
+
+
 def _migration_005(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_005_SQL):
         conn.execute(statement)
@@ -587,6 +626,11 @@ def _migration_011(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_012(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_012_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -600,6 +644,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_009,
     _migration_010,
     _migration_011,
+    _migration_012,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

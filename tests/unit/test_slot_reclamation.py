@@ -498,3 +498,93 @@ def test_two_passes_over_a_live_worker_leave_it_alone_and_report_it_once(
     ).total == 1
     matching = [a for a in db.list_anomalies(conn) if a.entity_id == "live-pass"]
     assert len(matching) == 1
+
+
+# -- retirement's interaction with this sweep (issue #138) --------------------
+#
+# Retirement is positioned *before* this sweep in the pass, and that ordering is the whole
+# of "the ordinary successful path raises no anomaly". Nothing suppresses the anomaly; the
+# branch that raises it is simply never reached. Two independent mechanisms guarantee that,
+# and both are asserted, because a design that relies on one of them silently is a design
+# whose safety margin nobody can see.
+
+
+def retired_session(conn, config, registry, proc, *, close_the_row: bool):
+    """A finished item whose worker retirement has just ended.
+
+    ``close_the_row=False`` is the hypothetical where retirement killed the process but
+    somehow did not close the row — the second mechanism has to hold on its own.
+    """
+    item = seed_item(conn, repo_key=REPO, state="done")
+    seed_session(conn, item, state="running", pid=779, session_id="retired-1")
+    live_worker(registry, proc, config, pid=779, session_id="retired-1")
+    # What a confirmed termination leaves behind: the process is gone from /proc while the
+    # registry file it wrote is still on disk, because nothing cleans that up synchronously.
+    import shutil
+
+    shutil.rmtree(proc / "779")
+    if close_the_row:
+        session = db.latest_session_for_item(conn, item)
+        with db.transaction(conn):
+            conn.execute(
+                "UPDATE sessions SET state = 'lost', ended_at = ? WHERE id = ?",
+                (utcnow(), session.id),
+            )
+    return item
+
+
+def test_a_row_retirement_already_closed_is_left_untouched(
+    conn, config, audit, registry, proc
+):
+    """The first mechanism. This sweep reaches a row that is neither ``starting`` nor
+    ``running`` and returns ``left`` — so the anomaly branch is never reached at all."""
+    item = retired_session(conn, config, registry, proc, close_the_row=True)
+
+    assert apply(conn, audit, item, registry, proc) == "left"
+    assert db.list_anomalies(conn) == []
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+
+
+def test_an_open_row_whose_worker_retirement_killed_is_reclaimed_not_reported(
+    conn, config, audit, registry, proc
+):
+    """The second, independent mechanism, and the subtle one.
+
+    ``scan`` is a snapshot taken at the top of the pass, so the registry entry for the
+    retired session is still in it. ``RegistryEntry.alive()`` re-reads ``/proc`` at call
+    time, though, so the process it names is observably gone and this takes the reclaim
+    branch rather than the report one. Were it the other way round, retirement would raise
+    the very anomaly it exists to stop.
+    """
+    item = retired_session(conn, config, registry, proc, close_the_row=False)
+
+    assert apply(conn, audit, item, registry, proc) == "reclaimed"
+    assert db.list_anomalies(conn) == []
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+
+
+def test_the_successful_path_leaves_no_anomaly_over_repeated_passes(
+    conn, config, audit, layout, registry, proc, boundaries
+):
+    """SC-001, through the real ``reconcile()`` rather than through the sweep alone.
+
+    Ten passes, because "no anomaly" has to mean "not on any later pass either" — the
+    reported bug was a condition that re-raised forever, and a one-pass assertion would
+    have been satisfied by the broken build too.
+    """
+    retired_session(conn, config, registry, proc, close_the_row=False)
+
+    for _ in range(10):
+        reconcile.reconcile(
+            conn,
+            boundaries=boundaries,
+            audit=audit,
+            config=config,
+            layout=layout,
+            registry_dir=registry,
+            proc_root=proc,
+        )
+
+    assert db.list_anomalies(conn) == []
+    snapshot = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
+    assert snapshot.total == 0, "the slot must not be held by finished work"

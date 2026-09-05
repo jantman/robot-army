@@ -242,7 +242,12 @@ class Anomaly:
     detected_at: str
     entity_type: str | None = None
     entity_id: str | None = None
+    #: A maintainer said "I have seen this".
     acknowledged_at: str | None = None
+    #: The system re-checked and the condition no longer holds (issue #138). A different
+    #: fact from ``acknowledged_at``, kept in a different column so ``--all`` can tell an
+    #: anomaly that resolved itself from one somebody dismissed.
+    resolved_at: str | None = None
 
     @property
     def detail_obj(self) -> dict[str, Any]:

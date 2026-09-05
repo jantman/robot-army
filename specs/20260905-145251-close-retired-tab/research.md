@@ -149,6 +149,17 @@ The sweep runs every 60 seconds forever. Two costs to avoid:
 return immediately when it is empty, before the display is touched at all. The terminal is consulted
 only when there is genuinely something that might need closing.
 
+**Corrected in review of PR #141: that is not sufficient, and on its own the gate never fires.**
+`done` is terminal and rows are never deleted, so a completed item meets every database condition on
+every future pass forever. The candidate set never empties again after the first item finishes, and
+every cost above is incurred anyway. The fix is a process-memory set of items already answered for —
+closed, or listed and found to have none, both of which are final because `done` has no outgoing
+transition. Keyed on `(id, done_at)`, because SQLite reuses freed row ids and `purge_simulated`
+frees them.
+
+The lesson generalises past this feature: **a gate built out of monotonically-growing state is not a
+gate.** Every condition here was about a fact that, once true, stays true.
+
 This also makes the failure path rare and meaningful: a `BoundaryError` from the listing now means
 "there was work to do and the terminal could not be reached", which is worth a record, rather than
 "there is no kitty on this machine", which is not.
@@ -169,4 +180,4 @@ window goes in the same pass rather than the next.
 | R3 | Identity from the `ra_item` marker | The stored `window_id`, which kitty renumbers on restart |
 | R4 | New `list_by_var(key)`; one listing per pass | Looping `find_by_var`; reading `foreground_processes` |
 | R5 | Reuse `cleanup.live_sessions` | A fourth definition of "still running" |
-| R6 | Database gate before the terminal is touched | Listing windows unconditionally every pass |
+| R6 | Database gate before the terminal is touched, **plus** a process-memory set of items already answered for — without the second half the gate never fires (corrected in review) | Listing windows unconditionally every pass; a persisted column, which costs a migration to save one listing per restart |

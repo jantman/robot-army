@@ -19,22 +19,45 @@ immediately and its window goes in the **same** pass rather than the next.
 
 ```
 candidates = {
-    item.id
+    item.id: item.done_at
     for item in work items where state == DONE
     if item has at least one session row
+    and (item.id, item.done_at) not in _WINDOWS_SETTLED
     and cleanup.live_sessions(conn, item.id) == []
 }
 if not candidates:
     return 0          # the terminal is never touched
 ```
 
-Three conditions, each carrying a requirement:
+**The fourth condition was missing and the gate did not work without it** (found in review of
+PR #141). `done` is terminal and rows are never deleted, so an item that has completed satisfies
+the three database conditions on *every future pass forever* — long after its window went. The
+candidate set would never empty again, so `if not candidates` fired exactly once in the life of an
+installation: before the first item ever finished. Everything this gate was built to prevent —
+a `kitty @ ls` per pass, ~1,440 listing failures a day on a machine with no kitty, a failure record
+whose `candidates` grew without bound — would have happened anyway, while the docstring and this
+contract both claimed otherwise.
+
+`_WINDOWS_SETTLED` holds the items this *process* has answered for: closed, or looked for and found
+none. Both are final, because `done` has no outgoing transition and so no dispatch can ever open a
+settled item another window.
+
+It is keyed on `(id, done_at)` rather than the id alone: SQLite reuses a freed `INTEGER PRIMARY
+KEY`, and `purge_simulated` frees them, so a later item could otherwise inherit a settled id and
+never have its window closed.
+
+It lives in process memory rather than a column, following the precedent milestone 004 set for the
+capacity hold and the notifier's cycle counter — losing it costs exactly **one** extra listing after
+a restart, which is far less than a table costs to keep correct.
+
+Four conditions, each carrying a requirement:
 
 | Condition | Requirement | Why |
 |---|---|---|
 | `state == DONE` | FR-003 | `failed` and `abandoned` keep their windows indefinitely. This is also what preserves `--hold`'s purpose (FR-017) without a second rule |
 | at least one session row | spec edge case | A `done` item that never had a session — a rebuilt database — offers no evidence its session ended. `live_sessions` returns `[]` for "all finished" *and* for "never had any", and only the first qualifies |
 | `live_sessions(...) == []` | FR-004 | The shared definition from issue #79, reused rather than re-derived (R5). A worker that survived a termination attempt keeps a `running` row, and so keeps its windows |
+| not already settled | FR-010's cost half | Without it the gate is dead after the first completion (above). Added in review of PR #141 |
 
 The early return is not an optimisation. It is what keeps the terminal error path rare enough to be
 meaningful (R6): a failure to list windows now means "there was work to do and the terminal could
@@ -68,11 +91,15 @@ marker.
 |---|---|
 | closed | counted in `windows_closed` |
 | the window had already gone | **success**, not a failure (FR-014). Not counted, not recorded as an error |
-| the close failed | recorded as `window_close_failed` with the window id and item id; **the sweep continues to the next window** (FR-013); not counted |
-| the listing itself failed | recorded once for the pass; the sweep returns 0; the pass completes normally |
+| the close failed | recorded as `window.close` with the window id and item id; **the sweep continues to the next window** (FR-013); not counted; **its item is not settled**, so it is retried next pass |
+| the listing itself failed | recorded once for the pass; the sweep returns 0; the pass completes normally; **nothing is settled**, because the question was not answered |
 
 A `BoundaryError` from either the listing or a close is caught. Reconciliation never raises for an
 operational condition.
+
+**Every candidate the listing answered for is settled**, including the ones that turned out to have
+no window at all — that *is* the answer, and it cannot change. Only a candidate whose close failed
+is held back.
 
 ## W5 — Counter
 

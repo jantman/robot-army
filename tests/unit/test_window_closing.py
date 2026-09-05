@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 from tests.conftest import make_boundaries, seed_item, seed_session
 
-from robot_army import reconcile
+from robot_army import db, reconcile
 from robot_army.boundaries import BoundaryError, DisplayHandle
 from robot_army.boundaries.kitty import SimulatedDisplay
 
@@ -505,3 +505,160 @@ def test_stopping_a_failed_items_session_by_hand_keeps_its_window(conn, audit, c
 
     assert sweep(conn, audit, display) == 0
     assert len(display.list_by_var(reconcile.WINDOW_ITEM_VAR)) == 1
+
+
+# -- the gate must keep working after the first item ever completes ----------
+#
+# Found in review of PR #141. The gate is what keeps this feature free on an idle machine
+# and what stops a machine with no kitty collecting ~1,440 listing failures a day. It was
+# built entirely out of database state — and `done` is terminal and rows are never deleted,
+# so a completed item satisfied every condition on every future pass forever. The gate fired
+# exactly once in the life of an installation: before the first item finished.
+#
+# Nothing in the original tests caught it, because each one seeded a fresh database with
+# nothing already completed. These start from the state a real machine is in five minutes
+# after its first success.
+
+
+def test_the_gate_still_fires_after_an_item_has_been_settled(conn, audit):
+    """The reported bug, at its smallest.
+
+    One completed item, one window, closed on the first pass. On the second pass there is
+    nothing to do — and the terminal must not be consulted to discover that.
+    """
+    display = CountingDisplay(audit)
+    item = finished_item(conn)
+    open_window(display, item)
+
+    assert sweep(conn, audit, display) == 1
+    assert display.list_calls == 1
+
+    for _ in range(10):
+        assert sweep(conn, audit, display) == 0
+    assert display.list_calls == 1, (
+        "the terminal was consulted again for an item already answered for; the gate is "
+        "dead and a machine with no kitty would log a failure on every pass forever"
+    )
+
+
+def test_an_item_that_never_had_a_window_is_settled_by_one_listing(conn, audit):
+    """The commoner case, and the one that would have hurt most.
+
+    Most completed items have no window by the time this looks — the maintainer closed it,
+    or the machine was rebooted. "There is no window for this item" is a final answer, so
+    it must be remembered, not re-derived from the terminal every 60 seconds.
+    """
+    display = CountingDisplay(audit)
+    finished_item(conn)
+
+    assert sweep(conn, audit, display) == 0
+    assert display.list_calls == 1
+
+    for _ in range(10):
+        assert sweep(conn, audit, display) == 0
+    assert display.list_calls == 1
+
+
+def test_a_newly_finished_item_reopens_the_gate(conn, audit):
+    """Settling must not wedge the sweep shut: a *new* completion is still acted on."""
+    display = CountingDisplay(audit)
+    first = finished_item(conn, issue_number=116)
+    open_window(display, first)
+    assert sweep(conn, audit, display) == 1
+    assert sweep(conn, audit, display) == 0
+
+    second = finished_item(conn, issue_number=136)
+    open_window(display, second)
+
+    assert sweep(conn, audit, display) == 1
+    # Two, not three: the middle pass never listed at all, because the gate had closed
+    # behind the first item. That is the property this whole mechanism exists for.
+    assert display.list_calls == 2
+
+
+def test_a_close_that_failed_is_retried_rather_than_settled(conn, audit):
+    """A window we could not close is not an answered question. Settling it would leak the
+    window permanently — the failure would be recorded once and never revisited."""
+    item = finished_item(conn)
+    display = CloseRaises(audit)
+    stubborn = open_window(display, item)
+    display.refuse = stubborn
+
+    assert sweep(conn, audit, display) == 0
+    assert sweep(conn, audit, display) == 0
+
+    display.refuse = None
+    assert sweep(conn, audit, display) == 1, "the retry must still be possible"
+
+
+def test_a_failed_listing_settles_nothing(conn, audit):
+    """The question was not answered, so it is asked again — otherwise a single transient
+    terminal failure would strand every window outstanding at that moment."""
+    item = finished_item(conn)
+    failing = ListRaises(audit)
+
+    assert sweep(conn, audit, failing) == 0
+
+    working = SimulatedDisplay(audit)
+    open_window(working, item)
+    assert sweep(conn, audit, working) == 1
+
+
+def test_a_restart_costs_exactly_one_listing(conn, audit):
+    """The price of keeping this in memory rather than in a column, stated as a test.
+
+    ``forget_settled_windows`` is what a daemon restart does. One listing afterwards, then
+    the gate closes again — which is the trade the docstring claims.
+    """
+    display = CountingDisplay(audit)
+    finished_item(conn)
+    sweep(conn, audit, display)
+    sweep(conn, audit, display)
+    assert display.list_calls == 1
+
+    reconcile.forget_settled_windows()
+
+    assert sweep(conn, audit, display) == 0
+    assert display.list_calls == 2
+    for _ in range(5):
+        sweep(conn, audit, display)
+    assert display.list_calls == 2
+
+
+def test_a_reused_item_id_is_not_mistaken_for_a_settled_one(conn, audit):
+    """SQLite reuses a freed ``INTEGER PRIMARY KEY``, and ``purge_simulated`` frees them.
+
+    Keying the settled set on the id alone would let a later item inherit a settled id and
+    never have its window closed. The key is ``(id, done_at)``, so a different row with the
+    same number is a different question.
+    """
+    display = SimulatedDisplay(audit)
+    item = finished_item(conn)
+    open_window(display, item)
+    assert sweep(conn, audit, display) == 1
+
+    with db.transaction(conn):
+        conn.execute(
+            "UPDATE work_items SET done_at = ? WHERE id = ?", ("2099-01-01T00:00:00Z", item)
+        )
+    open_window(display, item)
+
+    assert sweep(conn, audit, display) == 1, (
+        "a row that is not the one we settled must be considered afresh"
+    )
+
+
+def test_the_listing_error_detail_does_not_grow_without_bound(conn, audit, layout):
+    """The reviewer's second observation. With the gate dead, the failure record's
+    ``candidates`` would have listed every item ever completed; bounded to genuinely
+    outstanding ones, it stays small and stays useful."""
+    settled = finished_item(conn, issue_number=116)
+    working = SimulatedDisplay(audit)
+    open_window(working, settled)
+    assert sweep(conn, audit, working) == 1
+
+    outstanding = finished_item(conn, issue_number=136)
+    assert sweep(conn, audit, ListRaises(audit)) == 0
+
+    errors = [r for r in records(layout, "window.list") if r["outcome"] == "error"]
+    assert errors[-1]["detail"]["candidates"] == [outstanding]

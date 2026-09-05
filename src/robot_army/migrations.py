@@ -590,6 +590,48 @@ CREATE UNIQUE INDEX idx_anomalies_open
     WHERE acknowledged_at IS NULL AND resolved_at IS NULL;
 """
 
+SCHEMA_013_SQL = """
+-- What pull requests this work item has, and when that was last confirmed (issue #143).
+--
+-- A session's whole purpose is to open a pull request, and until this the web interface
+-- could not name one. The only pull-request link on the site was computed live while a page
+-- rendered, from the branch alone, on two states out of nine.
+--
+-- `pull_requests` is a JSON array of {number, url, state} sorted by number, where state is
+-- `open`, `merged` or `closed` -- normalised at the boundary, so nothing above it sees
+-- GitHub's upper-case enum. JSON in a TEXT column rather than a `pull_requests` table for
+-- the reason `labels` and `speckit_baseline` are: there is one consumer, no query ever
+-- filters or joins on a pull request, and the whole value is read and written as a unit. A
+-- table would add four functions and a join for nothing.
+--
+-- **Nullable, not NOT NULL DEFAULT '[]', and the difference is the point.** Three states
+-- have to stay distinguishable:
+--
+--   NULL   never looked up -- a row written before this migration, an item that has never
+--          been dispatched and so has no branch, or a simulated item we must not ask about
+--   '[]'   looked up successfully; GitHub reports no pull request
+--   '[..]' these, as of pull_requests_at
+--
+-- Collapsing the first two would tell the maintainer "there is no pull request" on the
+-- strength of never having asked -- the silent failure Principle III forbids, wearing an
+-- empty list. It is the same distinction migration 011 draws for `author` and migration 007
+-- draws for `speckit_baseline`, and it is drawn here for the same reason: a surface acts on
+-- the difference.
+--
+-- `pull_requests_at` advances only on a **successful** lookup, so the age the interface
+-- shows is the age of the answer rather than the age of the last attempt. A failed lookup
+-- writes neither column; the stored answer stands and its age keeps growing, which is true.
+--
+-- No backfill. An item that reached a terminal state before this migration is never looked
+-- up, and its NULL reads as "not checked" -- which is exactly what it is. The alternative is
+-- one GraphQL call per item of history, in a single pass, to re-litigate finished work.
+--
+-- No index. Nothing queries by either column; both are read by primary key, on an item the
+-- caller is already holding.
+ALTER TABLE work_items ADD COLUMN pull_requests TEXT;
+ALTER TABLE work_items ADD COLUMN pull_requests_at TEXT;
+"""
+
 
 def _migration_005(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_005_SQL):
@@ -631,6 +673,11 @@ def _migration_012(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_013(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_013_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -645,6 +692,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_010,
     _migration_011,
     _migration_012,
+    _migration_013,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

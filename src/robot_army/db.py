@@ -324,6 +324,27 @@ def update_work_item_columns(
     )
 
 
+def record_pull_requests(
+    conn: sqlite3.Connection, item_id: int, *, found: str, at: str
+) -> None:
+    """Store one item's pull-request set and when it was confirmed (issue #143).
+
+    Its own statement rather than ``update_work_item_columns`` for one reason:
+    ``updated_at`` must not move. This runs every reconcile pass for every live item, and
+    almost every run confirms an unchanged set — so routing it through the general updater
+    would push ``updated_at`` forward once a minute for every item in the system, making a
+    column that means "when this item last changed" mean "when the daemon last looked",
+    and quietly falsifying every age derived from it.
+
+    Both columns are written together, always. The unchanged case writes the identical
+    text back, which keeps one path through the code and costs one row.
+    """
+    conn.execute(
+        "UPDATE work_items SET pull_requests = ?, pull_requests_at = ? WHERE id = ?",
+        (found, at, item_id),
+    )
+
+
 def list_cleanup_candidates(
     conn: sqlite3.Connection, *, include_simulated: bool = False
 ) -> list[WorkItem]:

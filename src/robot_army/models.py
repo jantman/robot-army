@@ -118,10 +118,44 @@ class WorkItem:
     #: silently promote every item of an unread board to the head of its queue.
     board_column: str | None = None
     board_position: int | None = None
+    #: The pull requests this item has, as a JSON array of ``{number, url, state}`` sorted
+    #: by number (issue #143), and when that set was last **successfully** confirmed.
+    #:
+    #: Three states, and they are not two. ``NULL`` means *never looked up* — a row written
+    #: before migration 013, an item that was never dispatched and so has no branch, or a
+    #: simulated item nothing may ask GitHub about. ``"[]"`` means *looked up, GitHub
+    #: reports none*. Collapsing them would report "there is no pull request" on the
+    #: strength of never having asked, which is the one thing every surface of this feature
+    #: exists to avoid — the same distinction ``speckit_baseline`` and ``author`` draw.
+    #:
+    #: ``pull_requests_at`` advances only on success, so the age a surface shows is the age
+    #: of the answer rather than of the last attempt.
+    pull_requests: str | None = None
+    pull_requests_at: str | None = None
 
     @property
     def label_list(self) -> list[str]:
         return json.loads(self.labels)
+
+    @property
+    def pull_request_list(self) -> list[dict[str, Any]]:
+        """The stored pull requests, or ``[]``.
+
+        ``[]`` for *both* "none found" and "never looked up": a caller that must tell them
+        apart reads ``pull_requests is None``, exactly as ``speckit_baseline``'s readers do.
+        Returning ``None`` here instead would push that distinction into every list
+        comprehension, and the surfaces that need it are few and named.
+
+        A column that will not parse is a column we do not have — ``speckit.record_phase``'s
+        rule for the baseline it reads, and the same answer: silence rather than a guess.
+        """
+        if not self.pull_requests:
+            return []
+        try:
+            parsed = json.loads(self.pull_requests)
+        except ValueError:
+            return []
+        return parsed if isinstance(parsed, list) else []
 
     @property
     def cleanup_pending(self) -> bool:

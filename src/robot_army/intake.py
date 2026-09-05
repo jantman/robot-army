@@ -576,6 +576,29 @@ _BARE_REF = re.compile(r"(?<![\w/.-])([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)(?![\w/.
 #: An absolute or ``~``-relative filesystem path, matched against configured clone paths.
 _PATH_REF = re.compile(r"(?<!\S)(~?/[^\s'\"`,;)\]]+)")
 
+#: A whole line reading ``robot-army: <reference>`` and nothing else — the author naming the
+#: repository outright, which is the only way a card that legitimately mentions several
+#: onboarded repositories can be filed at all (milestone 116, FR-001).
+#:
+#: Every clause is load-bearing:
+#:
+#: * **Both anchors** are the whole of "and nothing else on the line". Without them the
+#:   pattern would fire on ``see robot-army: you/demo for context``, which is prose about a
+#:   repository rather than an instruction to use it.
+#: * **``[ \t]`` rather than ``\s``** because ``\s`` matches ``\n``: under ``MULTILINE`` a
+#:   ``\s*`` would happily straddle a line break and defeat the anchors it sits between.
+#: * **``\S+`` for the reference** because deciding *what* the reference is belongs to the
+#:   three recognisers above, not to this pattern. Keeping the two apart is what makes
+#:   FR-004's "the same three spellings" true by construction rather than by care.
+#: * **``IGNORECASE``** because the prefix is a project's name, not a token, and refusing
+#:   ``Robot-Army:`` teaches the author nothing.
+#:
+#: A bare ``robot-army:`` with no reference simply does not match, which is FR's "treat it
+#: as though the line were not there" with no special case written for it.
+_DECLARATION = re.compile(
+    r"^[ \t]*robot-army[ \t]*:[ \t]*(\S+)[ \t]*$", re.IGNORECASE | re.MULTILINE
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Resolution:
@@ -584,15 +607,41 @@ class Resolution:
     ``resolvable`` means exactly one distinct configured repository survived. Zero and two
     are both unresolvable, and the ``reason`` distinguishes them — because "you named
     nothing I know" and "you named two" need different edits from the author (FR-012).
+
+    ``source`` names the origin of the **outcome**, not of a success: a card held because
+    its ``robot-army:`` lines disagreed carries ``"declaration"``, because "the author named
+    a repository and was still held" is precisely the fact the log needs in order to explain
+    itself (FR-014). It defaults to ``"scan"`` so that every construction site that predates
+    milestone 116 keeps meaning exactly what it meant.
     """
 
     repo_key: str | None
     reason: str | None = None
     candidates: tuple[str, ...] = ()
+    source: str = "scan"
 
     @property
     def resolvable(self) -> bool:
         return self.repo_key is not None
+
+
+def _declared_references(text: str) -> list[str]:
+    """Every reference the card's ``robot-army:`` lines give, in the order they appear.
+
+    Backticks are removed before matching, and that is not politeness. The guide renders
+    the line as ``robot-army: <repo>`` because that is how a literal is written in prose,
+    an author will copy it out of the guide with the backticks attached, and Trello renders
+    markdown — so on the saved card the backticks are *invisible* and the line silently
+    does nothing. A backtick cannot occur in a GitHub URL, an ``owner/name``, or any path
+    this system will match, so dropping every one of them costs nothing and is the
+    difference between the feature working and failing with no visible cause.
+
+    The list is deliberately **not** deduplicated. Deduplication happens later on the
+    resolved key, which is what makes ``robot-army: you/demo`` and ``robot-army: ~/git/demo``
+    on one card a single instruction rather than two (FR-008) while still letting the caller
+    see that two lines were written.
+    """
+    return _DECLARATION.findall(text.replace("`", ""))
 
 
 def resolve_repository(
@@ -611,6 +660,13 @@ def resolve_repository(
     Two references to the same repository are one reference: the set is deduplicated by
     resolved key before it is counted, so a card that pastes a URL *and* names the local
     path is resolvable rather than ambiguous.
+
+    A ``robot-army:`` line short-circuits all of that (milestone 116). It **overrides**
+    rather than breaks a tie, and that is the decision worth defending: an override that
+    applied only when the scan was already confused could not be tested by the author, who
+    cannot see whether the system is confused until it holds the card — so they could never
+    tell a working line from an ignored one. Overriding always means the line has the same
+    effect on every card, which is the only version a person can learn.
     """
     text = f"{title}\n{body}"
     found: dict[str, str] = {}  # repo key → the text that produced it
@@ -619,6 +675,10 @@ def resolve_repository(
     # "is this a repository we watch" and "does this path sit inside one of their
     # clones" — are answered from the same resolved view (research R8).
     onboarded = repos.resolved_all(conn, config)
+
+    declared = _resolve_declarations(_declared_references(text), onboarded)
+    if declared is not None:
+        return declared
 
     for owner, name in _URL_REF.findall(text):
         _offer(found, f"{owner}/{name}", onboarded, f"github.com/{owner}/{name}")
@@ -631,7 +691,7 @@ def resolve_repository(
 
     if len(found) == 1:
         key = next(iter(found))
-        return Resolution(repo_key=key, candidates=(key,))
+        return Resolution(repo_key=key, candidates=(key,), source="scan")
     if not found:
         # "onboarded:", not "configured:". After milestone 005 that is what the list is,
         # and telling the author to name a repository they already named — because it has
@@ -640,19 +700,116 @@ def resolve_repository(
             repo_key=None,
             reason=(
                 "no onboarded repository could be identified from this card. Name one by "
-                "its GitHub URL, its owner/name, or its local path — onboarded: "
+                "its GitHub URL, its owner/name, or its local path, or by a line reading "
+                "`robot-army: <repo>` and nothing else — onboarded: "
                 f"{', '.join(sorted(onboarded)) or 'none'}"
             ),
+            source="scan",
         )
     keys = tuple(sorted(found))
     return Resolution(
         repo_key=None,
         reason=(
             f"this card names {len(keys)} onboarded repositories ({', '.join(keys)}); "
-            "it must name exactly one"
+            "it must name exactly one, or say which by a line reading "
+            "`robot-army: <repo>` and nothing else"
         ),
         candidates=keys,
+        source="scan",
     )
+
+
+def _resolve_declarations(
+    references: list[str], onboarded: dict[str, RepoConfig]
+) -> Resolution | None:
+    """Turn the card's ``robot-army:`` lines into a verdict, or ``None`` if it has none.
+
+    ``None`` — not an unresolvable ``Resolution`` — is what makes FR-010 structural: a card
+    with no such line falls through to the text scan untouched, so nothing that resolves
+    today can start being held because this function exists.
+
+    Each reference is resolved by the **same** three recognisers and the **same**
+    ``_offer``/``_key_for_path`` onboarding filter the text scan uses. That is not code
+    reuse for tidiness: FR-004 promises the line accepts the spellings the rest of the card
+    accepts, and "the same" is only true if it is the same code. It also means the security
+    property R8 was written for survives untouched — a declaration raises the author's
+    intent above the *text scan*, never above onboarding, so a card full of pasted output
+    containing a line of exactly this shape still cannot file an issue in a repository
+    nobody approved.
+
+    Anything other than one agreed, onboarded repository **holds** the card. In particular a
+    reference that selects nothing does not fall back to the scan, and neither does a card
+    carrying one good line and one bad one. The fallback is the dangerous direction: a
+    typo'd ``robot-army: jantmna/demo`` on a card that mentions three repositories would
+    quietly become "guess from the text", and the issue lands somewhere the author never
+    asked for. A line the author wrote is never silently discarded.
+    """
+    if not references:
+        return None
+
+    found: dict[str, str] = {}  # repo key → the reference text that produced it
+    unmatched: list[str] = []
+    for raw in references:
+        key = _key_for_reference(raw, onboarded)
+        if key is None:
+            unmatched.append(raw)
+        else:
+            found.setdefault(key, raw)
+
+    keys = tuple(sorted(found))
+    if unmatched:
+        return Resolution(
+            repo_key=None,
+            reason=(
+                f"the `robot-army:` line on this card names {unmatched[0]!r}, which is not "
+                "an onboarded repository — onboarded: "
+                f"{', '.join(sorted(onboarded)) or 'none'}"
+            ),
+            candidates=keys,
+            source="declaration",
+        )
+    if len(keys) == 1:
+        return Resolution(repo_key=keys[0], candidates=keys, source="declaration")
+    return Resolution(
+        repo_key=None,
+        reason=(
+            "this card gives more than one `robot-army:` line and they name different "
+            f"repositories ({', '.join(keys)}); it must name exactly one"
+        ),
+        candidates=keys,
+        source="declaration",
+    )
+
+
+def _key_for_reference(raw: str, onboarded: dict[str, RepoConfig]) -> str | None:
+    """One declaration's reference resolved to one onboarded repository, or ``None``.
+
+    The three recognisers are run against the reference **alone** rather than against the
+    whole card, which is what stops the URL and bare-slug patterns from picking up a second
+    repository out of surrounding prose that is not on this line.
+
+    Order matters only for cost, not for correctness: a string cannot be both a GitHub URL
+    and an absolute path, and ``_offer`` admits a candidate only when it is exactly an
+    onboarded key, so a spelling that matches two patterns resolves to the same repository
+    or to nothing.
+
+    **One reference names at most one repository.** A single token can hold two — a comma
+    joins them into one run of non-whitespace, and ``you/demo,you/other`` matches the bare
+    pattern twice — and picking the first would be the system choosing between two things
+    the author wrote, which is the whole failure this line exists to end. So it selects
+    nothing, and the caller holds the card quoting the token back.
+    """
+    found: dict[str, str] = {}
+    for owner, name in _URL_REF.findall(raw):
+        _offer(found, f"{owner}/{name}", onboarded, raw)
+    if not found:
+        for owner, name in _BARE_REF.findall(raw):
+            _offer(found, f"{owner}/{name}", onboarded, raw)
+    if not found:
+        return _key_for_path(raw, onboarded)
+    if len(found) > 1:
+        return None
+    return next(iter(found))
 
 
 def _offer(
@@ -902,6 +1059,10 @@ def evaluate_card(
             "repo_key": resolution.repo_key,
             "candidates": list(resolution.candidates),
             "reason": resolution.reason,
+            # Which one, *and* how it was decided. On a card that names three repositories,
+            # "jantman/demo" without "because the author said so" is half an answer, and
+            # Principle III's standard is reconstruction from the log alone (FR-014).
+            "source": resolution.source,
         },
         dry_run=dry_run,
     )
@@ -1290,11 +1451,21 @@ def _hold_for_info(
 
 
 def _needs_info_comment(reason: str) -> str:
+    """The one comment a held card gets, per distinct reason.
+
+    It names the ``robot-army:`` line explicitly because the card that most needs this
+    comment is the one that legitimately mentions three repositories — and on that card the
+    older advice, "say which repository this is for", is advice the author has already
+    followed three times over. The line is the only instruction that can actually be
+    obeyed there, so it is the one the card carries.
+    """
     return (
         "🤖 robot-army could not file an issue for this card yet.\n\n"
         f"{reason}\n\n"
-        "Edit the card to say which repository this is for, and it will be picked up "
-        "automatically on the next pass — no other action is needed."
+        "Add a line to this card reading `robot-army: <repo>` — a GitHub URL, an "
+        "`owner/name`, or the local clone path, alone on its own line — and it will be "
+        "picked up automatically on the next pass. No other action is needed, and the rest "
+        "of the card can go on mentioning whatever it needs to."
     )
 
 

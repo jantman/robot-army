@@ -185,7 +185,7 @@ where one exists, the repository and issue — so a card's whole life is `grep`-
 |---|---|---|
 | `trello.board.check` | Startup, and `robot-army doctor` | Each precondition and its verdict, plus the board's **member list**, which is recorded and never gated on |
 | `trello.poll` | Once per board cycle | How many cards carry the tag, and how many were newly tracked |
-| `trello.evaluated` | Per card, per evaluation | Whether it resolved, to what, and the candidates it considered |
+| `trello.evaluated` | Per card, per evaluation | Whether it resolved, to what, the candidates it considered, and `source` — `declaration` if a `robot-army:` line on the card decided it, `scan` if the card's text did |
 | `trello.needs_info` | A card is held | The reason, and the reason last written onto the card |
 | `trello.issue.create` | An issue is filed from a card | Intent/outcome pair. The failure branch carries the attempt count |
 | `trello.card.comment` | Any comment we write | Intent/outcome pair |

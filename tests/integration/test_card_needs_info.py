@@ -82,7 +82,7 @@ def test_the_card_is_commented_on_exactly_once_across_many_polls(conn, board_con
     )
     cycle(conn, board_config, audit, boundaries)
     assert len(boundaries.card_writer.comments) == 1
-    assert "which repository" in boundaries.card_writer.comments[0][1]
+    assert "robot-army: <repo>" in boundaries.card_writer.comments[0][1]
 
     for _ in range(5):
         cycle(conn, board_config, audit, boundaries)
@@ -255,3 +255,94 @@ def test_rescan_writes_a_marker_a_running_daemon_drains(
 
     assert control.take_requests(layout, audit) == ["rescan"]
     assert control.pending(layout) == []
+
+
+# -- held because of the `robot-army:` line (milestone 116) -----------------
+
+
+def _two_onboarded(conn, board_config, tmp_path):
+    from tests.conftest import make_repo
+
+    other = make_repo(tmp_path / "other")
+    board_config.repos["jantman/other"] = dataclasses.replace(
+        board_config.repos[REPO], key="jantman/other", path=other
+    )
+    onboard_repo(conn, "jantman/other", other)
+
+
+def test_a_declaration_naming_nothing_onboarded_is_held_and_quoted_back(
+    conn, board_config, audit, tmp_path
+):
+    """SC-003, driven through the machinery that actually writes on the card. The author
+    has already done what the generic message asks; the comment has to name *their* text
+    or it sends them looking for a problem they have fixed."""
+    _two_onboarded(conn, board_config, tmp_path)
+    boundaries = make_board_boundaries(
+        audit,
+        cards=[
+            make_card(
+                "card-1",
+                body=f"either {REPO} or jantman/other\nrobot-army: jantmna/demo",
+            )
+        ],
+    )
+    outcome = cycle(conn, board_config, audit, boundaries)
+
+    assert outcome.held == 1
+    assert boundaries.issue_writer.created == []
+    row = db.list_cards(conn)[0]
+    assert row.state == CardState.NEEDS_INFO
+    assert "jantmna/demo" in row.reason
+    assert len(boundaries.card_writer.comments) == 1
+    assert "jantmna/demo" in boundaries.card_writer.comments[0][1]
+
+
+def test_correcting_the_declaration_resolves_the_card_with_no_other_action(
+    conn, board_config, audit, tmp_path
+):
+    """FR-023 applied to the new reasons: the existing re-evaluate-on-edit machinery is
+    reused unchanged, so fixing a typo'd line is the whole of the author's work."""
+    _two_onboarded(conn, board_config, tmp_path)
+    boundaries = make_board_boundaries(
+        audit,
+        cards=[
+            make_card(
+                "card-1",
+                body=f"either {REPO} or jantman/other\nrobot-army: jantmna/demo",
+            )
+        ],
+    )
+    cycle(conn, board_config, audit, boundaries)
+    assert db.list_cards(conn)[0].state == CardState.NEEDS_INFO
+
+    edit(
+        boundaries,
+        body=f"either {REPO} or jantman/other\nrobot-army: {REPO}",
+        last_activity="2026-08-25T12:00:00Z",
+    )
+    outcome = cycle(conn, board_config, audit, boundaries)
+
+    assert outcome.issues_created == 1
+    row = db.list_cards(conn)[0]
+    assert row.state == CardState.LINKED
+    assert row.repo_key == REPO
+
+
+def test_two_declarations_that_disagree_earn_their_own_reason(
+    conn, board_config, audit, tmp_path
+):
+    """A distinct reason means a distinct comment: a card that moves from one failure to
+    another is told about the move rather than left with the stale explanation."""
+    _two_onboarded(conn, board_config, tmp_path)
+    boundaries = make_board_boundaries(
+        audit,
+        cards=[
+            make_card("card-1", body=f"robot-army: {REPO}\nrobot-army: jantman/other")
+        ],
+    )
+    outcome = cycle(conn, board_config, audit, boundaries)
+
+    assert outcome.held == 1
+    row = db.list_cards(conn)[0]
+    assert "more than one" in row.reason
+    assert REPO in row.reason and "jantman/other" in row.reason

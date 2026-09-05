@@ -659,3 +659,22 @@ def test_the_record_and_the_derivation_read_the_same_set():
 
     assert operations.NEVER_PARKED is NEVER_PARKED
     assert {CardState.LINKED, CardState.CREATING, CardState.DROPPED} == NEVER_PARKED
+
+
+def test_a_parked_card_carrying_a_declaration_is_still_parked(board_config, audit, conn):
+    """FR-016 (milestone 116). A `robot-army:` line says *which* repository, never
+    *whether* to act — so the strongest possible statement of intent on a card still does
+    not override the author having shelved it. The two decisions are independent, and the
+    gate sitting before resolution is what makes that structural rather than remembered."""
+    config = with_ignore_lists(board_config, "Icebox")
+    parked = make_card(
+        "card-1",
+        list_id="list-ice",
+        body="one day\nrobot-army: jantman/demo",
+    )
+    outcome, boundaries = run(config, audit, conn, [parked])
+
+    assert outcome.ignored == 1
+    assert boundaries.issue_writer.created == []
+    assert boundaries.card_writer.comments == []
+    assert db.list_cards(conn) == []

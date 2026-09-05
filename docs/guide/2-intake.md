@@ -97,7 +97,8 @@ majority of the log saying nothing happened.
 
 A card that names no onboarded repository, or names two, is **held** rather than guessed at.
 It gets one comment saying what is missing, it appears in `robot-army cards` and on `/cards`
-with its reason, and editing the card to name a repository resolves it on the next pass with
+with its reason, and editing the card to name a repository — or adding the
+[`robot-army:` line](#saying-which-repository-outright) — resolves it on the next pass with
 no further action.
 
 ```bash
@@ -109,6 +110,43 @@ A repository reference only counts if it is **already onboarded**. A card descri
 often pasted from a log, and `src/robot_army` and `docs/roadmap.md` both look exactly like an
 `owner/name`; filtering against the onboarded set means an unknown reference cannot select
 anything, so the worst case is a held card rather than an issue filed somewhere I never named.
+
+## Saying which repository outright
+
+Plenty of cards mention two or three onboarded repositories on purpose — a traceback from one
+and a link to the other is the ordinary shape of a card worth writing. Editing that text down
+until one reference survives throws away the context. Instead, put a line on the card that is
+nothing but this:
+
+```
+robot-army: jantman/demo
+```
+
+The reference takes any of the three spellings the rest of the card accepts — a GitHub URL, an
+`owner/name`, or the local clone path — and the line may be written in backticks, in any case,
+with whatever spacing. **It decides**, and every other repository reference on the card is
+disregarded. It is an override rather than a tie-breaker on purpose: a line that only worked
+when the system happened to be confused could never be tested, because I cannot see the
+confusion until the card is already held.
+
+Three things it deliberately does not do:
+
+- **It cannot reach a repository that is not onboarded.** The line raises my intent above the
+  text scan, never above onboarding. A card full of pasted log output containing a line of
+  exactly this shape still files nothing.
+- **It is never silently ignored.** A line naming something not onboarded — a typo, a
+  repository I forgot to onboard — holds the card and quotes the reference back at me,
+  rather than quietly falling back to guessing from the rest of the text. So does a card with
+  two of these lines that disagree, and so does one good line next to one bad one. The failure
+  mode being avoided is the one where I have already done the thing the message is asking for.
+- **It does not override parking.** A card in an ignored column stays parked. The line says
+  which repository, not whether to act.
+
+`see robot-army: jantman/demo for context` is prose and does nothing — though the mention of
+`jantman/demo` still counts as a mention. Only a whole line counts.
+
+The audit log records which way each card was decided: `trello.evaluated` carries
+`"source": "declaration"` or `"source": "scan"`.
 
 ## One card, one issue
 

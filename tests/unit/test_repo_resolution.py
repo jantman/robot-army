@@ -436,3 +436,13 @@ def test_a_declaration_on_an_installation_with_nothing_onboarded_holds(
     result = resolve(config, "", "robot-army: jantman/demo")
     assert not result.resolvable
     assert "none" in result.reason
+
+
+def test_one_reference_naming_two_repositories_selects_neither(resolve, multi_config):
+    """A comma joins two references into one run of non-whitespace. Picking the first
+    would be the system choosing between two things the author wrote — the exact failure
+    the line exists to end — so it selects nothing and the card is held."""
+    result = resolve(multi_config, "", "robot-army: jantman/demo,jantman/other")
+    assert result.repo_key is None
+    assert "jantman/demo,jantman/other" in result.reason
+    assert result.source == "declaration"

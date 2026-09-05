@@ -61,7 +61,10 @@ already gets:
 - a filesystem path equal to, or inside, a repository's local clone, with `~` expanded.
 
 A reference that does not resolve to an onboarded repository selects **nothing**. It does not
-select a repository by partial match, by last path segment, or by any similarity rule. This is
+select a repository by partial match, by last path segment, or by any similarity rule. Neither
+does one that resolves to *two* — `robot-army: you/demo,you/other` is one run of non-whitespace
+holding two references, and choosing between two things the author wrote is the failure this
+line exists to end, so it selects nothing and the card is held quoting the token back. This is
 the property that makes the declaration safe on a card containing pasted log output: the
 parser can be fooled, and it still cannot cause an issue to be filed anywhere the author did
 not onboard.

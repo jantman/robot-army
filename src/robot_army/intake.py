@@ -792,6 +792,12 @@ def _key_for_reference(raw: str, onboarded: dict[str, RepoConfig]) -> str | None
     and an absolute path, and ``_offer`` admits a candidate only when it is exactly an
     onboarded key, so a spelling that matches two patterns resolves to the same repository
     or to nothing.
+
+    **One reference names at most one repository.** A single token can hold two — a comma
+    joins them into one run of non-whitespace, and ``you/demo,you/other`` matches the bare
+    pattern twice — and picking the first would be the system choosing between two things
+    the author wrote, which is the whole failure this line exists to end. So it selects
+    nothing, and the caller holds the card quoting the token back.
     """
     found: dict[str, str] = {}
     for owner, name in _URL_REF.findall(raw):
@@ -800,10 +806,10 @@ def _key_for_reference(raw: str, onboarded: dict[str, RepoConfig]) -> str | None
         for owner, name in _BARE_REF.findall(raw):
             _offer(found, f"{owner}/{name}", onboarded, raw)
     if not found:
-        key = _key_for_path(raw, onboarded)
-        if key is not None:
-            return key
-    return next(iter(found), None)
+        return _key_for_path(raw, onboarded)
+    if len(found) > 1:
+        return None
+    return next(iter(found))
 
 
 def _offer(

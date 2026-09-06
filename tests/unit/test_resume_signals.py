@@ -52,7 +52,10 @@ def count_conditions(monkeypatch):
     real = operations.worktree.condition
 
     def counting(*args, **kwargs):
-        calls.append("condition")
+        # The base ref rather than a marker: every caller here counts observations, and one
+        # of them (issue #150's review) needs to know which branch the observation was made
+        # against. ``worktree.condition(vcs, clone, worktree, branch, base_ref)``.
+        calls.append(str(args[4]) if len(args) > 4 else str(kwargs.get("base_ref")))
         return real(*args, **kwargs)
 
     monkeypatch.setattr(operations.worktree, "condition", counting)
@@ -106,25 +109,50 @@ def test_the_local_cache_is_keyed_on_what_it_observed(ctx, conn, count_condition
     assert len(count_conditions) == 2
 
 
-def test_the_local_cache_is_keyed_on_the_base_ref_too(ctx, conn, count_conditions, monkeypatch):
-    """``commits_on_branch`` is counted against the base branch, so a changed base is a
-    different answer even though nothing about the item moved.
+def test_the_base_ref_is_resolved_only_when_the_observation_is_made(
+    ctx, conn, count_conditions, monkeypatch
+):
+    """The base ref must not be resolved before the cache is consulted (review of #150).
 
-    The base ref is redirected at ``repos.base_ref`` — the one resolver every surface asks
-    since issue #150 — rather than at a configuration helper, because a base ref can now
-    change by the clone answering differently as well as by the file being edited.
+    It used to be part of the cache key, back when it was a dictionary lookup. Resolving it
+    reads the clone, so a key that needs a ``git`` fork to compute is a cache that cannot
+    prevent the ``git`` forks it exists to prevent: ``/interrupted`` renders one card per
+    item and RA-14's "at most once per item per window" would silently have become "always".
     """
+    resolutions: list[str] = []
+    real = operations.repos_mod.base_ref
+
+    def counted(*args, **kwargs):
+        resolutions.append(args[1])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(operations.repos_mod, "base_ref", counted)
     item = _item(conn)
+
+    operations.local_resume_signals(ctx, item)
     operations.local_resume_signals(ctx, item)
 
+    assert len(count_conditions) == 1, "the second call must be served from the cache"
+    assert len(resolutions) == 1, "and must not resolve the base ref to find that out"
+
+
+def test_a_base_ref_resolved_on_a_miss_is_the_one_the_condition_is_measured_against(
+    ctx, conn, count_conditions, monkeypatch
+):
+    """The other half: dropping the base ref from the key must not drop it from the
+    observation. ``commits_on_branch`` is counted against it, and a changed base is seen on
+    the next window — the same five seconds of staleness every other input already accepts.
+    """
     monkeypatch.setattr(
         operations.repos_mod,
         "base_ref",
         lambda *args, **kwargs: repos.BaseRef("release", "detected", "detected from origin/HEAD"),
     )
+    item = _item(conn)
+
     operations.local_resume_signals(ctx, item)
 
-    assert len(count_conditions) == 2
+    assert count_conditions[0] == "release"
 
 
 def test_a_failed_local_observation_is_not_cached(ctx, conn, monkeypatch):

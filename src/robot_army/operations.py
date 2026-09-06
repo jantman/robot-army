@@ -1002,15 +1002,24 @@ LOCAL_SIGNAL_TTL_SECONDS = 5.0
 _REMOTE_SIGNAL_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 _REMOTE_SIGNAL_LOCK = threading.Lock()
 
-#: (item id, repo key, worktree path, branch, base ref) -> (computed_at monotonic, signals).
-#: Every input :func:`worktree.condition` is given, so an item whose worktree was reclaimed or
-#: whose branch was renamed is a different key rather than a stale answer about somewhere else.
+#: (item id, repo key, worktree path, branch) -> (computed_at monotonic, signals).
+#: The item's own fields, so an item whose worktree was reclaimed or whose branch was renamed
+#: is a different key rather than a stale answer about somewhere else.
+#:
+#: **The base ref is deliberately not among them**, though ``worktree.condition`` is given it.
+#: It used to be, back when it was a dictionary lookup; since issue #150 resolving it reads
+#: the clone, and a key that costs a ``git`` fork to compute is a cache that cannot prevent
+#: the ``git`` forks it exists to prevent — RA-14's "at most once per item per window" would
+#: silently have become "always". It is resolved on a miss instead, where the observation is
+#: being made anyway. The cost is that a base ref which changes mid-window is seen on the next
+#: one, which is the same five seconds of staleness every other input to this observation
+#: already accepts.
 #:
 #: A second dict rather than one shared with the remote half, because the two have different
 #: lifetimes for different reasons — a minute for "has GitHub changed", five seconds for "has
 #: the checkout changed" — and that split is the fact the two functions already encode.
 _LOCAL_SIGNAL_CACHE: dict[
-    tuple[int, str, str, str, str], tuple[float, dict[str, Any]]
+    tuple[int, str, str, str], tuple[float, dict[str, Any]]
 ] = {}
 _LOCAL_SIGNAL_LOCK = threading.Lock()
 
@@ -1090,19 +1099,15 @@ def local_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
     repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
     if repo is None or not item.worktree_path or not item.branch:
         return signals
-    base_ref = repos_mod.base_ref(
-        ctx.config, item.repo_key, ctx.boundaries.version_control, repo.path
-    ).ref
-
-    # Every input the observation is made from. An item whose worktree was reclaimed or whose
-    # branch was renamed is a different key, so it is observed afresh rather than served an
-    # answer about somewhere it was never made.
+    # An item whose worktree was reclaimed or whose branch was renamed is a different key, so
+    # it is observed afresh rather than served an answer about somewhere it was never made.
+    # Every field here is free; see the note on the cache itself for why the base ref, which
+    # is not, is resolved below the lookup rather than inside the key.
     key = (
         int(item.id),
         str(item.repo_key),
         str(item.worktree_path),
         str(item.branch),
-        str(base_ref),
     )
     now = _monotonic()
     with _LOCAL_SIGNAL_LOCK:
@@ -1110,6 +1115,9 @@ def local_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
         if cached is not None and now - cached[0] < LOCAL_SIGNAL_TTL_SECONDS:
             return {**cached[1], "local_signals_age_seconds": int(now - cached[0])}
 
+    base_ref = repos_mod.base_ref(
+        ctx.config, item.repo_key, ctx.boundaries.version_control, repo.path
+    ).ref
     try:
         condition = worktree.condition(
             ctx.boundaries.version_control,

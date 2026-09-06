@@ -4536,6 +4536,30 @@ def _scan_file_backwards(
     return _FileScan(found, 0, skipped, withheld, read, False)
 
 
+def _resume_point(files: list[Path], cursor: str | None) -> tuple[int, int | None]:
+    """Where a page starts: an index into ``files`` and a byte offset within that file.
+
+    ``None`` as the offset means "from the end of the file", which is what a first page wants
+    and what a cursor whose offset was ``0`` wants of the *next* file down.
+
+    An unreadable cursor, or one naming a file that no longer exists, falls back to the newest
+    page rather than erroring — the file it names may legitimately have been rotated away, and
+    ``_decode_cursor`` says why that is the right direction to fail in.
+    """
+    if not cursor:
+        return 0, None
+    decoded = _decode_cursor(cursor)
+    if decoded is None:
+        return 0, None
+    name, offset = decoded
+    for index, path in enumerate(files):
+        if path.name == name:
+            # An offset of zero means that file is finished, not that it should be read
+            # again — the difference between a page turn and an infinite loop.
+            return (index if offset else index + 1), (offset or None)
+    return 0, None
+
+
 def read_log_page(
     ctx: Context,
     *,
@@ -4570,21 +4594,7 @@ def read_log_page(
     limit = max(1, min(int(limit), 1000))
 
     files = sorted(Path(ctx.layout.log_dir).glob("audit-*.jsonl"), reverse=True)
-    start_index = 0
-    # ``None`` means "from the end of the file", which is what a first page wants and what a
-    # cursor whose offset was ``0`` wants of the *next* file down.
-    start_offset: int | None = None
-    if cursor:
-        decoded = _decode_cursor(cursor)
-        if decoded is not None:
-            name, offset = decoded
-            for index, path in enumerate(files):
-                if path.name == name:
-                    # An offset of zero means that file is finished, not that it should be
-                    # read again — the difference between a page turn and an infinite loop.
-                    start_index = index if offset else index + 1
-                    start_offset = offset or None
-                    break
+    start_index, start_offset = _resume_point(files, cursor)
 
     records: list[dict[str, Any]] = []
     skipped = 0

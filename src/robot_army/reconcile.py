@@ -214,6 +214,7 @@ def reclaim_stale_session(
             conn,
             kind="orphan_session",
             entity_type="session",
+            dry_run=session.dry_run,
             entity_id=session.session_id,
             detail={
                 "pid": entry.pid,
@@ -292,6 +293,7 @@ def _sweep_superseded_sessions(
                     conn,
                     kind="orphan_session",
                     entity_type="session",
+                    dry_run=other.dry_run,
                     entity_id=other.session_id,
                     detail={
                         "pid": entry.pid,
@@ -457,6 +459,7 @@ def reconcile(
                 conn,
                 kind="dispatching_timeout",
                 entity_type="work_item",
+                dry_run=item.dry_run,
                 entity_id=str(item.id),
                 detail={
                     "age_s": None if age == float("inf") else int(age),
@@ -1370,6 +1373,7 @@ def _sweep_transcripts(conn: sqlite3.Connection, *, audit: AuditLog) -> tuple[in
                 conn,
                 kind="no_transcript",
                 entity_type="session",
+                dry_run=session.dry_run,
                 entity_id=session.session_id,
                 detail={
                     # Not `**detail`: the anomaly's own `entity_id` is the session id, and
@@ -1447,6 +1451,11 @@ def _orphan_sweep(
         if row is not None and SessionState(row["state"]) is SessionState.RUNNING:
             continue
         with db.transaction(conn):
+            # No `dry_run` (issue #21), and its absence is the decision. This branch runs
+            # for a process the *registry* knows about, which may have no sessions row at
+            # all -- there is nothing to read a flag from. Real is the right answer anyway:
+            # an unaccounted-for live process holds a real slot on a real machine whatever
+            # produced it, and that is the whole content of the report.
             created = db.raise_anomaly(
                 conn,
                 kind="orphan_session",
@@ -1753,6 +1762,7 @@ def _sweep_worktrees(
                     conn,
                     kind="config_missing_repo",
                     entity_type="work_item",
+                    dry_run=item.dry_run,
                     entity_id=str(item.id),
                     detail={
                         "repo_key": item.repo_key,
@@ -1781,6 +1791,7 @@ def _sweep_worktrees(
                 conn,
                 kind="prunable_worktree",
                 entity_type="work_item",
+                dry_run=item.dry_run,
                 entity_id=str(item.id),
                 detail={
                     "worktree_path": item.worktree_path,

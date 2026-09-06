@@ -1308,6 +1308,10 @@ def _record_create_failure(
                 conn,
                 kind="card_create_failing",
                 entity_type="card",
+                # The card's own flag (issue #21). Below `live` the creation is simulated, so
+                # a failure of it is a rehearsal's failure -- which is exactly the pair of
+                # rows that were reported as real outstanding problems in the default view.
+                dry_run=card.dry_run,
                 entity_id=card.card_id,
                 detail={
                     "card_url": card.card_url,
@@ -2492,6 +2496,7 @@ def _issue_has_vanished(
             conn,
             kind="card_issue_missing",
             entity_type="card",
+            dry_run=card.dry_run,
             entity_id=card.card_id,
             detail={
                 "card_url": card.card_url,

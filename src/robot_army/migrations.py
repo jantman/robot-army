@@ -632,6 +632,55 @@ ALTER TABLE work_items ADD COLUMN pull_requests TEXT;
 ALTER TABLE work_items ADD COLUMN pull_requests_at TEXT;
 """
 
+SCHEMA_014_SQL = """
+-- Whether the run that raised an anomaly was a rehearsal (issue #21).
+--
+-- `--include-simulated` was advertised on `anomalies` and did nothing, because the filter
+-- cannot be applied where the column does not exist. The cost was not the missing option. It
+-- was that two `card_create_failing` anomalies belonging to dry-run cards were reported in the
+-- default view as outstanding real problems -- a rehearsal producing something a reader
+-- mistakes for real, which is the one thing FR-056 exists to prevent.
+--
+-- **Recorded at raise time rather than derived from the entity**, and the alternative is
+-- tempting enough to name. An anomaly carries `entity_type`/`entity_id`, so "is this card
+-- simulated?" looks like a join away. It is not one join but six -- work_item, session, card,
+-- repo, board, and NULL -- so the question would have six answers maintained inside one CASE
+-- expression. Four kinds name no entity at all (`capacity_unobservable`,
+-- `registry_version_unknown`, `malformed_exit_record`, `orphan_exit_record`), and "undefined"
+-- is not a scope a default view can be built on. And the derivation's answer *changes*:
+-- `purge-simulated` deletes the rows, at which point every anomaly raised against one silently
+-- becomes real again.
+--
+-- **NOT NULL DEFAULT 0, deliberately unlike migrations 011 and 013.** Those chose nullable
+-- columns precisely so "never asked" stayed distinguishable from "asked, and empty". Here the
+-- two readings do not cost the same. There is nothing to back-fill from -- an existing row
+-- carries no evidence of which run raised it -- and `0` reads as *real*, so every pre-014 row
+-- stays visible. Showing a real anomaly that was in fact rehearsed is a row the reader
+-- dismisses; hiding a rehearsed one that was in fact real is a condition nobody ever sees.
+-- Only the first is recoverable. The Python default on `db.raise_anomaly` is `False` for the
+-- same asymmetry: a future call site that forgets the argument raises a *visible* anomaly.
+ALTER TABLE anomalies ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0;
+
+-- **The index has to be rebuilt, and leaving it alone would be worse than the bug.**
+--
+-- `raise_anomaly` is `INSERT OR IGNORE` and leans entirely on this partial unique index to
+-- stop a 60-second reconciliation loop writing 1,440 identical rows a day. Without `dry_run`
+-- in it, a rehearsed run and a real run reporting the same condition for the same entity
+-- collide, and the insert silently keeps whichever arrived first. A real anomaly could
+-- therefore be swallowed by a rehearsal that got there earlier -- and would then be invisible
+-- in the default view, which is strictly worse than the defect being fixed here. They are
+-- different facts about different work and must be able to coexist.
+--
+-- COALESCE is carried over unchanged from 012 and is still load-bearing: in SQLite two NULLs
+-- never compare equal, so indexing the bare columns would leave every anomaly with an
+-- unspecified entity colliding with nothing and duplicating on every pass. SQLite cannot alter
+-- an index in place, so it is dropped and rebuilt -- the same two statements 012 needed.
+DROP INDEX idx_anomalies_open;
+CREATE UNIQUE INDEX idx_anomalies_open
+    ON anomalies (kind, COALESCE(entity_type, ''), COALESCE(entity_id, ''), dry_run)
+    WHERE acknowledged_at IS NULL AND resolved_at IS NULL;
+"""
+
 
 def _migration_005(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_005_SQL):
@@ -678,6 +727,11 @@ def _migration_013(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_014(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_014_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -693,6 +747,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_011,
     _migration_012,
     _migration_013,
+    _migration_014,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

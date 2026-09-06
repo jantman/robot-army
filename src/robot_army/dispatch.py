@@ -1221,6 +1221,7 @@ def _dispatch_item(
                 item_id=item_id,
                 expected=session_id,
                 worktree_path=worktree_path,
+                dry_run=dry_run,
                 registry_dir=registry_dir,
                 proc_root=proc_root,
             )
@@ -1409,6 +1410,7 @@ def _detect_session_id_mismatch(
     item_id: int,
     expected: str,
     worktree_path: str,
+    dry_run: bool,
     registry_dir: Path | None,
     proc_root: Path | None,
 ) -> bool:
@@ -1445,6 +1447,11 @@ def _detect_session_id_mismatch(
                         "did not request, so we cannot track or resume it"
                     ),
                 },
+                # The item's own flag (issue #21). A rehearsal's worktree really can be
+                # occupied by a live process -- the session host is real below `live` -- but
+                # it is a fact about rehearsed work, and a reader looking for real trouble
+                # must not be handed it in the default view.
+                dry_run=dry_run,
             )
         return created
     return False

@@ -150,6 +150,10 @@ def apply_record(
     if row is None:
         # Evidence of a session the daemon lost track of. The file is kept: discarding it
         # would destroy exactly the thing that makes this diagnosable.
+        #
+        # No `dry_run` (issue #21): this branch is reached *because* there is no sessions row,
+        # so there is no flag to read. Real is also the right answer — an exit record nothing
+        # claims is a gap in the record itself, not a fact about rehearsed work.
         db.raise_anomaly(
             conn,
             kind="orphan_exit_record",

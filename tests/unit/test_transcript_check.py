@@ -79,7 +79,17 @@ def checked_at(conn, row_id: int) -> str | None:
 
 
 def kinds(conn) -> list[str]:
-    return [a.kind for a in db.list_anomalies(conn, unacknowledged_only=False)]
+    """Every anomaly this module raised, rehearsed ones included.
+
+    ``include_simulated`` because the question these tests ask is *what was raised*, not what
+    the default view shows — and several of them seed ``dry_run`` sessions deliberately, since
+    a ``no-remote`` session has a real process behind a simulated row. Issue #21 gave anomalies
+    a ``dry_run`` of their own, so the default scope now hides exactly those.
+    """
+    return [
+        a.kind
+        for a in db.list_anomalies(conn, unacknowledged_only=False, include_simulated=True)
+    ]
 
 
 def actions(audit) -> list[str]:

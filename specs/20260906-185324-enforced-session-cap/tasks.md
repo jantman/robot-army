@@ -122,12 +122,12 @@ and a web reading and compare the denominators.
 
 ## Phase 6: Polish & cross-cutting
 
-- [ ] T030 [P] Add an integration test to `tests/integration/test_dispatch_capacity.py` proving the daemon's own dispatch decisions are unchanged: it plans against its own configuration, reads no heartbeat to learn its cap, and dispatches exactly as it did before with a heartbeat present, absent, or naming a different cap
-- [ ] T031 [P] Document the heartbeat's new key in `docs/guide/state.md`, saying what it is for and that reading it answers "what cap is in force?" without access to the configuration file
-- [ ] T032 [P] Document in `docs/guide/3-selection.md` which cap the surfaces report and why the running daemon is the authority, including that raising the cap takes effect when the daemon restarts and not before
-- [ ] T033 [P] Document the new notice in `docs/guide/operating.md`: what it means, that it never refuses anything, and that the fix is to restart whichever of the two processes has been running since before the configuration changed
-- [ ] T034 Run `uv run pytest` and confirm the whole suite passes, including `tests/unit/test_example_config_drift.py` — no configuration key changed, so `share/config.example.toml` must be untouched
-- [ ] T035 Walk [quickstart.md](quickstart.md) §1 and §2 against a running daemon and web service, confirming the issue's `6/5` now reads `6/7` and that the reverse direction reports the daemon's cap
+- [X] T030 [P] Add an integration test to `tests/integration/test_dispatch_capacity.py` proving the daemon's own dispatch decisions are unchanged: it plans against its own configuration, reads no heartbeat to learn its cap, and dispatches exactly as it did before with a heartbeat present, absent, or naming a different cap
+- [X] T031 [P] Document the heartbeat's new key in `docs/guide/state.md`, saying what it is for and that reading it answers "what cap is in force?" without access to the configuration file
+- [X] T032 [P] Document in `docs/guide/3-selection.md` which cap the surfaces report and why the running daemon is the authority, including that raising the cap takes effect when the daemon restarts and not before
+- [X] T033 [P] Document the new notice in `docs/guide/operating.md`: what it means, that it never refuses anything, and that the fix is to restart whichever of the two processes has been running since before the configuration changed
+- [X] T034 Run `uv run pytest` and confirm the whole suite passes, including `tests/unit/test_example_config_drift.py` — no configuration key changed, so `share/config.example.toml` must be untouched
+- [X] T035 Walk [quickstart.md](quickstart.md) §1 and §2 against a running daemon and web service, confirming the issue's `6/5` now reads `6/7` and that the reverse direction reports the daemon's cap — done against an **isolated** config, state directory and port rather than the live install, with a stand-in holding the real single-instance lock and writing real heartbeats. Every section walked: both directions, both surfaces agreeing as payloads, all three silent states, and the cap read straight out of `heartbeat.json`. One correction came out of it — `robot-army capacity` has no `--json` flag and never had one, so the contract and quickstart now name `status --json` as where that payload is read
 
 ---
 

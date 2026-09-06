@@ -29,14 +29,15 @@ cannot change while it runs.
 |---|---|
 | Web chrome pill, every page | `<total>/<cap in force> sessions (<n> ours, <m> other)` — unchanged in shape. Styled "at capacity" only when `total >= cap in force`. |
 | Web notices, every page | The disagreement sentence, as a `banner warn`, when and only when there is one. Placed with the daemon-not-running and effect-level banners, after them. |
-| `robot-army capacity` | `capacity     : <total> of <cap in force> sessions running`, unchanged in shape, plus one `cap          : ` line carrying the sentence when there is one. |
+| `robot-army capacity` | `capacity     : <total> of <cap in force> sessions running`, unchanged in shape, plus one `cap          : ` line carrying the sentence when there is one. It has no `--json` flag and never had one. |
 | `robot-army status` | The existing `capacity     : <describe()>` line, whose text now carries the disagreement as a trailing clause. |
-| `--json` / web JSON | `global_cap`, `configured_cap`, `cap_disagreement` (§3). |
+| `status --json` / web JSON | `global_cap`, `configured_cap`, `cap_disagreement` (§3). |
 | Queue view / `status` queue | Planned against the snapshot carrying the cap in force, so a per-item "at capacity" reason cannot contradict the fraction above it. |
 
 ## 3. The machine-readable shape
 
-Present in `_capacity_dict` (web chrome and `status --json`) and in `capacity --json`:
+Present in `_capacity_dict`, which the web chrome, the `/queue` payload and `status --json`
+all render from, and in the document `capacity` assembles for itself:
 
 ```json
 {
@@ -53,6 +54,10 @@ Present in `_capacity_dict` (web chrome and `status --json`) and in `capacity --
 - `configured_cap` is `null` unless this process's configuration disagrees with the cap in
   force. Its presence *is* the disagreement; no consumer compares numbers.
 - `cap_disagreement` is `null` or the exact sentence in §5.
+
+`capacity`'s own document carries the same three keys. It has no `--json` flag on the CLI —
+`status --json` is where that payload is read from — but the two documents must not be free
+to disagree about the same three facts.
 
 When capacity is unobservable, the keys are present and behave the same way: the cap in force
 is still resolved and still reported, because "how full is it?" being unanswerable does not

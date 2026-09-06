@@ -65,6 +65,10 @@ Run them within a second of each other, in either of the two states above:
 ```bash
 robot-army capacity | grep '^capacity'
 curl -s localhost:8420/active | grep -oE '[0-9]+/[0-9]+ sessions'
+
+# and as payloads — `capacity` itself has no --json flag; `status` is where that lives
+robot-army status --json      | jq '.capacity | {total, global_cap, configured_cap}'
+curl -s localhost:8420/active.json | jq '.capacity | {total, global_cap, configured_cap}'
 ```
 
 The denominators match. Before this change they could not be relied on to.

@@ -2184,7 +2184,14 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
                 "cleaned_at": item.cleaned_at,
             }
         )
-    result.data = {"worktrees": payload}
+    result.data = {
+        "worktrees": payload,
+        # Stated here as well as in the text, and always — including as 0. `cards` and
+        # `status` have carried it since 008; this listing printed the sentence and left the
+        # machine-readable consumer to infer the number from a table it cannot see, which is
+        # the same absent-versus-zero ambiguity one surface over (issue #21).
+        "withheld_simulated": withheld,
+    }
     if not rows:
         if withheld:
             return result.say(f"no worktrees visible ({_withheld_note(withheld)})")

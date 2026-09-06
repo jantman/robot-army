@@ -48,6 +48,30 @@ READ_COMMANDS = frozenset(
     }
 )
 
+#: The verbs that offer ``--include-simulated``, and the rule for belonging to this set:
+#: **a verb is here if and only if the rows it prints can be rehearsed and it filters them.**
+#:
+#: Named rather than written inline because the promise had already been broken once (issue
+#: #21). The flag was decorated onto six verbs and honoured by three; the parser said one
+#: thing and the commands did another, and nothing could notice because the set existed only
+#: as a literal inside the loop below. It now has two readers — this parser, and a test that
+#: drives every member in both spellings against a state holding rehearsed rows — so the
+#: claim and its check are the same object.
+#:
+#: ``repos`` is deliberately absent. Onboarding inspects a real clone on disk, computes a
+#: fingerprint from real ``git`` output, and records the origin it actually found; nothing in
+#: ``effects.py`` intercepts it and there is no rehearsed path, so the table cannot hold a row
+#: this flag would hide. Offering it there was a promise about an empty set.
+SIMULATED_SCOPED_COMMANDS = frozenset(
+    {
+        "status",
+        "worktree",
+        "log",
+        "anomalies",
+        "cards",
+    }
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -336,7 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
             action.add_argument(
                 "--json", action="store_true", help="machine-readable output on stdout"
             )
-        if name in ("status", "worktree", "log", "anomalies", "repos", "cards"):
+        if name in SIMULATED_SCOPED_COMMANDS:
             action.add_argument(
                 "--include-simulated",
                 action="store_true",

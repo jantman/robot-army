@@ -263,11 +263,24 @@ def test_every_read_command_accepts_json(command, config_file):
     assert args.json is True
 
 
-@pytest.mark.parametrize("command", [["status"], ["repos"], ["log"], ["worktree", "list"]])
+@pytest.mark.parametrize("command", [["status"], ["cards"], ["log"], ["worktree", "list"]])
 def test_listing_commands_accept_include_simulated(command):
-    """T124, FR-056: including simulated rows is the explicit act."""
+    """T124, FR-056: including simulated rows is the explicit act.
+
+    ``repos`` used to be in this list and no longer is. It accepted the option and ignored it
+    — there is no rehearsed onboarding path, so its table cannot hold a row the flag would
+    hide — and issue #21 removed the option rather than leave a promise about an empty set.
+    The verbs that *do* carry it are enumerated by ``cli.SIMULATED_SCOPED_COMMANDS`` and
+    driven end-to-end in ``tests/unit/test_simulated_scope_promise.py``.
+    """
     args = build_parser().parse_args([*command, "--include-simulated"])
     assert args.include_simulated is True
+
+
+def test_repos_no_longer_accepts_include_simulated():
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(["repos", "--include-simulated"])
+    assert caught.value.code == EXIT_USAGE
 
 
 def test_run_accepts_once(config_file):

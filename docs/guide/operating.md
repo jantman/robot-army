@@ -355,6 +355,46 @@ Reattach to a running session directly:
 dtach -a /run/user/$(id -u)/robot-army/<item>.sock
 ```
 
+## Walking away from a confirmation prompt
+
+Four commands stop and ask before doing something I cannot undo:
+
+| Command | The question |
+|---|---|
+| `onboard` | approve this repository for dispatch, recording its fingerprint |
+| `worktree remove --force` | type the item id, to discard the tree's uncommitted work |
+| `cancel` | stop this session |
+| `purge-simulated` | delete these rehearsal rows |
+
+Pressing Ctrl-C at any of them, or running one where there is no stdin to read — a
+pipeline, a cron entry, `< /dev/null` — stops the command. **Nothing it was about to do
+happens**, including at the force-removal prompt, where the expected answer is a typed item
+id and an absent answer is not it. Each says which of the two it was, and exits accordingly:
+
+```console
+$ robot-army purge-simulated < /dev/null
+Delete 4 simulated work item(s), 0 simulated session(s) and 17 simulated card(s)? [y/N]
+no answer available: input ended before the prompt was answered
+  → exit=4
+
+$ robot-army worktree remove 21 --force        # then Ctrl-C
+Type the item id (21) to force-remove /w/demo/issue-21 and discard its uncommitted work:
+interrupted
+  → exit=1
+```
+
+Every question is asked on **stderr**, so a `--json` run that was given up on still puts one
+parseable document on stdout. And every one of them leaves a record — what was attempted,
+against what, and which way I gave up — under the command's own action name. The shapes are
+on [the audit log page](audit-log.md#the-issue-23-records).
+
+Until issue #23 only `onboard` did all of this, and the two halves failed differently. A
+**closed stdin** tracebacked out of the other three — that is the reproduction in the issue.
+**Ctrl-C** already printed `interrupted` and exited 1, because `main` has caught it all
+along; what it did not do was say which question had been walked away from. `cancel` and
+`purge-simulated` wrote no record at all, and `worktree remove --force` wrote one naming an
+exception and nothing else, under an intent that had already named the path.
+
 ## Noticing it has died
 
 A dead daemon cannot report its own death, so the checker is a separate process and the

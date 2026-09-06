@@ -677,9 +677,10 @@ that refuses *before* reaching git would have left nothing behind at all.
 **A refusal is `outcome: "ok"`, not `"error"`.** The vocabulary is fixed to `ok`/`error`/
 `pending`, and the precedent is `cleanup.considered`, which records a `skipped` decision as
 `ok`. Nothing failed here: the command was asked a question and answered it. `error` stays
-for a boundary that broke, and `audit.action` still writes one on its own if anything raises
-— including a `KeyboardInterrupt` at the confirmation prompt, so even an abandoned prompt is
-reconstructible.
+for a boundary that broke, and `audit.action` still writes one on its own if anything raises.
+A `KeyboardInterrupt` at the confirmation prompt is one of those — see
+[the issue #23 records](#the-issue-23-records), which is what makes it say more than the name
+of an exception.
 
 The `live_session` detail reports process liveness in one of four words — `running`, `gone`,
 `unidentified`, `unrecorded` — and **none of them decides anything**. The session row is what
@@ -764,6 +765,47 @@ standard needs.
 One invocation shape goes entirely unrecorded: a non-numeric issue number, which argparse
 rejects before the log is open. Nothing was read and nothing was reached, so there is no
 action to reconstruct — that is a malformed invocation, not an event.
+
+## The issue #23 records
+
+Four commands stop and ask before acting. Giving up at the question — Ctrl-C, or a stdin
+with nothing in it — is now a recorded result rather than a traceback, at all four.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `repo.onboard` | Onboarding abandoned at its approval prompt | `refused: true` and `cause`. **Unchanged** — milestone 011 wrote this one, and issue #23 is the other three catching up |
+| `worktree.remove` | A forced removal abandoned at the typed-id prompt | The intent was already flushed before the question blocked, carrying `force: true` and the worktree path as `target`. Its outcome is now `error` with `abandoned: true` and `cause` — so the pair says a forced removal of that path was attempted, abandoned, and never happened. It used to say `EOFError` and nothing else |
+| `session.cancel` | **New** — a cancel abandoned at its prompt | `entity_id` is the session, and the detail carries `abandoned`, `cause` and `item_id` |
+| `purge.simulated` | A purge abandoned at its prompt | `abandoned: true`, `cause`, and the counts the question quoted — so the log says what was nearly deleted, not merely that something was |
+
+`cause` is one of two words, and they are kept apart deliberately:
+
+| `cause` | What happened | Exit |
+|---|---|---|
+| `interrupted_at_prompt` | Ctrl-C. The maintainer read the question and walked away | `1` |
+| `no_answer_available` | stdin was at end-of-file. Nobody was there to ask — a pipeline, a cron entry, `< /dev/null` | `4` |
+
+"I changed my mind" and "this ran somewhere with no maintainer attached" are different
+things to find in a log, and different things for a shell script to branch on. **Neither is
+ever read as consent**, including at the force-removal prompt, where the expected answer is
+a typed item id rather than `y`.
+
+```bash
+# every question anyone gave up on, and why
+jq -r 'select(.detail.cause == "interrupted_at_prompt" or .detail.cause == "no_answer_available")
+       | "\(.ts) \(.action) \(.entity_id) \(.detail.cause)"' \
+  ~/.local/state/robot-army/logs/audit-*.jsonl
+```
+
+**`session.cancel` appears only here.** A cancel that goes through is already
+reconstructable from `session.terminate` and the session and work-item transitions, so it
+never needed an intent/outcome pair of its own; an abandoned one has none of those to be
+read from. The asymmetry is deliberate rather than an oversight. Declining `cancel` or
+`purge-simulated` — typing `n` — writes no record either, for the same reason: a command that
+ran and changed nothing is what the absence of a record already says. The other two prompts
+are not like that, and already were not before issue #23: `onboard` records a decline as
+`aborted_at_prompt`, and typing the wrong item id at the force prompt sets `aborted` on the
+`worktree.remove` outcome that is open by then.
 
 ## Reconstructing an item's history
 

@@ -26,6 +26,7 @@ from robot_army.boundaries import RemovalResult
 from robot_army.boundaries.git import SimulatedVersionControl
 from robot_army.effects import EffectLevel
 from robot_army.operations import (
+    EXIT_CHECK_FAILED,
     EXIT_FAILED,
     EXIT_OK,
     EXIT_PRECONDITION,
@@ -612,3 +613,117 @@ def test_the_payload_discriminator_covers_all_three_outcomes(conn, audit, config
     )
     assert dirty.data["refused_by"] == "git"
     assert "modified or untracked files" in dirty.data["refused_reason"]
+
+
+# -- issue #23: giving up at the force prompt --------------------------------
+#
+# The prompt that discards uncommitted work. The intent was always written before the prompt
+# blocked, so the log could say a force-removal had been *started*. What it could not say is
+# how it ended: before #23 a closed stdin tracebacked out and a Ctrl-C exited 1 via
+# `cli.main`, and either way the outcome record's entire content was the exception's name.
+
+
+class GivesUp:
+    """A maintainer who walks away, or a stdin that was never there."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "line", "cause"),
+    [
+        (KeyboardInterrupt(), EXIT_FAILED, "interrupted", "interrupted_at_prompt"),
+        (
+            EOFError(),
+            EXIT_CHECK_FAILED,
+            "no answer available: input ended before the prompt was answered",
+            "no_answer_available",
+        ),
+    ],
+    ids=["ctrl-c", "eof"],
+)
+def test_giving_up_at_the_force_prompt_removes_nothing_and_says_so(
+    conn, audit, config, layout, error, code, line, cause
+):
+    item_id = item_with_worktree(conn)
+    prompter = GivesUp(error)
+
+    result = operations.worktree_remove(
+        make_context(conn, audit, config), item_id, force=True, confirm=prompter
+    )
+
+    assert prompter.prompts, "it did ask before giving up"
+    assert result.code == code
+    assert result.lines == [line]
+    assert git_touched(layout) == [], "nothing removed, and nothing merely attempted"
+    assert db.get_work_item(conn, item_id).worktree_path == "/w/demo/issue-42"
+    assert db.get_work_item(conn, item_id).branch == BRANCH
+
+
+@pytest.mark.parametrize(
+    ("error", "cause"),
+    [
+        (KeyboardInterrupt(), "interrupted_at_prompt"),
+        (EOFError(), "no_answer_available"),
+    ],
+    ids=["ctrl-c", "eof"],
+)
+def test_the_abandoned_force_removal_is_readable_from_the_pair_alone(
+    conn, audit, config, layout, error, cause
+):
+    """Issue #23's actual complaint. The intent record was always written before the
+    prompt blocked — what was missing was an outcome that said how the answer went.
+
+    "A forced removal of that path was attempted, and abandoned, and nothing was removed"
+    has to be readable without re-running anything (Principle III).
+    """
+    item_id = item_with_worktree(conn)
+
+    operations.worktree_remove(
+        make_context(conn, audit, config),
+        item_id,
+        force=True,
+        confirm=GivesUp(error),
+    )
+    audit.close()
+
+    intent, outcome = records(layout, "worktree.remove")
+    assert intent["kind"] == "intent" and intent["outcome"] == "pending"
+    assert intent["target"] == "/w/demo/issue-42"
+    assert intent["detail"]["force"] is True
+    assert intent["entity_id"] == item_id
+
+    assert outcome["kind"] == "outcome" and outcome["outcome"] == "error"
+    assert outcome["detail"]["abandoned"] is True
+    assert outcome["detail"]["cause"] == cause
+    assert outcome["detail"]["worktree_removed"] is False
+    assert outcome["detail"]["branch_deleted"] is False
+
+
+def test_an_absent_answer_is_not_the_item_id(conn, audit, config, layout):
+    """The note issue #23 closes on. This prompt does not ask for `y` — it asks the
+    operator to type the item id — so "an empty answer is not consent" has to be checked
+    where the comparison actually happens, not assumed from the `[y/N]` prompts.
+
+    And it is a distinct outcome from typing the wrong thing: a decline is `aborted`,
+    while this is a question that was never answered at all.
+    """
+    item_id = item_with_worktree(conn)
+
+    given_up = operations.worktree_remove(
+        make_context(conn, audit, config), item_id, force=True, confirm=GivesUp(EOFError())
+    )
+    declined = operations.worktree_remove(
+        make_context(conn, audit, config), item_id, force=True, confirm=Prompter("")
+    )
+
+    assert git_touched(layout) == [], "neither one removed anything"
+    assert declined.lines == ["aborted"] and declined.code == EXIT_FAILED
+    assert given_up.lines != ["aborted"], "an unanswered question is not a decline"
+    assert given_up.code == EXIT_CHECK_FAILED

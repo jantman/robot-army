@@ -740,3 +740,95 @@ def test_a_surviving_process_under_a_terminal_item_settles_nothing(conn, audit, 
     assert result.code != 0
     assert db.get_session(conn, SESSION).state is SessionState.RUNNING
     assert db.get_work_item(conn, item_id).state is WorkItemState.DONE
+
+
+# -- issue #23: giving up at the cancel prompt --------------------------------
+#
+# A cancel that goes through is reconstructable from `session.terminate` and the two state
+# transitions, so it never needed an intent/outcome pair of its own. An abandoned one has
+# none of those, and before #23 it had nothing else either: a closed stdin tracebacked, a
+# Ctrl-C exited 1 quietly via `cli.main`, and neither left any evidence that the command
+# which signals a running worker had been reached for.
+
+
+class GivesUp:
+    """A maintainer who walks away, or a stdin that was never there."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "line", "cause"),
+    [
+        (KeyboardInterrupt(), 1, "interrupted", "interrupted_at_prompt"),
+        (
+            EOFError(),
+            4,
+            "no answer available: input ended before the prompt was answered",
+            "no_answer_available",
+        ),
+    ],
+    ids=["ctrl-c", "eof"],
+)
+def test_giving_up_at_the_cancel_prompt_signals_nothing(
+    conn, audit, config, layout, error, code, line, cause
+):
+    item_id, _ = seed_running(conn, audit)
+    host = OutcomeHost(confirmed())
+    prompter = GivesUp(error)
+
+    result = operations.cancel(
+        ctx_with(conn, audit, config, host), item_id, confirm=prompter
+    )
+    audit.close()
+
+    assert prompter.prompts == [f"Stop session {SESSION} for item {item_id}? [y/N] "]
+    assert result.code == code
+    assert result.lines == [line]
+
+    assert host.calls == [], "no signal reached the worker"
+    assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
+    assert db.get_session(conn, SESSION).state is SessionState.RUNNING
+
+    written = [
+        record
+        for record, _ in read_records(layout.log_dir)
+        if record is not None and record["action"] == "session.cancel"
+    ]
+    assert len(written) == 1, "one record, naming what was attempted"
+    assert written[0]["outcome"] == "error"
+    assert written[0]["entity_type"] == "session"
+    assert written[0]["entity_id"] == SESSION
+    assert written[0]["detail"] == {
+        "abandoned": True,
+        "cause": cause,
+        "item_id": item_id,
+    }
+
+
+def test_a_declined_cancel_still_writes_no_record_of_its_own(conn, audit, config, layout):
+    """The other half of the asymmetry, stated so it is not mistaken for an oversight.
+
+    `session.cancel` exists only for a question that went unanswered. Saying "no" is an
+    answer, and it is already visible as a command that ran and changed nothing.
+    """
+    item_id, _ = seed_running(conn, audit)
+    host = OutcomeHost(confirmed())
+
+    result = operations.cancel(
+        ctx_with(conn, audit, config, host), item_id, confirm=lambda _: "n"
+    )
+    audit.close()
+
+    assert result.lines == ["aborted"] and host.calls == []
+    assert [
+        record
+        for record, _ in read_records(layout.log_dir)
+        if record is not None and record["action"] == "session.cancel"
+    ] == []

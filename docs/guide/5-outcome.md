@@ -195,6 +195,13 @@ finished and the session may be exactly what I am about to attach to. `robot-arm
 <id>` is the route out of those, and it now settles a terminal item's session correctly
 rather than reporting an ending it did not observe.
 
+`cancel` asks before it signals anything. Ctrl-C at that question, or running it with no
+stdin, stops the command with nothing signalled and the item exactly where it was — and
+writes a `session.cancel` record saying which session I reached for and which way I gave up.
+Until issue #23 a closed stdin tracebacked here, and a Ctrl-C — which `main` has always caught
+— left nothing behind at all. `cancel --force` skips the question, and is a different
+`--force` from the ones on this page.
+
 ### The tab
 
 **The tab does not close by itself, and I assumed for one whole feature that it did.** The
@@ -300,7 +307,9 @@ the automatic path is enabled, so the manual route cannot drift from the automat
   from the start. That was the wrong way round — `cleanup` runs unattended and is
   conservative by design, while `worktree remove` is what I reach for when `/home` is at
   93%, and it is the one that can override git. `--force` still overrides it, and says so
-  in the prompt before I type anything.
+  in the prompt before I type anything. Giving up at that prompt — Ctrl-C, or no stdin at
+  all — removes nothing: an absent answer is not the item id it asks me to type, and the
+  attempt is recorded against the worktree path it named (issue #23).
 - **The worktree**: git's own refusal, taken as-is. `git worktree remove` refuses on a dirty
   tree — *including merely untracked files* — and `--force` is never passed. A refused
   worktree is recorded as `retained` with git's own message, and the branch half is not

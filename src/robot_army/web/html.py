@@ -368,7 +368,7 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     cap_note = (chrome.get("capacity") or {}).get("cap_disagreement")
     if cap_note:
         notices.append(div(cap_note, class_="banner warn"))
-    # The third member of the family the two above belong to: conditions under which what
+    # The last member of the family the three above belong to: conditions under which what
     # you are reading does not mean what it appears to mean. This one is the broadest, since
     # it changes the meaning of *every* value on the page rather than one of them — an item
     # shown as `linked` against issue #900001 is linked to nothing at all.

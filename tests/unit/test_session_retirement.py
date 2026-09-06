@@ -40,6 +40,13 @@ SESSION = "037460ea-0969-4a44-adca-d79920557a33"
 #: idle 84 and 198 minutes when they were measured.
 LONG_IDLE_MS = reconcile.RETIRE_IDLE_SECONDS * 1000 + 60_000
 
+#: The measured number from issue #149, not a round one chosen for a test. On the first
+#: ordinary completion to run the retirement code — issue #20 / PR #147 — the worker went
+#: idle at 11:40:49 and the item reached ``done`` at 11:41:36. **47 seconds**, which is why
+#: no floor is safe on the merged path: a 60-second one declines on exactly this pass and
+#: ``_sweep_stale_sessions`` raises the anomaly eight lines later.
+FRESH_IDLE_MS = 47_000
+
 
 def now_ms() -> int:
     return int(time.time() * 1000)
@@ -157,6 +164,32 @@ def finished_item(
         )
         write_proc(proc, pid, starttime=str(pid), cwd=str(cwd))
     return item
+
+
+def merge_pull_request(conn, item: int, *states: str, number: int = 147) -> None:
+    """Record pull requests against an item, exactly as ``_refresh_pull_requests`` would.
+
+    No GitHub double is involved, and that is the point of issue #149's design: the signal
+    retirement reads is a stored column that the same pass has already written, so a test of
+    the decision needs no boundary at all.
+    """
+    with db.transaction(conn):
+        db.record_pull_requests(
+            conn,
+            item,
+            found=json.dumps(
+                [
+                    {
+                        "number": number + offset,
+                        "url": f"https://github.com/{REPO}/pull/{number + offset}",
+                        "state": state,
+                    }
+                    for offset, state in enumerate(states or ("merged",))
+                ],
+                separators=(",", ":"),
+            ),
+            at="2026-09-06T11:41:35Z",
+        )
 
 
 def sweep(conn, audit, registry: Path, proc: Path, host: Any) -> int:
@@ -284,7 +317,13 @@ def test_idleness_that_cannot_be_established_never_retires(
 def test_a_worker_idle_for_less_than_the_threshold_is_left_alone(
     conn, config, audit, registry, proc
 ):
-    """C2 rule 6, at the boundary. This is the maintainer attached and thinking."""
+    """D1 rule 7, at the boundary. This is the maintainer attached and thinking.
+
+    Reachable only by an item with **no merged pull request** since issue #149 — an issue
+    closed by hand or as not-planned. ``finished_item`` writes no pull request set, so this
+    is that case, and it is unchanged: with no explicit acceptance of the work the idleness
+    heuristic is still the only evidence there is.
+    """
     item = finished_item(
         conn, config, registry, proc, idle_ms=(reconcile.RETIRE_IDLE_SECONDS - 5) * 1000
     )
@@ -309,6 +348,197 @@ def test_a_finished_item_with_a_long_idle_worker_is_retired(
     assert session.ended_at is not None
     # The work item is untouched. Retirement is about the process, not about the work.
     assert db.get_work_item(conn, item).state is WorkItemState.DONE
+
+
+# -- D1: the merged pull request removes the *duration* requirement (issue #149) ---
+#
+# The gate used to ask one question. It now asks two, and only the second is conditional:
+# "could we establish that this worker is idle?" is unchanged and still comes first.
+
+
+def test_a_freshly_idle_worker_is_retired_when_the_pull_request_is_merged(
+    conn, config, audit, layout, registry, proc
+):
+    """D1 rule 6, and the complement of the boundary test above.
+
+    Merging is the maintainer saying "this is complete" in as many words, which is a
+    stronger and earlier statement than any inference from how long a process has been
+    quiet. 47 seconds is the measured idle time from #149, and it must be enough.
+    """
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    merge_pull_request(conn, item)
+    host = KillingHost(proc)
+
+    assert sweep(conn, audit, registry, proc, host) == 1
+
+    session = db.latest_session_for_item(conn, item)
+    assert session.state is SessionState.LOST
+    assert session.ended_at is not None
+    # Untouched, exactly as on the quiet-period path. Retirement is about the process.
+    assert db.get_work_item(conn, item).state is WorkItemState.DONE
+
+
+def test_a_merged_pull_request_among_others_is_still_the_signal(
+    conn, config, audit, layout, registry, proc
+):
+    """Any merged pull request counts, not the newest one. An item that was retried carries
+    a closed-unmerged attempt beside the merged one, and the merged one is still the
+    maintainer's acceptance of the work."""
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    merge_pull_request(conn, item, "closed", "merged", "open")
+
+    assert sweep(conn, audit, registry, proc, KillingHost(proc)) == 1
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+
+
+@pytest.mark.parametrize(
+    ("status", "idle_ms"),
+    [
+        ("busy", LONG_IDLE_MS),
+        ("compacting", LONG_IDLE_MS),
+        (None, LONG_IDLE_MS),
+        ("idle", None),
+    ],
+    ids=["busy", "unrecognised-status", "no-status", "no-timestamp"],
+)
+def test_a_merged_pull_request_does_not_bypass_the_idleness_rule(
+    conn, config, audit, registry, proc, status, idle_ms
+):
+    """FR-002, and the reason this feature is a narrow change rather than a broad one.
+
+    What the merge removes is the *duration* requirement. What it must never remove is
+    rule 5 — the one that keeps a worker from being ended in the middle of a tool call, and
+    the one that makes `RegistryEntry.idle_for`'s "every unknown delays a retirement, never
+    causes one" true. A merged pull request is a statement about the work, not an
+    observation about the process, so it cannot settle a question about the process.
+    """
+    item = finished_item(conn, config, registry, proc, status=status, idle_ms=idle_ms)
+    merge_pull_request(conn, item)
+    host = KillingHost(proc)
+
+    assert sweep(conn, audit, registry, proc, host) == 0
+    assert host.calls == [], "nothing may even be asked of the host"
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+
+
+def test_a_future_status_timestamp_is_not_evidence_even_with_a_merge(
+    conn, config, audit, registry, proc
+):
+    """The fourth way `idle_for` answers `None`: a clock that disagrees with ours. Given its
+    own test because the parametrisation above cannot express a negative age."""
+    item = finished_item(conn, config, registry, proc, idle_ms=-60_000)
+    merge_pull_request(conn, item)
+    host = KillingHost(proc)
+
+    assert sweep(conn, audit, registry, proc, host) == 0
+    assert host.calls == []
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+
+
+@pytest.mark.parametrize(
+    ("pid", "live"),
+    [(None, True), (PID, False)],
+    ids=["no-process-recorded", "process-not-alive"],
+)
+def test_a_merged_pull_request_does_not_reach_past_the_earlier_rules(
+    conn, config, audit, registry, proc, pid, live
+):
+    """D1 rules 2–4 are unchanged and still come first. A row with no process, or one whose
+    process is already gone, is `_sweep_stale_sessions`'s business — a merged pull request
+    cannot make retirement claim a kill it did not perform."""
+    item = finished_item(conn, config, registry, proc, pid=pid, live=live)
+    merge_pull_request(conn, item)
+    host = KillingHost(proc)
+
+    assert sweep(conn, audit, registry, proc, host) == 0
+    assert host.calls == []
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+
+
+@pytest.mark.parametrize(
+    "item_state", ["dispatching", "active", "awaiting_review", "interrupted", "failed"]
+)
+def test_a_merged_pull_request_under_an_unfinished_item_retires_nothing(
+    conn, config, audit, registry, proc, item_state
+):
+    """FR-007. The precondition is still `done` and this feature does not widen it.
+
+    A merged pull request accelerates a retirement; it never authorises one on its own. An
+    item can carry a merged pull request while its issue is still open — a partial merge, or
+    a second pull request still in flight — and `failed` and `abandoned` are precisely the
+    states where the session may be the thing the maintainer is about to attach to.
+    """
+    item = finished_item(conn, config, registry, proc, item_state=item_state)
+    merge_pull_request(conn, item)
+    host = KillingHost(proc)
+
+    assert sweep(conn, audit, registry, proc, host) == 0
+    assert host.calls == []
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+
+
+# -- US2: no merged pull request keeps the full quiet period (issue #149) ----
+
+
+@pytest.mark.parametrize(
+    "states",
+    [(), ("open",), ("closed",), ("open", "closed")],
+    ids=["looked-up-none-found", "open", "closed-unmerged", "open-and-closed"],
+)
+def test_a_freshly_idle_worker_waits_when_nothing_was_merged(
+    conn, config, audit, layout, registry, proc, states
+):
+    """D1 rule 7 across every non-merged shape the column can hold.
+
+    This is the guard that keeps issue #149's fix from being an over-reach. An issue closed
+    by hand, as a duplicate, or as not-planned carries no statement that the session's work
+    was accepted — and that session may be exactly what the maintainer is about to attach to
+    and read. Nothing here is new behaviour; it is behaviour that has to be *asserted*,
+    because an unasserted "unchanged" is not a claim.
+    """
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    if states:
+        merge_pull_request(conn, item, *states)
+    else:
+        # Looked up, and GitHub reports none — distinct from never having asked.
+        with db.transaction(conn):
+            db.record_pull_requests(conn, item, found="[]", at="2026-09-06T11:41:35Z")
+    host = KillingHost(proc)
+    before = len(records(layout))
+
+    assert sweep(conn, audit, registry, proc, host) == 0
+    assert host.calls == []
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+    assert len(records(layout)) == before, "a deferral must still write nothing at all"
+
+
+def test_a_column_never_looked_up_is_not_a_merge(conn, config, audit, registry, proc):
+    """``NULL`` means *never asked*, and "never asked" must not read as "merged".
+
+    The distinction the column exists to preserve. A pre-migration-013 row, an item that was
+    never dispatched, a simulated item — none of them has been asked about, and answering a
+    question nobody put to GitHub is the one thing every surface of #143 exists to avoid.
+    Here it lands in the safe direction: the worker waits out the quiet period.
+    """
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    assert db.get_work_item(conn, item).pull_requests is None
+
+    assert sweep(conn, audit, registry, proc, KillingHost(proc)) == 0
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+
+
+def test_an_unmerged_item_is_still_retired_once_it_has_been_quiet_long_enough(
+    conn, config, audit, layout, registry, proc
+):
+    """The other half of US2: waiting is not refusing. The 30-minute rule still fires, and
+    the record says which of the two conditions let it."""
+    item = finished_item(conn, config, registry, proc, idle_ms=LONG_IDLE_MS)
+    merge_pull_request(conn, item, "open")
+
+    assert sweep(conn, audit, registry, proc, KillingHost(proc)) == 1
+
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+    assert records(layout, "session.retire")[0]["detail"]["signal"] == "quiet_period"
 
 
 def test_the_pass_asks_the_question_again_next_time(conn, config, audit, registry, proc):
@@ -367,6 +597,30 @@ def test_the_retire_record_carries_what_a_reader_needs(
     assert detail["pid"] == PID
     assert detail["proc_start"] == str(PID)
     assert detail["idle_s"] >= reconcile.RETIRE_IDLE_SECONDS
+    assert detail["signal"] == "quiet_period"
+
+
+def test_the_retire_record_says_which_condition_authorised_it(
+    conn, config, audit, layout, registry, proc
+):
+    """FR-009, contract D3. With one gate `idle_s` implied the reason; with two it does not.
+
+    An `idle_s` of 47 is either a merged pull request or a bug, and the log alone has to
+    answer which — Principle III's standard is reconstruction from the record, without
+    re-running anything and without the reader knowing which release they are looking at.
+    """
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    merge_pull_request(conn, item)
+
+    assert sweep(conn, audit, registry, proc, KillingHost(proc)) == 1
+
+    intent = records(layout, "session.retire")
+    assert len(intent) == 1
+    detail = intent[0]["detail"]
+    assert detail["signal"] == "merged_pull_request"
+    assert detail["item_id"] == item
+    # Still recorded, and still the truth. It is no longer the *reason*.
+    assert 0 <= detail["idle_s"] < reconcile.RETIRE_IDLE_SECONDS
 
 
 def test_the_recorded_process_identity_is_passed_to_the_termination(
@@ -656,6 +910,48 @@ def test_a_retired_session_lets_cleanup_reclaim_the_worktree_in_the_same_pass(
     assert vcs.removals, "cleanup never got as far as asking git to remove the worktree"
 
 
+def test_a_merged_item_reclaims_its_worktree_on_the_pass_it_finishes(
+    conn, config, audit, layout, registry, proc
+):
+    """The same property on the shape the ordinary path actually has (issue #149).
+
+    The test above establishes that retirement's *position* lets cleanup run honestly in the
+    same pass. That was true and still left the worktree reported ``skipped`` for half an
+    hour on every successful item, because the position only helps once retirement acts. Add
+    the merged pull request and a 47-second idle time and the same pass reclaims the disk.
+    """
+    from dataclasses import replace
+
+    from tests.unit.test_cleanup import FakeVcs
+
+    item = finished_item(
+        conn, config, registry, proc, repo_key="demo", idle_ms=FRESH_IDLE_MS
+    )
+    merge_pull_request(conn, item)
+    worktree = Path(config.worktree_root) / "issue-116"
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn, item, worktree_path=str(worktree), branch="robot-army/issue-116-x"
+        )
+
+    vcs = FakeVcs(ahead={"origin/main": 0})
+    cleaning = replace(config, cleanup=replace(config.cleanup, on_issue_close=True))
+
+    reconcile.reconcile(
+        conn,
+        boundaries=make_boundaries(audit, host=KillingHost(proc), vcs=vcs),
+        audit=audit,
+        config=cleaning,
+        layout=layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+    assert db.get_work_item(conn, item).cleanup_state != "skipped"
+    assert vcs.removals
+
+
 # -- the orphan sweep must not report what this pass just killed -------------
 
 
@@ -698,6 +994,71 @@ def test_a_full_pass_raises_no_orphan_for_the_session_it_retired(
     )
     assert records(layout, "anomaly.resolved") == []
     assert db.list_anomalies(conn, unacknowledged_only=False) == []
+
+
+def test_a_full_pass_raises_no_orphan_for_a_freshly_idle_merged_item(
+    conn, config, audit, layout, registry, proc
+):
+    """Issue #149, and the test that would have caught it. Contract D5.
+
+    The test above it builds its item with ``LONG_IDLE_MS`` and therefore exercises the
+    quiet-period path — as does every other full-pass test in this file, which is exactly why
+    this shipped. **The ordinary successful path never produces that shape.** The worker goes
+    quiet, the maintainer merges within a few minutes, the issue closes, and the item reaches
+    ``done`` *inside* the quiet period, every time. Of the three completions that ran the
+    shipped code, the only one that raised no anomaly had been idle 2477 seconds when its item
+    went ``done`` — backlog, not a completion.
+
+    So this is the same assertion with the shape the real path actually has: 47 seconds idle
+    and a merged pull request. Measured against the code before the fix: ``retired`` is 0
+    because the gate declines, the row is still ``running``, and the anomalies table holds an
+    ``orphan_session``. That is the bug, stated as assertions.
+
+    **The listing is what catches it, not the counter.** ``result.orphans`` counts
+    ``_orphan_sweep`` alone, and the anomaly on this path is raised by
+    ``_sweep_stale_sessions`` via ``reclaim_stale_session``'s "reported" branch — so
+    ``orphans`` reads 0 both before and after the fix. It is asserted anyway, because the
+    other sweep must not report it either, but a test written on the counter alone would
+    have missed this exactly as the counter did.
+
+    FR-011 asks for the anomaly never to be *raised*, not for it to be raised and then tidied
+    away — the difference between a path that is quiet and one that merely looks quiet by the
+    time anyone reads it.
+    """
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    merge_pull_request(conn, item)
+
+    result = reconcile.reconcile(
+        conn,
+        boundaries=make_boundaries(audit, host=KillingHost(proc)),
+        audit=audit,
+        config=config,
+        layout=layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+
+    assert result.retired == 1, "a merged pull request is the signal; it must not wait"
+    assert result.orphans == 0, "the sweep reported the worker this pass should have retired"
+    assert result.anomalies_resolved == 0, (
+        "nothing should need resolving; nothing should have been raised"
+    )
+
+    session = db.latest_session_for_item(conn, item)
+    assert session.state is SessionState.LOST
+    assert session.ended_at is not None
+    assert db.get_work_item(conn, item).state is WorkItemState.DONE
+
+    # An anomaly reaches the table directly rather than through an audit action, so
+    # "never raised" is proved by the pair: nothing is listed *and* nothing was resolved.
+    # A raise-then-resolve within the pass would leave the listing just as clean while
+    # setting ``anomalies_resolved`` and writing ``anomaly.resolved`` — which is precisely
+    # the failure PR #140's review found, and the reason to assert both.
+    assert db.list_anomalies(conn, unacknowledged_only=False) == []
+    assert records(layout, "anomaly.resolved") == []
+
+    after = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
+    assert after.total == 0, "the slot must come back in this same pass"
 
 
 def test_a_genuine_orphan_is_still_reported_after_the_liveness_recheck(

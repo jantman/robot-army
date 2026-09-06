@@ -384,3 +384,64 @@ def test_unparseable_json_reads_as_no_pull_requests_rather_than_raising(conn, au
     item_id = item(conn, stored="not json at all")
 
     assert db.get_work_item(conn, item_id).pull_request_list == []
+
+
+# -- has_merged_pull_request (issue #149) -----------------------------------
+#
+# The predicate retirement reads to decide whether the maintainer has accepted the work.
+# It sits on this file rather than beside the sweep that calls it because what is under
+# test is the column, and the column's failure modes are this file's subject.
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        (None, False),
+        ("[]", False),
+        ('[{"number":7,"url":"u","state":"open"}]', False),
+        ('[{"number":7,"url":"u","state":"closed"}]', False),
+        ('[{"number":7,"url":"u","state":"merged"}]', True),
+        (
+            '[{"number":7,"url":"u","state":"closed"},'
+            '{"number":9,"url":"u","state":"merged"}]',
+            True,
+        ),
+        ('[{"number":7,"url":"u","state":"draft"}]', False),
+        ('[{"number":7,"url":"u","state":"MERGED"}]', False),
+        ("not json at all", False),
+        ('{"number":7,"state":"merged"}', False),
+        ("[144]", False),
+        ('["merged"]', False),
+    ],
+    ids=[
+        "never-looked-up",
+        "looked-up-none-found",
+        "open",
+        "closed-unmerged",
+        "merged",
+        "merged-among-others",
+        "unrecognised-state",
+        "upper-case-state",
+        "unparseable",
+        "not-a-list",
+        "non-object-elements",
+        "list-of-strings",
+    ],
+)
+def test_has_merged_pull_request_over_every_shape_the_column_can_hold(
+    conn, stored, expected
+):
+    """Every unknown answers ``False``, which is the direction that delays a retirement.
+
+    Two rows are worth naming. **``never-looked-up``**: a `NULL` column is not evidence of
+    anything, and answering "merged" on the strength of never having asked is the one thing
+    the three-states-not-two design exists to prevent. **``unrecognised-state``**: states
+    are lower-cased at the boundary but an unknown one is passed through as GitHub spelled
+    it rather than mapped to a guess, so a state nobody has seen yet — today's `draft`,
+    tomorrow's something else — must read as not merged rather than as truthy. The
+    upper-case row pins the same edge from the other side: the comparison is exact, and a
+    boundary that stopped normalising would fail here rather than silently retiring workers.
+    """
+    item_id = item(conn, state=WorkItemState.DONE, stored=stored)
+
+    assert db.get_work_item(conn, item_id).has_merged_pull_request is expected

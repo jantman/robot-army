@@ -1961,6 +1961,25 @@ def _record_detail(detail: Any) -> Markup:
     return tag("dl", join(parts), class_="kv")
 
 
+def _nothing_on_this_page(
+    records: list[dict[str, Any]], payload: dict[str, Any], *, include_simulated: bool
+) -> Markup:
+    """"No records match." must not be printed over records this page is withholding.
+
+    Same rule as :func:`_nothing`, in the one view whose rows do not come from the database.
+    """
+    withheld = int(payload["withheld_simulated"])
+    if not withheld:
+        return _empty("No records match.")
+    plural = "record" if withheld == 1 else "records"
+    return p(
+        f"Nothing to show here. {withheld} simulated {plural} on this page "
+        f"{'is' if withheld == 1 else 'are'} hidden — ",
+        _reveal("/log", include_simulated=include_simulated),
+        class_="withheld",
+    )
+
+
 def log_view(
     ctx: operations.Context,
     *,
@@ -1971,7 +1990,12 @@ def log_view(
     include_simulated: bool = False,
 ) -> View:
     result = operations.read_log_page(
-        ctx, item_id=item_id, since=since, outcome=outcome, cursor=cursor
+        ctx,
+        item_id=item_id,
+        since=since,
+        outcome=outcome,
+        cursor=cursor,
+        include_simulated=include_simulated,
     )
     if result.code != operations.EXIT_OK:
         return View(
@@ -2068,7 +2092,17 @@ def log_view(
             if payload["skipped_lines"]
             else Markup(""),
             truncation_note,
-            _empty("No records match.")
+            # Scoped to this page's scan, and worded so (issue #21). A bounded reader cannot
+            # honestly count what it never read, and a whole-history number beside a page
+            # would be read as describing the page.
+            p(
+                f"{payload['withheld_simulated']} simulated record(s) on this page hidden — ",
+                _reveal("/log", include_simulated=include_simulated),
+                class_="withheld",
+            )
+            if payload["withheld_simulated"]
+            else Markup(""),
+            _nothing_on_this_page(records, payload, include_simulated=include_simulated)
             if not records
             else join(
                 div(
@@ -2084,7 +2118,7 @@ def log_view(
                             class_=f"outcome-{record.get('outcome')}",
                         ),
                         " ",
-                        mark_simulated(record.get("simulated") or record.get("dry_run")),
+                        mark_simulated(operations._is_rehearsed(record)),
                     ),
                     div(_record_target(record, include_simulated=include_simulated), class_="meta"),
                     div(_record_detail(record.get("detail")), class_="detail"),

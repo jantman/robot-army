@@ -526,7 +526,13 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "log": lambda: (
             _follow(ctx)
             if args.follow
-            else operations.read_log(ctx, since=args.since, item_id=args.item, limit=args.limit)
+            else operations.read_log(
+                ctx,
+                since=args.since,
+                item_id=args.item,
+                limit=args.limit,
+                include_simulated=include_simulated,
+            )
         ),
         "anomalies": lambda: operations.anomalies(
             ctx,

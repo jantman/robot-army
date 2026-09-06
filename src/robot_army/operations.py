@@ -4225,9 +4225,27 @@ def anomalies(
 #: A record either matches the active filters, fails them, or cannot be judged. The third
 #: case is not the second: an unparseable timestamp means the record is *skipped and
 #: counted*, which is what FR-044 requires readers to report rather than silently drop.
+#:
+#: ``_WITHHELD`` is a fourth answer and not a flavour of ``_REJECT``, because the two are
+#: reported differently: a rejected record fails a filter the reader chose, while a withheld
+#: one would appear the moment they passed ``--include-simulated``, and a listing has to say
+#: how many of those there were rather than let them vanish (issue #21).
 _MATCH = "match"
 _REJECT = "reject"
 _UNREADABLE = "unreadable"
+_WITHHELD = "withheld"
+
+
+def _is_rehearsed(record: dict[str, Any]) -> bool:
+    """Whether this record describes something that did not really happen.
+
+    Two field names for one condition, and both have always been written: ``dry_run`` by the
+    acting component, ``simulated`` by the ``effects`` boundaries. ``_format_record`` renders
+    either as the trailing ``[simulated]`` marker and reads them through this same function, so
+    what a reader *hides* and what it *marks* cannot drift apart — which is the first thing
+    that would go wrong here (issue #21).
+    """
+    return bool(record.get("simulated") or record.get("dry_run"))
 
 
 def _judge_record(
@@ -4236,11 +4254,18 @@ def _judge_record(
     cutoff: datetime | None,
     item_id: int | None,
     outcome: str | None,
+    include_simulated: bool = False,
 ) -> str:
     """Apply the log filters to one record. One implementation, two readers.
 
     ``read_log`` scans forwards and ``read_log_page`` scans backwards; sharing this keeps
     "what does ``--item 42`` mean" from having two answers.
+
+    **The simulated check comes last, and the order is the whole correctness argument.** A
+    record outside ``--since`` that also happens to be rehearsed must come back ``_REJECT``,
+    not ``_WITHHELD``: passing ``--include-simulated`` would still not show it, so counting it
+    as withheld would state a number the flag does not reveal. Judging it only after every
+    other filter has passed makes the withheld count exactly the set the flag would add.
     """
     if cutoff is not None:
         try:
@@ -4253,6 +4278,8 @@ def _judge_record(
         return _REJECT
     if outcome is not None and str(record.get("outcome")) != outcome:
         return _REJECT
+    if not include_simulated and _is_rehearsed(record):
+        return _WITHHELD
     return _MATCH
 
 
@@ -4263,6 +4290,7 @@ def read_log(
     item_id: int | None = None,
     limit: int | None = None,
     outcome: str | None = None,
+    include_simulated: bool = False,
 ) -> Result:
     """The FR-062 reconstruction path: what happened, when, to what, with what result.
 
@@ -4279,22 +4307,44 @@ def read_log(
 
     records: list[dict[str, Any]] = []
     skipped = 0
+    withheld = 0
     for record, _raw in audit_mod.read_records(ctx.layout.log_dir):
         if record is None:
             skipped += 1
             continue
-        verdict = _judge_record(record, cutoff=cutoff, item_id=item_id, outcome=outcome)
+        verdict = _judge_record(
+            record,
+            cutoff=cutoff,
+            item_id=item_id,
+            outcome=outcome,
+            include_simulated=include_simulated,
+        )
         if verdict is _UNREADABLE:
             skipped += 1
+        elif verdict is _WITHHELD:
+            withheld += 1
         elif verdict is _MATCH:
             records.append(record)
 
+    # After the filter, not before: `--limit 20` means twenty records the reader can see, not
+    # twenty of which some are hidden. Trimming first would make the page size depend on how
+    # much rehearsal traffic happened to sit at the end of the log.
     if limit:
         records = records[-limit:]
 
-    result = Result(data={"records": records, "unparseable_lines": skipped})
+    result = Result(
+        data={
+            "records": records,
+            "unparseable_lines": skipped,
+            # Always present, including as 0 — the absent-versus-zero ambiguity 008 removed.
+            "withheld_simulated": withheld,
+        }
+    )
     for record in records:
         result.say(_format_record(record))
+    if withheld:
+        result.say()
+        result.say(_withheld_note(withheld))
     if skipped:
         result.say()
         result.say(f"({skipped} unparseable line(s) skipped)")
@@ -4412,6 +4462,9 @@ class _FileScan:
     next_offset: int
     #: Lines that could not be parsed or judged. Counted, never silently dropped.
     skipped: int
+    #: Records this pass hid because they were rehearsed. Only the ones that passed every
+    #: *other* filter, so it is exactly what ``--include-simulated`` would have added here.
+    withheld: int
     #: Bytes of log consumed. Within one block of the bytes actually read from the file.
     read: int
     #: The budget ended this pass, rather than the page filling or the file running out.
@@ -4441,18 +4494,19 @@ def _scan_file_backwards(
     """
     found: list[dict[str, Any]] = []
     skipped = 0
+    withheld = 0
     read = 0
     try:
         handle = path.open("rb")
     except OSError:
         # A file that vanished between the glob and the read is not a reason to fail the
         # page; it is counted so the silence is not silent.
-        return _FileScan([], 0, 1, 0, False)
+        return _FileScan([], 0, 1, 0, 0, False)
     with handle:
         cursor = end_offset
         for raw, start in _lines_backwards(handle, end_offset, LOG_SCAN_BLOCK_BYTES):
             if read + len(raw) + 1 > budget and not (must_progress and read == 0):
-                return _FileScan(found, cursor, skipped, read, True)
+                return _FileScan(found, cursor, skipped, withheld, read, True)
             read += len(raw) + 1
             cursor = start
             try:
@@ -4463,11 +4517,16 @@ def _scan_file_backwards(
                 verdict = judge(record)
                 if verdict is _UNREADABLE:
                     skipped += 1
+                elif verdict is _WITHHELD:
+                    # Judged inside the scan rather than applied to a finished page, which is
+                    # what stops a page whose whole region is rehearsed coming back empty
+                    # while older matching records are still there to be read.
+                    withheld += 1
                 elif verdict is _MATCH:
                     found.append(record)
             if len(found) >= want:
-                return _FileScan(found, cursor, skipped, read, False)
-    return _FileScan(found, 0, skipped, read, False)
+                return _FileScan(found, cursor, skipped, withheld, read, False)
+    return _FileScan(found, 0, skipped, withheld, read, False)
 
 
 def read_log_page(
@@ -4478,6 +4537,7 @@ def read_log_page(
     outcome: str | None = None,
     cursor: str | None = None,
     limit: int = LOG_PAGE_SIZE,
+    include_simulated: bool = False,
 ) -> Result:
     """One bounded page of the audit log, newest first (research.md R14, FR-044).
 
@@ -4521,11 +4581,16 @@ def read_log_page(
 
     records: list[dict[str, Any]] = []
     skipped = 0
+    withheld = 0
     scanned = 0
     truncated = False
     next_cursor: str | None = None
     judge = lambda record: _judge_record(  # noqa: E731 - one binding, read once, below
-        record, cutoff=cutoff, item_id=item_id, outcome=outcome
+        record,
+        cutoff=cutoff,
+        item_id=item_id,
+        outcome=outcome,
+        include_simulated=include_simulated,
     )
     for path in files[start_index:]:
         try:
@@ -4559,6 +4624,7 @@ def read_log_page(
         )
         records.extend(scan.records)
         skipped += scan.skipped
+        withheld += scan.withheld
         scanned += scan.read
         start_offset = None
         if len(records) >= limit:
@@ -4585,10 +4651,20 @@ def read_log_page(
             "page_size": limit,
             "truncated": truncated,
             "bytes_scanned": scanned,
+            # Scoped to the records this page *scanned*, not to the history — a bounded scan
+            # cannot honestly count what it never read, and the wording below says so. Always
+            # present, including as 0.
+            "withheld_simulated": withheld,
         }
     )
     for record in records:
         result.say(_format_record(record))
+    if withheld:
+        result.say()
+        result.say(
+            f"({withheld} simulated record(s) on this page withheld — pass "
+            "--include-simulated to show them)"
+        )
     if truncated:
         result.say()
         result.say(
@@ -4604,7 +4680,7 @@ def read_log_page(
 def _format_record(record: dict[str, Any]) -> str:
     marker = {"intent": "→", "outcome": "←"}.get(str(record.get("kind")), " ")
     outcome = record.get("outcome", "")
-    sim = " [simulated]" if record.get("simulated") or record.get("dry_run") else ""
+    sim = " [simulated]" if _is_rehearsed(record) else ""
     entity = ""
     if record.get("entity_type"):
         entity = f" {record['entity_type']}:{record.get('entity_id')}"

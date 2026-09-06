@@ -307,3 +307,63 @@ def test_the_anomalies_payload_states_what_it_withheld(web_at, conn) -> None:
     assert payload["count"] == 1
     assert payload["withheld_simulated"] == 1
     assert [a["entity_id"] for a in payload["anomalies"]] == ["card-real"]
+
+
+def _write_log(layout, records: list[dict]) -> None:
+    import json as _json
+    from datetime import UTC, datetime
+
+    day = datetime.now(UTC).strftime("%Y-%m-%d")
+    path = layout.log_dir / f"audit-{day}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with path.open("a", encoding="utf-8") as handle:
+        for rec in records:
+            handle.write(_json.dumps({"ts": stamp, "component": "daemon", **rec}) + "\n")
+
+
+def test_the_log_page_hides_rehearsed_records_when_told_to(web_at, layout) -> None:
+    harness = web_at("plan")
+    _write_log(
+        layout,
+        [
+            {"action": "real.thing", "outcome": "ok"},
+            {"action": "rehearsed.thing", "outcome": "ok", "simulated": True},
+        ],
+    )
+
+    body = harness.get("/log?include_simulated=0").text
+
+    assert "real.thing" in body
+    assert "rehearsed.thing" not in body
+    assert "1 simulated record(s) on this page hidden" in body
+
+
+def test_the_log_page_shows_them_when_told_to(web_at, layout) -> None:
+    harness = web_at("plan")
+    _write_log(
+        layout,
+        [
+            {"action": "real.thing", "outcome": "ok"},
+            {"action": "rehearsed.thing", "outcome": "ok", "dry_run": True},
+        ],
+    )
+
+    body = harness.get("/log?include_simulated=1").text
+
+    assert "real.thing" in body and "rehearsed.thing" in body
+    assert "on this page hidden" not in body
+
+
+def test_the_log_page_never_claims_no_records_match_while_withholding(web_at, layout) -> None:
+    """The web half of US2's empty state, in the direction that misleads.
+
+    "No records match." over a page of rehearsed records tells the reader nothing happened.
+    """
+    harness = web_at("plan")
+    _write_log(layout, [{"action": "rehearsed.thing", "outcome": "ok", "simulated": True}])
+
+    body = harness.get("/log?include_simulated=0").text
+
+    assert "No records match." not in body
+    assert "1 simulated record" in body

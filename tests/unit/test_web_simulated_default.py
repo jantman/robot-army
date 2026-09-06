@@ -217,3 +217,93 @@ def test_the_queue_order_is_the_same_whoever_is_looking(web_at, conn) -> None:
     # The real row keeps the position the dispatcher would give it, not the position it
     # would have if the simulated row had never existed.
     assert [row["position"] for row in hidden] == [row["position"] for row in shown if not row["simulated"]]
+
+
+# -- the two views that accepted the preference and discarded it (issue #21) --
+#
+# `/anomalies` and `/log` were handed `include_simulated` by the router, threaded it through
+# every link and form they rendered, and then ignored it when fetching their rows. The
+# preference survived the click and changed nothing when it arrived.
+
+
+def _anomaly(conn, entity_id: str, *, dry_run: bool) -> None:
+    from robot_army import db
+
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn,
+            kind="card_create_failing",
+            entity_type="card",
+            entity_id=entity_id,
+            detail={"attempts": 3},
+            dry_run=dry_run,
+        )
+
+
+def test_the_anomalies_page_hides_rehearsed_rows_when_told_to(web_at, conn) -> None:
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    body = web_at("plan").get("/anomalies?include_simulated=0").text
+
+    assert "card-real" in body
+    assert "card-sim" not in body
+    assert "1 simulated row hidden" in body
+
+
+def test_the_anomalies_page_shows_them_when_told_to(web_at, conn) -> None:
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    body = web_at("plan").get("/anomalies?include_simulated=1").text
+
+    assert "card-real" in body and "card-sim" in body
+    # Not a bare "hidden": every form on the page carries an <input type="hidden"> restating
+    # the preference, which is 009's doing and correct.
+    assert "simulated row hidden" not in body
+
+
+def test_the_anomalies_page_never_claims_nothing_outstanding_while_withholding(
+    web_at, conn
+) -> None:
+    """The web half of the reported defect, in the direction that misleads.
+
+    "Nothing outstanding." over two withheld rows is the page telling the reader the machine
+    is clear when it is not.
+    """
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    body = web_at("plan").get("/anomalies?include_simulated=0").text
+
+    assert "Nothing outstanding." not in body
+    assert "1 simulated row" in body
+
+
+def test_the_header_pill_agrees_with_the_page_it_links_to(web_at, conn) -> None:
+    """The pill is rendered on every view and links to /anomalies.
+
+    An unscoped count disagreed with its own destination the moment the toggle was off, which
+    is one interface handing the reader two numbers for one question.
+    """
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+    harness = web_at("plan")
+
+    for path in ("/anomalies", "/queue", "/cards", "/log"):
+        hidden = harness.get(f"{path}?include_simulated=0")
+        shown = harness.get(f"{path}?include_simulated=1")
+        assert "1 anomaly" in hidden.text, path
+        assert "2 anomalies" in shown.text, path
+
+
+def test_the_anomalies_payload_states_what_it_withheld(web_at, conn) -> None:
+    import json
+
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    payload = json.loads(web_at("plan").get("/anomalies.json?include_simulated=0").text)
+
+    assert payload["count"] == 1
+    assert payload["withheld_simulated"] == 1
+    assert [a["entity_id"] for a in payload["anomalies"]] == ["card-real"]

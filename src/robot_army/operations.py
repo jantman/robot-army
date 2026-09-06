@@ -308,7 +308,7 @@ def status(
     items = db.list_work_items(
         ctx.conn, include_simulated=include_simulated, states=states, repo_key=repo
     )
-    anomalies = db.list_anomalies(ctx.conn)
+    anomalies = db.list_anomalies(ctx.conn, include_simulated=include_simulated)
     control_state = db.get_dispatch_control(ctx.conn)
     # Handed in by a caller that has already taken one, or taken here for the terminal path
     # that has not (RA-14). The web renders several of these per page — ``/interrupted``
@@ -335,6 +335,13 @@ def status(
         if include_simulated
         else db.count_simulated_work_items(ctx.conn, states=states, repo_key=repo)
     )
+    # A third number, for the third section (issue #21). Milestone 008 corrected the counts
+    # and the listing and left the anomaly block below them drawn from an unscoped query, so
+    # `status --include-simulated` and `status` printed the same anomalies while claiming to
+    # differ. No window applies here — `status` has never had one — so this is a plain length.
+    withheld_anomalies = (
+        0 if include_simulated else len(db.list_simulated_anomalies(ctx.conn))
+    )
 
     result.data = {
         "effect_level": str(ctx.effect_level),
@@ -355,7 +362,11 @@ def status(
         # Keyed to the two sections it explains, and always present: a consumer must never
         # have to tell "nothing was withheld" apart from "this build does not report it",
         # which is the absent-versus-zero ambiguity this milestone removes from the text.
-        "withheld_simulated": {"counts": withheld_counts, "items": withheld_items},
+        "withheld_simulated": {
+            "counts": withheld_counts,
+            "items": withheld_items,
+            "anomalies": withheld_anomalies,
+        },
     }
 
     result.say(f"effect level : {ctx.effect_level}")
@@ -430,15 +441,21 @@ def status(
     else:
         result.say("no matching work items")
 
-    if anomalies:
+    if anomalies or withheld_anomalies:
+        # The header prints when rows were withheld even though none are visible, and that
+        # case is the reported defect rather than an edge of it. Falling silent there says
+        # "nothing was detected" about a machine holding two open anomalies, which is the
+        # misreading this whole change exists to prevent.
         result.say()
         result.say(f"unacknowledged anomalies ({len(anomalies)}):")
         for anomaly in anomalies:
             result.say(
-                f"  [{anomaly.id}] {anomaly.kind} "
+                f"  [{anomaly.id}]{'*' if anomaly.dry_run else ''} {anomaly.kind} "
                 f"{anomaly.entity_type or ''}:{anomaly.entity_id or ''} "
                 f"@ {timefmt.local(anomaly.detected_at)}"
             )
+        if withheld_anomalies:
+            result.say(f"  {_withheld_note(withheld_anomalies)}")
     return result
 
 
@@ -840,6 +857,9 @@ def _anomaly_dict(anomaly: Any) -> dict[str, Any]:
         # longer true" are not the same fact, and a reader of `--all` who cannot tell them
         # apart cannot tell which conditions were actually dealt with.
         "resolved_at": anomaly.resolved_at,
+        # Issue #21. A payload that hid rows without letting a consumer identify the ones it
+        # did show would have moved the ambiguity rather than removed it.
+        "simulated": anomaly.dry_run,
     }
 
 
@@ -4080,6 +4100,7 @@ def anomalies(
     acknowledge: int | None = None,
     show_all: bool = False,
     since: str | None = None,
+    include_simulated: bool = False,
 ) -> Result:
     # Parsed first — before the acknowledgement below, not merely before the listing. A
     # duration the parser refuses must not be the thing that irreversibly marks an anomaly
@@ -4114,22 +4135,54 @@ def anomalies(
     # payload are drawn from one list and cannot disagree about the window (012 FR-008).
     rows = [
         anomaly
-        for anomaly in db.list_anomalies(ctx.conn, unacknowledged_only=not show_all)
+        for anomaly in db.list_anomalies(
+            ctx.conn, unacknowledged_only=not show_all, include_simulated=include_simulated
+        )
         if _within_window(anomaly.detected_at, cutoff)
     ]
+    # The rows this invocation matched and did not show (issue #21). Counted from a listing
+    # rather than from a `COUNT(*)`, and put through the *same* `_within_window` predicate the
+    # visible rows went through — which is the whole reason `db.list_simulated_anomalies`
+    # hands back rows. `--since` is applied here in Python on purpose (012 research R2), so a
+    # number counted in SQL would name rows this window had already excluded, and the promise
+    # that "withheld" equals "what the flag reveals" would be false exactly when a filter was
+    # in play. Milestone 008 made that equality structural for work items; this is the same
+    # construction on a second table.
+    withheld = (
+        0
+        if include_simulated
+        else sum(
+            1
+            for anomaly in db.list_simulated_anomalies(
+                ctx.conn, unacknowledged_only=not show_all
+            )
+            if _within_window(anomaly.detected_at, cutoff)
+        )
+    )
     result.data = {
         "anomalies": [_anomaly_dict(a) for a in rows],
         "known_kinds": list(ANOMALY_KINDS),
+        # Always present, including as 0: a consumer must never have to tell "nothing was
+        # withheld" apart from "this build does not report it" (008's absent-versus-zero).
+        "withheld_simulated": withheld,
     }
     if not rows:
-        # Two empty listings that mean different things, and saying so is the whole reason
-        # this filter is safe to add. "no outstanding anomalies" is an all-clear; a window
+        # Three empty listings that mean different things, and saying so is the whole reason
+        # these filters are safe to add. "no outstanding anomalies" is an all-clear; a window
         # that matched nothing is not one, and a reader who reads it as one has been misled
-        # by the tool into believing nothing is wrong (012 FR-009).
+        # by the tool into believing nothing is wrong (012 FR-009). A scope that withheld
+        # everything is not one either, and that is issue #21's case exactly: the rows exist,
+        # they belong to a rehearsal, and silence here would report an all-clear over them.
         if cutoff is not None:
-            result.say(f"no anomalies detected in the last {since}")
+            result.say(
+                f"no anomalies detected in the last {since}"
+                + (f" ({_withheld_note(withheld)})" if withheld else "")
+            )
         else:
-            result.say("no outstanding anomalies")
+            result.say(
+                "no outstanding anomalies"
+                + (f" ({_withheld_note(withheld)})" if withheld else "")
+            )
         result.say()
         result.say("kinds this system can raise: " + ", ".join(ANOMALY_KINDS))
         return result
@@ -4144,12 +4197,23 @@ def anomalies(
         elif anomaly.acknowledged_at:
             status = f"  acknowledged {timefmt.local(anomaly.acknowledged_at)}"
         result.say(
-            f"[{anomaly.id}] {anomaly.kind}  {anomaly.entity_type or '—'}:"
+            f"[{anomaly.id}]{'*' if anomaly.dry_run else ''} {anomaly.kind}  "
+            f"{anomaly.entity_type or '—'}:"
             f"{anomaly.entity_id or '—'}  detected {timefmt.local(anomaly.detected_at)}"
             f"{status}"
         )
         for key, value in anomaly.detail_obj.items():
             result.say(f"      {key}: {value}")
+        result.say()
+    # FR-057: a simulated row is marked wherever it is shown. The legend is printed only when
+    # the listing actually contains one, the way `status` prints its own.
+    if any(anomaly.dry_run for anomaly in rows):
+        result.say("* = simulated (dry-run) row")
+        result.say()
+    # Whenever anything was withheld, not only when the listing came out empty — two visible
+    # rows while three are held back is the same contradiction, only quieter (008).
+    if withheld:
+        result.say(_withheld_note(withheld))
         result.say()
     result.say("kinds this system can raise: " + ", ".join(ANOMALY_KINDS))
     return result

@@ -172,11 +172,12 @@ speculative generality with one caller and no second use, which Principle I name
 No deprecation path, per Principle V: this project maintains no backward compatibility for
 outside consumers, and what is being removed never did anything.
 
-**The web's site-wide toggle stays on `/repos`.** It is chrome carried across navigation — it
-governs the nav links and the anomaly pill on every page — not a per-page filter, so suppressing
-it on one page would make the reader's choice silently forgettable when they navigated through
-it. The CLI flag and the web toggle are not the same control and are not required to have the
-same surface.
+**There is no web page to make the same decision about.** `repos` is a terminal-only verb; the
+site's nav is `/active`, `/queue`, `/interrupted`, `/cards`, `/anomalies`, `/log`. So removing the
+CLI flag removes the whole surface, and nothing about the web's site-wide toggle changes. That
+toggle remains chrome carried across navigation — it governs the nav links and the anomaly pill on
+every page — rather than a per-page filter, which is why it is still rendered on pages whose own
+rows it does not narrow.
 
 ---
 

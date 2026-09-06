@@ -151,11 +151,13 @@ handed to both views. Two of them discard it.
 | `/log` | filtered by the toggle; the page's scanned-region withheld count stated |
 | the anomaly pill in the chrome | counts within the scope the page was served with, on **every** page |
 
-The pill is the reason the toggle stays on `/repos` even though that page has nothing of its own
-to filter: the toggle is chrome carried across navigation, not a per-page control, and hiding it
-on one page would make the reader's choice silently forgettable when they navigated through it.
-The CLI flag and the web toggle are not the same control and are not required to have the same
-surface.
+The pill is the part most easily left behind: it is rendered on every view and links to
+`/anomalies`, so an unscoped count disagreed with its own destination the moment the toggle was
+off — one interface handing the reader two numbers for one question.
+
+`repos` has no web page at all (the nav is `/active`, `/queue`, `/interrupted`, `/cards`,
+`/anomalies`, `/log`), so removing the CLI option removes that verb's whole surface and the web
+needs no corresponding decision.
 
 ## Retraction
 

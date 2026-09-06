@@ -529,7 +529,11 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
             else operations.read_log(ctx, since=args.since, item_id=args.item, limit=args.limit)
         ),
         "anomalies": lambda: operations.anomalies(
-            ctx, acknowledge=args.acknowledge, show_all=args.all, since=args.since
+            ctx,
+            acknowledge=args.acknowledge,
+            show_all=args.all,
+            since=args.since,
+            include_simulated=include_simulated,
         ),
         "health": lambda: operations.health_check(ctx, max_age=args.max_age, do_notify=args.notify),
         "doctor": lambda: operations.doctor(ctx),

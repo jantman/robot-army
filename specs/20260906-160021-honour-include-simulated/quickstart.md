@@ -99,12 +99,12 @@ uv run robot-army serve --bind 127.0.0.1 --port 8765
 Then, with rehearsed anomalies in the database:
 
 - `/anomalies` with the toggle **off** lists only real anomalies, and states what it withheld.
-- The anomaly pill in the header shows the same number **on every page**, including `/queue` and
-  `/repos`. Flipping the toggle changes it everywhere.
+- The anomaly pill in the header shows the same number **on every page** — `/queue`, `/cards`,
+  `/log` — and flipping the toggle changes it everywhere.
 - `/log` with the toggle off shows no `[simulated]` record, and says how many the page's scan
   withheld.
-- `/repos` still shows the toggle. That is deliberate: it is chrome carried across navigation and
-  it governs the pill, not that page's rows ([research R6](research.md)).
+- There is no `/repos` page; that verb is terminal-only, which is why removing its flag needed no
+  web decision ([research R6](research.md)).
 
 **Failure to watch for**: a pill that disagrees with the `/anomalies` page it links to. Both read
 one scope from the request; if they disagree, one of them is computing its own.

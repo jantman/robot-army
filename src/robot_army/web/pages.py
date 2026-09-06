@@ -225,7 +225,10 @@ def chrome(
     # second entry point — from silently rendering a page with no level at all.
     effective_level = effective_level or str(ctx.effect_level)
     pause = db.get_dispatch_control(ctx.conn)
-    anomalies = db.list_anomalies(ctx.conn)
+    # Scoped, because the pill is rendered on *every* page and links to /anomalies (issue
+    # #21). An unscoped count here disagreed with the page it pointed at the moment the
+    # visibility toggle was off, which is one surface telling the reader two numbers.
+    anomalies = db.list_anomalies(ctx.conn, include_simulated=include_simulated)
 
     return {
         "effect_level": str(ctx.effect_level),
@@ -1344,18 +1347,25 @@ def interrupted_view(
 
 
 def anomalies_view(ctx: operations.Context, *, include_simulated: bool = False) -> View:
-    payload = operations.anomalies(ctx).data
+    payload = operations.anomalies(ctx, include_simulated=include_simulated).data
     rows = payload["anomalies"]
+    withheld = int(payload["withheld_simulated"])
     body = join(
         [
             h(1, f"anomalies ({len(rows)})"),
             p(
-                "Conditions the system detected but cannot resolve on its own. "
-                "Acknowledging one lifts it out of the outstanding count and lets a "
-                "genuinely new occurrence be recorded later.",
+                "Conditions the system detected. Two kinds re-check themselves and are "
+                "retracted when they stop being true; the rest wait for an acknowledgement, "
+                "which lifts the row out of the outstanding count and lets a genuinely new "
+                "occurrence be recorded later.",
                 class_="meta",
             ),
-            _empty("Nothing outstanding.")
+            _nothing(
+                "Nothing outstanding.",
+                withheld,
+                path="/anomalies",
+                include_simulated=include_simulated,
+            )
             if not rows
             else join(
                 div(
@@ -1385,13 +1395,23 @@ def anomalies_view(ctx: operations.Context, *, include_simulated: bool = False) 
                 )
                 for row in rows
             ),
+            withheld_note(
+                withheld if rows else 0,
+                path="/anomalies",
+                include_simulated=include_simulated,
+            ),
             h(2, "kinds this system can raise"),
             html.ul(payload["known_kinds"]),
         ]
     )
     return View(
         title="anomalies",
-        data={"anomalies": rows, "known_kinds": payload["known_kinds"], "count": len(rows)},
+        data={
+            "anomalies": rows,
+            "known_kinds": payload["known_kinds"],
+            "count": len(rows),
+            "withheld_simulated": withheld,
+        },
         body=body,
     )
 

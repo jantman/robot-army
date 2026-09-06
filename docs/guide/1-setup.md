@@ -99,6 +99,29 @@ opposite. It now re-reads the issue from GitHub and re-runs the same verdict, so
 blocked because somebody else wrote it stays blocked. A second comparison at dispatch, against
 the author recorded on the item, is a backstop rather than the gate.
 
+### The base ref comes from the repository
+
+The `base ref` line says which branch new work will be cut from — and which branch the settings
+below it are read at. It is **detected from the clone**, by reading `refs/remotes/origin/HEAD`,
+and the line says where the answer came from:
+
+```
+base ref     : master   (detected from origin/HEAD)
+base ref     : develop   ([repos."jantman/some-repo"] base_branch)
+base ref     : main   ([worker] base_branch; the clone does not say which branch is its default)
+```
+
+It used to be `[worker] base_branch`, whose default is `"main"` — the only line on this screen
+nothing had looked at the repository to produce. Onboarding a `master` repository therefore
+read the committed settings at a ref that does not exist, said "no committed
+`.claude/settings*.json` at the base ref", and recorded that nothing as approved (issue #150).
+
+Four rungs, first one that answers wins: `[repos."owner/name"] base_branch` → what the clone
+says → `[worker] base_branch` → `main`. Detection beats `[worker] base_branch` on purpose;
+[configuration.md](configuration.md#the-base-ref) has the why. Detection is a local ref read —
+no network, no token — so a clone whose remote has never been fetched simply falls through to
+the configured value, and the screen says that it did.
+
 ### What the approval screen puts in front of you
 
 Between the resolution lines and the prompt, `onboard` prints the **full text** of any

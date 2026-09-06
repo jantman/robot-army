@@ -90,7 +90,7 @@ repository at a time.
 [worker]
 permission_mode = "auto"          # acceptEdits, auto, bypassPermissions, manual, dontAsk, plan
 model           = ""              # empty means the worker's own default
-base_branch     = "main"
+# base_branch   = "main"          # only for a clone that cannot say; see below
 branch_prefix   = "robot-army"
 binary          = "claude"
 ```
@@ -98,6 +98,36 @@ binary          = "claude"
 `permission_mode` is the one to think about. `auto` is what lets a session work unattended,
 which is the point of the whole system, and it is also the setting that decides how much it
 can do without asking.
+
+### The base ref
+
+The branch new work is cut from, that the committed `.claude/settings*.json` are read at,
+and that "has this landed?" is asked against. **It comes from the repository**, not from
+this file. Four rungs, first one that answers:
+
+| Rung | Where | When it decides |
+|---|---|---|
+| 1 | `[repos."owner/name"] base_branch` | I said so about this repository |
+| 2 | the clone's `refs/remotes/<remote>/HEAD` | almost always — every clone that has ever fetched has it |
+| 3 | `[worker] base_branch` | the clone could not say |
+| 4 | `main` | nothing said anything |
+
+Detection is a local ref read: no network, no token, nothing written. `onboard` prints which
+rung answered, and so does the `repo.onboard` record.
+
+**Rung 2 outranks rung 3 deliberately**, and that is the one surprising line here. Until
+issue #150 the base ref was `[worker] base_branch`, whose default is `"main"` — so
+onboarding `jantman/biweeklybudget`, whose default branch is `master`, printed
+`base ref : main`, reviewed the settings at a ref that does not exist, and recorded that
+nothing as approved. The obvious fix — let an explicitly written value win — fixes it for
+nobody: `base_branch = "main"` shipped **live** in the example configuration, so my own
+`config.toml` says `"main"` because I copied it, not because I chose it. A value copied is
+indistinguishable from a value chosen, so the global key steps aside for the repository's
+own answer and the example no longer writes it out.
+
+Set `[repos."owner/name"] base_branch` for the repository that really does branch off
+something else. That one wins over everything, because it is a statement about the
+repository in front of you.
 
 ### `[hooks]`
 

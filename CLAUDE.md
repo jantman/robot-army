@@ -72,13 +72,15 @@ the loader's tables has no annotation, and says which key. You will not be able 
 2 either: `tests/unit/test_example_config_drift.py` compares the committed file against a
 fresh render and fails naming the command above.
 
-The four rules that decide whether a key renders live or commented out are in
+The five rules that decide whether a key renders live or commented out are in
 [`contracts/example-config.md`](specs/20260905-124257-docs-overhaul-example-config/contracts/example-config.md).
 The short version: a key stays commented when it is one of a mutually exclusive pair, when
 it lives in a section whose *absence* is the behaviour (`[trello]`, `[pushover]`), when the
-loader validates it against the filesystem, or when its default is derived from the
-environment. **The generated file must keep loading clean and configuring nothing
-outward-facing** — that is what makes it safe to copy, and it is tested.
+loader validates it against the filesystem, when its default is derived from the
+environment, or when it is derived from the repository being acted on (`[worker]
+base_branch`, which the clone's own `<remote>/HEAD` outranks). **The generated file must keep
+loading clean and configuring nothing outward-facing** — that is what makes it safe to copy,
+and it is tested.
 
 ## Conventions worth matching
 

@@ -172,7 +172,13 @@ def build_parser() -> argparse.ArgumentParser:
     log.add_argument("--limit", type=int, default=None, help="show only the last N records")
     log.add_argument("--follow", action="store_true", help="tail the current day's file")
 
-    anomalies = sub.add_parser("anomalies", help="conditions detected but not resolvable")
+    # Not "conditions detected but not resolvable" any more. Two kinds re-check themselves and
+    # are retracted when they stop being true — `orphan_session` since issue #138 and
+    # `card_create_failing` since #21 — so that framing is now wrong in the first place a
+    # reader looks, about the very kinds most likely to be sitting in their list.
+    anomalies = sub.add_parser(
+        "anomalies", help="conditions detected; most wait for --acknowledge, two clear themselves"
+    )
     anomalies.add_argument("--acknowledge", type=int, default=None, metavar="ID")
     anomalies.add_argument("--all", action="store_true", help="include acknowledged ones")
     # Spelled exactly as `log --since` above, because it is the same parser behind it —

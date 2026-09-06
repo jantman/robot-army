@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from robot_army import cleanup, db, intake, notifications, procinfo, repos, sessions, speckit
 from robot_army.boundaries import BoundaryError, HostHandle, TransportError
+from robot_army.cardstates import CardState
 from robot_army.states import (
     SessionState,
     WorkItemState,
@@ -589,6 +590,10 @@ def reconcile(
     result.anomalies_resolved += _resolve_orphan_anomalies(
         conn, audit=audit, proc_root=proc_root
     )
+    # The second retractable kind (issue #21). Needs no machine observation and no network —
+    # it compares two local tables — so it sits here beside its sibling rather than on the
+    # intake path, where it would only run when a board poll succeeded.
+    result.anomalies_resolved += _resolve_card_create_anomalies(conn, audit=audit)
 
     # -- how far Spec Kit runs have got (milestone 007, FR-012) ------------
     result.speckit_phase_changes += _observe_speckit(conn, audit=audit)
@@ -1539,6 +1544,72 @@ def _resolve_orphan_anomalies(
                         "condition it reported no longer holds"
                     ),
                 },
+            )
+        resolved += 1
+    return resolved
+
+
+def _resolve_card_create_anomalies(conn: sqlite3.Connection, *, audit: AuditLog) -> int:
+    """Close a ``card_create_failing`` whose card has since been linked (issue #21).
+
+    The second kind whose truth can be positively re-established as *false*, and it earns that
+    on the same terms ``_resolve_orphan_anomalies`` sets for itself: ``linked`` is terminal, is
+    reached only by the success path, and that path writes ``issue_number``, ``issue_url`` and
+    ``create_failures = 0`` in the *same transaction* as the transition. So "the card is
+    linked" is not an inference about the condition — it is the condition, negated.
+
+    **Here rather than in ``intake``, and the placement is the point.** Retraction must not
+    depend on the board being reachable. Put on the intake path it would run only when a poll
+    succeeded, so an anomaly would sit outstanding through every hour Trello was down — a list
+    going stale for a reason unrelated to what it reports, which is the exact failure the
+    retraction mechanism exists to prevent. This reads two local tables and makes no network
+    call at all.
+
+    **Not cleared inline when the card links, either.** That would put anomaly bookkeeping
+    inside the creation path, where an interruption between the transition and the clear leaves
+    the anomaly open with nothing left to re-check it. This pass is idempotent and self-healing;
+    an inline write is neither.
+
+    A card that cannot be found is left alone, permanently and deliberately — a purge, or a
+    database restored without it, is "I could not check", and that must never be recorded as
+    "it is fine". Identical to how the orphan resolver treats an anomaly with no recorded pid.
+
+    One transaction per anomaly, so a pass killed midway leaves what it reached resolved and
+    logged and the rest for next time.
+    """
+    resolved = 0
+    for anomaly in db.open_card_create_failing_anomalies(conn):
+        if not anomaly.entity_id:
+            continue
+        card = db.find_card_on_any_board(
+            conn, card_id=anomaly.entity_id, dry_run=anomaly.dry_run
+        )
+        if card is None or card.state is not CardState.LINKED:
+            continue
+
+        with db.transaction(conn):
+            if not db.resolve_anomaly(conn, anomaly.id):
+                continue
+            audit.record(
+                "anomaly.resolved",
+                outcome="ok",
+                entity_type="anomaly",
+                entity_id=str(anomaly.id),
+                detail={
+                    "kind": anomaly.kind,
+                    "anomaly_entity_id": anomaly.entity_id,
+                    "card_state": str(card.state),
+                    "issue": (
+                        f"{card.repo_key}#{card.issue_number}"
+                        if card.repo_key and card.issue_number is not None
+                        else None
+                    ),
+                    "reason": (
+                        "the card this anomaly named has since been linked to an issue, so "
+                        "the creation it reported as failing has succeeded"
+                    ),
+                },
+                dry_run=anomaly.dry_run,
             )
         resolved += 1
     return resolved

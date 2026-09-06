@@ -708,6 +708,31 @@ def count_simulated_cards(
     return int(conn.execute(sql, params).fetchone()["n"])
 
 
+def find_card_on_any_board(
+    conn: sqlite3.Connection, *, card_id: str, dry_run: bool
+) -> Card | None:
+    """One card by its Trello id, without needing to know which board it is on.
+
+    ``find_card`` above takes a ``board_id`` because every caller in the intake path is already
+    holding one. The anomaly resolver is not: it runs in reconciliation, which reaches this
+    without reading the board at all — deliberately, so a retraction does not depend on Trello
+    being reachable. ``idx_cards_identity`` is over ``(board_id, card_id, dry_run)`` and Trello
+    card ids are globally unique, so the pair here identifies at most one row in practice.
+
+    ``dry_run`` is part of the lookup rather than ignored: one card id can have both a real and
+    a rehearsed row, and resolving a rehearsed anomaly against a real card's success would be a
+    retraction of something that never happened.
+
+    No ``include_simulated``: this is a lookup by identity, not a listing, and the caller states
+    which of the two it means.
+    """
+    row = conn.execute(
+        "SELECT * FROM cards WHERE card_id = ? AND dry_run = ?",
+        (card_id, int(dry_run)),
+    ).fetchone()
+    return from_row(Card, row) if row else None
+
+
 def list_cards(
     conn: sqlite3.Connection,
     *,
@@ -913,6 +938,28 @@ def open_orphan_session_anomalies(conn: sqlite3.Connection) -> list[Anomaly]:
     return _rows(
         conn.execute(
             "SELECT * FROM anomalies WHERE kind = 'orphan_session' "
+            "AND acknowledged_at IS NULL AND resolved_at IS NULL ORDER BY id"
+        ),
+        Anomaly,
+    )
+
+
+def open_card_create_failing_anomalies(conn: sqlite3.Connection) -> list[Anomaly]:
+    """The population ``reconcile._resolve_card_create_anomalies`` re-checks (issue #21).
+
+    Narrow by construction, exactly like ``open_orphan_session_anomalies`` above and for the
+    same reason. ``card_create_failing`` is the second kind whose truth can be positively
+    re-established as *false* — the card it named has since been linked to an issue, so the
+    creation it reported as failing has succeeded. Every other kind has its own settling story
+    that this mechanism has no business guessing at.
+
+    Rehearsed rows are included deliberately: this is not a listing, and an anomaly raised by a
+    rehearsal is exactly as entitled to be retracted as a real one. Withholding retraction from
+    it would leave the rehearsal's list going stale, which is the problem, not the scope.
+    """
+    return _rows(
+        conn.execute(
+            "SELECT * FROM anomalies WHERE kind = 'card_create_failing' "
             "AND acknowledged_at IS NULL AND resolved_at IS NULL ORDER BY id"
         ),
         Anomaly,

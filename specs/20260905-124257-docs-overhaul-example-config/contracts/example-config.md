@@ -52,7 +52,7 @@ costs only that the multi-line table form is shown in the guide instead of here.
 
 ## Active versus commented
 
-Every key the loader accepts appears. Four rules decide whether it is live.
+Every key the loader accepts appears. Five rules decide whether it is live.
 
 | Rule | Keys | Reason |
 |---|---|---|
@@ -60,6 +60,7 @@ Every key the loader accepts appears. Four rules decide whether it is live.
 | **Inert-when-absent section** — every key commented, *header included* | all of `[trello]`, all of `[pushover]` | `config.trello is None` and `config.pushover is None` are what make an unconfigured install issue no outbound request. An active `[trello]` with an empty `board_id` polls nothing, forever. |
 | **Filesystem-validated** — commented | `[github] token_file`; `[repos.*] path` | The loader requires `token_file` to exist at mode 0600 and `path` to be an existing git repository. No value satisfies that on an arbitrary machine. |
 | **Environment-derived** — commented | `[terminal] socket_glob` | Its default is computed from `$XDG_RUNTIME_DIR`. Emitting the resolved value embeds this machine's UID and breaks FR-016; emitting the literal `$XDG_RUNTIME_DIR/...` silently configures a directory of that literal name, because neither TOML nor the loader expands variables. Commented, the loader computes the right value per machine. |
+| **Derived from the repository** — commented | `[worker] base_branch` | Since issue #150 the base ref is read from the clone's `refs/remotes/<remote>/HEAD`, and this key is only the answer when that ref is absent. Rendered live it was worse than redundant: it is where the maintainer's explicit `"main"` came from, and a value copied rather than chosen is indistinguishable from one that was. |
 
 The whole `[repos."owner/name"]` section is rendered commented: it names a repository that
 does not exist, and unknown keys inside `[repos.*]` are an **error** rather than a warning,

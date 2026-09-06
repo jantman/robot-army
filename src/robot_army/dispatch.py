@@ -349,7 +349,12 @@ def check_gates(
     if not trusted:
         raise DispatchBlocked(f"workspace trust check failed: {explanation}")
 
-    base_ref = repo.base_branch or config.worker.base_branch
+    # The same resolution onboarding used (issue #150). Both sides must resolve by one
+    # rule or an unchanged repository reports a changed fingerprint, because the two read
+    # different branches.
+    base_ref = repos.base_ref(
+        config, repo.key, boundaries.version_control, repo.path
+    ).ref
     current = compute_fingerprint(boundaries, str(repo.path), base_ref)
     approved = record.fingerprint
     if current != approved:

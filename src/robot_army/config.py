@@ -312,7 +312,13 @@ class PushoverConfig:
 class WorkerConfig:
     permission_mode: str = "auto"
     model: str = ""
-    base_branch: str = "main"
+    #: ``""`` means *not stated*, and that is the whole of it: since issue #150 the base ref
+    #: is resolved by ``repos.base_ref``, which prefers what the clone says its default
+    #: branch is and reaches this value only when the clone cannot answer. A default of
+    #: ``"main"`` here would be indistinguishable from a maintainer who wrote ``"main"``
+    #: because the shipped example told them to — and that copied value outranking the
+    #: repository's own answer is exactly the bug.
+    base_branch: str = ""
     branch_prefix: str = "robot-army"
     binary: str = "claude"
 
@@ -654,12 +660,6 @@ class Config:
         if repo and repo.model:
             return repo.model
         return self.worker.model
-
-    def base_branch_for(self, key: str) -> str:
-        repo = self.repos.get(key)
-        if repo and repo.base_branch:
-            return repo.base_branch
-        return self.worker.base_branch
 
     def speckit_enabled_for(self, key: str) -> tuple[bool, str | None]:
         """Does this repository get the Spec Kit prompt block, and what decided it?
@@ -1084,7 +1084,7 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
     worker = WorkerConfig(
         permission_mode=permission_mode,
         model=_str("worker", "model", ""),
-        base_branch=_str("worker", "base_branch", "main"),
+        base_branch=_str("worker", "base_branch", ""),
         branch_prefix=_str("worker", "branch_prefix", "robot-army"),
         binary=_str("worker", "binary", "claude"),
     )
@@ -1422,7 +1422,12 @@ def parse(raw: dict[str, Any], config_path: Path) -> Config:  # noqa: C901 - fla
         repos[key] = RepoConfig(
             key=key,
             path=repo_path,
-            base_branch=str(section.get("base_branch", worker.base_branch)),
+            # Not inherited from ``[worker]`` at parse time any more (issue #150). Copying
+            # it in made "this repository chose main" and "nobody said anything" the same
+            # value, and the resolution order needs to tell them apart. Every consumer
+            # already reads the empty string as *inherit*, because all of them are spelled
+            # ``repo.base_branch or <the next answer down>``.
+            base_branch=str(section.get("base_branch", "")),
             post_create=tuple(steps),
             env=env,
             permission_mode=str(repo_mode) if repo_mode else None,

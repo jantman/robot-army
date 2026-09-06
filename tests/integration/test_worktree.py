@@ -30,7 +30,7 @@ def repo_with(clone: Path, steps: tuple[HookStep, ...] = (), **kwargs) -> RepoCo
     return RepoConfig(
         key="demo",
         path=clone,
-        base_branch="main",
+        base_branch=kwargs.pop("base_branch", "main"),
         post_create=steps,
         env=kwargs.pop("env", {}),
         **kwargs,
@@ -719,3 +719,52 @@ def test_a_simulated_preparation_records_the_skip_a_real_one_would(
         prepare_record(layout, audit)["fetch_skipped"]
         == "the repository has no configured remote"
     )
+
+
+# -- the base ref comes from the repository (issue #150) ---------------------
+
+
+def master_clone(tmp_path: Path, files: dict[str, str] | None = None) -> Path:
+    """A real clone of a ``master`` repository, so ``origin/HEAD`` exists to be read."""
+    import subprocess
+
+    upstream = make_repo(tmp_path / "upstream", files=files, branch="master")
+    target = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(upstream), str(target)], check=True, capture_output=True
+    )
+    return target
+
+
+def test_a_master_repository_branches_from_master(audit, layout, tmp_path):
+    """The half of issue #150 nobody had seen yet, because no ``master`` repository had
+    been dispatched into. With ``main`` as the base ref this fails at ``git worktree add``:
+    there is no such branch and no such remote-tracking ref."""
+    from tests.conftest import config_dict, monkey_token
+
+    from robot_army.config import parse
+
+    clone = master_clone(tmp_path)
+    monkey_token()
+    config = parse(
+        config_dict(clone, layout, tmp_path / "worktrees", repos={"demo": {"path": str(clone)}}),
+        tmp_path / "config.toml",
+    )
+    assert config.repos["demo"].base_branch == "", "the point is that nothing is configured"
+    boundaries = make_boundaries(audit, hooks=SubprocessHookRunner(audit))
+
+    result = worktree.prepare(
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        repo=repo_with(clone, base_branch=""),
+        item_id=1,
+        issue_number=42,
+        title="Fix the login flow",
+        dry_run=False,
+    )
+
+    assert result.ok, result.failure_reason
+    vcs = GitVersionControl(audit)
+    assert vcs.commits_ahead(str(clone), "master", result.branch) == 0
+    assert vcs.rev_parse(str(clone), "origin/master") == vcs.rev_parse(str(clone), result.branch)

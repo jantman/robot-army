@@ -40,6 +40,7 @@ suite by name.
 | `list_remotes` | the clone's remote config | **real** | the identity check must reach the same verdict at `plan` as at `live` (005) |
 | `remote_url` | the clone's remote config | **real** | "what repository is at this path" has one true answer (005) |
 | `default_remote` | the clone's remote config | **real** | derived from `list_remotes`, which is already real; inventing `"origin"` made a local-only clone look remote-backed and suppressed the `fetch_skipped` record the real path writes (issue #20) |
+| `default_branch` | the clone's `refs/remotes/<remote>/HEAD` | **real** | which branch a remote calls its default is written in the operator's clone at every effect level; an invented `"main"` would make a `plan`-level onboarding of a `master` repository print the wrong base ref and review the wrong settings (issue #150) |
 | `fetch` | the network; writes refs | inert | a write |
 | `add_worktree` | creates the artifact | as-if handle | a write; returns a structurally valid handle |
 | `remove_worktree` | the artifact | as-if | a write |

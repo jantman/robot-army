@@ -84,7 +84,11 @@ def repo_clone(tmp_path: Path) -> Path:
 
 
 def make_repo(
-    path: Path, *, files: dict[str, str] | None = None, origin: str | None = None
+    path: Path,
+    *,
+    files: dict[str, str] | None = None,
+    origin: str | None = None,
+    branch: str = "main",
 ) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     env = {
@@ -99,7 +103,10 @@ def make_repo(
     run = lambda *args: subprocess.run(  # noqa: E731
         ["git", *args], cwd=path, env=env, check=True, capture_output=True, text=True
     )
-    run("init", "-q", "-b", "main")
+    # ``branch`` is a parameter rather than a constant because issue #150 is entirely about
+    # repositories whose default branch is not ``main``: a fixture that can only build one
+    # can only test the case that already worked.
+    run("init", "-q", "-b", branch)
     # Hermetic: the maintainer's own ~/.config/git/ignore excludes
     # `.claude/settings.local.json`, which would silently keep the fingerprint fixtures
     # out of the commit and make these tests pass or fail depending on whose machine

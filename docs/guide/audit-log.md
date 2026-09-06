@@ -289,6 +289,25 @@ whole milestone exists to make answerable:
 | `verified_origin` | the **normalised** `host/owner/name` found there. Never a raw URL |
 | `owner_verdict` | `owned`, `listed`, or the owner found, from the one repository lookup |
 
+**`base_ref_source` arrived with issue #150**, beside the `base_ref` this record already
+carried. The ref alone said *what* was approved and not *what decided it*, and those had become
+different questions once the base ref stopped being a configuration default:
+
+| Field | Meaning |
+|---|---|
+| `base_ref` | the branch the settings were reviewed at, and that work will be cut from |
+| `base_ref_source` | `repo_config`, `detected` (from `<remote>/HEAD`), `worker_config`, or `default` |
+
+`detected` is the answer for any clone that has ever spoken to its remote. Anything else means
+the clone could not say and configuration filled in — worth knowing when a later dispatch
+reports a fingerprint that changed without anybody touching the repository:
+
+```bash
+jq -r 'select(.action == "repo.onboard" and .detail.base_ref_source != "detected")
+       | "\(.ts) \(.entity_id) \(.detail.base_ref) \(.detail.base_ref_source)"' \
+  ~/.local/state/robot-army/logs/audit-*.jsonl
+```
+
 **Two more fields arrived with issue #41**, on the same record and for the same kind of reason —
 they say what was true of the repository at the moment it was approved:
 

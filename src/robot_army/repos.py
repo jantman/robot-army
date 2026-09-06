@@ -1,11 +1,14 @@
 """Which repositories this system watches, where their clones are, and what settings apply.
 
-**This module answers questions. It performs no actions.**
+**This module answers questions. It changes nothing.**
 
 That boundary is the whole of its design (plan.md, Structure Decision). Derivation,
 URL normalisation, the origin comparison, and the join of record-over-section-over-default
-live here as pure functions over ``(conn, config)``. Onboarding's *decision* to record,
-dispatch's *decision* to refuse, and every audit write stay at their existing call sites.
+live here as pure functions over ``(conn, config)``. Three of them — :func:`select_remote`,
+:func:`verify` and :func:`base_ref` — additionally *read* the clone through the
+version-control boundary, which is audited like any other read and still writes nothing.
+Onboarding's *decision* to record, dispatch's *decision* to refuse, and every audit write
+stay at their existing call sites.
 The seam therefore adds a place to look things up without adding a place where things
 happen — which is what keeps twenty-six call sites from each performing the join by hand.
 
@@ -166,6 +169,104 @@ def locate(config: Config, repo_key: str) -> tuple[Path | None, str]:
     if section is not None and section.path is not None:
         return section.path, "configured"
     return derive_path(config, repo_key), "derived"
+
+
+# -- the base ref -----------------------------------------------------------
+
+#: The default of last resort. Only reached when the clone cannot say and nothing is
+#: configured anywhere; before issue #150 this string was the *first* answer rather than
+#: the last, which is what made a ``master`` repository onboard against a ref that is not
+#: there.
+FALLBACK_BASE_BRANCH = "main"
+
+
+@dataclass(frozen=True, slots=True)
+class BaseRef:
+    """Which branch new work is based on, and what decided that.
+
+    Two fields for the answer's provenance rather than one, and it is the same split
+    :class:`Verification` makes between ``cause`` and ``refusal``: ``source`` is a token the
+    audit log can carry and a later reader can count, ``detail`` is the sentence the
+    approval screen prints. Deriving either from the other at the call site is how the
+    record and the screen come to disagree about what the maintainer approved.
+    """
+
+    ref: str
+    source: str  # "repo_config" | "detected" | "worker_config" | "default"
+    detail: str
+
+
+def base_ref(
+    config: Config,
+    repo_key: str,
+    vcs: VersionControl,
+    clone_path: Path | str,
+    *,
+    remote: str | None = None,
+) -> BaseRef:
+    """The one answer to "what branch does this repository's work come off?" (issue #150).
+
+    Four rungs, in this order:
+
+    1. ``[repos."<key>"] base_branch`` — the maintainer said so about *this* repository.
+    2. what the clone says: ``refs/remotes/<remote>/HEAD``.
+    3. ``[worker] base_branch`` — the fallback for a clone that cannot answer.
+    4. ``"main"``.
+
+    **Detection outranks the global key**, which is the one arguable line in this function
+    and is deliberate. ``share/config.example.toml`` shipped ``base_branch = "main"`` live
+    under ``[worker]``, so the maintainer's copy of it carries an explicit ``"main"`` they
+    never chose — which is how the reporter's own configuration came to say it. Letting a
+    copied value outrank the repository's own answer would leave issue #150 fixed for
+    nobody. A per-repository value still wins over everything, because that one is a
+    statement about the repository in front of us.
+
+    Nothing here raises for an operational condition. A clone with no remote, no
+    ``origin/HEAD``, or no git at all is rung 2 declining, and the caller is told which rung
+    answered so the fallback is visible rather than silent. ``OSError`` is caught beside
+    ``BoundaryError`` for the reason ``operations.repos`` already catches it: git is invoked
+    with the clone as its working directory, so a clone that has been moved fails before git
+    runs at all.
+    """
+    section = config.repos.get(repo_key)
+    if section is not None and section.base_branch:
+        return BaseRef(section.base_branch, "repo_config", f'[repos."{repo_key}"] base_branch')
+
+    detected = _detect_default_branch(vcs, str(clone_path), remote)
+    if detected is not None:
+        branch, asked = detected
+        return BaseRef(branch, "detected", f"detected from {asked}/HEAD")
+
+    missing = "the clone does not say which branch is its default"
+    if config.worker.base_branch:
+        return BaseRef(
+            config.worker.base_branch, "worker_config", f"[worker] base_branch; {missing}"
+        )
+    return BaseRef(FALLBACK_BASE_BRANCH, "default", f"the default; {missing}")
+
+
+def _detect_default_branch(
+    vcs: VersionControl, clone_path: str, remote: str | None
+) -> tuple[str, str] | None:
+    """Rung 2, with every way of not knowing folded into ``None``.
+
+    Returns the branch **and the remote it was asked of**, because the screen names that
+    remote and naming the wrong one would send the reader to look at a ref that is not the
+    one detection read.
+
+    The remote is resolved here when the caller did not supply one, because most callers
+    have a clone and a key and no reason to have asked. ``onboard`` does supply one: it has
+    already settled *which* remote decides this repository's identity, and detection must
+    ask that same remote rather than re-deciding.
+    """
+    try:
+        chosen = remote or vcs.default_remote(clone_path)
+        if chosen is None:
+            return None
+        branch = vcs.default_branch(clone_path, chosen)
+    except (BoundaryError, OSError):
+        return None
+    return (branch, chosen) if branch else None
 
 
 def is_primary_clone(path: Path) -> bool:

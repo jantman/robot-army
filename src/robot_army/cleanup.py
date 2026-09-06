@@ -247,8 +247,11 @@ def clean_item(
             worktree_removed=True,
         )
 
+    # Resolved from the clone (issue #150): a branch is judged contained against the branch
+    # it was actually cut from, and in a ``master`` repository that is not ``main``.
+    base = repos.base_ref(config, item.repo_key, vcs, repo.path).ref
     contained, evidence = _branch_is_contained(
-        vcs, clone=str(repo.path), branch=item.branch, base=config.base_branch_for(item.repo_key)
+        vcs, clone=str(repo.path), branch=item.branch, base=base
     )
     if not contained:
         return _retain(

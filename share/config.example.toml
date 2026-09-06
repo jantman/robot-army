@@ -43,7 +43,8 @@ api_base = "https://api.github.com"  # override for GitHub Enterprise
 [worker]
 permission_mode = "auto"  # acceptEdits, auto, bypassPermissions, manual, dontAsk or plan
 model = ""  # model to pass to the worker; empty means its default
-base_branch = "main"  # branch new work branches off
+# base_branch = "main"  # fallback when the clone cannot say what its default branch is
+#   (derived from the repository: onboarding reads <remote>/HEAD, and a value here is only the answer when that ref is absent)
 branch_prefix = "robot-army"  # prefix for the branches it creates
 binary = "claude"  # the worker executable
 

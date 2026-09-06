@@ -674,3 +674,203 @@ def test_the_record_still_wins_only_the_path(conn, repo_clone, layout, tmp_path)
 
     assert resolved.path == repo_clone
     assert resolved.project_column == "Ready"
+
+
+# -- the base ref (issue #150) ----------------------------------------------
+#
+# The four rungs, and which one answered. The last of these is the one that decides whether
+# the issue is actually fixed: the maintainer's ``[worker] base_branch = "main"`` is a copy
+# of the shipped example rather than a choice, so detection has to outrank it.
+
+
+@pytest.fixture
+def cloned(tmp_path):
+    """A factory for real clones — the only shape that has an ``origin/HEAD`` to read."""
+
+    def build(branch: str, name: str = "demo") -> Path:
+        upstream = make_repo(tmp_path / f"{name}-upstream", branch=branch)
+        target = tmp_path / "clones" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "clone", "-q", str(upstream), str(target)],
+            check=True,
+            capture_output=True,
+        )
+        return target
+
+    return build
+
+
+def base_ref_config(clone, layout, tmp_path, **overrides):
+    monkey_token()
+    return parse(
+        config_dict(clone, layout, tmp_path / "worktrees", **overrides), tmp_path / "config.toml"
+    )
+
+
+@pytest.mark.requires_git
+def test_a_per_repository_base_branch_wins_and_asks_the_clone_nothing(
+    cloned, layout, tmp_path, boundaries
+):
+    """Rung 1. The override is the reason the key exists, so it beats the repository's own
+    answer — and it short-circuits detection entirely, which is asserted here because a
+    resolver that consulted git anyway would be doing work whose answer it discards."""
+    clone = cloned("master")
+    config = base_ref_config(
+        clone, layout, tmp_path, repos={"jantman/demo": {"path": str(clone), "base_branch": "develop"}}
+    )
+
+    class RefusesToBeAsked:
+        def __getattr__(self, name):
+            raise AssertionError(f"detection must not run: {name} was called")
+
+    answer = repos.base_ref(config, "jantman/demo", RefusesToBeAsked(), clone)
+
+    assert answer.ref == "develop"
+    assert answer.source == "repo_config"
+    assert answer.detail == '[repos."jantman/demo"] base_branch'
+
+
+@pytest.mark.requires_git
+def test_detection_beats_a_stated_worker_base_branch(cloned, layout, tmp_path, boundaries):
+    """Rung 2, and issue #150 in one assertion. ``share/config.example.toml`` shipped
+    ``base_branch = "main"`` live, so the maintainer's explicit value is a copy rather than
+    a decision; letting it win would leave the bug fixed for nobody."""
+    clone = cloned("master")
+    config = base_ref_config(
+        clone,
+        layout,
+        tmp_path,
+        worker={"base_branch": "main"},
+        repos={"jantman/demo": {"path": str(clone)}},
+    )
+
+    answer = repos.base_ref(config, "jantman/demo", boundaries.version_control, clone)
+
+    assert answer.ref == "master"
+    assert answer.source == "detected"
+    assert answer.detail == "detected from origin/HEAD"
+
+
+@pytest.mark.requires_git
+def test_the_remote_the_identity_check_chose_is_the_one_detection_asks(
+    cloned, layout, tmp_path, boundaries
+):
+    """A clone whose only remote is ``gh`` is a shape ``select_remote`` accepts, so
+    detection must name it rather than ask about an ``origin`` that is not there."""
+    clone = cloned("master")
+    git(clone, "remote", "rename", "origin", "gh")
+    config = base_ref_config(clone, layout, tmp_path, repos={"jantman/demo": {"path": str(clone)}})
+
+    answer = repos.base_ref(config, "jantman/demo", boundaries.version_control, clone, remote="gh")
+
+    assert (answer.ref, answer.source) == ("master", "detected")
+    assert answer.detail == "detected from gh/HEAD"
+
+
+@pytest.mark.requires_git
+def test_a_clone_that_cannot_answer_falls_back_and_says_so(
+    bare_clone, layout, tmp_path, boundaries
+):
+    """Rung 3. A remote that was never fetched has no ``origin/HEAD``; onboarding must
+    still work, and the screen must show that the value came from configuration."""
+    git(bare_clone, "remote", "add", "origin", "git@github.com:jantman/demo.git")
+    config = base_ref_config(
+        bare_clone,
+        layout,
+        tmp_path,
+        worker={"base_branch": "trunk"},
+        repos={"jantman/demo": {"path": str(bare_clone)}},
+    )
+
+    answer = repos.base_ref(config, "jantman/demo", boundaries.version_control, bare_clone)
+
+    assert answer.ref == "trunk"
+    assert answer.source == "worker_config"
+    assert "the clone does not say" in answer.detail
+
+
+@pytest.mark.requires_git
+def test_nothing_stated_anywhere_and_nothing_detected_is_main(
+    bare_clone, layout, tmp_path, boundaries
+):
+    """Rung 4. The old first answer, now the last one."""
+    config = base_ref_config(
+        bare_clone,
+        layout,
+        tmp_path,
+        worker={"base_branch": ""},
+        repos={"jantman/demo": {"path": str(bare_clone)}},
+    )
+
+    answer = repos.base_ref(config, "jantman/demo", boundaries.version_control, bare_clone)
+
+    assert answer.ref == "main"
+    assert answer.source == "default"
+
+
+@pytest.mark.requires_git
+def test_a_clone_with_no_remote_skips_detection_rather_than_failing(
+    bare_clone, layout, tmp_path, boundaries
+):
+    """A local-only repository is a legitimate shape, and ``default_remote`` answers
+    ``None`` for it rather than guessing ``origin``."""
+    config = base_ref_config(
+        bare_clone,
+        layout,
+        tmp_path,
+        worker={"base_branch": "trunk"},
+        repos={"jantman/demo": {"path": str(bare_clone)}},
+    )
+
+    answer = repos.base_ref(config, "jantman/demo", boundaries.version_control, bare_clone)
+
+    assert (answer.ref, answer.source) == ("trunk", "worker_config")
+
+
+@pytest.mark.parametrize("failing", ["default_remote", "default_branch"])
+def test_a_boundary_failure_is_a_fallback_not_a_raise(
+    failing, repo_clone, layout, tmp_path, boundaries
+):
+    """Resolution is called mid-dispatch and mid-listing. Neither is a place where "git
+    could not be asked" may become a traceback — it is rung 2 declining."""
+    from robot_army.boundaries import BoundaryError
+
+    vcs = boundaries.version_control
+
+    def explode(*_args, **_kwargs):
+        raise BoundaryError("git is having a day")
+
+    setattr(vcs, failing, explode)
+    config = base_ref_config(
+        repo_clone,
+        layout,
+        tmp_path,
+        worker={"base_branch": "trunk"},
+        repos={"jantman/demo": {"path": str(repo_clone)}},
+    )
+
+    answer = repos.base_ref(config, "jantman/demo", vcs, repo_clone)
+
+    assert (answer.ref, answer.source) == ("trunk", "worker_config")
+
+
+def test_a_clone_that_is_no_longer_there_falls_back_rather_than_raising(
+    layout, tmp_path, repo_clone, boundaries
+):
+    """``OSError``, not ``BoundaryError``: git is invoked with the clone as its working
+    directory, so a moved clone fails before git runs at all. ``operations.repos`` already
+    catches this pair for the same reason."""
+    config = base_ref_config(
+        repo_clone,
+        layout,
+        tmp_path,
+        worker={"base_branch": "trunk"},
+        repos={"jantman/demo": {"path": str(repo_clone)}},
+    )
+
+    answer = repos.base_ref(
+        config, "jantman/demo", boundaries.version_control, tmp_path / "gone" / "away"
+    )
+
+    assert (answer.ref, answer.source) == ("trunk", "worker_config")

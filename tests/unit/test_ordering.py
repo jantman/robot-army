@@ -274,6 +274,26 @@ def test_an_unfinished_item_holds_the_rest_of_its_repository(conn, config):
     assert "awaiting_review" in entry.detail
 
 
+def test_the_hold_message_names_no_branch_and_the_queue_reads_no_clone(conn, config, monkeypatch):
+    """Issue #150. Since the base ref is detected from the clone rather than defaulted,
+    naming it here would mean a git subprocess inside ``plan`` — which promises no I/O
+    beyond the database because the web interface recomputes it on every page render. The
+    sentence gives up the branch name instead, and says as much as it did before."""
+    from robot_army import repos
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("plan must not resolve a base ref: it would read the clone")
+
+    monkeypatch.setattr(repos, "base_ref", refuse)
+    seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.AWAITING_REVIEW))
+    ready(conn, 1, repo_key="demo")
+
+    entry = ordering.plan(conn, config=waiting(config), capacity=snapshot(global_cap=9))[0]
+
+    assert "has not landed yet" in entry.detail
+    assert "main" not in entry.detail
+
+
 def test_the_global_setting_holds_a_repository_with_no_section_of_its_own(conn, config):
     seed_item(conn, repo_key="demo", issue_number=41, state=str(WorkItemState.ACTIVE))
     ready(conn, 1, repo_key="demo")

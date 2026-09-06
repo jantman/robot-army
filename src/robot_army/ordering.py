@@ -442,10 +442,15 @@ def _hold_for(
             # will most likely free the queue.
             first = min(blockers, key=lambda other: other.id)
             more = f" (and {len(blockers) - 1} more)" if len(blockers) > 1 else ""
+            # No branch is named, deliberately (issue #150). Since the base ref is detected
+            # from the clone rather than defaulted, naming it means a git subprocess — and
+            # this function is ``plan``'s, which promises no I/O beyond the database because
+            # the web interface recomputes it on every page render. "Has not landed yet" is
+            # the whole of what this sentence has to say, and it cannot go stale.
             return (
                 HoldReason.AWAITING_MERGE,
                 f"repository {item.repo_key}: #{first.issue_number} is {first.state} and "
-                f"has not landed on {config.base_branch_for(item.repo_key)} yet{more}",
+                f"has not landed yet{more}",
             )
 
     # Milestone 001's gate, reported through this milestone's vocabulary so the two

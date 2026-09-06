@@ -131,11 +131,59 @@ slot held for as long as the machine stayed up.** Three successful items at
 the machine was full — and the worktrees could never be reclaimed either, because cleanup's
 session guard kept recording `skipped`, which means "not yet". That is issue #138.
 
-So the lifecycle has an ending now. An item that is `done` **and** whose worker has been
-idle for **30 minutes** has that worker stopped: the process ends, the row closes with a
-reason naming retirement, and the slot comes back. Its terminal tab goes too, on the same
-pass — see [the tab](#the-tab) below, which is a separate act and was originally, wrongly,
-assumed to be free.
+So the lifecycle has an ending now. An item that is `done` and whose worker is idle has
+that worker stopped: the process ends, the row closes with a reason naming retirement, and
+the slot comes back. Its terminal tab goes too, on the same pass — see [the tab](#the-tab)
+below, which is a separate act and was originally, wrongly, assumed to be free.
+
+### What says "now": the merge, or failing that the clock
+
+**Two signals authorise it, and the merged pull request is the one that matters.** If I have
+merged the PR I have said "yes, this is complete" in as many words, which is a stronger and
+earlier statement than any inference from how long a process has been quiet. From that point
+the worker has nothing left to do and its tab has nothing left in it I am about to read, so
+it goes on the very pass the item reaches `done` — no floor, no further wait.
+
+| The item is `done` and… | It is retired |
+|---|---|
+| it has a **merged** pull request | as soon as the worker is observed idle |
+| it has none — the issue was closed by hand, or as not-planned | after the worker has been idle **30 minutes** |
+
+The second row is unchanged and is the guard on the first. With no merge there is no
+explicit acceptance of anything, the session may be exactly what I am about to attach to,
+and idleness is the only evidence there is.
+
+**This is a correction, and the shape of the mistake is worth keeping.** Retirement shipped
+with the 30-minute clock as the *whole* gate, on the reasoning that erring long was nearly
+free. That reasoning was measured against the wrong case. On the real path the worker goes
+quiet, I merge within a few minutes, the issue closes, and the item goes `done` — so `done`
+reliably arrives *inside* the quiet period and never after it. The gate declined every time,
+`orphan_session` was raised by the sweep a few lines later, and for the next ~29 minutes
+there was an anomaly on the list, a capacity slot held, a tab still open and a worktree
+reported `skipped`. Of the four `session.retire` records in the log when this was found — at
+idle 2477s, 11205s, 18049s and 35052s — **not one was an item that had finished normally.**
+They were all backlog from before the feature existed. That is issue #149, and it is the
+bounded version of the same bug #138 reported.
+
+**No floor on the merged path, and that is arithmetic rather than taste.** A 60-second one
+was considered. On the completion #149 was filed about the worker had been idle 47 seconds
+when its item reached `done`, so a 60-second floor declines on exactly the pass that matters
+and the anomaly is raised anyway. The case a floor would cover — merging from the web
+interface while still reading the session — is already covered by the fact that retirement
+destroys nothing: the transcript survives and `claude --resume` brings it back, so the cost
+is a keystroke.
+
+**What the merge does not remove is the idleness check.** A worker whose status is not
+`idle`, or whose idleness cannot be established at all, is left alone however long ago
+anything was merged. Merging is a statement about the *work*; whether the process is between
+tool calls is a different question, and only the registry answers it. That is what keeps a
+worker from being ended in the middle of a tool call, and it is why being wrong about the
+registry can still only ever delay a retirement.
+
+The audit record says which of the two fired: `session.retire` carries
+`signal: merged_pull_request` or `signal: quiet_period`. With one gate the `idle_s` field
+implied the reason; with two it does not, and a reader should not have to know that a low
+`idle_s` means a merge.
 
 **`done` is the whole precondition, and it means more than it looks like.** The only thing
 in the system that writes that state is the pass that observed the issue closed, so `done`
@@ -184,6 +232,11 @@ Three consequences worth knowing:
 - **It is a sweep, not a step of retirement.** Which means a tab left behind by a crash
   between the kill and the close is still cleaned up on the next pass, and so is one left by
   a version of this that predates the rule.
+- **It goes on the pass the item finishes.** The rule above was right from the start and the
+  tab still sat there for half an hour, because it waits on the session row and the row was
+  waiting on a 30-minute clock the ordinary path never reached. Nothing in this rule changed
+  to fix that: the tab moves earlier because the row closes earlier. That is issue #81,
+  fixed as a consequence of #149 rather than on its own.
 
 Which tab belongs to which item is decided by a marker the launch writes onto the window —
 `ra_item=<id>` — and **never** by the window number recorded on the session row. Kitty
@@ -196,7 +249,8 @@ whatever it contains.
 status that is not exactly `idle`, an absent or malformed timestamp, a missing registry
 entry, a registry that cannot be read — every one of them means *not retired*, and the
 question is asked again next pass. Being wrong about that file can delay a retirement; it
-cannot cause one. Transcript file mtime was tried first and measured wrong: it ran 29 and
+cannot cause one. **A merged pull request does not change any of that**: it removes the
+duration requirement, never the idleness one. Transcript file mtime was tried first and measured wrong: it ran 29 and
 163 minutes ahead of the last record actually inside the file.
 
 **Nothing is destroyed.** This is the difference between retirement and the cleanup below,

@@ -1544,6 +1544,11 @@ def _resolve_orphan_anomalies(
                         "condition it reported no longer holds"
                     ),
                 },
+                # The retraction of a rehearsed anomaly is itself rehearsed work (issue #21).
+                # Without this the record shows in `robot-army log`'s default view while the
+                # anomaly it is about does not, which is the same mismatch between what a
+                # surface hides and what it says that #21 exists to remove.
+                dry_run=anomaly.dry_run,
             )
         resolved += 1
     return resolved

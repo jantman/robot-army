@@ -552,3 +552,29 @@ def test_a_full_reconciliation_pass_runs_both_resolvers(conn, audit, config, pro
 
     assert result.anomalies_resolved == 2
     assert db.list_anomalies(conn) == []
+
+
+def test_both_resolvers_mark_a_rehearsed_retraction_as_rehearsed(conn, audit, layout, proc):
+    """A retraction of a rehearsed anomaly is itself rehearsed work.
+
+    Without the marker the `anomaly.resolved` record shows in `robot-army log`'s default view
+    while the anomaly it is about does not — the same mismatch between what a surface hides
+    and what it says that issue #21 exists to remove. Both resolvers, because the older one
+    predates the flag and is exactly where the inconsistency would sit unnoticed.
+    """
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn, kind="orphan_session", entity_type="session", entity_id="sim-sess",
+            detail={"pid": PID, "proc_start": START}, dry_run=True,
+        )
+    _card(conn, card_id="sim-card", dry_run=True, state=CardState.LINKED)
+    raise_create_failing(conn, card_id="sim-card", dry_run=True)
+
+    assert resolve(conn, audit, proc) == 1
+    assert resolve_cards(conn, audit) == 1
+
+    written = records(layout, "anomaly.resolved")
+    assert len(written) == 2
+    assert all(record.get("dry_run") is True for record in written), (
+        "both retractions concern rehearsed work and must say so"
+    )

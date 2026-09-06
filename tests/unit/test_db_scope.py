@@ -19,6 +19,9 @@ LISTING_ACCESSORS = [
     db.list_work_items,
     db.list_sessions,
     db.count_work_items_by_state,
+    # Issue #21. `anomalies`, `status` and the web's /anomalies page were three surfaces that
+    # each had to be fixed separately because none of them could ask this question here.
+    db.list_anomalies,
 ]
 
 
@@ -234,3 +237,87 @@ def test_hold_tables_have_no_dry_run_column(conn):
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         assert "dry_run" not in columns, table
 
+
+
+def test_anomaly_listings_exclude_simulated_by_default(conn):
+    """Issue #21: the flag was advertised on ``anomalies`` and could not be applied.
+
+    The column did not exist, so both spellings of the command printed the same rows — and on
+    the reporting machine both outstanding anomalies belonged to dry-run cards and were shown
+    as real problems in the default view.
+    """
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn, kind="card_create_failing", entity_type="card", entity_id="real",
+            detail={"attempts": 3},
+        )
+        db.raise_anomaly(
+            conn, kind="card_create_failing", entity_type="card", entity_id="rehearsed",
+            detail={"attempts": 3}, dry_run=True,
+        )
+
+    assert [a.entity_id for a in db.list_anomalies(conn)] == ["real"]
+    assert {a.entity_id for a in db.list_anomalies(conn, include_simulated=True)} == {
+        "real",
+        "rehearsed",
+    }
+
+
+def test_the_withheld_listing_is_exactly_what_the_flag_reveals(conn):
+    """The equality milestone 008 built ``_work_item_filters`` to guarantee, on a second table.
+
+    ``list_simulated_anomalies`` and ``list_anomalies`` share ``_anomaly_scope``, so the rows
+    withheld cannot drift from the rows the flag shows.
+    """
+    with db.transaction(conn):
+        db.raise_anomaly(conn, kind="orphan_session", entity_type="session",
+                         entity_id="s-real", detail={})
+        db.raise_anomaly(conn, kind="orphan_session", entity_type="session",
+                         entity_id="s-sim", detail={}, dry_run=True)
+        db.raise_anomaly(conn, kind="no_transcript", entity_type="session",
+                         entity_id="s-sim2", detail={}, dry_run=True)
+
+    visible = {a.id for a in db.list_anomalies(conn)}
+    revealed = {a.id for a in db.list_anomalies(conn, include_simulated=True)}
+    withheld = {a.id for a in db.list_simulated_anomalies(conn)}
+
+    assert withheld == revealed - visible
+    assert len(withheld) == 2
+
+
+def test_the_withheld_listing_follows_the_acknowledged_scope_it_is_given(conn):
+    """``--all`` widens both populations together, or the count describes a different set."""
+    with db.transaction(conn):
+        db.raise_anomaly(conn, kind="orphan_session", entity_type="session",
+                         entity_id="s-sim", detail={}, dry_run=True)
+    row = db.list_anomalies(conn, include_simulated=True)[0]
+    with db.transaction(conn):
+        db.acknowledge_anomaly(conn, row.id)
+
+    assert db.list_simulated_anomalies(conn) == []
+    assert len(db.list_simulated_anomalies(conn, unacknowledged_only=False)) == 1
+
+
+def test_the_withheld_listing_carries_no_include_simulated_parameter():
+    """Listing withheld rows *is* the simulated-only question.
+
+    ``include_simulated=False`` here would be nonsense, which is why this accessor is kept out
+    of ``LISTING_ACCESSORS`` above — the same argument ``count_simulated_work_items`` carries.
+    """
+    parameters = inspect.signature(db.list_simulated_anomalies).parameters
+    assert "include_simulated" not in parameters
+
+
+def test_an_anomaly_naming_no_entity_is_visible_by_default(conn):
+    """FR-009. Several kinds are facts about the machine rather than about any rehearsal.
+
+    Withholding one would hide a real problem, which is the opposite of what this flag is for.
+    """
+    with db.transaction(conn):
+        db.raise_anomaly(conn, kind="registry_version_unknown", detail={"versions": ["9.9"]})
+        db.raise_anomaly(conn, kind="capacity_unobservable", detail={"reason": "no /proc"})
+
+    assert {a.kind for a in db.list_anomalies(conn)} == {
+        "registry_version_unknown",
+        "capacity_unobservable",
+    }

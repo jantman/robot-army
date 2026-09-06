@@ -263,7 +263,14 @@ def test_a_live_ghost_is_reported_and_left_open(conn, audit, config, tmp_path):
 
     result = run(conn, audit, config, tmp_path, registry=registry, proc=proc)
 
-    anomalies = [a for a in db.list_anomalies(conn) if a.kind == "orphan_session"]
+    # ``include_simulated`` because the subject here is *whether the anomaly was raised*,
+    # not what the default view shows. These fixtures seed rehearsed rows, so since issue
+    # #21 gave anomalies a ``dry_run`` of their own the default scope correctly hides them.
+    anomalies = [
+        a
+        for a in db.list_anomalies(conn, include_simulated=True)
+        if a.kind == "orphan_session"
+    ]
     assert [a.entity_id for a in anomalies] == ["ghost"]
     assert anomalies[0].detail_obj["attempt"] == 1
     assert anomalies[0].detail_obj["current_attempt"] == 2
@@ -287,7 +294,14 @@ def test_a_live_ghost_is_not_reported_twice(conn, audit, config, tmp_path):
     result = run(conn, audit, config, tmp_path, registry=registry, proc=proc)
 
     assert result.orphans == 0
-    assert len([a for a in db.list_anomalies(conn) if a.kind == "orphan_session"]) == 1
+    assert (
+        len([
+            a
+            for a in db.list_anomalies(conn, include_simulated=True)
+            if a.kind == "orphan_session"
+        ])
+        == 1
+    )
 
 
 def test_reporting_a_ghost_is_idempotent(conn, audit, config, tmp_path):
@@ -301,7 +315,14 @@ def test_reporting_a_ghost_is_idempotent(conn, audit, config, tmp_path):
     run(conn, audit, config, tmp_path, registry=registry, proc=proc)
     second = run(conn, audit, config, tmp_path, registry=registry, proc=proc)
 
-    assert len([a for a in db.list_anomalies(conn) if a.kind == "orphan_session"]) == 1
+    assert (
+        len([
+            a
+            for a in db.list_anomalies(conn, include_simulated=True)
+            if a.kind == "orphan_session"
+        ])
+        == 1
+    )
     assert second.superseded == 0, "an already-open anomaly is not a new finding"
 
 
@@ -318,7 +339,9 @@ def test_a_dead_ghost_is_closed_without_touching_its_item(conn, audit, config, t
     assert db.get_session(conn, "ghost").state is SessionState.LOST
     assert db.get_session(conn, "current").state is SessionState.RUNNING
     assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
-    assert not db.list_anomalies(conn), "a dead ghost is closed, not reported"
+    assert not db.list_anomalies(conn, include_simulated=True), (
+        "a dead ghost is closed, not reported"
+    )
 
 
 def test_simulated_ghosts_are_left_entirely_alone(conn, audit, config, tmp_path):

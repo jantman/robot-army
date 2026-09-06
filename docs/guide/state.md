@@ -99,21 +99,39 @@ sqlite3 ~/.local/state/robot-army/state.db 'PRAGMA user_version'
 
 There are no downgrades. The rollback plan is restoring the file from backup.
 
-### `anomalies` — two different ways a row leaves the list
+### `anomalies` — two different ways a row leaves the list, and whether it was a rehearsal
 
 | Column | Meaning |
 |---|---|
 | `acknowledged_at` | I looked at this and dismissed it (`robot-army anomalies --acknowledge <id>`) |
 | `resolved_at` | The system re-checked and the condition no longer holds |
+| `dry_run` | The run that raised this was below `live` |
 
-They are separate columns because they are separate facts, and `--all` has to be able to
-tell them apart: "this stopped being true" and "somebody dismissed it" say very different
-things about whether the underlying problem was dealt with. Only `orphan_session` is ever
-resolved automatically — it is the only kind whose truth can be positively re-established as
-false, because both places that raise it record the pid *and* the process start time, so a
-recycled pid answers correctly rather than reading as still-alive. An anomaly whose detail
-carries no pid is left alone permanently: "I could not check" must never be stored as "it is
-fine".
+The first two are separate columns because they are separate facts, and `--all` has to be
+able to tell them apart: "this stopped being true" and "somebody dismissed it" say very
+different things about whether the underlying problem was dealt with.
+
+**Two kinds resolve themselves**, and only two, because only these two conditions can be
+positively re-established as *false*. `orphan_session` records the pid *and* the process
+start time, so a recycled pid answers correctly rather than reading as still-alive.
+`card_create_failing` names a card, and `linked` is terminal and written in the same
+transaction that records the issue — so a linked card *is* the failed creation, negated. An
+anomaly whose detail carries no pid, or whose card is no longer in the database, is left
+alone permanently: "I could not check" must never be stored as "it is fine".
+
+**`dry_run` is a property of the run, not of the entity named** (added by migration 14,
+issue #21). Deriving it from `entity_id` looks like one join and is six — work item,
+session, card, repo, board, and none — is undefined for the four kinds that name no entity,
+and changes its answer the moment `purge-simulated` deletes the row it depended on. So it is
+written when the anomaly is raised: the nine sites whose subject is a work item, a session
+or a card pass that row's flag, and everything about the machine, the filesystem or the
+network stays real, because those are real at every effect level.
+
+It is `NOT NULL DEFAULT 0`, which is the opposite choice from migrations 11 and 13 and
+deliberately so. There is nothing to backfill from — a pre-14 row carries no evidence of
+which run raised it — and `0` reads as *real*, so every existing row stays visible. Showing
+a real anomaly that was in fact a rehearsal is a row I dismiss; hiding a rehearsal's anomaly
+that was in fact real is a condition I never see. Only one of those is recoverable.
 
 A row with either stamp set drops out of the partial unique index that keeps a 60-second
 reconciliation loop from writing 1,440 identical rows a day. **That is load-bearing, and
@@ -121,6 +139,11 @@ getting it wrong is silent**: a resolved row left inside the index would stop th
 condition from ever being reported again, with no error anywhere — the symptom would be an
 anomaly that simply never arrives. Migration 12 rebuilds the index for exactly this reason,
 and a test raises, resolves, and re-raises to prove the recurrence still lands.
+
+Migration 14 rebuilds it again, to add `dry_run`. Without that, a rehearsal and a live run
+reporting the same condition for the same entity collide, and the `INSERT OR IGNORE` keeps
+whichever arrived first — so a real anomaly could be swallowed by a rehearsal and then be
+*invisible in the default view*, which is worse than the bug that migration exists to fix.
 
 Nothing is backfilled. Every row that existed before schema 12 comes through with
 `resolved_at` NULL, which is correct: whether its condition still holds is a question for

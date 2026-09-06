@@ -308,7 +308,7 @@ def status(
     items = db.list_work_items(
         ctx.conn, include_simulated=include_simulated, states=states, repo_key=repo
     )
-    anomalies = db.list_anomalies(ctx.conn)
+    anomalies = db.list_anomalies(ctx.conn, include_simulated=include_simulated)
     control_state = db.get_dispatch_control(ctx.conn)
     # Handed in by a caller that has already taken one, or taken here for the terminal path
     # that has not (RA-14). The web renders several of these per page — ``/interrupted``
@@ -335,6 +335,13 @@ def status(
         if include_simulated
         else db.count_simulated_work_items(ctx.conn, states=states, repo_key=repo)
     )
+    # A third number, for the third section (issue #21). Milestone 008 corrected the counts
+    # and the listing and left the anomaly block below them drawn from an unscoped query, so
+    # `status --include-simulated` and `status` printed the same anomalies while claiming to
+    # differ. No window applies here — `status` has never had one — so this is a plain length.
+    withheld_anomalies = (
+        0 if include_simulated else len(db.list_simulated_anomalies(ctx.conn))
+    )
 
     result.data = {
         "effect_level": str(ctx.effect_level),
@@ -355,7 +362,11 @@ def status(
         # Keyed to the two sections it explains, and always present: a consumer must never
         # have to tell "nothing was withheld" apart from "this build does not report it",
         # which is the absent-versus-zero ambiguity this milestone removes from the text.
-        "withheld_simulated": {"counts": withheld_counts, "items": withheld_items},
+        "withheld_simulated": {
+            "counts": withheld_counts,
+            "items": withheld_items,
+            "anomalies": withheld_anomalies,
+        },
     }
 
     result.say(f"effect level : {ctx.effect_level}")
@@ -430,15 +441,21 @@ def status(
     else:
         result.say("no matching work items")
 
-    if anomalies:
+    if anomalies or withheld_anomalies:
+        # The header prints when rows were withheld even though none are visible, and that
+        # case is the reported defect rather than an edge of it. Falling silent there says
+        # "nothing was detected" about a machine holding two open anomalies, which is the
+        # misreading this whole change exists to prevent.
         result.say()
         result.say(f"unacknowledged anomalies ({len(anomalies)}):")
         for anomaly in anomalies:
             result.say(
-                f"  [{anomaly.id}] {anomaly.kind} "
+                f"  [{anomaly.id}]{'*' if anomaly.dry_run else ''} {anomaly.kind} "
                 f"{anomaly.entity_type or ''}:{anomaly.entity_id or ''} "
                 f"@ {timefmt.local(anomaly.detected_at)}"
             )
+        if withheld_anomalies:
+            result.say(f"  {_withheld_note(withheld_anomalies)}")
     return result
 
 
@@ -840,6 +857,9 @@ def _anomaly_dict(anomaly: Any) -> dict[str, Any]:
         # longer true" are not the same fact, and a reader of `--all` who cannot tell them
         # apart cannot tell which conditions were actually dealt with.
         "resolved_at": anomaly.resolved_at,
+        # Issue #21. A payload that hid rows without letting a consumer identify the ones it
+        # did show would have moved the ambiguity rather than removed it.
+        "simulated": anomaly.dry_run,
     }
 
 
@@ -2164,7 +2184,14 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
                 "cleaned_at": item.cleaned_at,
             }
         )
-    result.data = {"worktrees": payload}
+    result.data = {
+        "worktrees": payload,
+        # Stated here as well as in the text, and always — including as 0. `cards` and
+        # `status` have carried it since 008; this listing printed the sentence and left the
+        # machine-readable consumer to infer the number from a table it cannot see, which is
+        # the same absent-versus-zero ambiguity one surface over (issue #21).
+        "withheld_simulated": withheld,
+    }
     if not rows:
         if withheld:
             return result.say(f"no worktrees visible ({_withheld_note(withheld)})")
@@ -4080,6 +4107,7 @@ def anomalies(
     acknowledge: int | None = None,
     show_all: bool = False,
     since: str | None = None,
+    include_simulated: bool = False,
 ) -> Result:
     # Parsed first — before the acknowledgement below, not merely before the listing. A
     # duration the parser refuses must not be the thing that irreversibly marks an anomaly
@@ -4114,22 +4142,54 @@ def anomalies(
     # payload are drawn from one list and cannot disagree about the window (012 FR-008).
     rows = [
         anomaly
-        for anomaly in db.list_anomalies(ctx.conn, unacknowledged_only=not show_all)
+        for anomaly in db.list_anomalies(
+            ctx.conn, unacknowledged_only=not show_all, include_simulated=include_simulated
+        )
         if _within_window(anomaly.detected_at, cutoff)
     ]
+    # The rows this invocation matched and did not show (issue #21). Counted from a listing
+    # rather than from a `COUNT(*)`, and put through the *same* `_within_window` predicate the
+    # visible rows went through — which is the whole reason `db.list_simulated_anomalies`
+    # hands back rows. `--since` is applied here in Python on purpose (012 research R2), so a
+    # number counted in SQL would name rows this window had already excluded, and the promise
+    # that "withheld" equals "what the flag reveals" would be false exactly when a filter was
+    # in play. Milestone 008 made that equality structural for work items; this is the same
+    # construction on a second table.
+    withheld = (
+        0
+        if include_simulated
+        else sum(
+            1
+            for anomaly in db.list_simulated_anomalies(
+                ctx.conn, unacknowledged_only=not show_all
+            )
+            if _within_window(anomaly.detected_at, cutoff)
+        )
+    )
     result.data = {
         "anomalies": [_anomaly_dict(a) for a in rows],
         "known_kinds": list(ANOMALY_KINDS),
+        # Always present, including as 0: a consumer must never have to tell "nothing was
+        # withheld" apart from "this build does not report it" (008's absent-versus-zero).
+        "withheld_simulated": withheld,
     }
     if not rows:
-        # Two empty listings that mean different things, and saying so is the whole reason
-        # this filter is safe to add. "no outstanding anomalies" is an all-clear; a window
+        # Three empty listings that mean different things, and saying so is the whole reason
+        # these filters are safe to add. "no outstanding anomalies" is an all-clear; a window
         # that matched nothing is not one, and a reader who reads it as one has been misled
-        # by the tool into believing nothing is wrong (012 FR-009).
+        # by the tool into believing nothing is wrong (012 FR-009). A scope that withheld
+        # everything is not one either, and that is issue #21's case exactly: the rows exist,
+        # they belong to a rehearsal, and silence here would report an all-clear over them.
         if cutoff is not None:
-            result.say(f"no anomalies detected in the last {since}")
+            result.say(
+                f"no anomalies detected in the last {since}"
+                + (f" ({_withheld_note(withheld)})" if withheld else "")
+            )
         else:
-            result.say("no outstanding anomalies")
+            result.say(
+                "no outstanding anomalies"
+                + (f" ({_withheld_note(withheld)})" if withheld else "")
+            )
         result.say()
         result.say("kinds this system can raise: " + ", ".join(ANOMALY_KINDS))
         return result
@@ -4144,12 +4204,23 @@ def anomalies(
         elif anomaly.acknowledged_at:
             status = f"  acknowledged {timefmt.local(anomaly.acknowledged_at)}"
         result.say(
-            f"[{anomaly.id}] {anomaly.kind}  {anomaly.entity_type or '—'}:"
+            f"[{anomaly.id}]{'*' if anomaly.dry_run else ''} {anomaly.kind}  "
+            f"{anomaly.entity_type or '—'}:"
             f"{anomaly.entity_id or '—'}  detected {timefmt.local(anomaly.detected_at)}"
             f"{status}"
         )
         for key, value in anomaly.detail_obj.items():
             result.say(f"      {key}: {value}")
+        result.say()
+    # FR-057: a simulated row is marked wherever it is shown. The legend is printed only when
+    # the listing actually contains one, the way `status` prints its own.
+    if any(anomaly.dry_run for anomaly in rows):
+        result.say("* = simulated (dry-run) row")
+        result.say()
+    # Whenever anything was withheld, not only when the listing came out empty — two visible
+    # rows while three are held back is the same contradiction, only quieter (008).
+    if withheld:
+        result.say(_withheld_note(withheld))
         result.say()
     result.say("kinds this system can raise: " + ", ".join(ANOMALY_KINDS))
     return result
@@ -4161,9 +4232,27 @@ def anomalies(
 #: A record either matches the active filters, fails them, or cannot be judged. The third
 #: case is not the second: an unparseable timestamp means the record is *skipped and
 #: counted*, which is what FR-044 requires readers to report rather than silently drop.
+#:
+#: ``_WITHHELD`` is a fourth answer and not a flavour of ``_REJECT``, because the two are
+#: reported differently: a rejected record fails a filter the reader chose, while a withheld
+#: one would appear the moment they passed ``--include-simulated``, and a listing has to say
+#: how many of those there were rather than let them vanish (issue #21).
 _MATCH = "match"
 _REJECT = "reject"
 _UNREADABLE = "unreadable"
+_WITHHELD = "withheld"
+
+
+def _is_rehearsed(record: dict[str, Any]) -> bool:
+    """Whether this record describes something that did not really happen.
+
+    Two field names for one condition, and both have always been written: ``dry_run`` by the
+    acting component, ``simulated`` by the ``effects`` boundaries. ``_format_record`` renders
+    either as the trailing ``[simulated]`` marker and reads them through this same function, so
+    what a reader *hides* and what it *marks* cannot drift apart — which is the first thing
+    that would go wrong here (issue #21).
+    """
+    return bool(record.get("simulated") or record.get("dry_run"))
 
 
 def _judge_record(
@@ -4172,11 +4261,18 @@ def _judge_record(
     cutoff: datetime | None,
     item_id: int | None,
     outcome: str | None,
+    include_simulated: bool = False,
 ) -> str:
     """Apply the log filters to one record. One implementation, two readers.
 
     ``read_log`` scans forwards and ``read_log_page`` scans backwards; sharing this keeps
     "what does ``--item 42`` mean" from having two answers.
+
+    **The simulated check comes last, and the order is the whole correctness argument.** A
+    record outside ``--since`` that also happens to be rehearsed must come back ``_REJECT``,
+    not ``_WITHHELD``: passing ``--include-simulated`` would still not show it, so counting it
+    as withheld would state a number the flag does not reveal. Judging it only after every
+    other filter has passed makes the withheld count exactly the set the flag would add.
     """
     if cutoff is not None:
         try:
@@ -4189,6 +4285,8 @@ def _judge_record(
         return _REJECT
     if outcome is not None and str(record.get("outcome")) != outcome:
         return _REJECT
+    if not include_simulated and _is_rehearsed(record):
+        return _WITHHELD
     return _MATCH
 
 
@@ -4199,6 +4297,7 @@ def read_log(
     item_id: int | None = None,
     limit: int | None = None,
     outcome: str | None = None,
+    include_simulated: bool = False,
 ) -> Result:
     """The FR-062 reconstruction path: what happened, when, to what, with what result.
 
@@ -4213,24 +4312,68 @@ def read_log(
         except ValueError as exc:
             return Result(code=EXIT_USAGE, lines=[str(exc)])
 
-    records: list[dict[str, Any]] = []
+    # Verdicts kept in file order, matches and withheld together, because the withheld count
+    # has to be scoped to the same stretch of log the records are — see the trim below.
+    judged: list[tuple[str, dict[str, Any]]] = []
     skipped = 0
     for record, _raw in audit_mod.read_records(ctx.layout.log_dir):
         if record is None:
             skipped += 1
             continue
-        verdict = _judge_record(record, cutoff=cutoff, item_id=item_id, outcome=outcome)
+        verdict = _judge_record(
+            record,
+            cutoff=cutoff,
+            item_id=item_id,
+            outcome=outcome,
+            include_simulated=include_simulated,
+        )
         if verdict is _UNREADABLE:
             skipped += 1
+        elif verdict is _WITHHELD:
+            judged.append((_WITHHELD, record))
         elif verdict is _MATCH:
-            records.append(record)
+            judged.append((_MATCH, record))
 
-    if limit:
-        records = records[-limit:]
+    # After the filter, not before: `--limit 20` means twenty records the reader can see, not
+    # twenty of which some are hidden. Trimming first would make the page size depend on how
+    # much rehearsal traffic happened to sit at the end of the log.
+    #
+    # **And the withheld count is trimmed with them**, which is not obvious and was wrong at
+    # first. Counted over the whole scan, `log --limit 3` against ten rehearsed and five real
+    # records would promise ten withheld — while `--limit 3 --include-simulated` returned the
+    # same three, revealing none of them. The note has to describe the stretch of log the
+    # reader is actually looking at, which is what `read_log_page` means by "on this page";
+    # here that stretch begins at the oldest record shown.
+    matched = [index for index, (verdict, _) in enumerate(judged) if verdict is _MATCH]
+    span_from = 0
+    if limit and len(matched) > limit:
+        span_from = matched[-limit]
+    records = [record for verdict, record in judged[span_from:] if verdict is _MATCH]
+    withheld = sum(1 for verdict, _ in judged[span_from:] if verdict is _WITHHELD)
+    limited = span_from > 0
 
-    result = Result(data={"records": records, "unparseable_lines": skipped})
+    result = Result(
+        data={
+            "records": records,
+            "unparseable_lines": skipped,
+            # Always present, including as 0 — the absent-versus-zero ambiguity 008 removed.
+            "withheld_simulated": withheld,
+        }
+    )
     for record in records:
         result.say(_format_record(record))
+    if withheld:
+        result.say()
+        # Two sentences because there are two honest claims. Unlimited, the count is every
+        # record the flag would add, and `_withheld_note`'s wording says exactly that. Limited,
+        # it is every record the flag would add *among these*, and saying so is the difference
+        # between a number the reader can check and one that quietly means something else.
+        result.say(
+            f"{withheld} simulated record(s) among these withheld — pass "
+            "--include-simulated to show them"
+            if limited
+            else _withheld_note(withheld)
+        )
     if skipped:
         result.say()
         result.say(f"({skipped} unparseable line(s) skipped)")
@@ -4348,6 +4491,9 @@ class _FileScan:
     next_offset: int
     #: Lines that could not be parsed or judged. Counted, never silently dropped.
     skipped: int
+    #: Records this pass hid because they were rehearsed. Only the ones that passed every
+    #: *other* filter, so it is exactly what ``--include-simulated`` would have added here.
+    withheld: int
     #: Bytes of log consumed. Within one block of the bytes actually read from the file.
     read: int
     #: The budget ended this pass, rather than the page filling or the file running out.
@@ -4377,18 +4523,19 @@ def _scan_file_backwards(
     """
     found: list[dict[str, Any]] = []
     skipped = 0
+    withheld = 0
     read = 0
     try:
         handle = path.open("rb")
     except OSError:
         # A file that vanished between the glob and the read is not a reason to fail the
         # page; it is counted so the silence is not silent.
-        return _FileScan([], 0, 1, 0, False)
+        return _FileScan([], 0, 1, 0, 0, False)
     with handle:
         cursor = end_offset
         for raw, start in _lines_backwards(handle, end_offset, LOG_SCAN_BLOCK_BYTES):
             if read + len(raw) + 1 > budget and not (must_progress and read == 0):
-                return _FileScan(found, cursor, skipped, read, True)
+                return _FileScan(found, cursor, skipped, withheld, read, True)
             read += len(raw) + 1
             cursor = start
             try:
@@ -4399,11 +4546,40 @@ def _scan_file_backwards(
                 verdict = judge(record)
                 if verdict is _UNREADABLE:
                     skipped += 1
+                elif verdict is _WITHHELD:
+                    # Judged inside the scan rather than applied to a finished page, which is
+                    # what stops a page whose whole region is rehearsed coming back empty
+                    # while older matching records are still there to be read.
+                    withheld += 1
                 elif verdict is _MATCH:
                     found.append(record)
             if len(found) >= want:
-                return _FileScan(found, cursor, skipped, read, False)
-    return _FileScan(found, 0, skipped, read, False)
+                return _FileScan(found, cursor, skipped, withheld, read, False)
+    return _FileScan(found, 0, skipped, withheld, read, False)
+
+
+def _resume_point(files: list[Path], cursor: str | None) -> tuple[int, int | None]:
+    """Where a page starts: an index into ``files`` and a byte offset within that file.
+
+    ``None`` as the offset means "from the end of the file", which is what a first page wants
+    and what a cursor whose offset was ``0`` wants of the *next* file down.
+
+    An unreadable cursor, or one naming a file that no longer exists, falls back to the newest
+    page rather than erroring — the file it names may legitimately have been rotated away, and
+    ``_decode_cursor`` says why that is the right direction to fail in.
+    """
+    if not cursor:
+        return 0, None
+    decoded = _decode_cursor(cursor)
+    if decoded is None:
+        return 0, None
+    name, offset = decoded
+    for index, path in enumerate(files):
+        if path.name == name:
+            # An offset of zero means that file is finished, not that it should be read
+            # again — the difference between a page turn and an infinite loop.
+            return (index if offset else index + 1), (offset or None)
+    return 0, None
 
 
 def read_log_page(
@@ -4414,6 +4590,7 @@ def read_log_page(
     outcome: str | None = None,
     cursor: str | None = None,
     limit: int = LOG_PAGE_SIZE,
+    include_simulated: bool = False,
 ) -> Result:
     """One bounded page of the audit log, newest first (research.md R14, FR-044).
 
@@ -4439,29 +4616,20 @@ def read_log_page(
     limit = max(1, min(int(limit), 1000))
 
     files = sorted(Path(ctx.layout.log_dir).glob("audit-*.jsonl"), reverse=True)
-    start_index = 0
-    # ``None`` means "from the end of the file", which is what a first page wants and what a
-    # cursor whose offset was ``0`` wants of the *next* file down.
-    start_offset: int | None = None
-    if cursor:
-        decoded = _decode_cursor(cursor)
-        if decoded is not None:
-            name, offset = decoded
-            for index, path in enumerate(files):
-                if path.name == name:
-                    # An offset of zero means that file is finished, not that it should be
-                    # read again — the difference between a page turn and an infinite loop.
-                    start_index = index if offset else index + 1
-                    start_offset = offset or None
-                    break
+    start_index, start_offset = _resume_point(files, cursor)
 
     records: list[dict[str, Any]] = []
     skipped = 0
+    withheld = 0
     scanned = 0
     truncated = False
     next_cursor: str | None = None
     judge = lambda record: _judge_record(  # noqa: E731 - one binding, read once, below
-        record, cutoff=cutoff, item_id=item_id, outcome=outcome
+        record,
+        cutoff=cutoff,
+        item_id=item_id,
+        outcome=outcome,
+        include_simulated=include_simulated,
     )
     for path in files[start_index:]:
         try:
@@ -4495,6 +4663,7 @@ def read_log_page(
         )
         records.extend(scan.records)
         skipped += scan.skipped
+        withheld += scan.withheld
         scanned += scan.read
         start_offset = None
         if len(records) >= limit:
@@ -4521,10 +4690,20 @@ def read_log_page(
             "page_size": limit,
             "truncated": truncated,
             "bytes_scanned": scanned,
+            # Scoped to the records this page *scanned*, not to the history — a bounded scan
+            # cannot honestly count what it never read, and the wording below says so. Always
+            # present, including as 0.
+            "withheld_simulated": withheld,
         }
     )
     for record in records:
         result.say(_format_record(record))
+    if withheld:
+        result.say()
+        result.say(
+            f"({withheld} simulated record(s) on this page withheld — pass "
+            "--include-simulated to show them)"
+        )
     if truncated:
         result.say()
         result.say(
@@ -4540,7 +4719,7 @@ def read_log_page(
 def _format_record(record: dict[str, Any]) -> str:
     marker = {"intent": "→", "outcome": "←"}.get(str(record.get("kind")), " ")
     outcome = record.get("outcome", "")
-    sim = " [simulated]" if record.get("simulated") or record.get("dry_run") else ""
+    sim = " [simulated]" if _is_rehearsed(record) else ""
     entity = ""
     if record.get("entity_type"):
         entity = f" {record['entity_type']}:{record.get('entity_id')}"
@@ -4550,8 +4729,19 @@ def _format_record(record: dict[str, Any]) -> str:
     return f"{stamp} {marker} {record.get('action')} [{outcome}]{entity}{sim}{tail}"
 
 
-def follow_log(ctx: Context) -> Iterator[str]:
-    """Tail the current day's audit file. Used by ``log --follow``."""
+def follow_log(ctx: Context, *, include_simulated: bool = False) -> Iterator[str]:
+    """Tail the current day's audit file. Used by ``log --follow``.
+
+    Scoped like the reader it is a mode of (issue #21). ``--follow`` is spelled on the same
+    verb and accepts the same flag, so a tail that showed rehearsed records either way would
+    be the defect this feature removes, surviving on a sub-mode — and it is the mode where a
+    rehearsal's traffic drowns the real thing most completely, because a dry run at speed
+    writes far more records than live work does.
+
+    Nothing is counted here, deliberately. A withheld total is a statement about a finite
+    scan; a tail has no end to count against, and a running tally that grew forever in the
+    corner of the stream would be noise rather than disclosure.
+    """
     import time as _time
 
     day = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -4566,9 +4756,16 @@ def follow_log(ctx: Context) -> Iterator[str]:
                 _time.sleep(0.5)
                 continue
             try:
-                yield _format_record(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
+                # Still shown, and still not filtered: a line we cannot parse is a line we
+                # cannot judge, and dropping it would be the silent omission Principle III
+                # forbids — the same call `read_log` makes by counting rather than hiding.
                 yield f"(unparseable) {line.rstrip()}"
+                continue
+            if not include_simulated and _is_rehearsed(record):
+                continue
+            yield _format_record(record)
 
 
 # -- health -----------------------------------------------------------------

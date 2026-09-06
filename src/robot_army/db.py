@@ -708,6 +708,31 @@ def count_simulated_cards(
     return int(conn.execute(sql, params).fetchone()["n"])
 
 
+def find_card_on_any_board(
+    conn: sqlite3.Connection, *, card_id: str, dry_run: bool
+) -> Card | None:
+    """One card by its Trello id, without needing to know which board it is on.
+
+    ``find_card`` above takes a ``board_id`` because every caller in the intake path is already
+    holding one. The anomaly resolver is not: it runs in reconciliation, which reaches this
+    without reading the board at all — deliberately, so a retraction does not depend on Trello
+    being reachable. ``idx_cards_identity`` is over ``(board_id, card_id, dry_run)`` and Trello
+    card ids are globally unique, so the pair here identifies at most one row in practice.
+
+    ``dry_run`` is part of the lookup rather than ignored: one card id can have both a real and
+    a rehearsed row, and resolving a rehearsed anomaly against a real card's success would be a
+    retraction of something that never happened.
+
+    No ``include_simulated``: this is a lookup by identity, not a listing, and the caller states
+    which of the two it means.
+    """
+    row = conn.execute(
+        "SELECT * FROM cards WHERE card_id = ? AND dry_run = ?",
+        (card_id, int(dry_run)),
+    ).fetchone()
+    return from_row(Card, row) if row else None
+
+
 def list_cards(
     conn: sqlite3.Connection,
     *,
@@ -806,36 +831,99 @@ def raise_anomaly(
     detail: dict[str, Any],
     entity_type: str | None = None,
     entity_id: str | None = None,
+    dry_run: bool = False,
 ) -> bool:
     """Record an anomaly. Returns ``True`` if this was a new one.
 
     Re-detecting an unacknowledged anomaly updates nothing — the partial unique index
     absorbs it. That is what keeps a 60-second reconciliation loop from producing 1,440
-    identical rows a day.
+    identical rows a day. ``dry_run`` is part of that index (migration 014), so a rehearsed
+    run and a live one reporting the same condition for the same entity produce two rows
+    rather than one — they are different facts, and collapsing them would let a rehearsal
+    swallow a real report by arriving first.
+
+    ``dry_run`` defaults to ``False`` rather than being required, and the asymmetry is the
+    reason: a call site that forgets it raises a *visible* anomaly. The opposite default
+    would make forgetting it hide a real condition, which is the failure this flag exists to
+    prevent. It is a property of the run, so the caller supplies its subject's flag — see
+    the table in the feature's research.md for which of the seventeen sites pass what.
     """
     cursor = conn.execute(
         """
-        INSERT OR IGNORE INTO anomalies (kind, entity_type, entity_id, detail, detected_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO anomalies
+            (kind, entity_type, entity_id, detail, detected_at, dry_run)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (kind, entity_type, entity_id, json.dumps(detail, default=str), utcnow()),
+        (
+            kind,
+            entity_type,
+            entity_id,
+            json.dumps(detail, default=str),
+            utcnow(),
+            int(dry_run),
+        ),
     )
     return bool(cursor.rowcount)
 
 
+def _anomaly_scope(unacknowledged_only: bool) -> str:
+    """The open/closed clause shared by the listing and its withheld companion.
+
+    Extracted for the reason ``_work_item_filters`` was: the number of withheld simulated
+    rows must equal *exactly* the rows ``--include-simulated`` would reveal, and two
+    hand-written copies of this predicate would make that equality a claim maintained by
+    hand rather than a fact about the construction.
+    """
+    return " AND acknowledged_at IS NULL AND resolved_at IS NULL" if unacknowledged_only else ""
+
+
 def list_anomalies(
-    conn: sqlite3.Connection, *, unacknowledged_only: bool = True
+    conn: sqlite3.Connection,
+    *,
+    include_simulated: bool = False,
+    unacknowledged_only: bool = True,
 ) -> list[Anomaly]:
     """Anomalies still needing attention, or every one ever recorded.
 
     A resolved row is excluded by the same flag that excludes an acknowledged one, and that
     is deliberately the only place the distinction is made: the CLI, ``status`` and the web
     page are three callers of this one function, so they all became correct about issue
-    #138's self-resolving anomalies without any of them being edited.
+    #138's self-resolving anomalies without any of them being edited. ``include_simulated``
+    was added for the same reason and pays off the same way — issue #21's defect was that
+    ``anomalies``, ``status`` and ``/anomalies`` each had to be fixed separately because none
+    of them could ask this function the question.
     """
-    sql = "SELECT * FROM anomalies"
-    if unacknowledged_only:
-        sql += " WHERE acknowledged_at IS NULL AND resolved_at IS NULL"
+    sql = (
+        "SELECT * FROM anomalies WHERE 1=1"  # noqa: S608
+        + _scope(include_simulated)
+        + _anomaly_scope(unacknowledged_only)
+    )
+    sql += " ORDER BY detected_at DESC, id DESC"
+    return _rows(conn.execute(sql), Anomaly)
+
+
+def list_simulated_anomalies(
+    conn: sqlite3.Connection, *, unacknowledged_only: bool = True
+) -> list[Anomaly]:
+    """The anomalies a listing under these filters is *not* showing.
+
+    Deliberately carries no ``include_simulated`` parameter — listing withheld rows *is* the
+    simulated-only question, and ``include_simulated=False`` here would be nonsense. It is
+    therefore not one of ``test_db_scope``'s listing accessors and must not be added to that
+    list, exactly as ``count_simulated_work_items`` is not.
+
+    **Rows rather than a ``COUNT(*)``, which is the one thing that separates it from its
+    work-item counterpart.** ``anomalies --since`` is applied in Python by
+    ``operations._within_window``, on purpose: ``detected_at`` is TEXT, so SQL would compare a
+    malformed stamp lexicographically and drop the row with nothing anywhere in a position to
+    notice (012 research R2). A count taken here could therefore name a number the flag would
+    not then reveal. Handing back the rows lets the caller apply the identical window
+    predicate to both populations, which makes the equality structural.
+    """
+    sql = (
+        "SELECT * FROM anomalies WHERE dry_run = 1"  # noqa: S608
+        + _anomaly_scope(unacknowledged_only)
+    )
     sql += " ORDER BY detected_at DESC, id DESC"
     return _rows(conn.execute(sql), Anomaly)
 
@@ -850,6 +938,28 @@ def open_orphan_session_anomalies(conn: sqlite3.Connection) -> list[Anomaly]:
     return _rows(
         conn.execute(
             "SELECT * FROM anomalies WHERE kind = 'orphan_session' "
+            "AND acknowledged_at IS NULL AND resolved_at IS NULL ORDER BY id"
+        ),
+        Anomaly,
+    )
+
+
+def open_card_create_failing_anomalies(conn: sqlite3.Connection) -> list[Anomaly]:
+    """The population ``reconcile._resolve_card_create_anomalies`` re-checks (issue #21).
+
+    Narrow by construction, exactly like ``open_orphan_session_anomalies`` above and for the
+    same reason. ``card_create_failing`` is the second kind whose truth can be positively
+    re-established as *false* — the card it named has since been linked to an issue, so the
+    creation it reported as failing has succeeded. Every other kind has its own settling story
+    that this mechanism has no business guessing at.
+
+    Rehearsed rows are included deliberately: this is not a listing, and an anomaly raised by a
+    rehearsal is exactly as entitled to be retracted as a real one. Withholding retraction from
+    it would leave the rehearsal's list going stale, which is the problem, not the scope.
+    """
+    return _rows(
+        conn.execute(
+            "SELECT * FROM anomalies WHERE kind = 'card_create_failing' "
             "AND acknowledged_at IS NULL AND resolved_at IS NULL ORDER BY id"
         ),
         Anomaly,

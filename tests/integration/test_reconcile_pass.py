@@ -97,7 +97,14 @@ def test_a_resumed_items_surviving_worker_is_reported_once(conn, audit, config, 
 
     result = _pass(conn, audit, config, registry, proc)
 
-    anomalies = [a for a in db.list_anomalies(conn) if a.kind == "orphan_session"]
+    # ``include_simulated`` because the subject here is *whether the anomaly was raised*,
+    # not what the default view shows. These fixtures seed rehearsed rows, so since issue
+    # #21 gave anomalies a ``dry_run`` of their own the default scope correctly hides them.
+    anomalies = [
+        a
+        for a in db.list_anomalies(conn, include_simulated=True)
+        if a.kind == "orphan_session"
+    ]
     assert len(anomalies) == 1, f"expected exactly one report, got {anomalies}"
     assert anomalies[0].entity_id == "s-attempt-1"
     assert anomalies[0].detail_obj["attempt"] == 1
@@ -170,7 +177,7 @@ def test_a_whole_pass_over_a_healthy_session_reports_no_anomaly(
 
     result = _pass(conn, audit, config, registry, proc)
 
-    assert db.list_anomalies(conn) == []
+    assert db.list_anomalies(conn, include_simulated=True) == []
     assert result.summary()["transcripts_checked"] == 1
     assert result.summary()["no_transcript"] == 0
 
@@ -198,5 +205,7 @@ def test_a_whole_pass_reports_a_session_that_never_wrote_a_transcript(
 
     result = _pass(conn, audit, config, registry, proc)
 
-    assert [a.kind for a in db.list_anomalies(conn)] == ["no_transcript"]
+    assert [
+        a.kind for a in db.list_anomalies(conn, include_simulated=True)
+    ] == ["no_transcript"]
     assert result.summary()["no_transcript"] == 1

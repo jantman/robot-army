@@ -217,3 +217,198 @@ def test_the_queue_order_is_the_same_whoever_is_looking(web_at, conn) -> None:
     # The real row keeps the position the dispatcher would give it, not the position it
     # would have if the simulated row had never existed.
     assert [row["position"] for row in hidden] == [row["position"] for row in shown if not row["simulated"]]
+
+
+# -- the two views that accepted the preference and discarded it (issue #21) --
+#
+# `/anomalies` and `/log` were handed `include_simulated` by the router, threaded it through
+# every link and form they rendered, and then ignored it when fetching their rows. The
+# preference survived the click and changed nothing when it arrived.
+
+
+def _anomaly(conn, entity_id: str, *, dry_run: bool) -> None:
+    from robot_army import db
+
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn,
+            kind="card_create_failing",
+            entity_type="card",
+            entity_id=entity_id,
+            detail={"attempts": 3},
+            dry_run=dry_run,
+        )
+
+
+def test_the_anomalies_page_hides_rehearsed_rows_when_told_to(web_at, conn) -> None:
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    body = web_at("plan").get("/anomalies?include_simulated=0").text
+
+    assert "card-real" in body
+    assert "card-sim" not in body
+    assert "1 simulated row hidden" in body
+
+
+def test_the_anomalies_page_shows_them_when_told_to(web_at, conn) -> None:
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    body = web_at("plan").get("/anomalies?include_simulated=1").text
+
+    assert "card-real" in body and "card-sim" in body
+    # Not a bare "hidden": every form on the page carries an <input type="hidden"> restating
+    # the preference, which is 009's doing and correct.
+    assert "simulated row hidden" not in body
+
+
+def test_the_anomalies_page_never_claims_nothing_outstanding_while_withholding(
+    web_at, conn
+) -> None:
+    """The web half of the reported defect, in the direction that misleads.
+
+    "Nothing outstanding." over two withheld rows is the page telling the reader the machine
+    is clear when it is not.
+    """
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    body = web_at("plan").get("/anomalies?include_simulated=0").text
+
+    assert "Nothing outstanding." not in body
+    assert "1 simulated row" in body
+
+
+def test_the_header_pill_agrees_with_the_page_it_links_to(web_at, conn) -> None:
+    """The pill is rendered on every view and links to /anomalies.
+
+    An unscoped count disagreed with its own destination the moment the toggle was off, which
+    is one interface handing the reader two numbers for one question.
+    """
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+    harness = web_at("plan")
+
+    for path in ("/anomalies", "/queue", "/cards", "/log"):
+        hidden = harness.get(f"{path}?include_simulated=0")
+        shown = harness.get(f"{path}?include_simulated=1")
+        assert "1 anomaly" in hidden.text, path
+        assert "2 anomalies" in shown.text, path
+
+
+def test_the_anomalies_payload_states_what_it_withheld(web_at, conn) -> None:
+    import json
+
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    payload = json.loads(web_at("plan").get("/anomalies.json?include_simulated=0").text)
+
+    assert payload["count"] == 1
+    assert payload["withheld_simulated"] == 1
+    assert [a["entity_id"] for a in payload["anomalies"]] == ["card-real"]
+
+
+def _write_log(layout, records: list[dict]) -> None:
+    import json as _json
+    from datetime import UTC, datetime
+
+    day = datetime.now(UTC).strftime("%Y-%m-%d")
+    path = layout.log_dir / f"audit-{day}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with path.open("a", encoding="utf-8") as handle:
+        for rec in records:
+            handle.write(_json.dumps({"ts": stamp, "component": "daemon", **rec}) + "\n")
+
+
+def test_the_log_page_hides_rehearsed_records_when_told_to(web_at, layout) -> None:
+    harness = web_at("plan")
+    _write_log(
+        layout,
+        [
+            {"action": "real.thing", "outcome": "ok"},
+            {"action": "rehearsed.thing", "outcome": "ok", "simulated": True},
+        ],
+    )
+
+    body = harness.get("/log?include_simulated=0").text
+
+    assert "real.thing" in body
+    assert "rehearsed.thing" not in body
+    assert "1 simulated record(s) on this page hidden" in body
+
+
+def test_the_log_page_shows_them_when_told_to(web_at, layout) -> None:
+    harness = web_at("plan")
+    _write_log(
+        layout,
+        [
+            {"action": "real.thing", "outcome": "ok"},
+            {"action": "rehearsed.thing", "outcome": "ok", "dry_run": True},
+        ],
+    )
+
+    body = harness.get("/log?include_simulated=1").text
+
+    assert "real.thing" in body and "rehearsed.thing" in body
+    assert "on this page hidden" not in body
+
+
+def test_the_log_page_never_claims_no_records_match_while_withholding(web_at, layout) -> None:
+    """The web half of US2's empty state, in the direction that misleads.
+
+    "No records match." over a page of rehearsed records tells the reader nothing happened.
+    """
+    harness = web_at("plan")
+    _write_log(layout, [{"action": "rehearsed.thing", "outcome": "ok", "simulated": True}])
+
+    body = harness.get("/log?include_simulated=0").text
+
+    assert "No records match." not in body
+    assert "1 simulated record" in body
+
+
+def test_the_log_page_states_the_withheld_count_once(web_at, layout) -> None:
+    """A view discloses each withheld row exactly once — `withheld_note`'s own invariant.
+
+    When the page has no visible records, the empty state already carries the count in place
+    of its text, so the standalone paragraph must stand down. `anomalies_view` has always done
+    this; `/log` printed the number twice for a page whose whole scanned window was rehearsed.
+    """
+    _write_log(
+        layout,
+        [
+            {"action": "rehearsed.one", "outcome": "ok", "simulated": True},
+            {"action": "rehearsed.two", "outcome": "ok", "simulated": True},
+        ],
+    )
+
+    body = web_at("plan").get("/log?include_simulated=0").text
+
+    assert body.count("2 simulated record") == 1, "the count is stated once, not twice"
+    assert "Nothing to show here." in body
+
+
+def test_the_anomalies_page_marks_the_rehearsed_rows_it_shows(web_at, conn) -> None:
+    """FR-057: shown means marked, on every surface.
+
+    The CLI writes `*` after the id. Without the same claim here, a rehearsed anomaly revealed
+    by the toggle renders identically to a real one — the half of the defect that survives
+    filtering, since the reader has asked to see both and can no longer tell them apart.
+    """
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    body = web_at("plan").get("/anomalies?include_simulated=1").text
+
+    assert body.count('class="sim"') == 1, "exactly one row carries the marker"
+    # …and it is the rehearsed one. Each anomaly renders as its own `card` div, so the marker
+    # has to fall inside the block that names `card-sim` rather than merely somewhere on a
+    # page that happens to contain both.
+    blocks = [block for block in body.split('class="card"') if "card_create_failing" in block]
+    assert len(blocks) == 2
+    rehearsed = next(b for b in blocks if "card-sim" in b)
+    real = next(b for b in blocks if "card-real" in b)
+    assert 'class="sim"' in rehearsed
+    assert 'class="sim"' not in real

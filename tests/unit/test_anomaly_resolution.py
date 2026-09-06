@@ -1,4 +1,4 @@
-"""An ``orphan_session`` whose process is gone resolves itself (issue #138).
+"""The anomaly kinds that resolve themselves (issues #138 and #21).
 
 Nothing ever took a row off ``robot-army anomalies`` but a maintainer typing
 ``--acknowledge``. The report that prompted this feature listed three orphans, one of which
@@ -14,7 +14,11 @@ day for one orphan, and a resolved row left inside it would silently block that 
 from ever being reported again. Getting that wrong produces no error and no failing
 assertion anywhere else — the symptom is an anomaly that never appears, months later.
 
-**The scope.** One kind. Widening this to every anomaly whose condition "looks passed" is
+**The scope.** Two kinds now, and still not a general mechanism. ``orphan_session`` resolves
+when the pid and start time it recorded no longer name a live process; ``card_create_failing``
+resolves when the card it named has reached ``linked``, which is terminal and is written in
+the same transaction that records the issue. Both are conditions that can be positively
+re-established as *false*. Widening this to every anomaly whose condition "looks passed" is
 the speculative generality Principle I forbids, and each other kind has its own settling
 story that this mechanism has no business guessing at.
 
@@ -30,6 +34,7 @@ import pytest
 from tests.conftest import write_proc
 
 from robot_army import db, reconcile
+from robot_army.cardstates import CardState
 
 PID = 498936
 START = "187024898"
@@ -290,3 +295,286 @@ def test_the_web_page_hides_resolved_rows(conn, audit, config, proc, web):
     resolve(conn, audit, proc)
 
     assert "sess-1" not in web.get("/anomalies").text
+
+
+# -- card_create_failing (issue #21) ----------------------------------------
+#
+# The second retractable kind. Both anomalies on the reporting machine were of this kind,
+# both belonged to cards that had resolved themselves the day before, and both were still
+# being listed as outstanding — which is the staleness the paragraph at the top of this file
+# describes, arriving by a different route.
+
+
+def _card(conn, *, card_id="card-1", dry_run=False, state=None, board_id="board-1",
+          issue_number=7):
+    """A card row, optionally driven to a state, without going through the intake path.
+
+    ``issue_number`` is a parameter because ``idx_cards_issue`` is unique over
+    ``(repo_key, issue_number, dry_run)`` — the §11 invariant that one issue maps to one card
+    — so a test seeding several linked cards has to give each its own.
+    """
+    with db.transaction(conn):
+        row_id = db.insert_card(
+            conn,
+            board_id=board_id,
+            card_id=card_id,
+            card_url=f"https://trello.com/c/{card_id}",
+            title="a card",
+            body="",
+            dry_run=dry_run,
+        )
+        if state is not None:
+            conn.execute(
+                "UPDATE cards SET state = ?, repo_key = 'jantman/demo', issue_number = ?, "
+                "create_failures = 0 WHERE id = ?",
+                (str(state), issue_number, row_id),
+            )
+    return row_id
+
+
+def raise_create_failing(conn, *, card_id="card-1", dry_run=False) -> int:
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn,
+            kind="card_create_failing",
+            entity_type="card",
+            entity_id=card_id,
+            detail={"repo_key": "jantman/demo", "attempts": 3},
+            dry_run=dry_run,
+        )
+    return next(
+        a.id
+        for a in db.list_anomalies(conn, include_simulated=True)
+        if a.entity_id == card_id
+    )
+
+
+def resolve_cards(conn, audit) -> int:
+    return reconcile._resolve_card_create_anomalies(conn, audit=audit)
+
+
+def test_an_anomaly_whose_card_has_been_linked_is_resolved(conn, audit, layout):
+    """The reported case: an anomaly about a creation that has since succeeded."""
+    _card(conn, state=CardState.LINKED)
+    anomaly_id = raise_create_failing(conn)
+
+    assert resolve_cards(conn, audit) == 1
+    assert db.list_anomalies(conn) == []
+    every = db.list_anomalies(conn, unacknowledged_only=False)
+    assert [a.id for a in every] == [anomaly_id]
+    assert every[0].resolved_at is not None
+    assert every[0].acknowledged_at is None, (
+        "resolved and acknowledged are different facts and must stay distinguishable"
+    )
+
+
+def test_an_anomaly_whose_card_is_still_failing_stays_listed(conn, audit):
+    """`creating` is where a failed creation stays — the intent stands and recovery runs."""
+    _card(conn, state=CardState.CREATING)
+    raise_create_failing(conn)
+
+    assert resolve_cards(conn, audit) == 0
+    assert [a.kind for a in db.list_anomalies(conn)] == ["card_create_failing"]
+
+
+def test_an_anomaly_whose_card_is_not_there_is_left_alone(conn, audit):
+    """"I could not check" must never be recorded as "it is fine".
+
+    A purge, or a database restored without the card, leaves nothing to re-check against —
+    exactly the case the orphan resolver treats the same way when a pid was never recorded.
+    """
+    raise_create_failing(conn, card_id="vanished")
+
+    assert resolve_cards(conn, audit) == 0
+    assert [a.entity_id for a in db.list_anomalies(conn)] == ["vanished"]
+
+
+@pytest.mark.parametrize("state", [CardState.DISCOVERED, CardState.NEEDS_INFO, CardState.DROPPED])
+def test_no_state_but_linked_resolves_the_anomaly(conn, audit, state):
+    """`linked` is the only state that says the creation succeeded, and it is terminal."""
+    _card(conn, state=state)
+    raise_create_failing(conn)
+
+    assert resolve_cards(conn, audit) == 0
+    assert len(db.list_anomalies(conn)) == 1
+
+
+def test_card_resolution_is_idempotent(conn, audit, layout):
+    """The `resolved_at IS NULL` guard: a second pass writes nothing and logs nothing.
+
+    Reconciliation runs every 60 seconds. Without this, every tick would log a resolution for
+    a row that resolved once, which is a log that cannot be read.
+    """
+    _card(conn, state=CardState.LINKED)
+    raise_create_failing(conn)
+
+    assert resolve_cards(conn, audit) == 1
+    assert resolve_cards(conn, audit) == 0
+    assert len(records(layout, "anomaly.resolved")) == 1
+
+
+def test_the_card_record_carries_the_evidence(conn, audit, layout):
+    """Principle III: from the log alone, why this row left the list."""
+    _card(conn, state=CardState.LINKED)
+    anomaly_id = raise_create_failing(conn)
+
+    resolve_cards(conn, audit)
+
+    record = records(layout, "anomaly.resolved")[0]
+    assert record["entity_type"] == "anomaly"
+    assert record["entity_id"] == str(anomaly_id)
+    assert record["detail"]["kind"] == "card_create_failing"
+    assert record["detail"]["anomaly_entity_id"] == "card-1"
+    assert record["detail"]["card_state"] == "linked"
+    assert record["detail"]["issue"] == "jantman/demo#7"
+    assert "has since been linked" in record["detail"]["reason"]
+
+
+def test_a_rehearsed_anomaly_resolves_against_its_own_rehearsed_card(conn, audit):
+    """One card id can hold a real row and a rehearsed one; the lookup carries `dry_run`.
+
+    Resolving a rehearsal's anomaly on the strength of a *real* card's success would retract
+    a report about something that never happened, on evidence about something else.
+    """
+    _card(conn, card_id="card-1", dry_run=True, state=CardState.CREATING)
+    _card(conn, card_id="card-1", dry_run=False, state=CardState.LINKED)
+    raise_create_failing(conn, card_id="card-1", dry_run=True)
+
+    assert resolve_cards(conn, audit) == 0
+    assert [a.dry_run for a in db.list_anomalies(conn, include_simulated=True)] == [True]
+
+
+def test_a_rehearsed_anomaly_is_retracted_like_any_other(conn, audit, layout):
+    """Rehearsed rows are in scope here, and their absence would be the bug.
+
+    ``anomalies`` hides them by default, but a rehearsal's list going stale is the same
+    problem as a real one's — and the maintainer who passes ``--include-simulated`` to look
+    deserves a list that has been re-checked.
+    """
+    _card(conn, card_id="card-1", dry_run=True, state=CardState.LINKED)
+    raise_create_failing(conn, card_id="card-1", dry_run=True)
+
+    assert resolve_cards(conn, audit) == 1
+    assert db.list_anomalies(conn, include_simulated=True) == []
+    assert records(layout, "anomaly.resolved")[0]["dry_run"] is True
+
+
+def test_an_acknowledged_card_anomaly_is_not_touched(conn, audit):
+    """It has already left the open list; stamping `resolved_at` would rewrite what I did."""
+    _card(conn, state=CardState.LINKED)
+    anomaly_id = raise_create_failing(conn)
+    with db.transaction(conn):
+        db.acknowledge_anomaly(conn, anomaly_id)
+
+    assert resolve_cards(conn, audit) == 0
+    row = db.list_anomalies(conn, unacknowledged_only=False)[0]
+    assert row.acknowledged_at is not None and row.resolved_at is None
+
+
+def test_the_same_card_can_raise_the_condition_again_after_resolution(conn, audit):
+    """A resolved row must leave the partial unique index, or the next occurrence is silent.
+
+    The failure mode has no error and no failing assertion anywhere else — the symptom is an
+    anomaly that never appears, months later.
+    """
+    _card(conn, state=CardState.LINKED)
+    raise_create_failing(conn)
+    assert resolve_cards(conn, audit) == 1
+
+    with db.transaction(conn):
+        created = db.raise_anomaly(
+            conn,
+            kind="card_create_failing",
+            entity_type="card",
+            entity_id="card-1",
+            detail={"attempts": 9},
+        )
+
+    assert created is True
+    assert [a.detail_obj["attempts"] for a in db.list_anomalies(conn)] == [9]
+
+
+def test_a_pass_killed_midway_keeps_what_it_reached(conn, audit, layout, monkeypatch):
+    """One transaction per anomaly, so an interruption settles rows rather than losing them.
+
+    The constitution asks this of every state-settling pass: what happens if it is killed
+    halfway. The answer must be "the rows it reached are resolved and logged, the rest are
+    outstanding for next time" — not "the whole pass is lost" and not "some row is resolved
+    without a record of why".
+    """
+    for n in (1, 2, 3):
+        _card(conn, card_id=f"card-{n}", state=CardState.LINKED, issue_number=n)
+        raise_create_failing(conn, card_id=f"card-{n}")
+
+    real_resolve = db.resolve_anomaly
+    calls = {"n": 0}
+
+    def explode_on_the_third(conn_, anomaly_id):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("killed mid-pass")
+        return real_resolve(conn_, anomaly_id)
+
+    monkeypatch.setattr(db, "resolve_anomaly", explode_on_the_third)
+    with pytest.raises(RuntimeError):
+        resolve_cards(conn, audit)
+    monkeypatch.undo()
+
+    settled = [a for a in db.list_anomalies(conn, unacknowledged_only=False) if a.resolved_at]
+    assert len(settled) == 2, "what the pass reached is committed"
+    assert len(db.list_anomalies(conn)) == 1, "the rest is left for the next pass"
+    assert len(records(layout, "anomaly.resolved")) == 2, (
+        "every resolution that happened is in the log; none is silent"
+    )
+
+    assert resolve_cards(conn, audit) == 1, "the next pass finishes the job"
+
+
+def test_a_full_reconciliation_pass_runs_both_resolvers(conn, audit, config, proc, tmp_path):
+    """The two are wired into the same pass and counted together."""
+    from tests.conftest import make_boundaries
+
+    _card(conn, state=CardState.LINKED)
+    raise_create_failing(conn)
+    raise_orphan(conn)
+
+    registry = tmp_path / "registry"
+    registry.mkdir(exist_ok=True)
+    result = reconcile.reconcile(
+        conn,
+        boundaries=make_boundaries(audit),
+        audit=audit,
+        config=config,
+        layout=config.layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+
+    assert result.anomalies_resolved == 2
+    assert db.list_anomalies(conn) == []
+
+
+def test_both_resolvers_mark_a_rehearsed_retraction_as_rehearsed(conn, audit, layout, proc):
+    """A retraction of a rehearsed anomaly is itself rehearsed work.
+
+    Without the marker the `anomaly.resolved` record shows in `robot-army log`'s default view
+    while the anomaly it is about does not — the same mismatch between what a surface hides
+    and what it says that issue #21 exists to remove. Both resolvers, because the older one
+    predates the flag and is exactly where the inconsistency would sit unnoticed.
+    """
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn, kind="orphan_session", entity_type="session", entity_id="sim-sess",
+            detail={"pid": PID, "proc_start": START}, dry_run=True,
+        )
+    _card(conn, card_id="sim-card", dry_run=True, state=CardState.LINKED)
+    raise_create_failing(conn, card_id="sim-card", dry_run=True)
+
+    assert resolve(conn, audit, proc) == 1
+    assert resolve_cards(conn, audit) == 1
+
+    written = records(layout, "anomaly.resolved")
+    assert len(written) == 2
+    assert all(record.get("dry_run") is True for record in written), (
+        "both retractions concern rehearsed work and must say so"
+    )

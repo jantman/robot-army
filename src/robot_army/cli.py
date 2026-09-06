@@ -48,6 +48,30 @@ READ_COMMANDS = frozenset(
     }
 )
 
+#: The verbs that offer ``--include-simulated``, and the rule for belonging to this set:
+#: **a verb is here if and only if the rows it prints can be rehearsed and it filters them.**
+#:
+#: Named rather than written inline because the promise had already been broken once (issue
+#: #21). The flag was decorated onto six verbs and honoured by three; the parser said one
+#: thing and the commands did another, and nothing could notice because the set existed only
+#: as a literal inside the loop below. It now has two readers — this parser, and a test that
+#: drives every member in both spellings against a state holding rehearsed rows — so the
+#: claim and its check are the same object.
+#:
+#: ``repos`` is deliberately absent. Onboarding inspects a real clone on disk, computes a
+#: fingerprint from real ``git`` output, and records the origin it actually found; nothing in
+#: ``effects.py`` intercepts it and there is no rehearsed path, so the table cannot hold a row
+#: this flag would hide. Offering it there was a promise about an empty set.
+SIMULATED_SCOPED_COMMANDS = frozenset(
+    {
+        "status",
+        "worktree",
+        "log",
+        "anomalies",
+        "cards",
+    }
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -148,7 +172,13 @@ def build_parser() -> argparse.ArgumentParser:
     log.add_argument("--limit", type=int, default=None, help="show only the last N records")
     log.add_argument("--follow", action="store_true", help="tail the current day's file")
 
-    anomalies = sub.add_parser("anomalies", help="conditions detected but not resolvable")
+    # Not "conditions detected but not resolvable" any more. Two kinds re-check themselves and
+    # are retracted when they stop being true — `orphan_session` since issue #138 and
+    # `card_create_failing` since #21 — so that framing is now wrong in the first place a
+    # reader looks, about the very kinds most likely to be sitting in their list.
+    anomalies = sub.add_parser(
+        "anomalies", help="conditions detected; most wait for --acknowledge, two clear themselves"
+    )
     anomalies.add_argument("--acknowledge", type=int, default=None, metavar="ID")
     anomalies.add_argument("--all", action="store_true", help="include acknowledged ones")
     # Spelled exactly as `log --since` above, because it is the same parser behind it —
@@ -336,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
             action.add_argument(
                 "--json", action="store_true", help="machine-readable output on stdout"
             )
-        if name in ("status", "worktree", "log", "anomalies", "repos", "cards"):
+        if name in SIMULATED_SCOPED_COMMANDS:
             action.add_argument(
                 "--include-simulated",
                 action="store_true",
@@ -524,12 +554,22 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "worktree": lambda: _worktree(args, ctx),
         "cleanup": lambda: operations.cleanup_now(ctx, args.item_id),
         "log": lambda: (
-            _follow(ctx)
+            _follow(ctx, include_simulated=include_simulated)
             if args.follow
-            else operations.read_log(ctx, since=args.since, item_id=args.item, limit=args.limit)
+            else operations.read_log(
+                ctx,
+                since=args.since,
+                item_id=args.item,
+                limit=args.limit,
+                include_simulated=include_simulated,
+            )
         ),
         "anomalies": lambda: operations.anomalies(
-            ctx, acknowledge=args.acknowledge, show_all=args.all, since=args.since
+            ctx,
+            acknowledge=args.acknowledge,
+            show_all=args.all,
+            since=args.since,
+            include_simulated=include_simulated,
         ),
         "health": lambda: operations.health_check(ctx, max_age=args.max_age, do_notify=args.notify),
         "doctor": lambda: operations.doctor(ctx),
@@ -627,9 +667,9 @@ def _worktree(args: argparse.Namespace, ctx: Context) -> Result:
     return Result(code=EXIT_USAGE, lines=["usage: robot-army worktree {list,remove,prune}"])
 
 
-def _follow(ctx: Context) -> Result | None:
+def _follow(ctx: Context, *, include_simulated: bool = False) -> Result | None:
     try:
-        for line in operations.follow_log(ctx):
+        for line in operations.follow_log(ctx, include_simulated=include_simulated):
             print(line, flush=True)
     except KeyboardInterrupt:
         pass

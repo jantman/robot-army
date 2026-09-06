@@ -225,7 +225,10 @@ def chrome(
     # second entry point — from silently rendering a page with no level at all.
     effective_level = effective_level or str(ctx.effect_level)
     pause = db.get_dispatch_control(ctx.conn)
-    anomalies = db.list_anomalies(ctx.conn)
+    # Scoped, because the pill is rendered on *every* page and links to /anomalies (issue
+    # #21). An unscoped count here disagreed with the page it pointed at the moment the
+    # visibility toggle was off, which is one surface telling the reader two numbers.
+    anomalies = db.list_anomalies(ctx.conn, include_simulated=include_simulated)
 
     return {
         "effect_level": str(ctx.effect_level),
@@ -1344,22 +1347,35 @@ def interrupted_view(
 
 
 def anomalies_view(ctx: operations.Context, *, include_simulated: bool = False) -> View:
-    payload = operations.anomalies(ctx).data
+    payload = operations.anomalies(ctx, include_simulated=include_simulated).data
     rows = payload["anomalies"]
+    withheld = int(payload["withheld_simulated"])
     body = join(
         [
             h(1, f"anomalies ({len(rows)})"),
             p(
-                "Conditions the system detected but cannot resolve on its own. "
-                "Acknowledging one lifts it out of the outstanding count and lets a "
-                "genuinely new occurrence be recorded later.",
+                "Conditions the system detected. Two kinds re-check themselves and are "
+                "retracted when they stop being true; the rest wait for an acknowledgement, "
+                "which lifts the row out of the outstanding count and lets a genuinely new "
+                "occurrence be recorded later.",
                 class_="meta",
             ),
-            _empty("Nothing outstanding.")
+            _nothing(
+                "Nothing outstanding.",
+                withheld,
+                path="/anomalies",
+                include_simulated=include_simulated,
+            )
             if not rows
             else join(
                 div(
-                    h(3, f"[{row['id']}] {row['kind']}"),
+                    # FR-057: shown means marked, on every surface. The CLI writes `*` after
+                    # the id; this is the same claim in the idiom every other listing on this
+                    # site already uses. Without it a rehearsed anomaly revealed by the
+                    # toggle renders identically to a real one, which is the half of the
+                    # defect that survives filtering (issue #21).
+                    h(3, join([f"[{row['id']}] {row['kind']}", " ",
+                               mark_simulated(row["simulated"])])),
                     p(
                         f"{row['entity_type'] or '—'}:{row['entity_id'] or '—'} · detected ",
                         when(row["detected_at"]),
@@ -1385,13 +1401,23 @@ def anomalies_view(ctx: operations.Context, *, include_simulated: bool = False) 
                 )
                 for row in rows
             ),
+            withheld_note(
+                withheld if rows else 0,
+                path="/anomalies",
+                include_simulated=include_simulated,
+            ),
             h(2, "kinds this system can raise"),
             html.ul(payload["known_kinds"]),
         ]
     )
     return View(
         title="anomalies",
-        data={"anomalies": rows, "known_kinds": payload["known_kinds"], "count": len(rows)},
+        data={
+            "anomalies": rows,
+            "known_kinds": payload["known_kinds"],
+            "count": len(rows),
+            "withheld_simulated": withheld,
+        },
         body=body,
     )
 
@@ -1941,6 +1967,25 @@ def _record_detail(detail: Any) -> Markup:
     return tag("dl", join(parts), class_="kv")
 
 
+def _nothing_on_this_page(
+    records: list[dict[str, Any]], payload: dict[str, Any], *, include_simulated: bool
+) -> Markup:
+    """"No records match." must not be printed over records this page is withholding.
+
+    Same rule as :func:`_nothing`, in the one view whose rows do not come from the database.
+    """
+    withheld = int(payload["withheld_simulated"])
+    if not withheld:
+        return _empty("No records match.")
+    plural = "record" if withheld == 1 else "records"
+    return p(
+        f"Nothing to show here. {withheld} simulated {plural} on this page "
+        f"{'is' if withheld == 1 else 'are'} hidden — ",
+        _reveal("/log", include_simulated=include_simulated),
+        class_="withheld",
+    )
+
+
 def log_view(
     ctx: operations.Context,
     *,
@@ -1951,7 +1996,12 @@ def log_view(
     include_simulated: bool = False,
 ) -> View:
     result = operations.read_log_page(
-        ctx, item_id=item_id, since=since, outcome=outcome, cursor=cursor
+        ctx,
+        item_id=item_id,
+        since=since,
+        outcome=outcome,
+        cursor=cursor,
+        include_simulated=include_simulated,
     )
     if result.code != operations.EXIT_OK:
         return View(
@@ -2048,7 +2098,20 @@ def log_view(
             if payload["skipped_lines"]
             else Markup(""),
             truncation_note,
-            _empty("No records match.")
+            # Scoped to this page's scan, and worded so (issue #21). A bounded reader cannot
+            # honestly count what it never read, and a whole-history number beside a page
+            # would be read as describing the page.
+            p(
+                f"{payload['withheld_simulated']} simulated record(s) on this page hidden — ",
+                _reveal("/log", include_simulated=include_simulated),
+                class_="withheld",
+            )
+            # `and records` because `_nothing_on_this_page` below states the same count in
+            # place of its empty text. A view discloses each withheld row exactly once, which
+            # is `withheld_note`'s own invariant and what `anomalies_view` does here too.
+            if payload["withheld_simulated"] and records
+            else Markup(""),
+            _nothing_on_this_page(records, payload, include_simulated=include_simulated)
             if not records
             else join(
                 div(
@@ -2064,7 +2127,7 @@ def log_view(
                             class_=f"outcome-{record.get('outcome')}",
                         ),
                         " ",
-                        mark_simulated(record.get("simulated") or record.get("dry_run")),
+                        mark_simulated(operations._is_rehearsed(record)),
                     ),
                     div(_record_target(record, include_simulated=include_simulated), class_="meta"),
                     div(_record_detail(record.get("detail")), class_="detail"),

@@ -64,7 +64,7 @@ against what target, with what result.
 | `entity_type` / `entity_id` | What it happened to |
 | `target` | A path, URL, or socket, where one is more useful than an id |
 | `action_id` | Present on `intent`/`outcome` pairs, shared between them |
-| `dry_run` / `simulated` | Present and `true` only when the record concerns simulated work |
+| `dry_run` / `simulated` | Present and `true` only when the record concerns simulated work. Either one means it; `robot-army log` excludes such records unless given `--include-simulated`, and marks them `[simulated]` when it shows them |
 | `detail` | Everything else, action-specific |
 
 ## Recorded in UTC, displayed in local time
@@ -467,7 +467,7 @@ process cannot be undone from this side — the intent is on disk before the sig
 | `session.retired` | **New** — after a confirmed stop | The termination's `method`, `confirmed` and `escalated`, plus how the row settled. `settled: left` is not a failure: it means the session recorded its own ending between the decision and the settle, which is an ordinary outcome of a successful retirement |
 | `session.retire_refused` | **New**, outcome `error` | The boundary declined to act on an implausible pid and **sent nothing**. Distinct from the next row, and the distinction matters: "we refused" and "we signalled it and it survived" are different claims about what happened to the machine |
 | `session.retire_unconfirmed` | **New**, outcome `error` | The worker survived the termination. The row stays open and the slot stays subscribed — "I tried and could not" is never recorded as "it is gone" |
-| `anomaly.resolved` | **New** — when an `orphan_session`'s process is confirmed gone | The anomaly id, its kind and entity, the `pid` and `proc_start` that no longer match, and the reason. This is where "on what evidence" lives: there is deliberately no `resolved_reason` column, because Principle III already makes this log the reconstruction path |
+| `anomaly.resolved` | When a re-checkable anomaly's condition is confirmed false: an `orphan_session`'s process is gone, or a `card_create_failing`'s card has reached `linked` | The anomaly id, its kind and entity, and the evidence — the `pid` and `proc_start` that no longer match, or the card's state and the issue it now carries — plus the reason. This is where "on what evidence" lives: there is deliberately no `resolved_reason` column, because Principle III already makes this log the reconstruction path. A repeated pass writes nothing, so one resolution means one record |
 | `reconcile.pass` | **Changed** — as before, once per pass | Gains `retired` and `anomalies_resolved`. `retired` is deliberately separate from `reclaimed`: both close a session row, but one means "this pass ended the worker" and the other means "the worker was already gone" |
 
 

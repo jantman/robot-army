@@ -303,7 +303,11 @@ class Card:
 
 @dataclass(frozen=True, slots=True)
 class Anomaly:
-    """A condition detected but not resolvable by the system (FR-065)."""
+    """A condition the system detected and reported (FR-065).
+
+    Two of the kinds can now be re-checked and retracted, so this is no longer "detected but
+    not resolvable" — see ``ANOMALY_KINDS`` and ``reconcile``'s two resolver passes.
+    """
 
     id: int
     kind: str
@@ -317,6 +321,12 @@ class Anomaly:
     #: fact from ``acknowledged_at``, kept in a different column so ``--all`` can tell an
     #: anomaly that resolved itself from one somebody dismissed.
     resolved_at: str | None = None
+    #: Whether the run that raised this was a rehearsal (issue #21). A property of the *run*,
+    #: not of the entity named: four kinds name no entity at all, and deriving it from the
+    #: entity would change answer the moment ``purge-simulated`` deleted the row. ``False``
+    #: for every row written before migration 014, which is the safe reading — a real anomaly
+    #: shown is dismissed, a real anomaly hidden is never seen.
+    dry_run: bool = False
 
     @property
     def detail_obj(self) -> dict[str, Any]:

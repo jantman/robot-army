@@ -231,7 +231,10 @@ def test_the_payload_reports_what_the_text_reported(ctx, conn, idle_machine):
 
     result, text = render(ctx, idle_machine)
 
-    assert result.data["withheld_simulated"] == {"counts": 4, "items": 4}
+    # Three sections, three numbers (issue #21 added the third). The anomaly block below
+    # the listing was drawn from an unscoped query until then, so `status` and
+    # `status --include-simulated` printed the same anomalies while claiming to differ.
+    assert result.data["withheld_simulated"] == {"counts": 4, "items": 4, "anomalies": 0}
     assert result.data["counts"] == {}
     assert result.data["items"] == []
     # The queue array holds the rows the counts and the listing do not, which is exactly
@@ -246,7 +249,7 @@ def test_the_payload_key_is_present_when_nothing_was_withheld(ctx, conn, idle_ma
         ready(conn, issue, dry_run=True)
 
     result, _ = render(ctx, idle_machine, include_simulated=True)
-    assert result.data["withheld_simulated"] == {"counts": 0, "items": 0}
+    assert result.data["withheld_simulated"] == {"counts": 0, "items": 0, "anomalies": 0}
 
     empty, _ = render(ctx, idle_machine, include_simulated=False, repo="nobody/nothing")
     assert empty.data["withheld_simulated"]["items"] == 0
@@ -260,7 +263,7 @@ def test_the_payload_scopes_the_two_numbers_separately(ctx, conn, idle_machine):
 
     result, _ = render(ctx, idle_machine, repo="demo")
 
-    assert result.data["withheld_simulated"] == {"counts": 2, "items": 0}
+    assert result.data["withheld_simulated"] == {"counts": 2, "items": 0, "anomalies": 0}
 
 
 def test_no_existing_payload_key_was_renamed_or_removed(ctx, conn, idle_machine):
@@ -282,3 +285,78 @@ def test_no_existing_payload_key_was_renamed_or_removed(ctx, conn, idle_machine)
         "queue",
     ):
         assert key in result.data, f"{key} disappeared from the status payload"
+
+
+# -- the anomaly block (issue #21) ------------------------------------------
+#
+# Milestone 008 corrected the counts and the listing and left the block beneath them drawn
+# from an unscoped query. `status --include-simulated` and `status` therefore printed the
+# same anomalies while the rest of the output claimed to differ — the same contradiction
+# this file exists to forbid, one section lower down.
+
+
+def anomaly(conn, entity_id, *, dry_run):
+    from robot_army import db
+
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn,
+            kind="card_create_failing",
+            entity_type="card",
+            entity_id=entity_id,
+            detail={"attempts": 3},
+            dry_run=dry_run,
+        )
+
+
+def test_the_anomaly_block_excludes_rehearsed_rows_by_default(ctx, conn, idle_machine):
+    anomaly(conn, "card-real", dry_run=False)
+    anomaly(conn, "card-sim", dry_run=True)
+
+    result, text = render(ctx, idle_machine)
+
+    assert "unacknowledged anomalies (1):" in text
+    assert "card-real" in text
+    assert "card-sim" not in text
+    assert f"1 simulated rows withheld — pass {FLAG} to show them" in text
+    assert result.data["withheld_simulated"]["anomalies"] == 1
+
+
+def test_the_anomaly_block_shows_and_marks_them_when_asked(ctx, conn, idle_machine):
+    anomaly(conn, "card-real", dry_run=False)
+    anomaly(conn, "card-sim", dry_run=True)
+
+    result, text = render(ctx, idle_machine, include_simulated=True)
+
+    assert "unacknowledged anomalies (2):" in text
+    assert "withheld" not in text
+    marked = [line for line in text.splitlines() if "]* card_create_failing" in line]
+    assert len(marked) == 1, "exactly the rehearsed row carries the marker"
+    assert result.data["withheld_simulated"]["anomalies"] == 0
+
+
+def test_a_block_that_withheld_everything_still_prints(ctx, conn, idle_machine):
+    """Silence here would report an all-clear over a machine holding two open anomalies.
+
+    This is the reported case exactly — both outstanding anomalies belonged to dry-run cards
+    — and it is the one where saying nothing is worst, because the reader draws the opposite
+    conclusion from an absent section than from an empty one.
+    """
+    anomaly(conn, "card-sim-1", dry_run=True)
+    anomaly(conn, "card-sim-2", dry_run=True)
+
+    result, text = render(ctx, idle_machine)
+
+    assert "unacknowledged anomalies (0):" in text
+    assert f"2 simulated rows withheld — pass {FLAG} to show them" in text
+    assert result.data["anomalies"] == []
+    assert result.data["withheld_simulated"]["anomalies"] == 2
+
+
+def test_a_machine_with_no_anomalies_at_all_still_prints_no_block(ctx, conn, idle_machine):
+    """The pre-existing behaviour, which the case above must not have turned into noise."""
+    ready(conn, 31, dry_run=False)
+
+    _, text = render(ctx, idle_machine)
+
+    assert "unacknowledged anomalies" not in text

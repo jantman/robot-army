@@ -334,3 +334,87 @@ def test_paging_across_a_boundary_does_not_double_count_what_it_withheld(ctx) ->
     actions = [r["action"] for r in first.data["records"] + second.data["records"]]
     assert len(actions) == len(set(actions)), "pages must be disjoint"
     assert all(not operations._is_rehearsed(r) for r in second.data["records"])
+
+
+# -- log --follow -----------------------------------------------------------
+
+
+def _follow_once(ctx, lines: list[str], *, include_simulated: bool) -> list[str]:
+    """Drive ``follow_log`` over a tail and return what it yielded before a sentinel.
+
+    Two things make this awkward and both are properties of the thing under test rather than
+    of the test. ``follow_log`` seeks to the *end* of the file when it starts, so records have
+    to be appended after it is already reading — hence the consumer thread. And it never
+    finishes on its own, because a tail has no end, so the read is terminated by a final real
+    record guaranteed to pass every filter rather than by counting yields, which would
+    deadlock the moment the filter hid one.
+
+    The join timeout is what turns a hang into a readable failure instead of a stuck suite.
+    """
+    import threading
+    import time as _time
+
+    path = ctx.layout.log_dir / f"audit-{datetime.now(UTC).strftime('%Y-%m-%d')}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+
+    out: list[str] = []
+
+    def consume() -> None:
+        for line in operations.follow_log(ctx, include_simulated=include_simulated):
+            if "sentinel.end" in line:
+                return
+            out.append(line)
+
+    reader = threading.Thread(target=consume, daemon=True)
+    reader.start()
+    _time.sleep(0.3)  # let the tail open the file and seek past its (empty) end
+
+    with path.open("a", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(line + "\n")
+        handle.write(json.dumps(record("sentinel.end")) + "\n")
+        handle.flush()
+
+    reader.join(timeout=10)
+    assert not reader.is_alive(), "the tail never reached the sentinel"
+    return out
+
+
+def test_follow_hides_rehearsed_records_by_default(ctx) -> None:
+    """The sub-mode the fix would most easily be left out of.
+
+    ``--follow`` is spelled on the same verb and takes the same flag, so a tail showing
+    rehearsed records either way is the original defect surviving one level down — and it is
+    the mode where the rehearsal drowns the real thing most completely, because a dry run at
+    speed writes far more records than live work does.
+    """
+    lines = [
+        json.dumps(record("real.one")),
+        json.dumps(record("rehearsed.one", simulated=True)),
+        json.dumps(record("rehearsed.two", dry_run=True)),
+    ]
+
+    shown = _follow_once(ctx, lines, include_simulated=False)
+
+    assert any("real.one" in line for line in shown)
+    assert not any("rehearsed." in line for line in shown)
+
+
+def test_follow_shows_them_when_asked(ctx) -> None:
+    lines = [
+        json.dumps(record("real.one")),
+        json.dumps(record("rehearsed.one", dry_run=True)),
+    ]
+
+    shown = _follow_once(ctx, lines, include_simulated=True)
+
+    assert any("real.one" in line for line in shown)
+    assert any("rehearsed.one" in line and "[simulated]" in line for line in shown)
+
+
+def test_follow_still_shows_a_line_it_cannot_parse(ctx) -> None:
+    """A line we cannot judge is not a line we may drop — the filter must not swallow it."""
+    shown = _follow_once(ctx, ["{not json at all"], include_simulated=False)
+
+    assert shown and shown[0].startswith("(unparseable)")

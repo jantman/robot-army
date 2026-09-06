@@ -554,7 +554,7 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "worktree": lambda: _worktree(args, ctx),
         "cleanup": lambda: operations.cleanup_now(ctx, args.item_id),
         "log": lambda: (
-            _follow(ctx)
+            _follow(ctx, include_simulated=include_simulated)
             if args.follow
             else operations.read_log(
                 ctx,
@@ -667,9 +667,9 @@ def _worktree(args: argparse.Namespace, ctx: Context) -> Result:
     return Result(code=EXIT_USAGE, lines=["usage: robot-army worktree {list,remove,prune}"])
 
 
-def _follow(ctx: Context) -> Result | None:
+def _follow(ctx: Context, *, include_simulated: bool = False) -> Result | None:
     try:
-        for line in operations.follow_log(ctx):
+        for line in operations.follow_log(ctx, include_simulated=include_simulated):
             print(line, flush=True)
     except KeyboardInterrupt:
         pass

@@ -116,6 +116,14 @@ older matching records remain.
 Records shown under the flag keep the `[simulated]` marker `_format_record` has always written.
 The unparseable-line count is independent of the simulated filter and is reported as it is today.
 
+`log --follow` is scoped the same way. It is a mode of the same verb and takes the same option,
+so a tail showing rehearsed records either way would be this defect surviving one level down —
+and it is the mode where a rehearsal drowns real work most completely, because a dry run at
+speed writes far more records than live work does. Nothing is counted there: a withheld total is
+a statement about a finite scan, and a tail has no end to count against. A line that cannot be
+parsed is still printed rather than filtered, because a line we cannot judge is not a line we
+may drop.
+
 ### `worktree list` and `cards`
 
 Unchanged. Both already filter and both already print the withheld sentence; they are named here

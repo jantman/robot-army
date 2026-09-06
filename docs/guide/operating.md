@@ -247,7 +247,8 @@ readable from the browser at `/log`, filtered, newest first, with GitHub links a
 really happened; `--include-simulated` adds the rest, still carrying the `[simulated]` marker
 they have always carried, and either way the reader says how many it withheld. The `/log`
 page does the same through the site-wide toggle, scoped to the records that page's scan
-actually read — a bounded reader cannot honestly count what it never looked at.
+actually read — a bounded reader cannot honestly count what it never looked at. `log --follow`
+is scoped too; it says no count, because a tail has no end to count against.
 
 **Record format, every action name, the redaction rules, and how to reconstruct one item's
 whole history are on the [audit log page](audit-log.md).**

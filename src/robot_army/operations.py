@@ -4707,8 +4707,19 @@ def _format_record(record: dict[str, Any]) -> str:
     return f"{stamp} {marker} {record.get('action')} [{outcome}]{entity}{sim}{tail}"
 
 
-def follow_log(ctx: Context) -> Iterator[str]:
-    """Tail the current day's audit file. Used by ``log --follow``."""
+def follow_log(ctx: Context, *, include_simulated: bool = False) -> Iterator[str]:
+    """Tail the current day's audit file. Used by ``log --follow``.
+
+    Scoped like the reader it is a mode of (issue #21). ``--follow`` is spelled on the same
+    verb and accepts the same flag, so a tail that showed rehearsed records either way would
+    be the defect this feature removes, surviving on a sub-mode — and it is the mode where a
+    rehearsal's traffic drowns the real thing most completely, because a dry run at speed
+    writes far more records than live work does.
+
+    Nothing is counted here, deliberately. A withheld total is a statement about a finite
+    scan; a tail has no end to count against, and a running tally that grew forever in the
+    corner of the stream would be noise rather than disclosure.
+    """
     import time as _time
 
     day = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -4723,9 +4734,16 @@ def follow_log(ctx: Context) -> Iterator[str]:
                 _time.sleep(0.5)
                 continue
             try:
-                yield _format_record(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
+                # Still shown, and still not filtered: a line we cannot parse is a line we
+                # cannot judge, and dropping it would be the silent omission Principle III
+                # forbids — the same call `read_log` makes by counting rather than hiding.
                 yield f"(unparseable) {line.rstrip()}"
+                continue
+            if not include_simulated and _is_rehearsed(record):
+                continue
+            yield _format_record(record)
 
 
 # -- health -----------------------------------------------------------------

@@ -124,3 +124,124 @@ def test_per_repo_keeps_its_existing_key_and_meaning(ctx, conn, repo_clone):
 def test_nothing_onboarded_says_so_rather_than_showing_an_empty_block(ctx):
     text = operations.capacity(ctx).render(as_json=False)
     assert "no repository is onboarded" in text
+
+
+# -- the cap in force, not the one in the file (issue #30) ------------------
+
+
+def at_cap(config, n: int):
+    return replace(config, daemon=replace(config.daemon, max_concurrent_sessions=n))
+
+
+def context_for(config, monkeypatch):
+    monkeypatch.setattr(
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
+    )
+    return operations.build_context(config)
+
+
+def test_capacity_reports_the_daemons_cap_when_the_file_is_newer(
+    config, conn, layout, monkeypatch, running_daemon
+):
+    """The direction a fresh terminal command hides best: it has just read the file, so it
+    looks maximally trustworthy while printing a limit nothing is applying."""
+    from tests.conftest import beat
+
+    beat(layout, max_concurrent_sessions=7)
+    built = context_for(at_cap(config, 9), monkeypatch)
+    try:
+        result = operations.capacity(built)
+        document = json.loads(result.render(as_json=True))
+        assert document["global_cap"] == 7
+        assert document["configured_cap"] == 9
+        assert "of 7 sessions running" in result.render(as_json=False)
+        assert "SESSION CAP MISMATCH" in result.render(as_json=False)
+    finally:
+        built.close()
+
+
+def test_capacity_reports_the_daemons_cap_when_the_file_is_older(
+    config, conn, layout, monkeypatch, running_daemon
+):
+    from tests.conftest import beat
+
+    beat(layout, max_concurrent_sessions=7)
+    built = context_for(at_cap(config, 5), monkeypatch)
+    try:
+        document = json.loads(operations.capacity(built).render(as_json=True))
+        assert (document["global_cap"], document["configured_cap"]) == (7, 5)
+    finally:
+        built.close()
+
+
+def test_capacity_says_nothing_extra_when_the_two_agree(
+    config, conn, layout, monkeypatch, running_daemon
+):
+    from tests.conftest import beat
+
+    beat(layout, max_concurrent_sessions=5)
+    built = context_for(at_cap(config, 5), monkeypatch)
+    try:
+        result = operations.capacity(built)
+        document = json.loads(result.render(as_json=True))
+        assert document["configured_cap"] is None
+        assert document["cap_disagreement"] is None
+        assert "SESSION CAP MISMATCH" not in result.render(as_json=False)
+    finally:
+        built.close()
+
+
+def test_capacity_keeps_its_own_configured_cap_with_no_daemon_running(
+    config, conn, layout, monkeypatch
+):
+    """No lock held: nothing is enforcing anything, so a heartbeat left by a dead process
+    does not get to overrule the configuration this command actually read."""
+    from tests.conftest import beat
+
+    beat(layout, max_concurrent_sessions=7)
+    built = context_for(at_cap(config, 5), monkeypatch)
+    try:
+        document = json.loads(operations.capacity(built).render(as_json=True))
+        assert (document["global_cap"], document["configured_cap"]) == (5, None)
+    finally:
+        built.close()
+
+
+def test_status_reports_the_same_cap_the_web_chrome_does(
+    config, conn, layout, monkeypatch, running_daemon
+):
+    """SC-003: two surfaces read a second apart must print the same denominator. Both
+    render ``_capacity_dict``, so the keys are the same by identity, not by agreement."""
+    from tests.conftest import beat
+
+    beat(layout, max_concurrent_sessions=7)
+    built = context_for(at_cap(config, 5), monkeypatch)
+    try:
+        result = operations.status(built)
+        document = json.loads(result.render(as_json=True))
+        assert document["capacity"]["global_cap"] == 7
+        assert document["capacity"]["configured_cap"] == 5
+        assert "SESSION CAP MISMATCH" in result.render(as_json=False), "the status line carries it too"
+    finally:
+        built.close()
+
+
+def test_a_repositorys_limit_is_clamped_by_the_cap_in_force(
+    config, conn, repo_clone, layout, monkeypatch, running_daemon
+):
+    """A per-repository cap is ``min(repo, global)``, so a stale global would report a
+    repository limit that nothing is enforcing either — the same defect one level down."""
+    from tests.conftest import beat
+
+    beat(layout, max_concurrent_sessions=7)
+    section = replace(config.repos["demo"], max_sessions=4)
+    lowered = at_cap(replace(config, repos={**config.repos, "demo": section}), 2)
+    built = context_for(lowered, monkeypatch)
+    try:
+        onboard_repo(built.conn, "demo", repo_clone)
+        row = {r["repo_key"]: r for r in json.loads(
+            operations.capacity(built).render(as_json=True)
+        )["repos"]}["demo"]
+        assert row["cap"] == 4, "clamped by the enforced 7, not by this process's 2"
+    finally:
+        built.close()

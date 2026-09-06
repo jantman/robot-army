@@ -109,12 +109,12 @@ so two surfaces read a second apart cannot print different denominators.
 **Independent Test**: with a daemon whose cap differs from the file, take a terminal reading
 and a web reading and compare the denominators.
 
-- [ ] T024 [US3] In `status` in `src/robot_army/operations.py`, add the lock probe beside the health report it already takes and pass the resolved `enforced_cap` into the snapshot it builds when no snapshot was handed in
-- [ ] T025 [US3] In `capacity` in `src/robot_army/operations.py`, take the health report and the lock probe, pass the resolved `enforced_cap` into its snapshot, and add the `cap          : ` line carrying `snap.cap_disagreement` when there is one
-- [ ] T026 [US3] Add `configured_cap` and `cap_disagreement` to the `capacity --json` document in `src/robot_army/operations.py`, keeping `global_cap` as the cap in force so an existing consumer is correct without changing
+- [X] T024 [US3] In `status` in `src/robot_army/operations.py`, add the lock probe beside the health report it already takes and pass the resolved `enforced_cap` into the snapshot it builds when no snapshot was handed in
+- [X] T025 [US3] In `capacity` in `src/robot_army/operations.py`, take the health report and the lock probe, pass the resolved `enforced_cap` into its snapshot, and add the `cap          : ` line carrying `snap.cap_disagreement` when there is one
+- [X] T026 [US3] Add `configured_cap` and `cap_disagreement` to the `capacity --json` document in `src/robot_army/operations.py`, keeping `global_cap` as the cap in force so an existing consumer is correct without changing
 - [X] T027 [US3] Add the same two keys to `_capacity_dict` in `src/robot_army/operations.py`, which both `status --json` and the web chrome render from
-- [ ] T028 [P] [US3] Add tests to `tests/unit/test_capacity_cli.py` (or the existing home of the `capacity` command's tests): both directions of disagreement report the daemon's cap, the `cap` line appears only when they differ, and the three JSON keys carry the contracted values
-- [ ] T029 [P] [US3] Add a test that `status`'s capacity line carries the disagreement clause, and that its `--json` payload carries the same three keys as the web chrome's
+- [X] T028 [P] [US3] Add tests to `tests/unit/test_capacity_cli.py` (or the existing home of the `capacity` command's tests): both directions of disagreement report the daemon's cap, the `cap` line appears only when they differ, and the three JSON keys carry the contracted values
+- [X] T029 [P] [US3] Add a test that `status`'s capacity line carries the disagreement clause, and that its `--json` payload carries the same three keys as the web chrome's
 
 **Checkpoint**: all three stories complete; every surface reports the same denominator.
 

@@ -316,7 +316,17 @@ def status(
     # calls this twice, once per section — and each snapshot reads the session registry and
     # enumerates ``/proc``, so a page was paying for the same observation repeatedly.
     snap = capacity or capacity_mod.snapshot(
-        ctx.conn, config=ctx.config, registry_dir=registry_dir, proc_root=proc_root
+        ctx.conn,
+        config=ctx.config,
+        # The cap the running daemon is enforcing, not the one in the file this process just
+        # read (issue #30). Both directions are reachable and a freshly-started command is
+        # the more misleading of the two: it looks maximally trustworthy while reporting a
+        # limit nothing is applying.
+        enforced_cap=health.published_cap(
+            report, running=daemon_mod.is_locked(ctx.layout.lock_path)
+        ),
+        registry_dir=registry_dir,
+        proc_root=proc_root,
     )
     queue = ordering_mod.plan(ctx.conn, config=ctx.config, capacity=snap)
 
@@ -479,9 +489,18 @@ def capacity(
     for a check that ran and did not pass.
     """
     result = Result()
+    # One reading of the daemon, for the cap it is enforcing (issue #30). The terminal is
+    # fixed alongside the web because the issue's reproduction is two surfaces printing
+    # different fractions seconds apart; correcting one would leave them free to disagree.
+    report = health.check(
+        ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+    )
     snap = capacity_mod.snapshot(
         ctx.conn,
         config=ctx.config,
+        enforced_cap=health.published_cap(
+            report, running=daemon_mod.is_locked(ctx.layout.lock_path)
+        ),
         audit=ctx.audit,
         registry_dir=registry_dir,
         proc_root=proc_root,
@@ -494,6 +513,11 @@ def capacity(
         "degraded": snap.degraded,
         "total": snap.total,
         "global_cap": snap.global_cap,
+        # Non-null only when this process's configuration disagrees with the cap in force,
+        # so a consumer detects a disagreement by reading one key rather than comparing two
+        # numbers and deciding for itself when there is anything to say (issue #30).
+        "configured_cap": snap.configured_cap,
+        "cap_disagreement": snap.cap_disagreement,
         "ours": len(snap.ours),
         "others": snap.others,
         # Unchanged in key and in meaning: the live-session count per repository. Anything
@@ -505,14 +529,23 @@ def capacity(
         "reason": snap.reason,
     }
 
+    # Said on both paths below, and before anything else on each: a reader who is about to
+    # take a number away from this command should learn first that it is not the number in
+    # the file they were just editing.
+    def say_cap_disagreement() -> None:
+        if snap.cap_disagreement:
+            result.say(f"cap          : {snap.cap_disagreement}")
+
     if not snap.observable:
         result.code = EXIT_CHECK_FAILED
         result.say(f"capacity     : UNOBSERVABLE — {snap.reason}")
+        say_cap_disagreement()
         result.say("dispatch     : withheld until capacity can be observed again")
         result.say(f"order        : {order}")
         return result
 
     result.say(f"capacity     : {snap.total} of {snap.global_cap} sessions running")
+    say_cap_disagreement()
     # FR-003. The split is the actionable half: "two of these are mine" tells the author to
     # close one of their own, and "two are the daemon's" tells them to wait.
     result.say(f"  ours       : {len(snap.ours)}")

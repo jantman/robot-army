@@ -104,9 +104,10 @@ scroll horizontally and that each wide table still scrolls within its own contai
   metre of glass and put a row's first and last cells too far apart to associate by eye. The content
   area therefore has an upper bound generous enough that no table in the interface is squeezed by it,
   not an unlimited one.
-- **A table with two columns.** The state-history table has two. Filling a wide window with two columns
-  of six characters each is not an improvement; a table narrower than the space available must be free
-  to stay narrow rather than being stretched to fill it.
+- **A table with two columns.** The state-history table on the item page has two. Stretching it across a
+  wide window would leave six characters at the left edge and eleven at the right with a metre of
+  nothing between them; a table narrower than the space available must be free to stay narrow rather
+  than being stretched to fill it.
 - **A page with both a table and prose.** The item detail page and `/queue` carry both. Prose keeps its
   readable measure on the same page where a table uses the full width.
 - **Intermediate widths.** Between the prose measure and the widest table there is a range of window
@@ -132,8 +133,9 @@ scroll horizontally and that each wide table still scrolls within its own contai
   the width its content needs, up to the width available.
 - **FR-005**: Every existing table MUST keep its own horizontal scroll container, so that a table wider
   than the viewport scrolls within itself and never causes the page to scroll horizontally.
-- **FR-006**: At viewport widths at or below the current prose column width, every view MUST render at
-  the width it renders at today — the change MUST only ever add usable width, never remove it.
+- **FR-006**: At viewport widths at or below the current prose column width, every view MUST lay out as
+  it does today — same content width, same page scrolling, same table scrolling. The change MUST only
+  ever add usable width, never remove it.
 - **FR-007**: Width MUST grow continuously with the window between the prose measure and the upper
   bound, with no width at which the layout jumps.
 - **FR-008**: The change MUST be carried by the stylesheet, so it applies to every table already in the
@@ -154,16 +156,17 @@ scroll horizontally and that each wide table still scrolls within its own contai
 
 ### Measurable Outcomes
 
-- **SC-001**: On a 1920-pixel-wide window, the `/active` table occupies at least 90% of the usable page
-  width, compared with roughly 50% today.
+- **SC-001**: On a 1920-pixel-wide window, the `/active` table is limited only by what its own content
+  needs rather than by a page-level width limit: it renders about 1700 pixels wide against roughly 930
+  today, and every item title fits on one line instead of wrapping over five or six.
 - **SC-002**: On a 1920-pixel-wide window, every table on `/active`, `/queue`, `/cards`, and an item's
   detail page is fully readable with zero horizontal scrolling of the table.
 - **SC-003**: On a 1920-pixel-wide window, no line of prose on any view exceeds a readable measure of
   about 100 characters.
 - **SC-004**: On a 390-pixel-wide viewport, every view renders with zero horizontal scrolling of the
   page and no text requiring zoom — unchanged from today.
-- **SC-005**: At every viewport width at or below the current prose column width, each view's rendered
-  width is identical to today's.
+- **SC-005**: At a 390-pixel viewport, the measured content width, table-container width, banner width
+  and scrolling behaviour of each view are identical to today's.
 - **SC-006**: The whole existing test suite passes, and the new behaviour is covered by tests that fail
   against the current stylesheet.
 

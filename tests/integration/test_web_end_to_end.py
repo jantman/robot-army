@@ -35,7 +35,7 @@ def live_server(config, conn, monkeypatch):
     monkeypatch.setattr(
         operations,
         "wire",
-        lambda level, cfg, log: make_boundaries(
+        lambda level, cfg, log, conn: make_boundaries(
             log, level=level, reader=reader, display=display, host=host
         ),
     )
@@ -374,7 +374,7 @@ def test_the_queue_renders_without_ever_asking_github(config, conn, layout, monk
     monkeypatch.setattr(
         operations,
         "wire",
-        lambda level, cfg, log: make_boundaries(
+        lambda level, cfg, log, conn: make_boundaries(
             log, level=level, reader=ExplodingReader()
         ),
     )

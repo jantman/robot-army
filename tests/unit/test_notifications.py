@@ -572,16 +572,16 @@ def test_the_simulated_notifier_names_the_channels_it_would_have_used(audit, lay
 
 def test_nothing_is_delivered_below_live_even_with_pushover_configured(
     audit, config, layout, tmp_path
-):
+, conn):
     """US1 AS3. ``REAL_AT["notifier"]`` is unchanged: a notification is an outward-facing
     write and is simulated at every level below ``live``."""
     from robot_army.effects import EffectLevel, wire
 
     both = replace(configured(config, "failure"), pushover=pushover_config(tmp_path))
     for level in (EffectLevel.PLAN, EffectLevel.LOCAL, EffectLevel.NO_REMOTE):
-        wired = wire(level, both, audit)
+        wired = wire(level, both, audit, conn)
         assert type(wired.notifier).__name__ == "SimulatedNotifier"
-    assert type(wire(EffectLevel.LIVE, both, audit).notifier).__name__ == "MultiNotifier"
+    assert type(wire(EffectLevel.LIVE, both, audit, conn).notifier).__name__ == "MultiNotifier"
 
 
 def test_an_empty_events_list_sends_nothing_even_with_pushover_configured(

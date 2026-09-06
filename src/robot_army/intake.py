@@ -1206,10 +1206,19 @@ def _perform_creation(
     # reason, and without ever reaching the anomaly threshold — the silent gap Principle III
     # forbids, produced by the very guard meant to prevent one.
     #
-    # The reachable case is a simulated run after a restart: SimulatedIssueWriter's counter
-    # restarts at zero each process, so a second run can mint an issue number a row from an
-    # earlier run already holds. Routing it through the ordinary failure path makes the next
-    # pass retry with a fresh number, which is what the counter having advanced guarantees.
+    # Nothing reachable is expected to land here any more. It used to be routine: a
+    # simulated run after a restart re-minted numbers an earlier run already held, because
+    # the fake number came from a counter starting at zero in every process (issue #22).
+    # SimulatedIssueWriter now allocates above the highest number recorded for the
+    # repository, reading the three columns idx_cards_issue is built on, so the number it
+    # returns is one the index has no objection to. Live numbers come from GitHub and were
+    # never at risk.
+    #
+    # The guard stays anyway, and not out of superstition: the alternative to catching this
+    # is letting it escape, and the paragraph above says what that costs. A last line of
+    # defence that is never reached is doing its job — and if one is ever reached, the
+    # reason recorded says which card holds the number, which is the first thing anyone
+    # would want to know about a state that should not exist.
     try:
         with db.transaction(conn):
             transition_card(
@@ -1253,6 +1262,12 @@ def _mapping_conflict(
     "UNIQUE constraint failed: cards.repo_key, cards.issue_number, cards.dry_run" names the
     index and nothing else. Naming the card already holding the number is the difference
     between a message that explains and one that merely reports.
+
+    The sentence about the next pass has to stay true, which it once was not: it promised
+    "a fresh number" while the writer handed out the next one in a sequence that was
+    already taken (issue #22). A message describing a recovery strategy the system does not
+    have is worse than no message, because it reads as reassurance and stops the reader
+    looking further.
     """
     holder = db.find_card_by_issue(
         conn,
@@ -1264,7 +1279,8 @@ def _mapping_conflict(
         return BoundaryError(
             f"issue {card.repo_key}#{issue.number} is already mapped to card "
             f"{holder.card_id}, so this mapping was refused by the schema. The next pass "
-            f"retries with a fresh number ({error})"
+            f"allocates above the highest number recorded for {card.repo_key} "
+            f"({error})"
         )
     return BoundaryError(f"the mapping for {card.repo_key}#{issue.number} was refused: {error}")
 

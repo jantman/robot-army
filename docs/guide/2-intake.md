@@ -167,6 +167,13 @@ rebuilds the mapping from it rather than filing a second one. The one gap left o
 between creating the issue and recording it *combined with* losing the database, and it is
 written down in [state](state.md) rather than pretended away.
 
+Below `live` the number in that index is invented rather than GitHub's — it starts at 900001,
+high enough that no rehearsal number can be mistaken for a real issue in a log. It is allocated
+above the highest already recorded for that repository, so a rehearsal files each card on its
+first pass however many simulated cards the repository already holds, and restarting the daemon
+continues the numbering rather than replaying it. `purge-simulated` clears those rows, and the
+next simulated card is 900001 again.
+
 ---
 
 Next: [what runs next](3-selection.md).

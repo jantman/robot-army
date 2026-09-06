@@ -28,7 +28,7 @@ from robot_army.states import WorkItemState
 @pytest.fixture
 def ctx(config, conn, monkeypatch):
     monkeypatch.setattr(
-        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level)
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
     )
     built = operations.build_context(config)
     yield built
@@ -407,7 +407,7 @@ def test_a_configured_but_un_onboarded_repository_is_still_refused(
     assert "owner/ghost" not in repos_mod.known(conn)
 
     monkeypatch.setattr(
-        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level)
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
     )
     built = operations.build_context(configured)
     try:

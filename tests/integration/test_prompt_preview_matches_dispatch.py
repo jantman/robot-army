@@ -67,7 +67,7 @@ def wired(conn, repo_clone, layout, tmp_path, monkeypatch):
     monkeypatch.setattr(
         operations,
         "wire",
-        lambda level, cfg, log: make_boundaries(log, level=level, reader=_reader()),
+        lambda level, cfg, log, conn: make_boundaries(log, level=level, reader=_reader()),
     )
     ctx = operations.build_context(config)
     yield ctx

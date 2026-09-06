@@ -28,7 +28,7 @@ def ctx(config, conn, audit, monkeypatch):
     monkeypatch.setattr(
         operations,
         "wire",
-        lambda level, cfg, log: make_boundaries(log, level=level, reader=reader),
+        lambda level, cfg, log, conn: make_boundaries(log, level=level, reader=reader),
     )
     operations.clear_resume_signal_cache()
     built = operations.build_context(config)

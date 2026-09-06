@@ -477,10 +477,10 @@ def test_the_remote_is_asked_before_the_branch_is_deleted(
 # -- effect levels (T063, FR-039) ------------------------------------------
 
 
-def wired_at(level: EffectLevel, config: Any, audit: Any) -> Any:
+def wired_at(level: EffectLevel, config: Any, audit: Any, conn: Any) -> Any:
     from robot_army.effects import wire
 
-    return wire(level, config, audit)
+    return wire(level, config, audit, conn)
 
 
 def test_below_local_the_removals_are_simulated_and_nothing_leaves_the_disk(
@@ -491,7 +491,7 @@ def test_below_local_the_removals_are_simulated_and_nothing_leaves_the_disk(
     with their full arguments, so the intent is fully recorded either way."""
     _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=13)
 
-    decisions = sweep(conn, audit, config, wired_at(EffectLevel.PLAN, config, audit))
+    decisions = sweep(conn, audit, config, wired_at(EffectLevel.PLAN, config, audit, conn))
     assert [d.state for d in decisions] == [cleanup.DONE]
     assert path.exists(), "at plan level nothing may leave the disk"
     assert branch in branches(published)
@@ -512,7 +512,7 @@ def test_at_local_and_above_the_removals_are_real(
     conn, audit, config, published, boundaries, level
 ):
     _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=14)
-    sweep(conn, audit, config, wired_at(level, config, audit))
+    sweep(conn, audit, config, wired_at(level, config, audit, conn))
     assert not path.exists()
     assert branch not in branches(published)
 

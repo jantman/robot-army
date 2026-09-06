@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 import httpx
 
+from robot_army import db
 from robot_army.boundaries import (
     BoardEntry,
     BoardSnapshot,
@@ -34,6 +35,8 @@ from robot_army.boundaries import (
 )
 
 if TYPE_CHECKING:
+    import sqlite3
+
     from robot_army.audit import AuditLog
     from robot_army.config import Config
 
@@ -1100,16 +1103,29 @@ class SimulatedIssueWriter:
 
     Returning ``None`` or raising would let the simulated path diverge from the real one
     at exactly the point the dry-run feature exists to prevent (contracts/boundaries.md).
+
+    It holds the database connection because it stands in for GitHub's *server-side
+    allocator*, and an allocator has to know what it has already issued. The real one keeps
+    that in GitHub's database; this one keeps it in ours, because ours is where the
+    simulated issues live. The connection is required — see ``create_issue`` for what an
+    optional one would silently restore.
     """
 
-    def __init__(self, audit: AuditLog) -> None:
+    def __init__(self, audit: AuditLog, conn: sqlite3.Connection) -> None:
         self._audit = audit
-        self._counter = 0
+        self._conn = conn
+        #: Only to keep two simulated comment URLs in one process distinguishable. It is
+        #: deliberately *not* the source of issue numbers: a comment fragment needs
+        #: uniqueness within a run and nothing reads it back, while an issue number needs
+        #: uniqueness against the record. Sharing one counter between the two is what made
+        #: the number a card received depend on how much unrelated simulated traffic came
+        #: first (issue #22).
+        self._comments = 0
 
     def comment(self, repo_key: str, number: int, body: str) -> str:
-        self._counter += 1
+        self._comments += 1
         target = f"{repo_key}#{number}"
-        url = f"https://github.com/{repo_key}/issues/{number}#issuecomment-simulated-{self._counter}"
+        url = f"https://github.com/{repo_key}/issues/{number}#issuecomment-simulated-{self._comments}"
         self._audit.record(
             "github.comment",
             outcome="ok",
@@ -1132,9 +1148,24 @@ class SimulatedIssueWriter:
         The number is drawn from a fixed high offset so it is unmistakable in a log, and
         the row it produces is ``dry_run``, which is what keeps it out of listings and out
         of the live mapping.
+
+        **Which number** comes from the record, not from a count, and that distinction is
+        issue #22. A per-process counter regenerates ``900001, 900002, …`` on every start,
+        so a second run mints numbers the mapping already holds; ``idx_cards_issue``
+        refuses each one, the card is retried with the next number in the same sequence,
+        and the retry costs one failed pass per simulated card the repository already has.
+        One card took eight passes over nineteen minutes and raised two anomalies on the
+        way. Reading the highest recorded number instead means the value returned here is
+        one the index has no objection to, because it was derived from the three columns
+        the index is built on.
+
+        The floor is what makes an empty repository start at ``900001`` as it always did,
+        and it also means a ``NULL`` maximum needs no branch of its own. Gaps left by
+        purged rows are not filled: reusing a number that once meant something else makes
+        a log harder to read, not easier.
         """
-        self._counter += 1
-        number = SIMULATED_ISSUE_BASE + self._counter
+        highest = db.highest_simulated_issue_number(self._conn, repo_key=repo_key)
+        number = max(SIMULATED_ISSUE_BASE, highest or 0) + 1
         url = f"https://github.com/{repo_key}/issues/{number}"
         self._audit.record(
             "github.issue.create",

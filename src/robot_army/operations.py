@@ -188,7 +188,7 @@ def build_context(
         config=config,
         conn=conn,
         audit=audit,
-        boundaries=wire(level, config, audit),
+        boundaries=wire(level, config, audit, conn),
         effect_level=level,
     )
 

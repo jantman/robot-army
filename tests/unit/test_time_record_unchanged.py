@@ -33,7 +33,7 @@ LOCAL_FORM = re.compile(r"\d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}")
 @pytest.fixture
 def ctx(config, conn, monkeypatch):
     monkeypatch.setattr(
-        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level)
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
     )
     built = operations.build_context(config)
     yield built

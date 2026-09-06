@@ -216,7 +216,7 @@ def test_at_no_remote_the_card_is_really_read_and_nothing_is_written(
         audit,
         level=EffectLevel.NO_REMOTE,
         cards=[card()],
-        writer=SimulatedIssueWriter(audit),
+        writer=SimulatedIssueWriter(audit, conn),
         card_writer=SimulatedCardWriter(audit),
     )
     run(conn, board_config, audit, boundaries, dry_run=True)
@@ -257,7 +257,7 @@ def test_a_simulated_run_does_not_consume_the_live_cards_identity(
         audit,
         level=EffectLevel.NO_REMOTE,
         cards=[card()],
-        writer=SimulatedIssueWriter(audit),
+        writer=SimulatedIssueWriter(audit, conn),
         card_writer=SimulatedCardWriter(audit),
     )
     run(conn, board_config, audit, simulated, dry_run=True)
@@ -277,7 +277,7 @@ def test_no_board_or_issue_write_happens_below_live(conn, board_config, audit, l
     from robot_army.boundaries.github import SimulatedIssueWriter
     from robot_army.boundaries.trello import SimulatedCardWriter
 
-    issue_writer = SimulatedIssueWriter(audit)
+    issue_writer = SimulatedIssueWriter(audit, conn)
     card_writer = SimulatedCardWriter(audit)
     boundaries = make_board_boundaries(
         audit, level=level, cards=[card()], writer=issue_writer, card_writer=card_writer
@@ -288,6 +288,89 @@ def test_no_board_or_issue_write_happens_below_live(conn, board_config, audit, l
     # guarantees — the assertion here is that the *rows* are simulated, so nothing later
     # mistakes a rehearsal for the real thing.
     assert all(row.dry_run for row in db.list_cards(conn, include_simulated=True))
+
+
+# -- issue #22: an existing rehearsal does not cost the next card N passes ---
+
+
+def seed_simulated_mapping(conn, *, card_id: str, issue_number: int) -> None:
+    """A linked simulated card, left behind by an earlier rehearsal."""
+    with db.transaction(conn):
+        row_id = db.insert_card(
+            conn,
+            board_id="board-1",
+            card_id=card_id,
+            card_url=f"https://trello.com/c/{card_id}",
+            title="Filed in an earlier run",
+            body="",
+            dry_run=True,
+        )
+        conn.execute(
+            "UPDATE cards SET state = ?, repo_key = ?, issue_number = ? WHERE id = ?",
+            (str(CardState.LINKED), REPO, issue_number, row_id),
+        )
+
+
+def test_a_new_card_is_filed_on_the_first_pass_however_many_rows_exist(
+    conn, board_config, audit
+):
+    """SC-001 and SC-002, and the test that fails against the behaviour this replaces.
+
+    Six rows is deliberately more than ``CREATE_ANOMALY_THRESHOLD``: under the per-process
+    counter this card was refused once per existing row, so it raised a
+    ``card_create_failing`` anomaly on its third refusal and only landed on its seventh
+    pass — nineteen minutes of tick intervals for one card, and two anomalies in the
+    operator's list for a system that was working.
+    """
+    from robot_army.boundaries.github import SIMULATED_ISSUE_BASE, SimulatedIssueWriter
+    from robot_army.boundaries.trello import SimulatedCardWriter
+
+    taken = {SIMULATED_ISSUE_BASE + n for n in range(1, 7)}
+    assert len(taken) > intake.CREATE_ANOMALY_THRESHOLD
+    for number in sorted(taken):
+        seed_simulated_mapping(conn, card_id=f"old-{number}", issue_number=number)
+
+    boundaries = make_board_boundaries(
+        audit,
+        level=EffectLevel.NO_REMOTE,
+        cards=[card("card-new")],
+        writer=SimulatedIssueWriter(audit, conn),
+        card_writer=SimulatedCardWriter(audit),
+    )
+    outcome = run(conn, board_config, audit, boundaries, dry_run=True)
+
+    assert outcome.issues_created == 1
+    row = next(
+        r for r in db.list_cards(conn, include_simulated=True) if r.card_id == "card-new"
+    )
+    assert row.state == CardState.LINKED
+    assert row.create_failures == 0, "the card was refused before it landed"
+    assert row.reason is None
+    assert row.issue_number not in taken
+    assert db.list_anomalies(conn) == [], "a working system raised an anomaly"
+
+
+def test_two_cards_for_one_repository_in_one_pass_both_land(conn, board_config, audit):
+    """US1 acceptance scenario 2. Each card's mapping is committed before the next is
+    filed, so the second allocation sees the first — which is exactly why the allocation
+    must read the record rather than remember a count."""
+    from robot_army.boundaries.github import SimulatedIssueWriter
+    from robot_army.boundaries.trello import SimulatedCardWriter
+
+    boundaries = make_board_boundaries(
+        audit,
+        level=EffectLevel.NO_REMOTE,
+        cards=[card("card-1", title="One"), card("card-2", title="Two")],
+        writer=SimulatedIssueWriter(audit, conn),
+        card_writer=SimulatedCardWriter(audit),
+    )
+    outcome = run(conn, board_config, audit, boundaries, dry_run=True)
+
+    assert outcome.issues_created == 2
+    rows = db.list_cards(conn, include_simulated=True)
+    assert {r.state for r in rows} == {CardState.LINKED}
+    assert len({r.issue_number for r in rows}) == 2
+    assert all(r.create_failures == 0 for r in rows)
 
 
 # -- the disposable-board case CI cannot reach (T085) -----------------------

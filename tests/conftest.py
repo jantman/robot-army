@@ -1298,7 +1298,7 @@ def web_at(config: Config, conn: Any, layout: Layout, monkeypatch: Any) -> Any:
     host = StubSessionHost()
     shared: dict[str, Any] = {}
 
-    def fake_wire(level: Any, cfg: Any, audit_log: Any) -> Any:
+    def fake_wire(level: Any, cfg: Any, audit_log: Any, conn: Any) -> Any:
         from robot_army.boundaries.git import GitVersionControl
 
         if "vcs" not in shared:
@@ -1345,7 +1345,7 @@ def web(config: Config, conn: Any, layout: Layout, monkeypatch: Any) -> WebHarne
     host = StubSessionHost()
     shared: dict[str, Any] = {}
 
-    def fake_wire(level: Any, cfg: Any, audit_log: Any) -> Any:
+    def fake_wire(level: Any, cfg: Any, audit_log: Any, conn: Any) -> Any:
         from robot_army.boundaries.git import GitVersionControl
 
         if "vcs" not in shared:
@@ -1385,7 +1385,7 @@ def board_web(board_config: Config, conn: Any, layout: Layout, monkeypatch: Any)
     card_writer = RecordingCardWriter(card_reader)
     shared: dict[str, Any] = {}
 
-    def fake_wire(level: Any, cfg: Any, audit_log: Any) -> Any:
+    def fake_wire(level: Any, cfg: Any, audit_log: Any, conn: Any) -> Any:
         from robot_army.boundaries.git import GitVersionControl
 
         if "vcs" not in shared:

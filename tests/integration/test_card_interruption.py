@@ -446,11 +446,49 @@ def test_an_archived_linked_card_is_not_counted_as_dropped(conn, board_config, a
 # -- a mapping collision degrades to a retry, never an aborted cycle --------
 
 
-def simulated_boundaries(audit, cards):
+class ReissuingIssueWriter:
+    """A simulated writer that hands back a number the mapping already holds.
+
+    Forcing the collision is now the only honest way to reach the guard. It used to happen
+    by itself: ``SimulatedIssueWriter``'s counter restarted at zero in every process, so a
+    second dry run re-minted the first run's numbers (issue #22). A test that reached the
+    guard that way was exercising the defect as much as the defence, and it would have gone
+    green for the wrong reason for as long as the defect lasted.
+
+    The writer now allocates above the highest number recorded for the repository and
+    cannot collide with itself, so this stub breaks that allocation deliberately —
+    ``times`` collisions and then out of the way, which is what lets the retry be observed
+    landing rather than merely being scheduled.
+    """
+
+    def __init__(self, inner, *, reissue: int, times: int = 1) -> None:
+        self._inner = inner
+        self._reissue = reissue
+        self._remaining = times
+
+    def create_issue(self, repo_key, title, body):
+        from dataclasses import replace
+
+        issue = self._inner.create_issue(repo_key, title, body)
+        if self._remaining <= 0:
+            return issue
+        self._remaining -= 1
+        return replace(
+            issue,
+            number=self._reissue,
+            url=f"https://github.com/{repo_key}/issues/{self._reissue}",
+        )
+
+    def comment(self, repo_key, number, body):
+        return self._inner.comment(repo_key, number, body)
+
+
+def simulated_boundaries(audit, conn, cards, *, writer=None):
     """Board and issue writers as a **fresh process** would wire them.
 
-    A new ``SimulatedIssueWriter`` each time is the point: its counter restarts at zero on
-    every process start, which is what makes the collision below reachable at all.
+    A new ``SimulatedIssueWriter`` each time is still the point, but for a different reason
+    than it once was: a restart must now be uneventful, because the numbers come from the
+    record rather than from anything the process was holding.
     """
     from robot_army.boundaries.github import SimulatedIssueWriter
     from robot_army.boundaries.trello import SimulatedCardWriter
@@ -460,33 +498,34 @@ def simulated_boundaries(audit, cards):
         audit,
         level=EffectLevel.NO_REMOTE,
         cards=cards,
-        writer=SimulatedIssueWriter(audit),
+        writer=writer if writer is not None else SimulatedIssueWriter(audit, conn),
         card_writer=SimulatedCardWriter(audit),
     )
 
 
-def test_a_restart_that_reissues_a_simulated_number_does_not_abort_the_cycle(
-    conn, board_config, audit
-):
-    """``SimulatedIssueWriter``'s counter restarts at zero each process, so a second dry
-    run can mint an issue number a row from the first run already holds — and
-    ``idx_cards_issue`` refuses it.
+def test_a_reissued_simulated_number_does_not_abort_the_cycle(conn, board_config, audit):
+    """A writer that hands back a number a row already holds is refused by
+    ``idx_cards_issue``, and that refusal is correct.
 
-    The refusal is correct. What was wrong is that the ``IntegrityError`` escaped: it
-    aborted the whole pass, skipping every remaining card, and stranded this one in
-    ``creating`` with no failure count, no reason, and no route to the anomaly threshold —
-    a silent gap produced by the guard meant to prevent one.
+    What would be wrong is the ``IntegrityError`` escaping: it would abort the whole pass,
+    skipping every remaining card, and strand this one in ``creating`` with no failure
+    count, no reason, and no route to the anomaly threshold — a silent gap produced by the
+    guard meant to prevent one.
     """
+    from robot_army.boundaries.github import SimulatedIssueWriter
+
     first = card("card-1")
-    cycle(conn, board_config, audit, simulated_boundaries(audit, [first]), dry_run=True)
+    cycle(conn, board_config, audit, simulated_boundaries(audit, conn, [first]), dry_run=True)
     original = db.list_cards(conn, include_simulated=True)[0]
     assert original.issue_number is not None
 
-    # A restart, and a second card resolving to the same repository.
-    second = card("card-2")
-    boundaries = simulated_boundaries(audit, [first, second])
-    third = card("card-3")
-    boundaries.card_reader.cards.append(third)
+    # A restart, and two more cards resolving to the same repository. The first creation of
+    # the pass is handed the number card-1 already holds.
+    second, third = card("card-2"), card("card-3")
+    writer = ReissuingIssueWriter(
+        SimulatedIssueWriter(audit, conn), reissue=original.issue_number
+    )
+    boundaries = simulated_boundaries(audit, conn, [first, second, third], writer=writer)
 
     outcome = cycle(conn, board_config, audit, boundaries, dry_run=True)
 
@@ -504,20 +543,76 @@ def test_a_restart_that_reissues_a_simulated_number_does_not_abort_the_cycle(
     assert rows["card-1"].issue_number == original.issue_number
 
 
-def test_the_colliding_card_succeeds_on_the_next_pass(conn, board_config, audit):
-    """The counter has advanced by then, so the retry mints a number nothing holds. A
-    failure that needs a human to clear would be a poor trade for a numbering accident."""
+def test_the_reason_describes_the_recovery_that_actually_happens(conn, board_config, audit):
+    """The message is part of the record, so it is asserted like one.
+
+    It used to promise "a fresh number" while the next pass drew the next number in a
+    sequence that was already taken. A sentence that describes a recovery strategy the
+    system does not have reads as reassurance and stops the reader looking further, which
+    is worse than saying nothing.
+    """
+    from robot_army.boundaries.github import SimulatedIssueWriter
+
     first = card("card-1")
-    cycle(conn, board_config, audit, simulated_boundaries(audit, [first]), dry_run=True)
+    cycle(conn, board_config, audit, simulated_boundaries(audit, conn, [first]), dry_run=True)
+    original = db.list_cards(conn, include_simulated=True)[0]
+
+    writer = ReissuingIssueWriter(
+        SimulatedIssueWriter(audit, conn), reissue=original.issue_number
+    )
+    boundaries = simulated_boundaries(audit, conn, [first, card("card-2")], writer=writer)
+    cycle(conn, board_config, audit, boundaries, dry_run=True)
+
+    reason = {r.card_id: r for r in db.list_cards(conn, include_simulated=True)}["card-2"].reason
+    assert "already mapped to card card-1" in reason, "the holder must still be named"
+    assert "allocates above the highest number recorded" in reason
+    assert "fresh number" not in reason, "the sentence the system never implemented"
+
+
+def test_the_colliding_card_succeeds_on_the_next_pass(conn, board_config, audit):
+    """The next pass allocates above the highest number recorded for the repository, so it
+    mints one nothing holds. A failure needing a human to clear would be a poor trade for a
+    numbering accident."""
+    from robot_army.boundaries.github import SimulatedIssueWriter
+
+    first = card("card-1")
+    cycle(conn, board_config, audit, simulated_boundaries(audit, conn, [first]), dry_run=True)
+    original = db.list_cards(conn, include_simulated=True)[0]
 
     second = card("card-2")
-    boundaries = simulated_boundaries(audit, [first, second])
+    writer = ReissuingIssueWriter(
+        SimulatedIssueWriter(audit, conn), reissue=original.issue_number
+    )
+    boundaries = simulated_boundaries(audit, conn, [first, second], writer=writer)
     cycle(conn, board_config, audit, boundaries, dry_run=True)
     cycle(conn, board_config, audit, boundaries, dry_run=True)
 
     rows = {row.card_id: row for row in db.list_cards(conn, include_simulated=True)}
     assert rows["card-2"].state == CardState.LINKED
     assert rows["card-2"].issue_number != rows["card-1"].issue_number
+
+
+def test_a_restart_alone_no_longer_collides(conn, board_config, audit):
+    """Issue #22 itself: the collision above had to be forced because a restart cannot
+    produce one any more. Two fresh processes, two cards, no failure and no anomaly."""
+    first = card("card-1")
+    cycle(conn, board_config, audit, simulated_boundaries(audit, conn, [first]), dry_run=True)
+
+    second = card("card-2")
+    outcome = cycle(
+        conn,
+        board_config,
+        audit,
+        simulated_boundaries(audit, conn, [first, second]),
+        dry_run=True,
+    )
+
+    assert outcome.failed == 0
+    rows = {row.card_id: row for row in db.list_cards(conn, include_simulated=True)}
+    assert {r.state for r in rows.values()} == {CardState.LINKED}
+    assert rows["card-1"].issue_number != rows["card-2"].issue_number
+    assert all(r.create_failures == 0 for r in rows.values())
+    assert db.list_anomalies(conn) == []
 
 
 def test_a_live_run_is_unaffected(conn, board_config, audit):

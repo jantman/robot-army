@@ -21,7 +21,7 @@ from robot_army.daemon import Daemon, SingleInstanceLock
 @pytest.fixture
 def ctx(config, conn, monkeypatch):
     monkeypatch.setattr(
-        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level)
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
     )
     built = operations.build_context(config)
     yield built

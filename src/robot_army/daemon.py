@@ -719,7 +719,7 @@ def run_daemon(
         audit = AuditLog(layout.log_dir, component="daemon")
         conn, _ = db.open_database(layout.db_path)
         try:
-            boundaries = wire_boundaries(effect_level, config, audit)
+            boundaries = wire_boundaries(effect_level, config, audit, conn)
             problems = check_preconditions(
                 config=config, layout=layout, boundaries=boundaries, conn=conn
             )
@@ -752,8 +752,10 @@ def run_daemon(
             audit.close()
 
 
-def wire_boundaries(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
+def wire_boundaries(
+    level: EffectLevel, config: Config, audit: AuditLog, conn: sqlite3.Connection
+) -> Boundaries:
     """Indirection so tests can substitute the whole wired set in one place."""
     from robot_army.effects import wire
 
-    return wire(level, config, audit)
+    return wire(level, config, audit, conn)

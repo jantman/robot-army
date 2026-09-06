@@ -474,3 +474,72 @@ def test_the_health_alert_ignores_the_effect_level_deliberately(
     assert [c["channel"] for c in sent] == ["webhook", "pushover"], (
         f"the alert must still be delivered at {level}"
     )
+
+
+# -- the cap the daemon publishes (issue #30) -------------------------------
+
+
+def test_the_heartbeat_carries_the_cap_the_daemon_is_enforcing(tmp_path):
+    """The whole point: the file alone answers "what cap is in force?"."""
+    path = tmp_path / "heartbeat.json"
+    health.write_heartbeat(
+        path, effect_level="live", activity="idle", cycles=1, max_concurrent_sessions=7
+    )
+    assert json.loads(path.read_text(encoding="utf-8"))["max_concurrent_sessions"] == 7
+
+
+def test_a_heartbeat_written_without_a_cap_still_parses(tmp_path):
+    """An older build's file, or one written before this field existed."""
+    path = tmp_path / "heartbeat.json"
+    health.write_heartbeat(path, effect_level="live", activity="idle", cycles=1)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["max_concurrent_sessions"] is None
+    assert health.check(path, max_age_seconds=180).healthy is True
+
+
+def report_with(**beat):
+    """A health report carrying whatever heartbeat the case needs."""
+    return health.HealthReport(True, "fresh", age_seconds=1.0, heartbeat=beat or None)
+
+
+def test_no_daemon_running_publishes_no_cap(tmp_path):
+    """Nothing is enforcing anything, so a heartbeat left behind is not an authority."""
+    assert health.published_cap(report_with(max_concurrent_sessions=7), running=False) is None
+
+
+def test_a_daemon_with_an_unreadable_heartbeat_publishes_no_cap(tmp_path):
+    path = tmp_path / "heartbeat.json"
+    report = health.check(path, max_age_seconds=180)
+    assert report.heartbeat is None
+    assert health.published_cap(report, running=True) is None
+
+
+def test_a_running_daemons_cap_is_taken_from_its_heartbeat(tmp_path):
+    assert health.published_cap(report_with(max_concurrent_sessions=7), running=True) == 7
+
+
+def test_a_stale_heartbeat_still_names_the_cap_in_force(tmp_path):
+    """R5. A daemon's cap cannot change while it runs, so staleness is not ignorance.
+
+    Staleness means a tick is running long — which is when the machine is busy, which is
+    exactly when the fraction is being read.
+    """
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=3600, max_concurrent_sessions=7)
+    report = health.check(path, max_age_seconds=180)
+    assert report.healthy is False, "the report really is stale"
+    assert health.published_cap(report, running=True) == 7
+
+
+def test_a_heartbeat_with_no_cap_field_publishes_nothing(tmp_path):
+    assert health.published_cap(report_with(effect_level="live"), running=True) is None
+
+
+@pytest.mark.parametrize("value", [0, -1, "7", True, False, None, 7.5, [7], {"n": 7}])
+def test_an_unusable_cap_is_not_published_rather_than_believed(value):
+    """Replacing a stale number with a nonsensical one is not an improvement.
+
+    ``True`` is in the list because ``bool`` is an ``int`` in Python, and a heartbeat
+    carrying ``true`` would otherwise be read as a cap of one session.
+    """
+    assert health.published_cap(report_with(max_concurrent_sessions=value), running=True) is None

@@ -377,3 +377,117 @@ def test_no_code_path_signals_a_pid_it_did_not_read_from_the_sessions_table():
             f"capacity.py must not reference {forbidden!r}: it is the one module holding "
             "out-of-band observations, and it may notice them but never touch them"
         )
+
+
+# -- which cap the fraction is reported against (issue #30) -----------------
+
+
+def test_with_no_enforced_cap_the_snapshot_uses_this_processs_own(conn, config, registry, proc):
+    """The daemon's own path, and any reader that could not learn a cap. No disagreement is
+    reported, because with only one number in hand there is nothing to disagree about."""
+    snap = take(conn, config, registry, proc)
+    assert snap.global_cap == config.daemon.max_concurrent_sessions
+    assert snap.configured_cap is None
+    assert snap.cap_disagreement is None
+
+
+def test_a_differing_enforced_cap_wins_and_is_reported(conn, config, registry, proc):
+    """Issue #30's reproduction: the daemon is enforcing 7, this process still thinks 5."""
+    config = dataclasses.replace(
+        config, daemon=dataclasses.replace(config.daemon, max_concurrent_sessions=5)
+    )
+    snap = capacity.snapshot(
+        conn, config=config, enforced_cap=7, registry_dir=registry, proc_root=proc
+    )
+    assert snap.global_cap == 7
+    assert snap.configured_cap == 5
+    assert "7" in (snap.cap_disagreement or "") and "5" in (snap.cap_disagreement or "")
+
+
+def test_the_enforced_cap_wins_in_the_other_direction_too(conn, config, registry, proc):
+    """The file edited and nothing restarted: a fresh process reads 9, the daemon enforces
+    7, and the number nothing is enforcing is the wrong one to print."""
+    config = dataclasses.replace(
+        config, daemon=dataclasses.replace(config.daemon, max_concurrent_sessions=9)
+    )
+    snap = capacity.snapshot(
+        conn, config=config, enforced_cap=7, registry_dir=registry, proc_root=proc
+    )
+    assert snap.global_cap == 7
+    assert snap.configured_cap == 9
+
+
+def test_an_agreeing_enforced_cap_reports_no_disagreement(conn, config, registry, proc):
+    cap = config.daemon.max_concurrent_sessions
+    snap = capacity.snapshot(
+        conn, config=config, enforced_cap=cap, registry_dir=registry, proc_root=proc
+    )
+    assert snap.global_cap == cap
+    assert snap.configured_cap is None
+    assert snap.cap_disagreement is None
+
+
+def test_at_capacity_follows_the_cap_in_force(conn, config, registry, proc, tmp_path):
+    """FR-003: the fraction and the wording around it cannot come from different numbers.
+
+    One session running against a configured cap of 1 is full; against the daemon's cap of
+    3 it is not, and it is the daemon that decides whether anything dispatches.
+    """
+    config = dataclasses.replace(
+        config, daemon=dataclasses.replace(config.daemon, max_concurrent_sessions=1)
+    )
+    add_live_session(
+        registry, proc, pid=701, session_id="s-1", cwd=str(tmp_path / WORKTREES / "demo")
+    )
+    stale_view = capacity.snapshot(
+        conn, config=config, registry_dir=registry, proc_root=proc
+    )
+    assert stale_view.at_capacity is True
+
+    live_view = capacity.snapshot(
+        conn, config=config, enforced_cap=3, registry_dir=registry, proc_root=proc
+    )
+    assert live_view.at_capacity is False
+
+
+def test_describe_carries_the_disagreement_so_one_line_says_both(conn, config, registry, proc):
+    config = dataclasses.replace(
+        config, daemon=dataclasses.replace(config.daemon, max_concurrent_sessions=5)
+    )
+    snap = capacity.snapshot(
+        conn, config=config, enforced_cap=7, registry_dir=registry, proc_root=proc
+    )
+    line = snap.describe()
+    assert line.startswith("0/7 sessions")
+    assert "SESSION CAP MISMATCH" in line
+
+
+def test_the_sentence_does_not_claim_to_know_which_process_is_stale(conn, config):
+    """Both directions are reachable and their remedies are opposite, so naming one would
+    send the reader to restart the process that was already right."""
+    snap = capacity.CapacitySnapshot(
+        observable=True, degraded=False, total=0, ours=(), others=0,
+        global_cap=7, configured_cap=5,
+    )
+    sentence = snap.cap_disagreement or ""
+    assert "restart that one" in sentence
+    assert "restart the daemon" not in sentence
+    assert "restart this interface" not in sentence
+
+
+def test_an_unobservable_machine_still_reports_the_cap_in_force(conn, config, audit, tmp_path):
+    """"How full is it?" being unanswerable does not make "what is the limit?" unanswerable."""
+    config = dataclasses.replace(
+        config, daemon=dataclasses.replace(config.daemon, max_concurrent_sessions=5)
+    )
+    snap = capacity.snapshot(
+        conn,
+        config=config,
+        enforced_cap=7,
+        audit=audit,
+        registry_dir=tmp_path / "absent",
+        proc_root=tmp_path / "no-proc-here",
+    )
+    assert snap.observable is False
+    assert snap.global_cap == 7
+    assert snap.configured_cap == 5

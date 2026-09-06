@@ -289,6 +289,28 @@ whole milestone exists to make answerable:
 | `verified_origin` | the **normalised** `host/owner/name` found there. Never a raw URL |
 | `owner_verdict` | `owned`, `listed`, or the owner found, from the one repository lookup |
 
+**Two more fields arrived with issue #41**, on the same record and for the same kind of reason —
+they say what was true of the repository at the moment it was approved:
+
+| Field | Meaning |
+|---|---|
+| `speckit` | whether the clone was detected as a Spec Kit project |
+| `speckit_numbering` | `timestamp`, `scanned`, `unknown`, or `null` when `speckit` is `false` and nothing was asked |
+
+`scanned` is what [the onboarding warning](1-setup.md#the-one-thing-onboarding-warns-about-rather-than-refuses)
+fires on, so this answers "was I told, and did I approve anyway" for any past onboarding:
+
+```bash
+jq -r 'select(.action == "repo.onboard" and .detail.speckit_numbering == "scanned")
+       | "\(.ts) \(.entity_id)"' \
+  ~/.local/state/robot-army/logs/audit-*.jsonl
+```
+
+`null` means *not asked* rather than *no answer*: the repository is not a Spec Kit project, so
+nothing read the file. The **configured value** — `sequential`, or whatever it said — is on the
+screen and in the `--json` document but deliberately not here. This record answers what was
+approved, and the verdict is that.
+
 **Refusals are now written, and that is a bug fix rather than new behaviour.** Before this
 milestone `onboard` returned for a missing `[repos.*]` section *before* opening any audit
 action, so a refusal was printed and forgotten. Under Principle III's reconstruction standard
@@ -505,6 +527,7 @@ the log knows what its silence means:
 | A reconciliation pass in which an item's **pull-request set did not change** | Same disproportion as the phase row below, and the same accounting: with a 60-second cycle almost every check confirms an unchanged set. Every change is recorded individually with what it changed from, `reconcile.pass` counts them, and the row's own `pull_requests_at` carries the last confirmation — so neither the answer nor its age is unreconstructable. Every **failure** to look is logged individually. See the issue #143 section above |
 | A reconciliation pass in which **no lifecycle phase changed** | Same disproportion as the heartbeat: a 60-second cycle against work that moves every few hours. Every transition is recorded individually, and the pass summary counts the changes, so nothing about the progression is unreconstructable. See the milestone 007 section above |
 | The individual **file reads** behind Spec Kit detection and phase observation | Four `stat` calls per dispatch and a handful per active item per cycle. They change no state outside the process, and the *decision* they support is logged — logging each read would bury it |
+| The read of `.specify/init-options.json` at **onboarding** | Same reasoning, one milestone later (issue #41). A `stat` and at most one small file read, on a command run once per repository — and the answer it produces is written onto the `repo.onboard` record that same run, so what the maintainer was shown when they approved is reconstructable from the log without a line saying a file was opened |
 | A repository that **has never had a project board** and does not have one now | Not an action and not a failure — it is the ordinary condition of most repositories, and it would otherwise write a record a minute forever for every one of them. Nothing is persisted for such a repository either, so `status` stays quiet about it too. A board that *goes away* is different and **is** recorded: that is a change, and the author should hear about it |
 | The project board's **item sequence** on every read — the counts and the outcome are recorded instead | The order itself is recoverable from `work_items.board_position` at any instant, and it is not a question about an action the system *took*. Writing the same list every 60 seconds per repository would be ~1,440 copies a day drowning the records that matter. What is genuinely lost is history: from the log alone you cannot say what order the board was in three days ago. Every read, every failure, every fallback and every dispatch **is** recorded, so nothing the system did is unreconstructable |
 | A **window that simply does not qualify for closing** — its item is `failed`, or still has a live session | The pass runs every 60 seconds and a working machine has several such windows permanently, so a record each would be thousands a day carrying no news. The condition is re-derivable from the item's state at any instant, and everything the sweep *does* — every close, every failure to close, every failure to list — is recorded. Same reasoning as the row below, and as the transcript check |

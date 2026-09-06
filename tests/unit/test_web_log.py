@@ -86,11 +86,25 @@ def test_the_skipped_count_reaches_the_page(web, layout):
 
 
 def test_a_record_with_an_unparseable_timestamp_is_skipped_and_counted(ctx, layout):
-    """Skipped is not rejected: a record we cannot judge must be reported, not dropped."""
+    """Skipped is not rejected: a record we cannot judge must be reported, not dropped.
+
+    This is the only test in the module that passes ``since``, so it is the only one whose
+    fixtures have to be inside a window measured from **now**. ``record()``'s default stamp
+    is midnight of the day the module was imported, which is inside a one-day window right
+    up until midnight and outside it a second later — so a CI run that starts at 23:59 and
+    reaches this test at 00:01 fails, having filtered every record out. That happened on
+    2026-08-25 and again on 2026-09-06. Deriving the day from the module-level clock, which
+    is what the last fix did, does not close it: the flake is the *offset*, not the date.
+
+    So the stamps here are a minute old by construction, and the file is named for the day
+    that minute falls in, whenever the test happens to run.
+    """
+    minute_ago = datetime.now(UTC) - timedelta(minutes=1)
+    stamp = minute_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
     write_log(
         layout,
-        TODAY,
-        [record(0), record(1, ts="not-a-timestamp"), record(2)],
+        minute_ago.strftime("%Y-%m-%d"),
+        [record(0, ts=stamp), record(1, ts="not-a-timestamp"), record(2, ts=stamp)],
     )
     result = operations.read_log_page(ctx, since="1d")
     assert result.data["skipped_lines"] == 1

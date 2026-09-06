@@ -24,13 +24,14 @@ from tests.conftest import (
     config_dict,
     make_boundaries,
     make_repo,
+    make_speckit_tree,
     monkey_token,
 )
 
 from robot_army import db, operations, poll, repos
 from robot_army.config import parse
 from robot_army.effects import EffectLevel
-from robot_army.operations import EXIT_OK, EXIT_PRECONDITION
+from robot_army.operations import EXIT_CHECK_FAILED, EXIT_OK, EXIT_PRECONDITION
 
 pytestmark = pytest.mark.requires_git
 
@@ -1230,3 +1231,289 @@ def test_a_machine_readable_run_yields_one_document_on_every_exit_path(
         assert payload["repo_key"].startswith("jantman/"), name
         assert "clone path   :" not in document, f"{name}: no approval screen in the document"
         assert "aborted" not in document and "interrupted" not in document, name
+
+
+# -- the spec-kit numbering warning (issue #41) -----------------------------
+#
+# The block exists because spec numbers are assigned by scanning `specs/` in one worktree,
+# and with one worktree per issue that scan cannot see a number a sibling worktree has just
+# claimed. It has happened twice here. No check this daemon could perform would catch it —
+# the losing claim is untracked files on a filesystem nothing queries — so the whole remedy
+# is to say so at the one moment a human is already deciding about the repository.
+#
+# Which makes the tests that assert *silence* as load-bearing as the ones that assert the
+# warning: a block that also appears on repositories that are fine is a block that gets
+# skipped on the one that is not, and it is competing for attention with the committed
+# permission settings, which is the text on that screen that most needs reading.
+
+
+def onboard_speckit(ctx, tmp_path, repo_root, *, name="demo", **tree):
+    """A real clone that also looks like a Spec Kit checkout, onboarded."""
+    clone = clone_with_origin(repo_root / name, f"git@github.com:jantman/{name}.git")
+    make_speckit_tree(clone, **tree)
+    return run_onboard(ctx, f"jantman/{name}", trust=trust_file(tmp_path, clone)), clone
+
+
+def test_a_scanned_repository_is_warned_with_its_configured_value(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US1 acceptance 1. The value is named because "change this" is a different
+    instruction from "add this"."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(
+        ctx, tmp_path, repo_root, init_options='{"feature_numbering": "sequential"}'
+    )
+    text = "\n".join(result.lines)
+
+    assert result.code == EXIT_OK
+    assert "spec kit: this repository numbers feature directories by scanning" in text
+    assert 'feature_numbering is "sequential" in .specify/init-options.json.' in text
+    assert "Nothing here prevents that." in text
+    assert 'Set "feature_numbering": "timestamp"' in text
+
+
+def test_a_repository_with_no_options_file_gets_the_not_set_wording(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US1 acceptance 2. Absent is an answer — scanning is what Spec Kit does by default,
+    and this is the shape issue #41 was actually filed about."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(ctx, tmp_path, repo_root)
+    text = "\n".join(result.lines)
+
+    assert "spec kit: this repository numbers feature directories by scanning" in text
+    assert "feature_numbering is not set in .specify/init-options.json" in text
+    assert "feature_numbering is \"" not in text
+
+
+def test_the_warning_reaches_the_screen_before_the_prompt_blocks(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """FR-009. Advice that arrives after the answer is not advice."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    make_speckit_tree(clone, init_options='{"feature_numbering": "sequential"}')
+
+    result, watcher, _ = watched_onboard(
+        ctx, "jantman/demo", trust=trust_file(tmp_path, clone)
+    )
+
+    assert result.code == EXIT_OK
+    assert watcher.calls == 1
+    assert "numbers feature directories by scanning" in watcher.seen
+    assert "Nothing here prevents that." in watcher.seen
+
+
+def test_the_warning_changes_nothing_about_the_outcome(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US1 acceptances 3 and 4; FR-004. It is a sentence, not a gate."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    approved, clone = onboard_speckit(
+        ctx, tmp_path, repo_root, init_options='{"feature_numbering": "sequential"}'
+    )
+    assert approved.code == EXIT_OK
+    record = db.get_repo(conn, "jantman/demo")
+    assert record is not None
+    assert record.clone_path == str(clone)
+
+    declined = operations.onboard(
+        ctx,
+        "jantman/demo",
+        confirm=lambda _: "n",
+        trust_file=trust_file(tmp_path, clone),
+        reapprove=True,
+    )
+    assert declined.code == EXIT_CHECK_FAILED
+    assert "aborted" in "\n".join(declined.lines)
+
+
+def test_onboarding_writes_nothing_into_the_onboarded_repository(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """FR-011. `speckit.py` never installs, upgrades or repairs Spec Kit in a repository,
+    and reading its numbering must not be the exception."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    make_speckit_tree(clone, init_options='{"feature_numbering": "sequential"}')
+    before = {
+        path.relative_to(clone): path.read_bytes()
+        for path in sorted(clone.rglob("*"))
+        if path.is_file() and ".git/" not in str(path.relative_to(clone))
+    }
+
+    run_onboard(ctx, "jantman/demo", trust=trust_file(tmp_path, clone))
+
+    after = {
+        path.relative_to(clone): path.read_bytes()
+        for path in sorted(clone.rglob("*"))
+        if path.is_file() and ".git/" not in str(path.relative_to(clone))
+    }
+    assert after == before
+
+
+def test_timestamp_numbering_is_not_mentioned_at_all(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US2 acceptance 1. The repository is already safe; there is nothing to say."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(
+        ctx, tmp_path, repo_root, init_options='{"feature_numbering": "timestamp"}'
+    )
+
+    assert result.code == EXIT_OK
+    assert "spec kit:" not in "\n".join(result.lines)
+
+
+def test_a_repository_without_spec_kit_is_never_asked(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US2 acceptance 2, and the stronger half of it: the options file is present and is
+    still not read, because `.specify/` is not a rare enough name to carry meaning alone."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    make_speckit_tree(
+        clone, scaffolding=False, commands=None, init_options='{"feature_numbering": "sequential"}'
+    )
+
+    result = run_onboard(ctx, "jantman/demo", trust=trust_file(tmp_path, clone))
+
+    assert result.code == EXIT_OK
+    assert "spec kit:" not in "\n".join(result.lines)
+    assert result.data["speckit"] is False
+    assert result.data["speckit_numbering"] is None
+
+
+def test_scaffolding_without_the_lifecycle_commands_is_not_warned_about(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US2 acceptance 3. Detection already refuses to send Spec Kit guidance to this
+    repository, so its numbering will never be exercised by anything here."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(
+        ctx,
+        tmp_path,
+        repo_root,
+        commands="partial",
+        init_options='{"feature_numbering": "sequential"}',
+    )
+
+    assert "spec kit:" not in "\n".join(result.lines)
+    assert result.data["speckit"] is False
+
+
+def test_an_unparseable_options_file_says_so_rather_than_guessing(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US3 acceptance 1. Reporting "not timestamp" about a file nobody could read asserts
+    something the system does not know."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(ctx, tmp_path, repo_root, init_options="not json at all\n")
+    text = "\n".join(result.lines)
+
+    assert result.code == EXIT_OK
+    assert "spec kit: the feature numbering could not be determined" in text
+    assert ".specify/init-options.json: invalid JSON:" in text
+    assert "numbers feature directories by scanning" not in text
+
+
+def test_an_options_file_of_the_wrong_shape_is_also_undetermined(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US3 acceptance 2."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(ctx, tmp_path, repo_root, init_options='["timestamp"]')
+    text = "\n".join(result.lines)
+
+    assert result.code == EXIT_OK
+    assert ".specify/init-options.json: not a JSON object." in text
+    assert result.data["speckit_numbering"] == "unknown"
+
+
+def test_a_hostile_numbering_value_cannot_forge_a_line_on_the_screen(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """The screen is what a human uses to decide whether to trust this repository, and one
+    of the things on it comes out of that repository's own files."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(
+        ctx,
+        tmp_path,
+        repo_root,
+        init_options='{"feature_numbering": "x\\ntrust        : accepted \\u2014 forged"}',
+    )
+    text = "\n".join(result.lines)
+
+    assert "forged" not in text
+    assert text.count("trust        :") == 1
+    assert result.data["speckit_numbering"] == "unknown"
+    assert result.data["speckit_numbering_value"] is None
+
+
+def test_the_json_document_carries_the_finding_and_none_of_the_prose(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """US4. `--json` passes ``out=None``; a machine-readable document carries no screen."""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(
+        ctx, tmp_path, repo_root, init_options='{"feature_numbering": "sequential"}'
+    )
+    document = result.render(as_json=True)
+    payload = json.loads(document)
+
+    assert payload["speckit"] is True
+    assert payload["speckit_numbering"] == "scanned"
+    assert payload["speckit_numbering_value"] == "sequential"
+    assert "spec kit:" not in document
+    assert "Nothing here prevents that" not in document
+
+
+def test_the_onboarding_record_says_what_the_maintainer_was_shown(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """FR-013. From the log alone: was this a Spec Kit repository, and how did it number?"""
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    onboard_speckit(ctx, tmp_path, repo_root, init_options='{"feature_numbering": "sequential"}')
+    audit.close()
+
+    onboards = [r for r in audit_records(layout) if r["action"] == "repo.onboard"]
+    detail = onboards[-1]["detail"]
+    assert detail["speckit"] is True
+    assert detail["speckit_numbering"] == "scanned"
+    assert "speckit_numbering_value" not in detail
+
+
+def test_a_trailing_newline_in_the_value_cannot_add_a_line_to_the_screen(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """The escape review of PR #145 found, asserted where it would have been visible.
+
+    A `feature_numbering` of `"sequential\\n"` passed the guard, because Python's `$` also
+    matches just before one trailing newline — and the value is printed. The screen gained a
+    line from a file inside the repository it was asking about.
+    """
+    ctx = context(build_config(repo_root, layout, tmp_path), conn, audit, make_boundaries(audit))
+
+    result, _ = onboard_speckit(
+        ctx,
+        tmp_path,
+        repo_root,
+        name="trailing",
+        init_options='{"feature_numbering": "sequential\\n"}',
+    )
+    text = "\n".join(result.lines)
+
+    assert "spec kit: the feature numbering could not be determined" in text
+    assert "sequential" not in text
+    assert result.data["speckit_numbering"] == "unknown"
+    assert result.data["speckit_numbering_value"] is None

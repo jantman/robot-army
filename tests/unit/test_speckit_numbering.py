@@ -155,15 +155,22 @@ def test_a_trailing_newline_does_not_slip_past_the_guard(tmp_path: Path) -> None
 
     The newline test above missed it because it puts the newline in the *middle*, where the
     character class rejects it whichever way the pattern is anchored. This one is the edge.
+
+    **Built with** ``json.dumps``, and that is not a stylistic preference. Writing the
+    fixture as ``'{"feature_numbering": "sequential\\n"}'`` in a non-raw literal puts a bare
+    line feed inside a JSON string, which is invalid JSON — so the file was rejected by the
+    decoder before the guard was ever reached, and this test passed against the very bug it
+    names. Caught in review of PR #145, one round after the fix it was meant to pin down.
     """
     root = make_speckit_tree(
-        tmp_path / "repo", init_options='{"feature_numbering": "sequential\n"}'
+        tmp_path / "repo", init_options=json.dumps({"feature_numbering": "sequential\n"})
     )
 
     result = speckit.numbering(root)
 
     assert result.kind == "unknown"
     assert result.value is None
+    assert result.reason == "feature_numbering is not a plain value"
     assert "\n" not in result.reason
 
 
@@ -217,6 +224,45 @@ def test_an_oversized_file_is_unknown_and_is_not_parsed(tmp_path: Path) -> None:
 
     assert result.kind == "unknown"
     assert result.reason == "too large to be a spec kit options file"
+
+
+def test_deeply_nested_json_is_unknown_rather_than_a_recursion_error(tmp_path: Path) -> None:
+    """`RecursionError` is a `RuntimeError`, so `except ValueError` does not hold the promise.
+
+    Whether the decoder actually recurses this far depends on which scanner is installed —
+    CPython's C one gives up around 52,000 levels, the pure-Python one around 2,000 — and on
+    a recursion limit any caller may lower. This test asserts the outcome rather than the
+    mechanism, so it stays honest on a build where the decoder copes.
+    """
+    depth = 5_000
+    root = make_speckit_tree(
+        tmp_path / "repo", init_options="[" * depth + "]" * depth
+    )
+
+    result = speckit.numbering(root)
+
+    assert result.kind in {"scanned", "unknown"}
+    assert result.value is None
+    assert result.safe is False
+
+
+def test_the_reader_survives_a_recursion_error_from_the_decoder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mechanism, forced, because the input that triggers it is version-dependent."""
+    root = make_speckit_tree(
+        tmp_path / "repo", init_options='{"feature_numbering": "timestamp"}'
+    )
+
+    def blow_the_stack(_text: str) -> object:
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON object")
+
+    monkeypatch.setattr(speckit.json, "loads", blow_the_stack)
+
+    result = speckit.numbering(root)
+
+    assert result.kind == "unknown"
+    assert result.reason.startswith("invalid JSON:")
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")

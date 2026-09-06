@@ -360,9 +360,18 @@ def numbering(root: str | Path) -> Numbering:
 
     try:
         options = json.loads(text)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         # The decoder's message names a line and a column and never quotes the input, so it
         # is safe to put on the screen. That is not true of the input itself.
+        #
+        # ``RecursionError`` is caught because deeply nested input recurses inside the
+        # decoder, and it is a ``RuntimeError`` — so ``ValueError`` alone does not hold the
+        # "never raises" promise this function's docstring makes. On CPython 3.14 the size
+        # bound above happens to reject such a payload first, since the C scanner needs
+        # ~52,000 levels before it gives up; the pure-Python scanner gives up at ~2,000,
+        # which is 4 KB and well inside the bound. Resting an unconditional promise on which
+        # accelerator is installed, and on a recursion limit any caller may lower, is not
+        # resting it on anything. Raised in review of PR #145.
         return Numbering(kind="unknown", reason=f"invalid JSON: {exc}")
 
     if not isinstance(options, dict):

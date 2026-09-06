@@ -42,6 +42,10 @@ Ordered; the first rule that applies wins. Every step's failure is an outcome, n
    something else is in that path, and it is not going to be parsed to find out what.
 4. **The content is not valid JSON** → `unknown`, `reason` carrying the decoder's message. That
    message names a line and column and never quotes the input, so it is safe to print.
+   `RecursionError` counts as "not valid JSON" here: deeply nested input recurses inside the
+   decoder, and it is a `RuntimeError` rather than a `ValueError`, so catching only the latter
+   would leave rule 4 able to raise — against a docstring that promises it never does. Raised
+   in review of PR #145.
 5. **The parsed content is not a JSON object** → `unknown`.
 6. **There is no `feature_numbering` key** → `scanned`, `value=None`.
 7. **The value is not a string, is longer than 32 characters, or contains anything outside

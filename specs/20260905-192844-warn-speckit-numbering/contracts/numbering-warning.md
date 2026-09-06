@@ -78,7 +78,7 @@ The second line is the `Numbering.reason`, printed verbatim. It is one of:
 |---|---|
 | `OSError` on open or read | `could not be read: <the OS error>` |
 | Larger than 64 KiB | `too large to be a spec kit options file` |
-| Invalid JSON | `invalid JSON: <the decoder's message>` |
+| Invalid JSON, including input nested deeply enough to exhaust the decoder's stack | `invalid JSON: <the decoder's message>` |
 | Not a JSON object | `not a JSON object` |
 | `feature_numbering` is not a plain identifier | `feature_numbering is not a plain value` |
 

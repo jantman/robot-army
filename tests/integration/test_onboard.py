@@ -49,6 +49,35 @@ def clone_with_origin(path: Path, url: str) -> Path:
     return repo
 
 
+def clone_of_a_repository_whose_default_is(
+    branch: str,
+    *,
+    upstream: Path,
+    target: Path,
+    url: str,
+    files: dict[str, str] | None = None,
+) -> Path:
+    """A clone made the way every real clone is made, so ``origin/HEAD`` is real.
+
+    ``clone_with_origin`` above builds a repository and *names* a remote it has never
+    spoken to, which is a shape with no ``refs/remotes/origin/HEAD`` — perfect for the
+    fallback path and useless for issue #150, whose whole subject is the ref a genuine
+    clone carries. So this one clones for real and then re-points ``origin`` at the URL the
+    identity check needs; ``git remote set-url`` leaves ``origin/HEAD`` alone.
+    """
+    make_repo(upstream, files=files, branch=branch)
+    subprocess.run(
+        ["git", "clone", "-q", str(upstream), str(target)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", url],
+        cwd=target,
+        check=True,
+        capture_output=True,
+    )
+    return target
+
+
 @pytest.fixture
 def repo_root(tmp_path: Path) -> Path:
     root = tmp_path / "GIT"
@@ -551,6 +580,135 @@ def test_yes_refuses_unapproved_committed_settings_and_records_that_too(
         if r["action"] == "repo.onboard" and r.get("detail", {}).get("refused")
     ]
     assert causes == ["unapproved_committed_settings"]
+
+
+# -- the base ref comes from the repository (issue #150) ---------------------
+
+
+def test_a_master_repository_is_onboarded_against_master(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """Issue #150, in the suite.
+
+    The reported screen said ``base ref : main`` for a clone whose default branch is
+    ``master``, and the damage is the line underneath: the settings committed on ``master``
+    were neither shown nor fingerprinted, so the maintainer approved a repository having
+    been shown nothing, and the record asserted it commits nothing.
+    """
+    body = '{"permissions": {"allow": ["Bash(ls:*)"]}}'
+    clone = clone_of_a_repository_whose_default_is(
+        "master",
+        upstream=tmp_path / "upstream",
+        target=repo_root / "demo",
+        url="git@github.com:jantman/demo.git",
+        files={".claude/settings.json": body},
+    )
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    result = run_onboard(ctx, "jantman/demo", trust=trust_file(tmp_path, clone))
+    screen = "\n".join(result.lines)
+
+    assert result.code == EXIT_OK
+    assert "base ref     : master   (detected from origin/HEAD)" in screen
+    assert "committed tool-permission settings at the base ref:" in screen
+    assert "Bash(ls:*)" in screen, "the file committed on master, which nobody was shown"
+    assert result.data["base_ref"] == "master"
+    assert result.data["base_ref_source"] == "detected"
+
+    record = db.get_repo(conn, "jantman/demo")
+    assert record.fingerprint and ".claude/settings.json" in record.fingerprint
+
+
+def test_the_screen_says_where_the_base_ref_came_from(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """The line used to be the only one on this screen nothing had looked at the repository
+    to produce, and it read exactly like the three that had. Now it names its rung."""
+    clone = clone_of_a_repository_whose_default_is(
+        "master",
+        upstream=tmp_path / "upstream",
+        target=repo_root / "demo",
+        url="git@github.com:jantman/demo.git",
+    )
+    config = build_config(
+        repo_root,
+        layout,
+        tmp_path,
+        repos={"jantman/demo": {"path": str(clone), "base_branch": "develop"}},
+    )
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    result = run_onboard(ctx, "jantman/demo", trust=trust_file(tmp_path, clone))
+
+    assert 'base ref     : develop   ([repos."jantman/demo"] base_branch)' in "\n".join(
+        result.lines
+    )
+    assert result.data["base_ref_source"] == "repo_config"
+
+
+def test_a_clone_that_cannot_say_falls_back_visibly_rather_than_silently(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """FR-007. A clone whose remote was configured but never fetched has no
+    ``origin/HEAD``; onboarding must still work, and the screen must not present the
+    configured value as though the repository had confirmed it."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path, worker={"base_branch": "trunk"})
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    result = run_onboard(ctx, "jantman/demo", trust=trust_file(tmp_path, clone))
+    screen = "\n".join(result.lines)
+
+    assert result.code == EXIT_OK
+    assert "base ref     : trunk   ([worker] base_branch;" in screen
+    assert "the clone does not say which branch is its default" in screen
+    assert result.data["base_ref_source"] == "worker_config"
+
+
+def test_the_record_says_what_branch_was_approved_and_what_decided_it(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """Principle III's reconstruction standard applied to the line that used to be a guess:
+    from the log alone, both halves of the answer."""
+    clone = clone_of_a_repository_whose_default_is(
+        "master",
+        upstream=tmp_path / "upstream",
+        target=repo_root / "demo",
+        url="git@github.com:jantman/demo.git",
+    )
+    config = build_config(repo_root, layout, tmp_path)
+    ctx = context(config, conn, audit, make_boundaries(audit))
+
+    run_onboard(ctx, "jantman/demo", trust=trust_file(tmp_path, clone))
+    audit.close()
+
+    detail = [r for r in audit_records(layout) if r["action"] == "repo.onboard"][-1]["detail"]
+    assert detail["base_ref"] == "master"
+    assert detail["base_ref_source"] == "detected"
+
+
+def test_the_simulated_boundary_detects_the_same_branch_as_the_real_one(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """The issue #20 shape, guarded before it can happen again: a simulation that invented
+    ``"main"`` here would go on printing the #150 screen below ``local`` after the real path
+    stopped printing it."""
+    clone = clone_of_a_repository_whose_default_is(
+        "master",
+        upstream=tmp_path / "upstream",
+        target=repo_root / "demo",
+        url="git@github.com:jantman/demo.git",
+        files={".claude/settings.json": '{"permissions": {"allow": ["Bash(ls:*)"]}}'},
+    )
+    config = build_config(repo_root, layout, tmp_path)
+
+    result = run_onboard(
+        simulated_ctx(config, conn, audit), "jantman/demo", trust=trust_file(tmp_path, clone)
+    )
+
+    assert result.data["base_ref"] == "master"
+    assert "Bash(ls:*)" in "\n".join(result.lines)
 
 
 # -- the review below ``local`` (issue #20) ----------------------------------

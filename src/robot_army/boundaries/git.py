@@ -455,6 +455,37 @@ class GitVersionControl:
             return "origin"
         return remotes[0] if remotes else None
 
+    def default_branch(self, clone_path: str, remote: str) -> str | None:
+        """``refs/remotes/<remote>/HEAD``, reduced to the branch name it points at.
+
+        The whole of issue #150 is that this was never asked. The base ref was a
+        configuration default, so a clone whose default branch is ``master`` was onboarded
+        against a ``main`` that does not exist — and the settings review, which reads files
+        *at that ref*, was therefore blank by construction for every such repository.
+
+        The **full** ref name is read rather than ``--short``. ``--short`` answers
+        ``origin/master``, and turning that back into ``master`` means assuming the remote's
+        name contains no ``/``; stripping a prefix we ourselves spelled is exact instead of
+        probable.
+
+        ``check=False`` because *absent* is a normal answer, not a failure: ``symbolic-ref``
+        exits 1 with no output in a repository whose remote was configured but never
+        fetched. That and a git failure are the same ``None`` here, for the reason the
+        protocol's docstring gives.
+        """
+        prefix = f"refs/remotes/{remote}/"
+        result = self._run(
+            ["symbolic-ref", "--quiet", f"{prefix}HEAD"],
+            cwd=clone_path,
+            timeout=QUICK_TIMEOUT,
+            action="git.subprocess",
+            check=False,
+        )
+        name = result.stdout.strip()
+        if not result.ok or not name.startswith(prefix):
+            return None
+        return name.removeprefix(prefix) or None
+
     def remote_url(self, clone_path: str, remote: str) -> str | None:
         """The configured URL of one remote, or ``None`` when it has none.
 
@@ -639,6 +670,19 @@ class SimulatedVersionControl:
         (issue #20). Nothing here contacts the remote: this reads local git config.
         """
         return self._real.default_remote(clone_path)
+
+    def default_branch(self, clone_path: str, remote: str) -> str | None:
+        """The **real** answer, at every effect level. Same subject as ``default_remote``.
+
+        Which branch a real remote calls its default is not something a simulation gets an
+        opinion about — it is written in the operator's clone, and it is written there
+        whatever level we are pretending at. The cost of getting this one wrong is precise
+        rather than theoretical: an invented ``"main"`` would make a ``plan``-level
+        onboarding of a ``master`` repository print exactly the screen issue #150 is about,
+        so the simulation would go on reproducing the bug after the real path stopped
+        having it. That is the shape of the two bugs issue #20 found in this class.
+        """
+        return self._real.default_branch(clone_path, remote)
 
     def remote_url(self, clone_path: str, remote: str) -> str | None:
         """The **real** URL, at every effect level.

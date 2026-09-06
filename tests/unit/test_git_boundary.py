@@ -628,6 +628,100 @@ def test_a_settings_file_that_is_not_valid_utf8_does_not_crash_the_review(tmp_pa
         assert "�" in contents[".claude/settings.json"]
 
 
+# -- the default branch a clone already knows (issue #150) -------------------
+
+
+@pytest.fixture
+def cloned(tmp_path):
+    """A factory for real clones, because ``origin/HEAD`` only exists in a real one.
+
+    ``bare_clone`` above builds a repository and names a remote it has never spoken to,
+    which is precisely the shape with **no** ``refs/remotes/origin/HEAD`` — the fallback
+    case below. Detection needs the other shape, and the only honest way to get it is to
+    clone.
+    """
+    from tests.conftest import make_repo
+
+    def build(branch: str, name: str = "demo") -> Path:
+        upstream = make_repo(tmp_path / f"{name}-upstream", branch=branch)
+        target = tmp_path / name
+        subprocess.run(
+            ["git", "clone", "-q", str(upstream), str(target)],
+            check=True,
+            capture_output=True,
+        )
+        return target
+
+    return build
+
+
+def test_a_clone_of_a_master_repository_answers_master(cloned, audit):
+    """Issue #150's whole premise: the answer was on disk the entire time."""
+    clone = cloned("master")
+
+    for vcs in implementations(audit):
+        assert vcs.default_branch(str(clone), "origin") == "master"
+
+
+def test_a_clone_of_a_main_repository_still_answers_main(cloned, audit):
+    """The case that worked by coincidence must go on working on purpose."""
+    clone = cloned("main")
+
+    for vcs in implementations(audit):
+        assert vcs.default_branch(str(clone), "origin") == "main"
+
+
+def test_a_remote_that_was_never_fetched_answers_none(bare_clone, audit):
+    """``git remote add`` writes a URL and nothing else. There is no ref to read, and that
+    is a normal answer rather than a failure — it is the shape every fixture in this suite
+    that predates issue #150 has."""
+    git(bare_clone, "remote", "add", "origin", "git@github.com:jantman/demo.git")
+
+    for vcs in implementations(audit):
+        assert vcs.default_branch(str(bare_clone), "origin") is None
+
+
+def test_the_remote_asked_about_is_the_remote_answered_about(cloned, audit):
+    """The identity check may settle on a remote that is not called ``origin``, and
+    detection is asked about *that* one. A hardcoded ``origin`` would answer for the wrong
+    remote, or for none."""
+    clone = cloned("master")
+    git(clone, "remote", "rename", "origin", "gh")
+
+    for vcs in implementations(audit):
+        assert vcs.default_branch(str(clone), "gh") == "master"
+        assert vcs.default_branch(str(clone), "origin") is None
+
+
+def test_a_directory_that_is_not_a_repository_answers_none_rather_than_raising(tmp_path, audit):
+    """Onboarding calls this before it has established very much, so a non-repository must
+    come back as "the clone does not know" rather than as a traceback."""
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+
+    for vcs in implementations(audit):
+        assert vcs.default_branch(str(plain), "origin") is None
+
+
+def test_detection_is_recorded_like_every_other_local_read(cloned, audit, layout):
+    """Principle III. The record must show the question was asked and what came back."""
+    import json
+
+    clone = cloned("master")
+    GitVersionControl(audit).default_branch(str(clone), "origin")
+    audit.close()
+
+    argvs = [
+        record["detail"]["argv"]
+        for path in sorted(layout.log_dir.glob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        for record in [json.loads(line)]
+        if record["action"] == "git.subprocess"
+    ]
+    assert ["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"] in argvs
+
+
 # -- which reads may be invented at all (issue #20) --------------------------
 #
 # The rule is in contracts/simulated-reads.md and restated on the class: *the subject of
@@ -647,6 +741,7 @@ SUBJECT_VERDICTS: dict[str, str] = {
     "list_remotes": REAL,
     "remote_url": REAL,
     "default_remote": REAL,
+    "default_branch": REAL,
     # Writes. Inert regardless of subject.
     "fetch": "writes refs, and reaches the network",
     "add_worktree": "creates the artifact; returns a structurally valid fake handle",
@@ -689,6 +784,7 @@ def test_every_real_verdict_really_delegates(committed_settings, audit):
         "list_remotes": lambda vcs: vcs.list_remotes(clone),
         "remote_url": lambda vcs: vcs.remote_url(clone, "origin"),
         "default_remote": lambda vcs: vcs.default_remote(clone),
+        "default_branch": lambda vcs: vcs.default_branch(clone, "origin"),
     }
     expected = {name for name, verdict in SUBJECT_VERDICTS.items() if verdict == REAL}
     assert set(calls) == expected, "a REAL verdict with no call here is untested"

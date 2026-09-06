@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 from tests.conftest import make_boundaries, seed_item
 
-from robot_army import db, operations
+from robot_army import db, operations, repos
 from robot_army.boundaries import TransportError
 
 
@@ -107,16 +107,21 @@ def test_the_local_cache_is_keyed_on_what_it_observed(ctx, conn, count_condition
 
 
 def test_the_local_cache_is_keyed_on_the_base_ref_too(ctx, conn, count_conditions, monkeypatch):
-    """``commits_on_branch`` is counted against the base branch, so a reconfigured base is a
+    """``commits_on_branch`` is counted against the base branch, so a changed base is a
     different answer even though nothing about the item moved.
 
-    ``Config`` is a frozen dataclass, so the base ref is redirected at the type rather than
-    at the instance — which is also closer to what an edited config file does.
+    The base ref is redirected at ``repos.base_ref`` — the one resolver every surface asks
+    since issue #150 — rather than at a configuration helper, because a base ref can now
+    change by the clone answering differently as well as by the file being edited.
     """
     item = _item(conn)
     operations.local_resume_signals(ctx, item)
 
-    monkeypatch.setattr(type(ctx.config), "base_branch_for", lambda self, repo_key: "release")
+    monkeypatch.setattr(
+        operations.repos_mod,
+        "base_ref",
+        lambda *args, **kwargs: repos.BaseRef("release", "detected", "detected from origin/HEAD"),
+    )
     operations.local_resume_signals(ctx, item)
 
     assert len(count_conditions) == 2

@@ -338,3 +338,110 @@ def _commit(path, message: str) -> None:
     subprocess.run(
         ["git", "commit", "-q", "-m", message], cwd=path, env=env, check=True, capture_output=True
     )
+
+
+# -- the gate reads the branch onboarding approved (issue #150) --------------
+
+
+@pytest.mark.requires_git
+def test_the_gate_reads_the_detected_branch_not_the_configured_default(
+    conn, audit, layout, tmp_path
+):
+    """Both halves of the fingerprint check resolve the base ref by one rule, so an
+    unchanged ``master`` repository cannot report a changed fingerprint because onboarding
+    and dispatch looked at different branches.
+
+    Here the settings are committed on ``master`` and nowhere else. Against the old
+    ``main`` default the gate computed ``{}``, which matched nothing that onboarding could
+    honestly have recorded.
+    """
+    from tests.conftest import config_dict, monkey_token
+
+    from robot_army import repos
+    from robot_army.config import parse
+
+    upstream = make_repo(
+        tmp_path / "upstream",
+        files={".claude/settings.json": '{"permissions": {"allow": ["Bash(ls:*)"]}}'},
+        branch="master",
+    )
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(upstream), str(clone)], check=True, capture_output=True
+    )
+    monkey_token()
+    config = parse(
+        config_dict(clone, layout, tmp_path / "worktrees", repos={"demo": {"path": str(clone)}}),
+        tmp_path / "config.toml",
+    )
+    boundaries = make_boundaries(audit)
+    approved = compute_fingerprint(
+        boundaries,
+        str(clone),
+        repos.base_ref(config, "demo", boundaries.version_control, clone).ref,
+    )
+    assert ".claude/settings.json" in approved
+    onboard_repo(conn, "demo", clone, settings_fingerprint=approved)
+    trust = write_trust(
+        tmp_path / "claude.json", {str(clone.resolve()): {"hasTrustDialogAccepted": True}}
+    )
+
+    check_gates(
+        conn,
+        boundaries=boundaries,
+        config=config,
+        repo=config.repos["demo"],
+        trust_file=trust,
+    )
+
+
+@pytest.mark.requires_git
+def test_a_configured_base_branch_still_decides_at_the_gate(conn, audit, layout, tmp_path):
+    """Rung 1 beats the clone's own answer, at the gate as on the screen. The override is
+    the reason the key exists, and detection is worthless if it cannot be turned off for
+    the one repository that branches off something else."""
+    from tests.conftest import config_dict, monkey_token
+
+    from robot_army.config import parse
+
+    upstream = make_repo(tmp_path / "upstream", branch="master")
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(upstream), str(clone)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", "develop"], cwd=clone, check=True, capture_output=True
+    )
+    (clone / ".claude").mkdir()
+    (clone / ".claude" / "settings.json").write_text(
+        '{"permissions": {"allow": ["Bash(ls:*)"]}}', encoding="utf-8"
+    )
+    _commit(clone, "settings on develop only")
+    monkey_token()
+    config = parse(
+        config_dict(
+            clone,
+            layout,
+            tmp_path / "worktrees",
+            repos={"demo": {"path": str(clone), "base_branch": "develop"}},
+        ),
+        tmp_path / "config.toml",
+    )
+    boundaries = make_boundaries(audit)
+
+    # The settings exist on ``develop`` and on no other branch, so a gate that had resolved
+    # ``master`` — what the clone says — would compute an empty fingerprint and block.
+    approved = compute_fingerprint(boundaries, str(clone), "develop")
+    assert ".claude/settings.json" in approved
+    onboard_repo(conn, "demo", clone, settings_fingerprint=approved)
+    trust = write_trust(
+        tmp_path / "claude.json", {str(clone.resolve()): {"hasTrustDialogAccepted": True}}
+    )
+
+    check_gates(
+        conn,
+        boundaries=boundaries,
+        config=config,
+        repo=config.repos["demo"],
+        trust_file=trust,
+    )

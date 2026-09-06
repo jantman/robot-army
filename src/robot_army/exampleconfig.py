@@ -214,7 +214,16 @@ SECTIONS: tuple[SectionSpec, ...] = (
                 "acceptEdits, auto, bypassPermissions, manual, dontAsk or plan",
             ),
             KeySpec("model", '""', "model to pass to the worker; empty means its default"),
-            KeySpec("base_branch", '"main"', "branch new work branches off"),
+            KeySpec(
+                "base_branch",
+                '"main"',
+                "fallback when the clone cannot say what its default branch is",
+                active=False,
+                why_commented=(
+                    "derived from the repository: onboarding reads <remote>/HEAD, and a "
+                    "value here is only the answer when that ref is absent"
+                ),
+            ),
             KeySpec("branch_prefix", '"robot-army"', "prefix for the branches it creates"),
             KeySpec("binary", '"claude"', "the worker executable"),
         ),

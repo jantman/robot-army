@@ -630,6 +630,25 @@ class VersionControl(Protocol):
         """
         ...
 
+    def default_branch(self, clone_path: str, remote: str) -> str | None:
+        """What ``remote``'s default branch is, according to the clone. A **branch name**.
+
+        Two answers, deliberately, where ``remote_branch_head`` below insists on three:
+        "the clone has no such ref" and "git could not be asked" both come back as
+        ``None``, because both mean the same thing to every caller — *fall back to the
+        configured value and say so on the screen*. That collapse is safe here for the
+        exact reason it is forbidden there: nothing irreversible hangs off this answer. The
+        worst a wrong ``None`` does is print a base ref the maintainer can see is wrong,
+        one line above the settings it was read at.
+
+        Implementations MUST NOT contact the network and MUST NOT write to the clone. The
+        point is that the answer is already on disk: ``git clone`` and ``git fetch`` both
+        write ``refs/remotes/<remote>/HEAD``, so the question costs one local ref read, no
+        credential, and nothing that can hang (research R1). Onboarding calls this, and
+        onboarding must keep working with the network unplugged.
+        """
+        ...
+
     def remote_branch_head(self, clone_path: str, remote: str, branch: str) -> str | None:
         """What ``remote`` has at ``refs/heads/<branch>``, asked of the remote right now.
 

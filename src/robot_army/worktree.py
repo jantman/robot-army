@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from robot_army import repos as repos_mod
 from robot_army import speckit
 from robot_army.boundaries import BoundaryError, HookResult, VersionControl, WorktreeHandle
 from robot_army.prompt import branch_name, worktree_dir
@@ -110,14 +111,23 @@ def prepare(
     vcs: VersionControl = boundaries.version_control
     path, branch = plan_paths(config, repo.key, issue_number, title)
     clone = str(repo.path)
-    base_ref = repo.base_branch or config.worker.base_branch
+    # Resolved rather than defaulted (issue #150): with ``main`` assumed, a repository whose
+    # default branch is ``master`` failed here at ``git fetch origin main``, exit 128, and
+    # the work item failed with it.
+    base = repos_mod.base_ref(config, repo.key, vcs, clone)
+    base_ref = base.ref
 
     with audit.action(
         "worktree.prepare",
         entity_type="work_item",
         entity_id=item_id,
         target=str(path),
-        detail={"branch": branch, "base_ref": base_ref, "clone": clone},
+        detail={
+            "branch": branch,
+            "base_ref": base_ref,
+            "base_ref_source": base.source,
+            "clone": clone,
+        },
         dry_run=dry_run,
     ) as outcome:
         remote: str | None = None

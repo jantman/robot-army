@@ -1090,7 +1090,9 @@ def local_resume_signals(ctx: Context, item: Any) -> dict[str, Any]:
     repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
     if repo is None or not item.worktree_path or not item.branch:
         return signals
-    base_ref = ctx.config.base_branch_for(item.repo_key)
+    base_ref = repos_mod.base_ref(
+        ctx.config, item.repo_key, ctx.boundaries.version_control, repo.path
+    ).ref
 
     # Every input the observation is made from. An item whose worktree was reclaimed or whose
     # branch was renamed is a different key, so it is observed afresh rather than served an
@@ -1694,7 +1696,6 @@ def onboard(
     caller that wants to read the screen rather than watch it arrive leaves it unset.
     """
     result = Result()
-    section = ctx.config.repos.get(repo_key)
 
     # Resolution and verification come first, and their refusals are recorded (FR-031).
     # Before milestone 005 this function returned ``EXIT_USAGE`` for a missing section
@@ -1707,7 +1708,18 @@ def onboard(
 
     clone_path = resolved.path
     assert clone_path is not None  # noqa: S101 - guaranteed by the refusal above
-    base_ref = (section.base_branch if section else "") or ctx.config.worker.base_branch
+    # Resolved rather than defaulted (issue #150). The remote is handed over rather than
+    # re-chosen: ``resolved.remote`` is the one the identity check settled on two lines up,
+    # and detection asking a different remote than identity did would be two answers about
+    # the same repository.
+    base = repos_mod.base_ref(
+        ctx.config,
+        repo_key,
+        ctx.boundaries.version_control,
+        clone_path,
+        remote=resolved.remote,
+    )
+    base_ref = base.ref
     trusted, explanation = dispatch.is_trusted(clone_path, trust_file=trust_file)
     committed = dispatch.read_committed_settings(ctx.boundaries, str(clone_path), base_ref)
     fingerprint = dispatch.compute_fingerprint(ctx.boundaries, str(clone_path), base_ref)
@@ -1730,6 +1742,11 @@ def onboard(
         "remote": resolved.remote,
         "owner_verdict": resolved.owner_verdict,
         "base_ref": base_ref,
+        # What decided it, in both the countable form and the readable one. Onboarding is
+        # the moment the base ref stops being a guess, so the document that records the
+        # approval has to say which rung answered.
+        "base_ref_source": base.source,
+        "base_ref_detail": base.detail,
         "trusted": trusted,
         "trust_explanation": explanation,
         "committed_settings": committed,
@@ -1757,7 +1774,7 @@ def onboard(
         recorded = existing.clone_path
         marker = "" if recorded == str(clone_path) else "   ** CHANGED **"
         result.say(f"recorded path: {recorded}{marker}")
-    result.say(f"base ref     : {base_ref}")
+    result.say(f"base ref     : {base_ref}   ({base.detail})")
     result.say(f"trust        : {'accepted' if trusted else 'NOT ACCEPTED'} — {explanation}")
     result.say()
 
@@ -1875,6 +1892,7 @@ def onboard(
                 "verified_origin": str(resolved.identity) if resolved.identity else None,
                 "owner_verdict": resolved.owner_verdict,
                 "base_ref": base_ref,
+                "base_ref_source": base.source,
                 "fingerprint": fingerprint,
                 "trusted": trusted,
                 "reapprove": reapprove,
@@ -1950,7 +1968,9 @@ def repos(ctx: Context, *, trust_file: Path | None = None) -> Result:
             continue
 
         trusted, explanation = dispatch.is_trusted(repo.path, trust_file=trust_file)
-        base_ref = repo.base_branch or ctx.config.worker.base_branch
+        base_ref = repos_mod.base_ref(
+            ctx.config, key, ctx.boundaries.version_control, repo.path
+        ).ref
         try:
             current = dispatch.compute_fingerprint(ctx.boundaries, str(repo.path), base_ref)
         except (BoundaryError, OSError):
@@ -2094,10 +2114,12 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
         if not item.worktree_path:
             continue
         repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
-        base_ref = ctx.config.base_branch_for(item.repo_key)
         if repo is None:
             condition = None
         else:
+            base_ref = repos_mod.base_ref(
+                ctx.config, item.repo_key, ctx.boundaries.version_control, repo.path
+            ).ref
             try:
                 condition = worktree.condition(
                     ctx.boundaries.version_control,

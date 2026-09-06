@@ -211,7 +211,9 @@ def test_per_repo_overrides_win_over_worker_defaults(repo_clone, layout, tmp_pat
     )
     assert config.permission_mode_for("demo") == "acceptEdits"
     assert config.model_for("demo") == "base-model"
-    assert config.base_branch_for("demo") == "trunk"
+    # ``base_branch`` has no ``*_for`` helper any more: since issue #150 resolving it needs
+    # the clone, so ``repos.base_ref`` owns the whole ladder and the section is rung one.
+    assert config.repos["demo"].base_branch == "trunk"
 
 
 def test_missing_config_file_is_reported_clearly(tmp_path):
@@ -1628,3 +1630,51 @@ def test_the_warning_judges_the_directory_the_pattern_is_rooted_in(
     )
     warning = next(w for w in config.warnings if "socket_glob" in w)
     assert f"directory {shared} is writable by others without the sticky bit" in warning
+
+
+# -- base_branch means "stated", not "inherited" (issue #150) ----------------
+
+
+def test_a_section_that_omits_base_branch_does_not_inherit_the_worker_value(
+    repo_clone, layout, tmp_path
+):
+    """The parse-time copy made "this repository chose main" and "nobody said anything"
+    the same value, and issue #150's resolution order has to tell them apart: only the
+    first outranks what the clone says its default branch is."""
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        worker={"base_branch": "trunk"},
+        repos={"jantman/demo": {"path": str(repo_clone)}},
+    )
+
+    assert config.repos["jantman/demo"].base_branch == ""
+    assert config.worker.base_branch == "trunk"
+
+
+def test_a_section_that_states_base_branch_keeps_its_own_value(repo_clone, layout, tmp_path):
+    config = build(
+        repo_clone,
+        layout,
+        tmp_path,
+        worker={"base_branch": "trunk"},
+        repos={"jantman/demo": {"path": str(repo_clone), "base_branch": "develop"}},
+    )
+
+    assert config.repos["jantman/demo"].base_branch == "develop"
+
+
+def test_an_unstated_worker_base_branch_stays_empty_rather_than_becoming_main(
+    repo_clone, layout, tmp_path
+):
+    """``"main"`` is applied by ``repos.base_ref`` as the last rung, not by the loader as
+    the first one. A default here would be indistinguishable from a maintainer who copied
+    the shipped example."""
+    raw = config_dict(repo_clone, layout, tmp_path / "worktrees")
+    raw["worker"].pop("base_branch")
+    monkey_token()
+
+    config = parse(raw, tmp_path / "config.toml")
+
+    assert config.worker.base_branch == ""

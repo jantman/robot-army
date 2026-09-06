@@ -1735,7 +1735,6 @@ def test_a_heartbeat_naming_another_cap_does_not_move_the_dispatch_line(
     """
     from robot_army import health
 
-    registry, proc = machine
     config = capped_at(config, 1, per_repo=5)
     health.write_heartbeat(
         layout.heartbeat_path,
@@ -1781,7 +1780,6 @@ def test_dispatch_is_unchanged_with_no_heartbeat_at_all(
     conn, audit, config, layout, tmp_path, machine
 ):
     """A daemon caught before its first beat, or a heartbeat file removed underneath one."""
-    registry, proc = machine
     config = capped_at(config, 1, per_repo=5)
     if layout.heartbeat_path.exists():
         layout.heartbeat_path.unlink()

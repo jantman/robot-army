@@ -477,9 +477,27 @@ class GitVersionControl:
 class SimulatedVersionControl:
     """Logs every intended git operation and returns structurally valid fake handles.
 
-    Reads that are cheap and side-effect-free (``status_porcelain``, ``commits_ahead``,
-    ``show_file_at_ref``) return empty/zero answers rather than touching disk, because at
-    ``plan`` level no worktree was created for them to describe.
+    **The subject of the question decides, not the verb** (contracts/simulated-reads.md).
+
+    A method whose subject exists independently of the simulation — the operator's primary
+    clone, its remote configuration, its object store — answers *truthfully* at every
+    effect level, by delegating to ``self._real``. A method whose subject is an artifact
+    this class only pretended to create — the worktree it did not make, the branch it did
+    not cut, the commit it did not push — answers as if the pretence held, and says at the
+    method why it chose the value it chose. A method that writes is inert either way.
+
+    The rule is written down because the obvious one, *reads are always real* (FR-052),
+    is not usable here: ``worktree_exists`` and ``commits_ahead`` are reads, and answering
+    them honestly would fail every simulated item at pre-launch validation and retain every
+    simulated branch. With no usable rule each method became a judgement, and two were
+    judged wrong — ``show_file_at_ref`` and ``default_remote``, both questions about the
+    real clone, both answered by invention until issue #20. The first of those was the read
+    the onboarding security review depends on, so at ``plan`` that review was blank for
+    every repository and an empty fingerprint was recorded as approved.
+
+    An as-if answer is still not free invention: it must be the answer that leads the caller
+    to the decision the real path would reach. ``commits_ahead`` returning ``0`` rather than
+    ``None`` is that rule in one line.
     """
 
     def __init__(self, audit: AuditLog) -> None:
@@ -521,6 +539,14 @@ class SimulatedVersionControl:
         return True
 
     def list_worktrees(self, clone_path: str) -> list[WorktreeInfo]:
+        """The other **mixed** subject. Asked of the real clone, used to judge a worktree
+        this class did not create.
+
+        Both callers — ``worktree.condition`` and reconciliation's prunable sweep — fall
+        back to a real ``Path.is_dir()`` check when the list is empty, so the honest answer
+        already reaches the decision by another route and making this real would buy
+        nothing. Left as-if deliberately, not by omission.
+        """
         self._log("git.list_worktrees", clone=clone_path)
         return []
 
@@ -566,8 +592,18 @@ class SimulatedVersionControl:
         )
 
     def show_file_at_ref(self, clone_path: str, ref: str, path: str) -> bytes | None:
-        self._log("git.show_file_at_ref", clone=clone_path, ref=ref, path=path)
-        return None
+        """The **real** committed content, at every effect level.
+
+        What is committed in the operator's clone is committed whatever level we simulate,
+        so this is a real read by the class's rule above. It is also the specific read the
+        FR-003 onboarding review and the FR-004 fingerprint are built on: while this
+        returned ``None`` unconditionally, ``onboard`` reported "no committed
+        .claude/settings*.json at the base ref" for every repository below ``local``, and
+        recorded an empty mapping as the approved fingerprint — an approval screen that was
+        blank by construction, and a record asserting the repository commits nothing
+        (issue #20).
+        """
+        return self._real.show_file_at_ref(clone_path, ref, path)
 
     def worktree_exists(self, worktree_path: str) -> bool:
         # It "exists" as far as the simulation is concerned. Answering False would fail
@@ -576,6 +612,15 @@ class SimulatedVersionControl:
         return True
 
     def rev_parse(self, clone_path: str, ref: str) -> str | None:
+        """A **mixed** subject, which is why it stays as-if. Do not "finish the job" here.
+
+        ``worktree.prepare`` asks it ``<remote>/<base_ref>`` — a real ref in a real clone —
+        but ``cleanup`` asks it ``refs/heads/<branch>``, which is the branch this class
+        pretended to cut. Answering the second honestly ("no such branch") would send a
+        simulated cleanup down a path the real one never takes, which is exactly the
+        divergence ``commits_ahead`` below argues against. The forty zeroes serve the
+        caller that cannot be answered honestly, and cost the other caller nothing.
+        """
         self._log("git.rev_parse", clone=clone_path, ref=ref)
         return "0" * 40
 
@@ -584,7 +629,16 @@ class SimulatedVersionControl:
         return self._real.list_remotes(clone_path)
 
     def default_remote(self, clone_path: str) -> str | None:
-        return "origin"
+        """The **real** answer, derived from ``list_remotes`` — which is already real.
+
+        Answering ``"origin"`` unconditionally described a local-only clone as
+        remote-backed and a clone whose only remote is ``gh`` as having an ``origin``, so
+        ``worktree.prepare``'s ``fetch_skipped: the repository has no configured remote``
+        could never be recorded below ``local``. The simulation reported a fetch the real
+        run would have skipped, which is the divergence the effect levels exist to prevent
+        (issue #20). Nothing here contacts the remote: this reads local git config.
+        """
+        return self._real.default_remote(clone_path)
 
     def remote_url(self, clone_path: str, remote: str) -> str | None:
         """The **real** URL, at every effect level.

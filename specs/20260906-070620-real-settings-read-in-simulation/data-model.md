@@ -30,7 +30,7 @@ Rows approved while the read was blank hold an empty mapping. Nothing in this fe
 them (research R6), because writing hashes into an approval row on the strength of a code change
 would forge the row's only assertion.
 
-Instead they are caught by the gate that already exists. At dispatch, `check_launch_gate` compares
+Instead they are caught by the gate that already exists. At dispatch, `check_gates` compares
 the repository's real fingerprint against the recorded one:
 
 | Recorded | Real | Before this fix | After this fix |

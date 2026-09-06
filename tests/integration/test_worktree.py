@@ -688,3 +688,34 @@ def test_a_repository_without_the_setting_records_no_fast_forward_key_at_all(
 
     assert result.ok, result.failure_reason
     assert "fast_forward" not in prepare_record(layout, audit)
+
+
+def test_a_simulated_preparation_records_the_skip_a_real_one_would(
+    config, audit, tmp_path, layout
+):
+    """Issue #20's second instance. ``SimulatedVersionControl.default_remote`` answered
+    ``"origin"`` for every clone, so this record — *the repository has no configured
+    remote* — could never appear below ``local``: the dry run reported a fetch the real
+    run would have skipped, which is the divergence the effect levels exist to prevent.
+    """
+    from robot_army.boundaries.git import SimulatedVersionControl
+
+    clone = make_repo(tmp_path / "remoteless")  # no ``origin``: make_repo adds none
+    assert GitVersionControl(audit).default_remote(str(clone)) is None
+
+    result = worktree.prepare(
+        boundaries=make_boundaries(audit, vcs=SimulatedVersionControl(audit)),
+        audit=audit,
+        config=config,
+        repo=repo_with(clone),
+        item_id=1,
+        issue_number=42,
+        title="no remote here",
+        dry_run=True,
+    )
+
+    assert result.ok, result.failure_reason
+    assert (
+        prepare_record(layout, audit)["fetch_skipped"]
+        == "the repository has no configured remote"
+    )

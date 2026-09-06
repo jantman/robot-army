@@ -159,6 +159,15 @@ path nobody approved into an approval record is the one thing this table exists 
 so dispatch refuses for such a repository and names `onboard --reapprove` as the fix. That
 is one command per repository, and it is the honest price of never guessing.
 
+**An empty `settings_fingerprint` recorded before issue #20 was fixed is not evidence of
+anything.** Below effect level `local` the read behind the onboarding review answered "no such
+file" for every path, so every approval made at `plan` recorded an empty mapping — including
+for repositories that do commit settings, whose review screen was blank when it was approved.
+Nothing backfills those rows either, and for the same reason: writing hashes into an approval
+record on the strength of a code change would forge the one thing the record asserts. They are
+caught instead — the settings now found at dispatch no longer match the empty approval, so
+dispatch blocks naming the files as `added:` and `onboard --reapprove` shows the real review.
+
 ```bash
 sqlite3 -header -column ~/.local/state/robot-army/state.db \
   'SELECT repo_key, clone_path, path_source, verified_origin FROM repos'

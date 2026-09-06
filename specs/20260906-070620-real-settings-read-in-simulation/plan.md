@@ -123,7 +123,7 @@ src/robot_army/
 │   └── git.py               # THE CHANGE: SimulatedVersionControl.show_file_at_ref,
 │                            #   .default_remote, and the class docstring's rule
 ├── dispatch.py              # unchanged — read_committed_settings, compute_fingerprint,
-│                            #   check_launch_gate all become correct by the boundary fix
+│                            #   check_gates all become correct by the boundary fix
 ├── operations.py            # unchanged — onboard() renders whatever it is handed
 └── effects.py               # unchanged — the wiring table is right as it stands
 

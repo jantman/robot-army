@@ -492,3 +492,206 @@ def test_the_simulated_implementation_changes_nothing(behind, audit):
     assert result.outcome == "skipped"
     assert "simulated" in result.reason
     assert head_of(behind) == before
+
+
+# -- show_file_at_ref and default_remote (issue #20) -------------------------
+#
+# Both were answered by invention in the simulated class, and both are questions about
+# the operator's *real* clone. ``show_file_at_ref`` is the read the onboarding security
+# review depends on, so at ``plan`` that review was blank for every repository and an
+# empty fingerprint was recorded as approved. ``default_remote`` is the same defect with
+# a different name: it answered ``"origin"`` whatever the clone actually had.
+#
+# These live beside the ``remote_url`` tests above because they are the same assertion —
+# the simulated implementation answers what the real one answers — and the rule they now
+# share is in contracts/simulated-reads.md.
+
+
+@pytest.fixture
+def committed_settings(tmp_path):
+    """A clone with both reviewed settings files committed at ``main``."""
+    from tests.conftest import make_repo
+
+    return make_repo(
+        tmp_path / "clones" / "settings",
+        files={
+            ".claude/settings.json": '{"hooks": {"SessionStart": []}}',
+            ".claude/settings.local.json": '{"permissions": {"allow": ["Bash"]}}',
+        },
+        origin="git@github.com:jantman/settings.git",
+    )
+
+
+def test_show_file_at_ref_answers_the_same_in_both_implementations(committed_settings, audit):
+    """Issue #20. The simulated implementation returned ``None`` unconditionally, so
+    ``onboard`` below ``local`` printed "no committed .claude/settings*.json at the base
+    ref" for every repository and recorded an empty fingerprint as the approved one."""
+    real, simulated = GitVersionControl(audit), SimulatedVersionControl(audit)
+    clone = str(committed_settings)
+
+    for path in (".claude/settings.json", ".claude/settings.local.json"):
+        content = simulated.show_file_at_ref(clone, "main", path)
+        assert content == real.show_file_at_ref(clone, "main", path)
+        assert content is not None, f"{path} is committed at main and must be readable"
+
+
+def test_default_remote_answers_the_same_in_both_implementations(bare_clone, audit):
+    """The same defect as ``show_file_at_ref``, with a different name: the simulated
+    implementation answered ``"origin"`` for every clone, so a local-only repository
+    looked remote-backed and a clone whose only remote is ``gh`` was misreported."""
+    real, simulated = GitVersionControl(audit), SimulatedVersionControl(audit)
+    clone = str(bare_clone)
+
+    assert simulated.default_remote(clone) == real.default_remote(clone) is None
+
+    git(bare_clone, "remote", "add", "gh", "https://github.com/jantman/demo")
+    assert simulated.default_remote(clone) == real.default_remote(clone) == "gh"
+
+    git(bare_clone, "remote", "add", "origin", "git@github.com:jantman/demo.git")
+    assert simulated.default_remote(clone) == real.default_remote(clone) == "origin"
+
+
+# The failure paths, asserted of *both* implementations now that they are the same code
+# path. Each of these was previously answered identically by accident — the simulated one
+# returned ``None`` for everything, including for the cases that are genuinely ``None``.
+
+
+def test_a_ref_that_does_not_exist_answers_none_rather_than_raising(committed_settings, audit):
+    """A missing base ref is indistinguishable from a missing file, and must be: the
+    onboarding screen prints the base ref immediately above the review so the operator can
+    tell "not committed" from "you named a branch that is not here"."""
+    for vcs in implementations(audit):
+        assert vcs.show_file_at_ref(str(committed_settings), "no-such-ref", ".claude/settings.json") is None
+
+
+def test_a_path_not_committed_at_the_ref_answers_none(committed_settings, audit):
+    for vcs in implementations(audit):
+        assert vcs.show_file_at_ref(str(committed_settings), "main", ".claude/absent.json") is None
+
+
+def test_a_directory_that_is_not_a_repository_answers_rather_than_raising(tmp_path, audit):
+    """This read must not become the thing that reports "there is no clone there" —
+    onboarding checks existence and primary-clone-ness before it ever gets here."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    for vcs in implementations(audit):
+        assert vcs.show_file_at_ref(str(plain), "main", ".claude/settings.json") is None
+        assert vcs.default_remote(str(plain)) is None
+
+
+def test_a_committed_settings_file_of_zero_bytes_is_present_not_absent(tmp_path, audit):
+    """An empty file is a fact about the repository. It must be listed and hashed, because
+    ``b""`` and "the file is not there" are different approvals."""
+    from tests.conftest import make_repo
+
+    clone = make_repo(tmp_path / "empty-settings", files={".claude/settings.json": ""})
+    for vcs in implementations(audit):
+        assert vcs.show_file_at_ref(str(clone), "main", ".claude/settings.json") == b""
+
+
+def test_a_settings_file_that_is_not_valid_utf8_does_not_crash_the_review(tmp_path, audit):
+    """A traceback here would be a traceback *instead of* the security screen, which is the
+    one place this project must not fail closed by exploding.
+
+    Note what this does **not** assert. ``subproc.run`` decodes with ``errors="replace"``
+    and ``show_file_at_ref`` re-encodes, so undecodable bytes do not survive the round trip
+    in *either* implementation — the fingerprint of such a file is the hash of its
+    replacement-charred form, and two files differing only in invalid byte sequences would
+    hash alike. That is a pre-existing property of the real read, not something issue #20
+    introduced or this change alters, and it is left alone here rather than widened into.
+    It matters little in practice because these files are JSON, which is UTF-8 by
+    definition; it is written down so the next reader does not mistake this test for a
+    promise that the bytes are exact.
+    """
+    from tests.conftest import make_boundaries, make_repo
+
+    from robot_army.dispatch import read_committed_settings
+
+    clone = make_repo(tmp_path / "bad-utf8")
+    settings = clone / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_bytes(b'{"a": "\xff\xfe"}')
+    subprocess.run(["git", "add", "-A"], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=T", "-c", "user.email=t@e.x", "commit", "-qm", "bad"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+
+    for vcs in implementations(audit):
+        raw = vcs.show_file_at_ref(str(clone), "main", ".claude/settings.json")
+        assert raw is not None
+        contents = read_committed_settings(
+            make_boundaries(audit, vcs=vcs), str(clone), "main"
+        )
+        assert "�" in contents[".claude/settings.json"]
+
+
+# -- which reads may be invented at all (issue #20) --------------------------
+#
+# The rule is in contracts/simulated-reads.md and restated on the class: *the subject of
+# the question decides, not the verb*. It is enforced here rather than in ``src/`` because
+# the table has exactly one consumer, and that consumer is this test.
+#
+# ``show_file_at_ref`` and ``default_remote`` were both questions about the operator's real
+# clone answered by invention, and the first of them was the read the onboarding security
+# review depends on. Nothing structural caught either, because there was no rule to catch
+# them against. Now a protocol member added without a decision fails here, by name.
+
+#: Every member of ``VersionControl``, mapped to ``REAL`` or to the reason it answers as-if.
+REAL = "real"
+SUBJECT_VERDICTS: dict[str, str] = {
+    # Real: the subject exists whatever level we simulate.
+    "show_file_at_ref": REAL,
+    "list_remotes": REAL,
+    "remote_url": REAL,
+    "default_remote": REAL,
+    # Writes. Inert regardless of subject.
+    "fetch": "writes refs, and reaches the network",
+    "add_worktree": "creates the artifact; returns a structurally valid fake handle",
+    "remove_worktree": "removes an artifact the simulation never created",
+    "delete_branch": "deletes a branch the simulation never cut",
+    "prune_worktrees": "writes to the clone's administrative files",
+    "fast_forward": "the one verb that writes to the author's own working clone",
+    # As-if: the subject is something the simulation only pretended to create.
+    "worktree_exists": "a worktree never created; False would fail pre-launch validation",
+    "status_porcelain": "that same worktree; nothing was checked out to be dirty",
+    "commits_ahead": "a branch never cut; None would retain every simulated branch",
+    "remote_branch_head": "a branch never pushed",
+    # Mixed subjects, deliberately left as-if — see the docstrings on each.
+    "rev_parse": "mixed: a real ref for one caller, the pretended branch for another",
+    "list_worktrees": "mixed: the real clone, but used to judge a worktree never created",
+}
+
+
+def test_every_protocol_member_has_a_decision():
+    """FR-007. A member added to ``VersionControl`` without a verdict fails here rather
+    than silently picking a side, which is how ``show_file_at_ref`` stayed wrong."""
+    from robot_army.boundaries import VersionControl
+
+    members = set(VersionControl.__protocol_attrs__)
+    assert members == set(SUBJECT_VERDICTS), (
+        f"undecided: {sorted(members - set(SUBJECT_VERDICTS))}; "
+        f"stale: {sorted(set(SUBJECT_VERDICTS) - members)}. "
+        "Add the member to SUBJECT_VERDICTS and to contracts/simulated-reads.md."
+    )
+
+
+def test_every_real_verdict_really_delegates(committed_settings, audit):
+    """The behavioural half, driven off the same table rather than a second hand-written
+    list: for each member marked ``REAL``, both implementations answer alike."""
+    real, simulated = GitVersionControl(audit), SimulatedVersionControl(audit)
+    clone = str(committed_settings)
+    #: One representative call per real-answering member.
+    calls = {
+        "show_file_at_ref": lambda vcs: vcs.show_file_at_ref(clone, "main", ".claude/settings.json"),
+        "list_remotes": lambda vcs: vcs.list_remotes(clone),
+        "remote_url": lambda vcs: vcs.remote_url(clone, "origin"),
+        "default_remote": lambda vcs: vcs.default_remote(clone),
+    }
+    expected = {name for name, verdict in SUBJECT_VERDICTS.items() if verdict == REAL}
+    assert set(calls) == expected, "a REAL verdict with no call here is untested"
+
+    for name, call in calls.items():
+        assert call(simulated) == call(real), f"{name} diverges between implementations"

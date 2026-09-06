@@ -143,7 +143,7 @@ change, so there is no Principle III exception to declare.
 Every repository onboarded on this installation while the read was blank has an approval row whose
 fingerprint is `{}`. Nothing in this feature backfills them, deliberately.
 
-**Decision**: rely on the gate that already exists. `check_launch_gate` compares the real
+**Decision**: rely on the gate that already exists. `check_gates` compares the real
 fingerprint against the recorded one and raises `DispatchBlocked` naming the added files and
 pointing at `onboard --reapprove`. Before this change that comparison also read blank below `local`,
 so the two blanks matched and the gate passed; after it, the real settings no longer match the empty

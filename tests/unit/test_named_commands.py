@@ -38,6 +38,7 @@ from tests.unit.test_ordering import snapshot
 
 from robot_army import db, ordering
 from robot_army.cli import build_parser
+from robot_army.states import WorkItemState
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "robot_army"
 
@@ -181,10 +182,16 @@ def test_every_command_the_source_names_exists():
 def test_every_command_a_hold_reason_names_exists(conn, config):
     """The end-to-end half: rendered hold details, not source text.
 
-    A hold reason is the surface issue #50 was reported against, and it is the one place a
-    command name is *composed* rather than written — ``not_onboarded`` interpolates a
-    repository key into it. Rendering the reasons and re-checking what comes out is what
-    makes the guarantee about the sentence the author reads.
+    A hold reason is the surface issue #50 was reported against, and one of them *composes*
+    its command rather than writing it — ``not_onboarded`` interpolates a repository key
+    into ``robot-army onboard … --reapprove``, so the string the author reads exists only
+    at render time and the source scan above never sees it whole. Rendering the reasons
+    and re-checking what comes out is what closes that gap.
+
+    The two reasons are produced by the two different callers on purpose: ``launch_holds``
+    answers "may this item start", ``plan`` answers "why is the queue not moving", and the
+    composed command is only reachable through the second. ``ghost`` is a repository with
+    no section and no recorded clone path, which is the state ``not_onboarded`` exists for.
     """
     item = db.get_work_item(conn, seed_item(conn))
     details = [
@@ -198,13 +205,21 @@ def test_every_command_a_hold_reason_names_exists(conn, config):
             repo_holds=None,
         )
     ]
+    seed_item(conn, repo_key="ghost", issue_number=1, state=str(WorkItemState.READY))
     details += [
         detail
         for entry in ordering.plan(conn, config=config, capacity=snapshot(global_cap=9))
         if (detail := entry.detail)
     ]
     named = [match.group(1) for detail in details for match in NAMED.finditer(detail)]
-    assert named, "no hold reason named a command; the assertion below proves nothing"
+    # Named rather than counted, because the failure this guards against is the corpus
+    # quietly shrinking back to the one hard-coded string: an item seeded in a state
+    # ``plan`` does not queue produces no entry at all, and the assertion below would then
+    # pass while checking nothing it claims to check.
+    assert "unpause" in named, f"the pause reason named no command: {named}"
+    assert any(
+        command.startswith("onboard ") for command in named
+    ), f"no composed command was rendered: {named}"
     offenders = [
         f"`robot-army {command}` — {'; '.join(faults)}"
         for command in named

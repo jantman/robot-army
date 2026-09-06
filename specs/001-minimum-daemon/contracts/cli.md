@@ -12,6 +12,16 @@ as a function the CLI calls, not as logic living in the argument parser.
   human-readable table.
 - `--include-simulated` on any listing command includes `dry_run` rows. **Without it they are
   excluded** (FR-056). Simulated rows are always visibly marked when shown (FR-057).
+
+  > **Corrected for the second time, by issue #21.** The rule above was true of the parser and
+  > false of three of the commands: `anomalies`, `repos` and `log` accepted the option and
+  > printed identical output either way, and `status` honoured it everywhere except the anomaly
+  > block it prints last. The rule is now stated so it cannot be true of a parser and false of
+  > a command — *a verb offers the option if and only if the rows it prints can be simulated
+  > and it filters them* — which cost `repos` the option, since onboarding has no simulated
+  > path. The set is `cli.SIMULATED_SCOPED_COMMANDS` and a test drives every member of it.
+  > [The simulated-scope contract](../../20260906-160021-honour-include-simulated/contracts/simulated-scope.md)
+  > fixes what each verb filters and what it says about what it withheld.
 - Read-only commands do not take the daemon lock and work while the daemon runs. Commands marked
   **[lock]** take it and fail with exit `3` if the daemon holds it.
 

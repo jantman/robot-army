@@ -264,9 +264,16 @@ uv run robot-army purge-simulated
 
 Simulated rows are excluded from every listing unless you ask for them, and are visibly
 marked when shown. Every listing that excludes them also says how many it withheld and how
-to see them — so `status`, `cards` and `worktree list` never report an empty system while
+to see them — `status` (its counts, its listing *and* its anomaly block), `cards`,
+`worktree list`, `anomalies` and `log` — so none of them ever reports an empty system while
 holding rows back, and `status` in particular never prints a populated queue above a claim
 that there is no work.
+
+`--include-simulated` is offered on those five and on nothing else. `repos` used to accept it
+and ignore it: onboarding inspects a real clone on disk and has no rehearsed path, so its
+table cannot hold a row the flag would hide, and a flag that silently does nothing is worse
+than no flag at all (issue #21). A test drives every verb that advertises it, in both
+spellings, and fails if the two agree.
 
 ---
 

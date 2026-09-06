@@ -243,6 +243,12 @@ jq -r 'select(.action_id) | "\(.action_id) \(.kind)"' ~/.local/state/robot-army/
 Records carry which interface produced them — `daemon`, `cli`, or `web` — and the same log is
 readable from the browser at `/log`, filtered, newest first, with GitHub links already made.
 
+**A rehearsal's records are excluded unless I ask for them.** `robot-army log` shows what
+really happened; `--include-simulated` adds the rest, still carrying the `[simulated]` marker
+they have always carried, and either way the reader says how many it withheld. The `/log`
+page does the same through the site-wide toggle, scoped to the records that page's scan
+actually read — a bounded reader cannot honestly count what it never looked at.
+
 **Record format, every action name, the redaction rules, and how to reconstruct one item's
 whole history are on the [audit log page](audit-log.md).**
 
@@ -251,20 +257,39 @@ whole history are on the [audit log page](audit-log.md).**
 ```bash
 uv run robot-army status               # counts, listings, outstanding anomalies
 uv run robot-army show <item-id>       # one item's whole history and resume signals
-uv run robot-army anomalies            # things detected but not resolvable
+uv run robot-army anomalies            # what was detected; most wait for me, two clear themselves
 uv run robot-army anomalies --since 1h # …narrowed to a window: 30s, 10m, 2h, 1d
+uv run robot-army anomalies --include-simulated   # …including a rehearsal's
 uv run robot-army repos                # why is nothing happening for this repo
 uv run robot-army doctor               # environment and preconditions
 ```
 
-**An `orphan_session` whose process is gone now clears itself.** It is the only kind that
-does. Every other kind waits for `--acknowledge`, because `orphan_session` is the only one
-whose truth can be positively re-established as *false* — the pid and start time it recorded
-no longer name a live process. A resolved anomaly leaves the default listing and shows under
-`--all` marked `resolved` rather than `acknowledged`, which are different facts: one is the
-system re-checking, the other is me saying I looked. This exists because the list is read as
-*things needing attention*, and a list that is mostly stale teaches the habit of clearing it
-unread — which is how the one that mattered gets dismissed with the noise.
+**A rehearsal's anomalies are not in this list unless I ask.** Below `live` the pipeline is
+rehearsed, and anything it raises is recorded as a rehearsal's anomaly and withheld from the
+default view — with a line saying how many, so an empty list is never mistaken for an
+all-clear. The same is true of the anomaly block on `status`, the `/anomalies` page, and the
+anomaly count in the web header. This is issue #21: two `card_create_failing` anomalies for
+dry-run cards were being reported as outstanding real problems with no way to exclude them,
+because the flag was advertised on the command and did nothing.
+
+Which run raised an anomaly is recorded when it is raised, not worked out from the entity it
+names. Anything about the machine, the filesystem or the network is real whatever the effect
+level — board *reads* included, since only writes are simulated — so those stay visible
+always. See [the anomalies table](state.md#anomalies--two-different-ways-a-row-leaves-the-list-and-whether-it-was-a-rehearsal).
+
+**Two kinds now clear themselves.** Every other kind waits for `--acknowledge`, because
+these two are the only ones whose truth can be positively re-established as *false*:
+
+- **`orphan_session`** — the pid and start time it recorded no longer name a live process.
+- **`card_create_failing`** — the card it named has since reached `linked`, so the creation
+  it reported as failing has succeeded. Re-checked by reconciliation, which needs no network,
+  so the retraction does not wait on Trello being reachable.
+
+A resolved anomaly leaves the default listing and shows under `--all` marked `resolved`
+rather than `acknowledged`, which are different facts: one is the system re-checking, the
+other is me saying I looked. This exists because the list is read as *things needing
+attention*, and a list that is mostly stale teaches the habit of clearing it unread — which
+is how the one that mattered gets dismissed with the noise.
 
 Anomalies worth understanding rather than dismissing:
 

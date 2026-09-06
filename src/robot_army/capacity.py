@@ -126,7 +126,16 @@ class CapacitySnapshot:
     def describe(self) -> str:
         """One line, for a terminal summary or the web chrome."""
         if not self.observable:
-            return f"capacity unobservable: {self.reason}"
+            # The disagreement is appended here too. An uncountable machine does not make
+            # the *limit* unknowable, and ``robot-army status`` has no other channel for
+            # this — every other surface would report the stale cap while its one line
+            # said nothing.
+            unobservable = f"capacity unobservable: {self.reason}"
+            return (
+                f"{unobservable} — {self.cap_disagreement}"
+                if self.cap_disagreement
+                else unobservable
+            )
         parts = [
             f"{self.total}/{self.global_cap} sessions",
             f"{len(self.ours)} ours",

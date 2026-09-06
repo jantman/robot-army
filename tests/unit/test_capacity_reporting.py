@@ -226,6 +226,28 @@ def test_status_reports_the_same_cap_the_web_chrome_does(
         built.close()
 
 
+def test_the_terminal_names_the_process_to_restart(
+    config, conn, layout, monkeypatch, running_daemon
+):
+    """The shared sentence will not say which of the two is behind, because on the web
+    either can be. A command can: it read the file milliseconds ago, so the daemon is the
+    one that has been running since before the change — and "restart that one" is not a
+    remedy someone can act on once the process saying it has exited."""
+    from tests.conftest import beat
+
+    beat(layout, max_concurrent_sessions=7)
+    built = context_for(at_cap(config, 5), monkeypatch)
+    try:
+        for text in (
+            operations.capacity(built).render(as_json=False),
+            operations.status(built).render(as_json=False),
+        ):
+            assert "the daemon is the one behind" in text
+            assert "restart it to apply the cap in the file" in text
+    finally:
+        built.close()
+
+
 def test_a_repositorys_limit_is_clamped_by_the_cap_in_force(
     config, conn, repo_clone, layout, monkeypatch, running_daemon
 ):

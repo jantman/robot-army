@@ -102,11 +102,37 @@ Three properties are load-bearing:
   which kills nothing, but does nothing either, and would leave them looking at the same
   page.
 
-## 6. What this never does
+## 6. The launch gate
 
-- **It never refuses, blocks, or alters an action.** No control is disabled, no POST is
-  rejected, no dispatch is withheld on account of a cap disagreement.
-- **It never changes a dispatch decision.** The daemon plans against its own configuration
-  with no `enforced_cap` supplied, exactly as before.
+`dispatch.check_launch_gate` runs in whichever process is about to launch — the daemon, the
+web on a *Resume*, the terminal on `resume`/`restart` — so the cap is enforced in more than
+one place and a *refusal* is a surface like any other.
+
+| Caller | `enforced_cap` passed | Effect |
+|---|---|---|
+| `select_and_dispatch` (the daemon) | none | unchanged: it is the authority and consults nothing |
+| `web.require_dispatchable` | resolved, fresh | a refusal cites the number the page is showing |
+| `operations.resume` / `restart` | resolved, fresh | the same, from the terminal or the web's worker |
+
+Resolved fresh at the gate rather than taken from the request's reading, deliberately: this
+gate's documented character is that the check at the launch decides, and minutes can pass
+between a render and a press.
+
+Both directions matter, and only one of them is about the display:
+
+- **The reading process is the stale, lower one.** Without this it refuses a launch the
+  daemon would allow, citing a cap the page has stopped showing — issue #30's `6/5`,
+  relocated into a `409`.
+- **The reading process is the higher one.** Without this it launches past the cap the
+  daemon is enforcing. That is an over-dispatch, which is the harmful direction: it
+  oversubscribes the one subscription the cap exists to protect.
+
+## 7. What this never does
+
+- **A disagreement never refuses, blocks, or alters an action.** No control is disabled and
+  no page is withheld because two processes hold different numbers. What a gate refuses, it
+  refuses against the enforced cap — which is what the daemon would have refused anyway.
+- **It never changes a dispatch decision made by the daemon.** The daemon plans and gates
+  against its own configuration with no `enforced_cap` supplied, exactly as before.
 - **It writes nothing.** No audit record, no anomaly, no state file — reporting capacity is a
   read.

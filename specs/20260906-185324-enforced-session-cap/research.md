@@ -36,12 +36,16 @@ it on every page already. Adding a fourth field costs one key.
 surface says so, and nothing is blocked.
 
 **Rationale**: the effect-level mismatch refuses mutations because acting at the wrong level
-does something in the world that the operator believes is being simulated. The cap has no
-such property. The daemon enforces its own cap regardless of what any other process believes,
-so no action taken through a stale interface can oversubscribe the machine. Refusing on the
-strength of a cap disagreement would convert a display defect into an outage — and the most
-likely time to hit it is right after raising the cap, which is to say the moment the operator
-most wants work to flow.
+does something in the world that the operator believes is being simulated. A *disagreement*
+about the cap has no such property, and refusing on the strength of one would convert a
+display defect into an outage — at the moment the operator had just raised the cap, which is
+to say the moment they most want work to flow.
+
+**One sentence of this was wrong and R8a corrects it**: "the daemon enforces its own cap
+regardless of what any other process believes, so no action taken through a stale interface
+can oversubscribe the machine". The launch gate runs in the launching process, so a stale
+interface *can* oversubscribe. That does not change this decision — the disagreement still
+refuses nothing — it changes which number the gate measures against.
 
 **Alternative rejected**: treat it like the effect level and refuse. Rejected on the
 asymmetry above; the spec makes it FR-005 so a later reading cannot quietly "improve" it into
@@ -141,6 +145,30 @@ daemon plans against its own configuration.
 circular, would put a file read in the dispatch path, and would make the cap a value that
 could in principle be influenced from outside the process. The value would be identical
 anyway, which is the point: nothing about dispatch changes.
+
+## R8a — The daemon is not the only enforcer, and a refusal is a surface
+
+**Found during implementation**, contradicting R8's premise as first written.
+
+`dispatch.check_launch_gate` — the gate that made *Resume* and *Restart* honour the cap at
+all (issue #120) — runs in the process performing the launch, not in the daemon. The web
+calls it before answering a press, and again on its worker thread through
+`operations.resume`. Both of those ran against the web's own configuration.
+
+So fixing the display alone left the defect intact one press deeper: a header correctly
+reading `6/7` offered a button whose refusal said `6 of 5 sessions running` — the exact
+number the header had stopped showing. And in the other direction a web process holding the
+*higher* cap would launch past what the daemon was enforcing, which is an over-dispatch:
+`capacity`'s own docstring names that as the only capacity error that does harm.
+
+**Decision**: every launch gate outside the daemon measures against the enforced cap, via
+the same optional `enforced_cap` parameter the snapshot already takes. The daemon passes
+nothing and is unchanged.
+
+**Alternative rejected**: deciding by the existing `surface` string (`"web"` and `"cli"`
+resolve, `"dispatcher"` does not). It is implicit — a future caller passing a new surface
+name would silently change which cap it is held to — and it would make the gate read the
+heartbeat itself, which is precisely what the daemon must not do.
 
 ## R9 — One reading of the daemon per rendered page
 

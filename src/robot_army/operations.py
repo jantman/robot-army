@@ -322,9 +322,7 @@ def status(
         # read (issue #30). Both directions are reachable and a freshly-started command is
         # the more misleading of the two: it looks maximally trustworthy while reporting a
         # limit nothing is applying.
-        enforced_cap=health.published_cap(
-            report, running=daemon_mod.is_locked(ctx.layout.lock_path)
-        ),
+        enforced_cap=_enforced_cap(ctx),
         registry_dir=registry_dir,
         proc_root=proc_root,
     )
@@ -394,6 +392,8 @@ def status(
         )
     )
     result.say(f"capacity     : {snap.describe()}")
+    if snap.cap_disagreement:
+        result.say(f"             : {FRESH_READER_REMEDY}")
     result.say(f"order        : {ctx.config.dispatch.order}")
     _say_holds_summary(result, ctx)
     result.say(f"database     : {ctx.layout.db_path} (schema {SCHEMA_VERSION})")
@@ -489,18 +489,13 @@ def capacity(
     for a check that ran and did not pass.
     """
     result = Result()
-    # One reading of the daemon, for the cap it is enforcing (issue #30). The terminal is
-    # fixed alongside the web because the issue's reproduction is two surfaces printing
-    # different fractions seconds apart; correcting one would leave them free to disagree.
-    report = health.check(
-        ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
-    )
+    # The cap the daemon is enforcing (issue #30). The terminal is fixed alongside the web
+    # because the issue's reproduction is two surfaces printing different fractions seconds
+    # apart; correcting one would leave them free to disagree.
     snap = capacity_mod.snapshot(
         ctx.conn,
         config=ctx.config,
-        enforced_cap=health.published_cap(
-            report, running=daemon_mod.is_locked(ctx.layout.lock_path)
-        ),
+        enforced_cap=_enforced_cap(ctx),
         audit=ctx.audit,
         registry_dir=registry_dir,
         proc_root=proc_root,
@@ -535,6 +530,7 @@ def capacity(
     def say_cap_disagreement() -> None:
         if snap.cap_disagreement:
             result.say(f"cap          : {snap.cap_disagreement}")
+            result.say(f"             : {FRESH_READER_REMEDY}")
 
     if not snap.observable:
         result.code = EXIT_CHECK_FAILED
@@ -709,6 +705,41 @@ def _repo_settings(ctx: Context, snap: Any) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+#: What a command knows that the shared sentence deliberately does not (issue #30).
+#:
+#: ``CapacitySnapshot.cap_disagreement`` will not say which of the two processes is behind,
+#: because on the web either one can be. A command cannot be: it loaded the configuration
+#: milliseconds ago, so if the two differ it is the daemon that has been running since
+#: before the change. Saying "restart that one" to someone whose process has already exited
+#: is a remedy they cannot act on, so the surface that *can* narrow it does — without the
+#: shared sentence growing a second wording.
+FRESH_READER_REMEDY = (
+    "This command read the configuration a moment ago, so the daemon is the one behind: "
+    "restart it to apply the cap in the file."
+)
+
+
+def _enforced_cap(ctx: Context) -> int | None:
+    """The cap the running daemon is enforcing, for a process that is not the daemon.
+
+    Issue #30. Every surface outside the daemon — a terminal command, the web, a worker
+    thread about to launch — asks this rather than trusting the configuration it loaded,
+    because the daemon is what enforces a cap and its own may have been read at a different
+    time. ``None`` means no daemon holds the lock or it published nothing usable, in which
+    case the caller's own configuration is the best answer there is.
+
+    Takes its own reading rather than accepting one. Its callers are either short-lived
+    commands, where there is nothing to share, or the launch gate, where the reading being
+    as late as possible is the point — that gate's documented character is that the check
+    at the launch decides. ``web.handle`` deliberately does **not** use this: it holds one
+    reading for the whole request so that the two halves of a page cannot disagree.
+    """
+    report = health.check(
+        ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+    )
+    return health.published_cap(report, running=daemon_mod.is_locked(ctx.layout.lock_path))
 
 
 def _capacity_dict(snap: Any, order: str) -> dict[str, Any]:
@@ -2946,6 +2977,10 @@ def resume(
             proc_root=proc_root,
             resume_session_id=previous.session_id,
             force=force,
+            # The gate measures against what the daemon is enforcing, not against what this
+            # process read (issue #30) — otherwise a page reading `6/7` offers a button
+            # whose refusal says `6 of 5`.
+            enforced_cap=_enforced_cap(ctx),
             surface=surface,
         )
     except dispatch.DispatchRefused as exc:
@@ -3003,6 +3038,7 @@ def restart(
             registry_dir=registry_dir,
             proc_root=proc_root,
             force=force,
+            enforced_cap=_enforced_cap(ctx),
             surface=surface,
         )
     except dispatch.DispatchRefused as exc:

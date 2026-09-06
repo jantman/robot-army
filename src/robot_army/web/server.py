@@ -576,6 +576,13 @@ def require_dispatchable(ctx: Context, item_id: int, action: str) -> None:
             config=ctx.config,
             item=item,
             surface="web",
+            # Measured against the daemon's cap, not this process's (issue #30). A refusal
+            # is a surface too: without this, a page correctly reading ``6/7`` offers
+            # *Resume* and answers it with "6 of 5 sessions running" — the very number the
+            # header no longer shows. Taken fresh rather than from the request's reading,
+            # which is right here: this gate's whole character is that the check at the
+            # launch decides, and minutes can pass between a render and a press.
+            enforced_cap=operations._enforced_cap(ctx),
         )
     except dispatch.DispatchRefused as exc:
         raise Refusal(

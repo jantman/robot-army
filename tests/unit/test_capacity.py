@@ -491,3 +491,23 @@ def test_an_unobservable_machine_still_reports_the_cap_in_force(conn, config, au
     assert snap.observable is False
     assert snap.global_cap == 7
     assert snap.configured_cap == 5
+
+
+def test_the_disagreement_survives_an_unobservable_machine_in_describe(conn, config, audit, tmp_path):
+    """``status`` renders only ``describe()``, so dropping it here would make that the one
+    surface silent about a stale cap in exactly the state where a wrong limit is least
+    diagnosable."""
+    config = dataclasses.replace(
+        config, daemon=dataclasses.replace(config.daemon, max_concurrent_sessions=5)
+    )
+    snap = capacity.snapshot(
+        conn,
+        config=config,
+        enforced_cap=7,
+        audit=audit,
+        registry_dir=tmp_path / "absent",
+        proc_root=tmp_path / "no-proc-here",
+    )
+    line = snap.describe()
+    assert line.startswith("capacity unobservable:")
+    assert "SESSION CAP MISMATCH" in line

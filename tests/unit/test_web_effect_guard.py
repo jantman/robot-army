@@ -278,10 +278,13 @@ def test_a_cap_disagreement_refuses_nothing(web, conn, layout, running_daemon):
     """The asymmetry that decides everything about issue #30's fix.
 
     An effect-level mismatch refuses because acting at the wrong level does something in
-    the world the author believes is being simulated. A cap disagreement cannot: the daemon
-    enforces its own cap whatever this interface believes, so no action taken through a
-    stale one can oversubscribe the machine. Refusing here would turn a display defect into
-    an outage — at the exact moment the author had just raised the cap to get work moving.
+    the world the author believes is being simulated. A cap *disagreement* does not:
+    refusing on one would turn a display defect into an outage — at the exact moment the
+    author had just raised the cap to get work moving.
+
+    The cap itself is still enforced, by the launch gate running in this very process, and
+    the two tests below are about that. What must never happen is a control refused because
+    two processes hold different numbers.
     """
     from dataclasses import replace
 
@@ -296,3 +299,62 @@ def test_a_cap_disagreement_refuses_nothing(web, conn, layout, running_daemon):
     assert abandoned.status == 303, "it acted and redirected, rather than being refused"
     assert abandoned.json()["ok"] is True
     assert web.post_json("/poll").status in (200, 303)
+
+
+def test_a_button_the_page_offers_is_not_refused_by_the_cap_the_page_stopped_showing(
+    web, conn, layout, running_daemon
+):
+    """Issue #30 one press further on than the header.
+
+    The web is a second enforcer of the cap: ``require_dispatchable`` takes its own reading
+    before a resume. Fixing only the display left the page reading ``2/4`` and offering
+    *Resume*, and the press answering "2 of 2 sessions running" — the stale number the
+    header had just stopped showing, in a refusal instead of in a pill.
+    """
+    from dataclasses import replace
+
+    from tests.conftest import seed_session
+
+    web.app.config = replace(
+        web.app.config,
+        daemon=replace(web.app.config.daemon, max_concurrent_sessions=2),
+        dispatch=replace(web.app.config.dispatch, default_repo_max_sessions=9),
+    )
+    beat(layout, max_concurrent_sessions=4)
+    for issue in (90, 91):
+        seed_session(conn, seed_item(conn, issue_number=issue, state="active"), state="running")
+    item_id = seed_item(conn, issue_number=1, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+
+    text = web.get(f"/item/{item_id}").text
+    assert "2/4 sessions" in text, "the page counts against the daemon's cap"
+
+    response = web.post_json(f"/item/{item_id}/resume")
+    assert response.status != 409, (
+        f"the page offered this and the daemon allows it: {response.json().get('reason')}"
+    )
+
+
+def test_the_gate_still_refuses_past_the_cap_the_daemon_is_enforcing(
+    web, conn, layout, running_daemon
+):
+    """And the direction that protects the machine: a web process holding a *higher* cap
+    than the daemon must not launch past what the daemon is enforcing."""
+    from dataclasses import replace
+
+    from tests.conftest import seed_session
+
+    web.app.config = replace(
+        web.app.config,
+        daemon=replace(web.app.config.daemon, max_concurrent_sessions=9),
+        dispatch=replace(web.app.config.dispatch, default_repo_max_sessions=9),
+    )
+    beat(layout, max_concurrent_sessions=2)
+    for issue in (90, 91):
+        seed_session(conn, seed_item(conn, issue_number=issue, state="active"), state="running")
+    item_id = seed_item(conn, issue_number=1, state="interrupted")
+    seed_session(conn, item_id, state="lost")
+
+    response = web.post_json(f"/item/{item_id}/resume")
+    assert response.status == 409
+    assert "2 of 2 sessions running" in response.json()["reason"], response.json()

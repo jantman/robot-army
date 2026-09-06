@@ -131,6 +131,19 @@ and a web reading and compare the denominators.
 
 ---
 
+## Phase 7: Review findings (added after implementation)
+
+Raised by a `/code-review high` pass over the finished branch, run locally because the CI
+review job went green having posted nothing — five attempts, each ending its turn waiting on
+a backgrounded agent.
+
+- [X] T037 **The launch gate was still on the stale cap.** `dispatch.check_launch_gate` runs in whichever process is about to launch, not in the daemon, so the web's *Resume* was gated against the web's own configuration: a header correctly reading `6/7` offered a button whose refusal said `6 of 5 sessions running`, and a web process with a *higher* cap would launch past the daemon's. Threaded `enforced_cap` through `check_launch_gate`, `dispatch_item` and `_dispatch_item` in `src/robot_army/dispatch.py`; resolved it in `web.require_dispatchable` and in `operations.resume`/`restart` via a new `operations._enforced_cap(ctx)`; the daemon passes nothing. Two tests in `tests/unit/test_launch_gate.py` and two in `tests/unit/test_web_effect_guard.py`, each verified to fail without the fix
+- [X] T038 **`describe()` dropped the disagreement on the unobservable path**, which made `robot-army status` — whose only channel this is — silent about a stale cap in exactly the state where a wrong limit is least diagnosable. Fixed in `src/robot_army/capacity.py` with a test in `tests/unit/test_capacity.py`
+- [X] T039 **The remedy was unactionable from a terminal.** The shared sentence will not say which process is behind, because on the web either can be — but a command read the file milliseconds ago, so the daemon necessarily is. `operations.FRESH_READER_REMEDY` adds that one line to `capacity` and `status` without the shared sentence growing a second wording
+- [X] T040 Corrected the spec's false assumption ("the daemon is the sole enforcer"), FR-005, FR-007 and a new FR-011; added [research.md](research.md) R8a and the plan's post-implementation amendment; added §6 to [contracts/enforced-cap.md](contracts/enforced-cap.md); and fixed the over-broad "it never refuses anything" claim in `docs/guide/3-selection.md`, `docs/guide/operating.md`, `src/robot_army/web/html.py` and a test docstring
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase dependencies

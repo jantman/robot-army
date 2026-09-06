@@ -15,9 +15,10 @@ The daemon starts publishing `max_concurrent_sessions` on its heartbeat. Every s
 reports capacity resolves the cap from there when a daemon holds the lock, falls back to its
 own configuration when it cannot, and says so on every view when the two disagree. The cap
 goes *into* the snapshot rather than being substituted at render time, so the queue's per-item
-"at capacity" reasons are planned against the same number the pill shows. Nothing is refused:
-the cap is a reported number, not a safety boundary, and the daemon enforces its own cap
-whatever any other process believes.
+"at capacity" reasons are planned against the same number the pill shows — and so is the
+launch gate that answers the buttons on it, which runs in the web's own process and was
+refusing against the stale number underneath a corrected header. A disagreement itself
+refuses nothing: it is a report, not a safety boundary.
 
 ## Technical Context
 
@@ -37,9 +38,9 @@ database change, no migration, no configuration key.
 **Performance Goals**: none new. The resolution adds one small JSON read and one shared-lock
 probe per *report*, both of which the web already performs on every page.
 
-**Constraints**: no dispatch decision may change; no action may become refused; the existing
-`global_cap` key keeps its name and gets narrower meaning rather than a sibling that
-consumers must learn to prefer.
+**Constraints**: no decision the *daemon* makes may change; no action may become refused on
+account of a disagreement; the existing `global_cap` key keeps its name and gets narrower
+meaning rather than a sibling that consumers must learn to prefer.
 
 **Scale/Scope**: one new function in `health.py`, one parameter and one field in
 `capacity.py`, five read call sites, one renderer, three guide pages, and their tests.
@@ -70,6 +71,16 @@ written nothing.
 **Post-Phase-1 re-check**: unchanged. Phase 1 added no dependency, no persistent structure, no
 configuration key and no new module; `contracts/enforced-cap.md` documents behaviour the plan
 had already committed to.
+
+**Post-implementation amendment**: the plan and the spec both assumed the daemon was the sole
+enforcer of the cap. It is not. `dispatch.check_launch_gate` runs in whichever process is
+about to launch, so the web's own *Resume* was gated against the web's stale configuration —
+leaving issue #30's `6/5` alive in a refusal underneath a header correctly reading `6/7`, and
+letting a web process with a *higher* cap launch past the daemon's. Both directions are now
+measured against the enforced cap ([contracts/enforced-cap.md](contracts/enforced-cap.md) §6).
+The verdicts above are unchanged by it: the parameter is the same optional integer, threaded
+through two existing functions, and the daemon still passes nothing. Principle III is likewise
+unchanged — the gate's refusal record already existed and now merely cites the right cap.
 
 ## Project Structure
 
@@ -155,7 +166,9 @@ a file to find rather than a file to read.
    - The two `capacity=None` fallbacks in `pages` stay as they are: they exist for a direct
      caller with no snapshot to hand, and resolve to the configured cap, which is the
      documented meaning of "no enforced cap supplied".
-   - `dispatch` is **not** touched: the daemon plans against its own configuration (R8).
+   - `dispatch` **is** touched, once and by a parameter only: `check_launch_gate` and the
+     two launch wrappers take `enforced_cap`, which the daemon does not pass. See the
+     post-implementation amendment above; the daemon's own decisions are unchanged.
 
 5. **Render it.** `html._chrome_bar` appends the sentence as a `banner warn` notice after the
    effect-level one, when `capacity["cap_disagreement"]` is set; a `.banner.warn` CSS rule is

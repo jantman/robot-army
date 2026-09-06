@@ -93,10 +93,16 @@ One of the two has been running since before the configuration changed — resta
 and they will agree.
 ```
 
-It never refuses anything — unlike an effect-level mismatch, which does. The daemon enforces
-its own cap whatever any other process believes, so a disagreement cannot make an action
-unsafe; it just means one of the two processes needs restarting. Which one, it cannot tell
-you: neither knows when the other read its configuration.
+The disagreement itself refuses nothing — unlike an effect-level mismatch, which does. It
+just means one of the two processes needs restarting. Which one, the notice cannot tell you:
+neither knows when the other read its configuration. A terminal command *can* narrow it and
+does — it read the file a moment ago, so the daemon is the one behind.
+
+The cap is still enforced, and by more than the daemon: pressing *Resume* on the web, or
+typing `resume` or `restart`, runs a launch gate inside that process. Those gates measure
+against the same enforced cap the surfaces report, so what a page shows, what it offers and
+what it refuses are one number. A gate left on the reader's own cap would refuse a launch the
+daemon would allow — or permit one past what the daemon is enforcing.
 
 With no daemon running, or with nothing readable from its heartbeat, each surface falls back
 to its own configured cap and says nothing — there is then nothing to disagree with.

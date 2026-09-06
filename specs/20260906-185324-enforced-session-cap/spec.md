@@ -50,10 +50,15 @@ disagreement should do:
 
 - **The effect level is a safety boundary.** Acting at the wrong one launches real work
   that the reader believes is being simulated, so a disagreement refuses mutations.
-- **The cap is a reported number.** A disagreement cannot make an action unsafe — the
-  daemon enforces its own cap whatever any other process believes — so a disagreement is
-  reported, not refused. Refusing work on the strength of it would take a display defect
-  and make it an outage.
+- **The cap is a reported number.** A disagreement between the two is not itself a reason
+  to refuse anything, so it is reported rather than refused; refusing work on the strength
+  of a *disagreement* would take a display defect and make it an outage.
+
+  The cap is nonetheless enforced, in more than one process — `check_launch_gate` runs
+  wherever a launch is about to happen — and that half is not a display. So the rule is one
+  step more precise than "the cap never refuses": every gate measures against the **same**
+  enforced cap the surfaces report, so that what a page shows, what it offers and what it
+  refuses cannot be three different numbers.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -109,8 +114,9 @@ reconciles them.
    rendered, **Then** a notice names both numbers, says the daemon's is the one in force,
    and says that restarting this interface is what makes them agree.
 2. **Given** the same disagreement, **When** the maintainer performs an action that
-   changes work, **Then** it is **not** refused on account of the cap — the notice is
-   informational, and a stale denominator never blocks work.
+   changes work, **Then** it is **not** refused on account of the *stale* cap — the notice
+   is informational. An action the enforced cap itself would refuse is still refused, and
+   says so against the number the page is showing rather than against the stale one.
 3. **Given** a reader and daemon that agree, **When** any view is rendered, **Then** no
    notice appears at all.
 
@@ -190,15 +196,23 @@ daemon's.
   every surface that reports capacity MUST say so, naming both values, stating that the
   daemon's is in force, and stating that restarting the reading process is what reconciles
   them.
-- **FR-005**: A disagreement MUST NOT refuse, block, or alter any action. It is a report
-  about a number, not a safety interlock.
+- **FR-005**: A disagreement MUST NOT refuse, block, or alter any action *that the enforced
+  cap itself permits*. It is a report about a number, not a safety interlock: no control is
+  disabled and no page is withheld on account of one. Where a launch gate already exists, it
+  measures against the enforced cap — so it permits exactly what the daemon would permit,
+  which is the same rule stated for an action rather than for a display.
 - **FR-006**: When no daemon is running, when no heartbeat can be read, or when the
   heartbeat publishes no usable cap, the configured cap MUST be used and no disagreement
   MUST be reported — an unknown enforced cap is not a disagreement, and the state where
   nothing about the daemon can be read is already announced by the existing banner.
 - **FR-007**: The daemon's own dispatch decisions MUST continue to be made against its own
   configuration and MUST NOT depend on reading its own heartbeat. Nothing about which
-  sessions launch, or when, changes.
+  sessions launch, or when, changes for the daemon.
+- **FR-011**: A launch gate running in any process **other** than the daemon MUST measure
+  against the enforced cap, so that what a surface offers, what it refuses, and what number
+  it shows are the same three facts. This tightens the gate where the reading process is the
+  more generous of the two — an over-dispatch is the harmful direction — and loosens it where
+  the reading process is the stale one.
 - **FR-008**: The machine-readable capacity payload MUST carry the enforced cap as the cap,
   and MUST additionally carry the reading process's configured cap when the two differ, so
   a consumer can detect the disagreement without parsing a sentence.
@@ -239,9 +253,17 @@ daemon's.
 
 ## Assumptions
 
-- The daemon is the sole enforcer of the cap, and its cap is immutable for the life of the
-  process. Both are true today: the cap is read once into the loaded configuration, and
-  every dispatch decision is made inside the daemon.
+- **Corrected during implementation.** The first half of this assumption was wrong: the
+  daemon is *not* the sole enforcer. `dispatch.check_launch_gate` runs in whichever process
+  is about to launch — the web when a *Resume* is pressed, the terminal when `resume` or
+  `restart` is typed — and it took its own capacity reading against that process's
+  configuration. So the stale cap survived in a **refusal**: a page correctly reading `6/7`
+  offered a button whose press answered `6 of 5 sessions running`, and in the other
+  direction a web process holding a higher cap would launch past the one the daemon was
+  enforcing. FR-002 therefore covers a refusal as much as a report, and every launch gate
+  outside the daemon measures against the enforced cap. What remains true, and is what the
+  rest of this spec rests on, is that the daemon's cap is immutable for the life of the
+  process and is the number the whole machine is meant to be held to.
 - One daemon runs at a time, enforced by the existing lock. The heartbeat therefore
   describes the only daemon there is.
 - A disagreement is worth a notice on every view rather than a status page, for the reason

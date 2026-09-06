@@ -196,9 +196,11 @@ SESSION CAP MISMATCH: the running daemon is enforcing a cap of 7, and this proce
 configured for 5. …
 ```
 
-It is a warning, not a refusal: nothing on the page is disabled and no control is blocked,
-because the daemon enforces its own cap whatever this interface believes. The fix is to
-restart whichever of the two has been running since before the configuration changed —
+It is a warning, not a refusal: nothing on the page is disabled and no control is blocked on
+account of the disagreement. The cap itself is still enforced — pressing *Resume* runs a
+launch gate in this very process — but that gate measures against the daemon's cap too, so a
+button this page offers is never answered with the number the page stopped showing. The fix
+is to restart whichever of the two has been running since before the configuration changed —
 usually this one, `systemctl --user restart robot-army-web.service`, and the same restart
 picks up every other key it read at startup. The notice cannot tell you which, because
 neither process knows when the other read its configuration.

@@ -111,6 +111,27 @@ That is the accepted model, so the mitigations are the ones that matter:
 From outside the house I connect my existing VPN and use the same LAN address. Nothing is
 published, no tunnel is configured, and no port is forwarded.
 
+### How it uses the window
+
+The same pages are read on a 1920-pixel monitor and on a phone, and until issue #148 they
+were laid out for neither: one column, 60rem wide, for the whole page. That is a good line
+length for a paragraph and half a screen for a nine-column table, which is what `/active`
+is — on a full-size monitor it used the left half of the window while every title wrapped
+over five or six lines.
+
+Prose and tables now get different widths:
+
+- **Text stays at a reading measure.** Banners, notes, audit records, an item's field list —
+  they keep the width the whole page used to have, so nothing is read across a metre of
+  glass.
+- **A table takes the width its content needs**, up to the width of a full-size monitor. It
+  is not stretched to fill space it does not want: the two-column state-history table on an
+  item page stays narrow, and the `/queue` repositories table stays narrower still.
+- **A table too wide for the viewport scrolls inside its own box.** This is the phone case
+  and it is unchanged — the page itself never scrolls sideways, and the header, nav and
+  footer stay put while a table is dragged. At 390 pixels every view lays out exactly as it
+  did before, because the two new limits are maxima and a phone is already below both.
+
 ### What it can do
 
 Six views — active, queue, interrupted, one item, anomalies, and the audit log — and the

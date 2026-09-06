@@ -508,13 +508,22 @@ def reconcile(
     # ``skipped``. Retiring first means a finished item's worktree is reclaimed in **this**
     # pass rather than the next, instead of being reported "not yet" forever.
     #
-    # *Before* ``_sweep_stale_sessions``, and this is what makes "no anomaly for the
-    # ordinary successful path" free. That sweep reaches a row this one has already closed,
-    # sees a state that is neither ``starting`` nor ``running``, and leaves it — so the
-    # ``orphan_session`` that fires today is never *reached*, rather than being suppressed
-    # by a flag saying "this one was retired". There is a second, independent reason it
-    # cannot fire there: ``scan`` is a snapshot but ``RegistryEntry.alive()`` re-reads
-    # ``/proc`` at call time, so even an open row would take the reclaim branch.
+    # *Before* ``_sweep_stale_sessions``, which is what makes "no anomaly for the ordinary
+    # successful path" reachable. That sweep reaches a row this one has already closed, sees
+    # a state that is neither ``starting`` nor ``running``, and leaves it — so the
+    # ``orphan_session`` is never *reached*, rather than being suppressed by a flag saying
+    # "this one was retired". There is a second, independent reason it cannot fire there:
+    # ``scan`` is a snapshot but ``RegistryEntry.alive()`` re-reads ``/proc`` at call time,
+    # so even an open row would take the reclaim branch.
+    #
+    # **This paragraph used to claim the ordering made that property "free", and it was
+    # wrong** (issue #149). The ordering is necessary and was never sufficient: it only
+    # helps on a pass where retirement actually *acts*, and under the single 30-minute idle
+    # gate it never could — the maintainer merges within minutes of the worker going quiet,
+    # so ``done`` always arrived inside the quiet period and the sweep below reached a row
+    # this one had declined to close. Every ordinary completion raised the anomaly for ~29
+    # minutes. What makes the property hold is this ordering *plus* ``_retire_signal``
+    # acting on the merge, on the same pass the item reaches ``done``.
     #
     # ``_orphan_sweep`` needed the same property and did **not** have it — it read the
     # snapshot directly — so it raised an anomaly against every worker this sweep retired.
@@ -881,16 +890,62 @@ def _resolve_closed_issues(
 #: with the work merged and the issue closed in both cases. 1800s sits far above any pause
 #: inside an agent's turn.
 #:
-#: **Erring long is nearly free; erring short is not, but neither is it expensive.** A
-#: threshold too high costs a capacity slot for a while longer. A threshold too low ends a
-#: session someone was reading — which destroys nothing: the transcript is untouched, the
-#: worktree is untouched, and `claude --resume <id>` brings the whole thing back. That
+#: **This applies to one path only, and issue #149 is why.** It shipped as the whole gate,
+#: on the argument that "erring long is nearly free". That was measured against the wrong
+#: case. Where the maintainer has *merged the pull request*, waiting is not nearly free: the
+#: cost is an `orphan_session`, a held slot and an open tab on **every successful item**,
+#: which is the thing #138 was filed about — bounded to half an hour rather than forever,
+#: but on exactly the path the whole feature exists to make quiet. `_retire_signal` now
+#: takes that path, and this constant governs the other one.
+#:
+#: Where it still applies — a `done` item with no merged pull request, so an issue closed by
+#: hand or as not-planned — the original argument holds unchanged and is the reason the
+#: value stays at 1800. There is no explicit "this is complete" there, only the inference
+#: from idleness, and the session may be the very thing the maintainer is about to attach
+#: to. A threshold too high costs a capacity slot for a while longer. A threshold too low
+#: ends a session someone was reading — which destroys nothing: the transcript is untouched,
+#: the worktree is untouched, and `claude --resume <id>` brings the whole thing back. That
 #: asymmetry is why this is safe to have on with no configuration key to turn it off.
 #:
 #: A constant rather than configuration, deliberately — one caller, no second use in hand
 #: (Principle I), exactly as ``TRANSCRIPT_GRACE_SECONDS`` above. If the value proves wrong,
 #: the value changes.
 RETIRE_IDLE_SECONDS = 1800
+
+
+def _retire_signal(item: WorkItem, idle_s: float) -> str | None:
+    """What authorises retiring this item's worker now, or ``None`` for "not yet" (#149).
+
+    A helper rather than a compound ``if`` because this is a decision *table*, and a table
+    that has to be read out of a loop body is a table nobody checks against its contract.
+    Callers have already established that the item is ``done`` and that the worker is idle;
+    this answers only "why may it be ended".
+
+    **A merged pull request is the signal, and an idleness timer is the fallback.** Merging
+    is the maintainer saying "yes, this is complete" in as many words — a stronger and
+    earlier statement than any inference from how long a process has been quiet. From that
+    point there is nothing left for the worker to do and nothing in its tab about to be
+    read. Where no merge exists the issue was closed by hand or as not-planned, there is no
+    explicit acceptance, and ``RETIRE_IDLE_SECONDS`` is still the right guard.
+
+    **No floor on the merged path, and that is arithmetic rather than taste.** Issue #149
+    weighed a 60-second one. On the completion it was filed about the worker had been idle
+    **47 seconds** when its item reached ``done`` — so a 60-second floor declines on exactly
+    the pass that matters, ``_sweep_stale_sessions`` raises the anomaly a few lines later,
+    and the reported bug reproduces. A floor low enough to be safe is not a number anyone
+    would defend. The case a floor was meant to cover — merging while still reading the
+    session — is already covered by retirement destroying nothing: the transcript survives
+    and ``claude --resume`` returns, so the cost is a keystroke.
+
+    **What this does not decide is whether the worker is idle at all.** That question is
+    settled before this is called and is unchanged by the merge, which is a statement about
+    the work rather than an observation about the process. See ``RegistryEntry.idle_for``.
+    """
+    if item.has_merged_pull_request:
+        return "merged_pull_request"
+    if idle_s >= RETIRE_IDLE_SECONDS:
+        return "quiet_period"
+    return None
 
 
 def _retire_finished_sessions(
@@ -913,6 +968,15 @@ def _retire_finished_sessions(
     ``done`` already *means* "the source issue was observed closed" — no second API call,
     no column, no matching on a transition's reason. ``tests/unit/test_done_single_writer``
     keeps it true.
+
+    **``done`` is the precondition; what authorises acting on it is one of two signals**
+    (issue #149). A merged pull request retires the worker at once; anything else waits out
+    ``RETIRE_IDLE_SECONDS``. ``_retire_signal`` holds that decision and the reasoning for it.
+    The split exists because the shipped single gate was never crossed by an item finishing
+    normally: the worker goes quiet, the maintainer merges within minutes, and ``done``
+    therefore arrives *inside* the quiet period every time — so the ordinary successful path
+    still ended in an anomaly, a held slot and an open tab, just for half an hour instead of
+    for ever. Neither signal weakens the idleness check below, which both must pass.
 
     ``abandoned`` and ``failed`` items are deliberately untouched. Those are the states
     where the work is *not* finished and the session may be the very thing the maintainer
@@ -952,10 +1016,23 @@ def _retire_finished_sessions(
             continue
 
         idle_s = entry.idle_for()
-        if idle_s is None or idle_s < RETIRE_IDLE_SECONDS:
-            # Busy, or idleness could not be established. Both mean "not yet", and the
-            # question is asked again next pass. See `RegistryEntry.idle_for` for why every
-            # unknown lands here rather than in the branch below.
+        if idle_s is None:
+            # Idleness could not be established: the status is not `idle`, or the timestamp
+            # is absent, malformed, or in the future. See `RegistryEntry.idle_for` for why
+            # every unknown lands here rather than in the branch below.
+            #
+            # **This is the branch a merged pull request does not bypass**, and the
+            # separation from the duration test below is the whole of issue #149's care.
+            # Merging says the *work* is accepted; it says nothing about whether the process
+            # is between tool calls. Removing the duration requirement is safe because the
+            # transcript survives a retirement; removing this one would end a worker
+            # mid-turn.
+            continue
+
+        signal = _retire_signal(item, idle_s)
+        if signal is None:
+            # Idle, but not long enough, and nothing has been merged to say otherwise. "Not
+            # yet": the question is asked again next pass and nothing is written (C6).
             continue
 
         retired += _retire_one(
@@ -966,6 +1043,7 @@ def _retire_finished_sessions(
             scan=scan,
             proc_root=proc_root,
             idle_s=idle_s,
+            signal=signal,
         )
     return retired
 
@@ -979,14 +1057,23 @@ def _retire_one(
     scan: sessions.RegistryScan,
     proc_root: Path | None,
     idle_s: float,
+    signal: str,
 ) -> int:
-    """Terminate one finished session and settle its row. Returns 1 if it was retired."""
+    """Terminate one finished session and settle its row. Returns 1 if it was retired.
+
+    ``signal`` is which of ``_retire_signal``'s two conditions authorised this, and it is
+    recorded rather than derived. With one gate ``idle_s`` implied the reason; with two it
+    does not — an ``idle_s`` of 47 is either a merged pull request or a bug, and Principle
+    III's standard is that the log alone answers which, without the reader having to know
+    which release wrote it.
+    """
     detail = {
         "item_id": session.work_item_id,
         "session_id": session.session_id,
         "pid": session.pid,
         "proc_start": session.proc_start,
         "idle_s": int(idle_s),
+        "signal": signal,
     }
     # Before the signal, not after. Ending a process cannot be undone from this side, and
     # Principle III puts the burden on the irreversible act being visible even if the
@@ -1088,9 +1175,16 @@ def _retire_one(
             session=fresh,
             scan=scan,
             proc_root=proc_root,
+            # Names the condition, not just the clock, so a session row read on its own
+            # says why its worker was ended rather than leaving the reader to infer it
+            # from a number that no longer carries the answer.
             reason=(
-                f"retired: the work item is done and its worker had been idle for "
-                f"{int(idle_s)}s"
+                "retired: the work item is done and its pull request was merged"
+                if signal == "merged_pull_request"
+                else (
+                    f"retired: the work item is done and its worker had been idle for "
+                    f"{int(idle_s)}s"
+                )
             ),
         )
     audit.record(

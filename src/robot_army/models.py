@@ -165,6 +165,34 @@ class WorkItem:
         return [entry for entry in parsed if isinstance(entry, dict)]
 
     @property
+    def has_merged_pull_request(self) -> bool:
+        """Did the maintainer merge something for this item? (issue #149)
+
+        The strongest completion signal this system has, and the reason it exists as a
+        property: merging is the maintainer saying "this is complete" in as many words,
+        which is a better statement than any inference from how long a worker has been
+        quiet. `reconcile._retire_signal` is what acts on it.
+
+        **Every unknown answers `False`, and that is the whole safety argument.** A `NULL`
+        column (never looked up), `"[]"`, text that will not parse, a payload that is not a
+        list and elements that are not objects all reach `pull_request_list`'s `[]` and land
+        here as *not merged* — which delays a retirement rather than causing one, exactly as
+        `RegistryEntry.idle_for` returning `None` does. "Never asked" is emphatically not
+        "merged", and it is not a reason to go and ask either: this reads the stored column
+        and makes no network call.
+
+        **An exact match on the state, not a truthiness test.** States are lower-cased at
+        the boundary but an unrecognised one is passed through as GitHub spelled it rather
+        than mapped to a guess (`PullRequest`), so a state nobody has seen yet — a `draft`,
+        or whatever GitHub adds next — reads as not merged. Again the safe direction.
+
+        **Any merged pull request counts, not the newest one.** An item that was retried
+        carries a closed-unmerged attempt beside the merged one, and the merged one is still
+        the maintainer's acceptance of the work.
+        """
+        return any(entry.get("state") == "merged" for entry in self.pull_request_list)
+
+    @property
     def cleanup_pending(self) -> bool:
         """Would the automatic pass reconsider this item?
 

@@ -268,6 +268,51 @@ def test_a_session_retired_this_pass_loses_its_window_in_the_same_pass(
     assert result.windows_closed == 1, "the window must go in the same pass as the kill"
 
 
+def test_the_tab_of_a_freshly_idle_merged_item_goes_on_the_pass_it_finishes(
+    conn, audit, config, layout
+):
+    """Issue #149, and most of #81 as a consequence.
+
+    The rule above is right and the tab still waited half an hour, because it is gated on
+    the session row and the row was gated on a 30-minute idle clock the ordinary path never
+    reached. Nothing in this file changes for that to be fixed — the tab moves earlier
+    because the row closes earlier — and that is exactly what this asserts.
+    """
+    from tests.conftest import write_proc
+    from tests.unit.test_session_retirement import (
+        FRESH_IDLE_MS,
+        KillingHost,
+        merge_pull_request,
+    )
+    from tests.unit.test_session_retirement import (
+        finished_item as live_finished_item,
+    )
+
+    registry = layout.state_dir / "registry"
+    registry.mkdir(parents=True, exist_ok=True)
+    proc = layout.state_dir / "proc"
+    write_proc(proc, 1, starttime="1", exe="/usr/lib/systemd/systemd")
+
+    display = SimulatedDisplay(audit)
+    item = live_finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    merge_pull_request(conn, item)
+    open_window(display, item)
+
+    result = reconcile.reconcile(
+        conn,
+        boundaries=make_boundaries(audit, host=KillingHost(proc), display=display),
+        audit=audit,
+        config=config,
+        layout=layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+
+    assert result.retired == 1
+    assert result.windows_closed == 1
+    assert display.list_by_var(reconcile.WINDOW_ITEM_VAR) == []
+
+
 # -- US1: the failure paths --------------------------------------------------
 
 

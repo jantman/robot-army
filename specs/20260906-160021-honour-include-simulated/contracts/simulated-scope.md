@@ -169,8 +169,13 @@ handed to both views. Two of them discard it.
 
 | Surface | Behaviour |
 |---|---|
-| `/anomalies` | filtered by the toggle; the withheld count stated on the page |
+| `/anomalies` | filtered by the toggle; rehearsed rows marked; the withheld count stated on the page |
 | `/log` | filtered by the toggle; the page's scanned-region withheld count stated |
+
+FR-057 applies on both front ends: a rehearsed row is marked wherever it is shown. The CLI
+writes `*` after the row's leading identifier; the web uses `mark_simulated`, as every other
+listing on the site does. A page that filters correctly but renders a revealed rehearsed row
+identically to a real one has fixed one half of the defect and left the other.
 
 Each view discloses a withheld row **exactly once**. A section that rendered nothing carries its
 count in place of its empty text, so the standalone note stands down when there is nothing to

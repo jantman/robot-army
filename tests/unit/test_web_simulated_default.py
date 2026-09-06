@@ -388,3 +388,27 @@ def test_the_log_page_states_the_withheld_count_once(web_at, layout) -> None:
 
     assert body.count("2 simulated record") == 1, "the count is stated once, not twice"
     assert "Nothing to show here." in body
+
+
+def test_the_anomalies_page_marks_the_rehearsed_rows_it_shows(web_at, conn) -> None:
+    """FR-057: shown means marked, on every surface.
+
+    The CLI writes `*` after the id. Without the same claim here, a rehearsed anomaly revealed
+    by the toggle renders identically to a real one — the half of the defect that survives
+    filtering, since the reader has asked to see both and can no longer tell them apart.
+    """
+    _anomaly(conn, "card-real", dry_run=False)
+    _anomaly(conn, "card-sim", dry_run=True)
+
+    body = web_at("plan").get("/anomalies?include_simulated=1").text
+
+    assert body.count('class="sim"') == 1, "exactly one row carries the marker"
+    # …and it is the rehearsed one. Each anomaly renders as its own `card` div, so the marker
+    # has to fall inside the block that names `card-sim` rather than merely somewhere on a
+    # page that happens to contain both.
+    blocks = [block for block in body.split('class="card"') if "card_create_failing" in block]
+    assert len(blocks) == 2
+    rehearsed = next(b for b in blocks if "card-sim" in b)
+    real = next(b for b in blocks if "card-real" in b)
+    assert 'class="sim"' in rehearsed
+    assert 'class="sim"' not in real

@@ -1369,7 +1369,13 @@ def anomalies_view(ctx: operations.Context, *, include_simulated: bool = False) 
             if not rows
             else join(
                 div(
-                    h(3, f"[{row['id']}] {row['kind']}"),
+                    # FR-057: shown means marked, on every surface. The CLI writes `*` after
+                    # the id; this is the same claim in the idiom every other listing on this
+                    # site already uses. Without it a rehearsed anomaly revealed by the
+                    # toggle renders identically to a real one, which is the half of the
+                    # defect that survives filtering (issue #21).
+                    h(3, join([f"[{row['id']}] {row['kind']}", " ",
+                               mark_simulated(row["simulated"])])),
                     p(
                         f"{row['entity_type'] or '—'}:{row['entity_id'] or '—'} · detected ",
                         when(row["detected_at"]),

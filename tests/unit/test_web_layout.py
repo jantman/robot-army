@@ -117,13 +117,23 @@ def test_main_is_bounded_by_the_page_and_not_by_the_prose_measure():
 
 
 def test_prose_is_capped_at_the_measure():
-    """Widening the page without this would trade a table problem for a text problem."""
+    """Widening the page without this would trade a table problem for a text problem.
+
+    The selector list is split into its members and compared whole. Substring matching is
+    the obvious way to write this and it does not work: ``main p`` is a substring of
+    ``main pre``, ``main ul`` of ``main ul.kv``, ``main .card`` of ``main .cards``. Changing
+    the rule's ``main p`` to ``main pre`` drops the paragraph cap entirely — the exact
+    failure this test exists to catch — and a substring version of it passes anyway. That is
+    not hypothetical; it was found by mutating the stylesheet and watching all fourteen tests
+    here go green (PR #153 review).
+    """
     selector, declarations = prose_rule()
     assert "max-width: var(--measure)" in " ".join(declarations.split())
+    capped = [part.strip() for part in selector.split(",")]
     for element in ("p", "ul", "dl", ".banner", ".card", ".record", ".filters"):
-        assert f"main {element}" in selector, (
+        assert f"main {element}" in capped, (
             f"{element} is prose and is not capped; on a 1920-pixel window it would be "
-            f"read across the whole monitor"
+            f"read across the whole monitor. The rule caps: {capped}"
         )
 
 

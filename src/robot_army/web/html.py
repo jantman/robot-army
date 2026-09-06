@@ -486,6 +486,18 @@ APP_CSS = """
 :root {
   --bg: #14161a; --panel: #1d2027; --line: #2e323c; --text: #e7e9ee;
   --muted: #9aa1ae; --ok: #4caf82; --warn: #d98c3f; --error: #d9534f; --link: #7fb2ff;
+  /* Two widths, because a paragraph and a table want different ones (issue #148). Until
+     they were separated there was one, 60rem, and it was applied to both: right for the
+     prose it was chosen for, and half a monitor for a nine-column table.
+
+     --measure is that original width, kept and pointed at what it was for. --page is
+     where the content area stops growing, set to exactly a full-size monitor — so on the
+     1920-pixel screen in the issue nothing is narrowed by it at all, and on an ultrawide
+     a row's first and last cells stay close enough to be read as one row.
+
+     Lengths, not colours: the light-scheme block below swaps colours and must not repeat
+     these, or a lit room would lay out differently from a dark one. */
+  --measure: 60rem; --page: 120rem;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -513,7 +525,22 @@ nav a {
   text-decoration: none; border-radius: 6px; color: var(--muted);
 }
 nav a.current { background: var(--line); color: var(--text); }
-main { padding: 1rem; max-width: 60rem; margin: 0 auto; }
+/* The content area is bounded by the page, and the prose inside it by the measure. One
+   bound for both is what issue #148 reported: on a 1920-pixel window the /active table
+   rendered at 928 pixels, with 480 of nothing on each side and every title wrapped over
+   five or six lines.
+
+   The second rule is a descendant selector on purpose. A child combinator would cap the
+   five things that happen to sit directly under #content and miss the rest — the audit
+   records, an item page's field list, and everything inside the wrapping div that the
+   /queue repositories block puts around its own contents.
+
+   Headings are not in the list: they are short, and one is a page title. Nor is .chrome,
+   whose pills wrap, and which reads better on one line than on three. */
+main { padding: 1rem; max-width: var(--page); margin: 0 auto; }
+main p, main ul, main dl, main .banner, main .card, main .record, main .filters {
+  max-width: var(--measure);
+}
 footer { padding: 1rem; color: var(--muted); font-size: .875rem; display: flex; gap: 1rem; }
 h1 { font-size: 1.3rem; margin: 0 0 .75rem; }
 h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
@@ -554,7 +581,19 @@ dl.kv {
 }
 dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; overflow-wrap: anywhere; }
-.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+/* Shrink-to-fit, so a table takes the width its content needs rather than the width it is
+   given. Without this, widening the page above would stretch every table to fill it —
+   including the two-column state-history table on an item page, which would put six
+   characters at the left edge of a 1920-pixel window and eleven at the right.
+
+   overflow-x is the half that was already here and must stay. max-width caps the container
+   at the space available; on a phone that is 343 pixels, which a nine-column table does not
+   fit into. Scrolling the table inside its own box rather than scrolling the page is
+   SC-013, and it is why this div exists at all. */
+.scroll {
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+  width: fit-content; max-width: 100%;
+}
 table { border-collapse: collapse; width: 100%; font-size: .9375rem; }
 th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }
 th { color: var(--muted); font-weight: 600; white-space: nowrap; }

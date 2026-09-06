@@ -22,7 +22,7 @@ the real views. Every assertion in it fails against the pre-change stylesheet.
 Run the interface against your own database:
 
 ```bash
-uv run robot-army web            # then open the printed URL
+uv run robot-army serve          # then open the printed URL
 ```
 
 Or, with no daemon running and no real data, render the pages to files and open them in a browser. The
@@ -47,9 +47,10 @@ On `/queue`, `/cards` and an item's detail page:
   version of that table would be worse than what is there today.
 - The item's own field list is still at reading width.
 
-Measured on a 1920-pixel window with the seeded pages, the `/active` table renders at about 1700 pixels
-against 928 before; the item page's history table at 410 and its session-attempts table at 743, against
-1888 each if the container were left full-width.
+Measured on a 1920-pixel window with the seeded pages: the `/active` table renders at 1702 pixels
+against 928 before; `/queue`'s ready table at 1131 and its repositories table at 351; the item page's
+history table at 410 and its session-attempts table at 743 — against 1888 each if the container were
+left full-width. Prose sits at 960 against 928 before, a difference of one indent that nothing notices.
 
 ## What to look for on a phone
 
@@ -61,6 +62,6 @@ and no text needing zoom.
 
 Desktop Chrome will not size a window below about 500 pixels, so a real 390-pixel check needs either a
 phone, the browser's device emulation, or the rendered page loaded into a 390-pixel iframe. Measured
-that last way, every number — content width, table container width, banner width, and both scrolling
-behaviours — is identical before and after the change. That identity *is* the check: below the prose
+that last way across all seven views, every number — content width, table container width, banner width,
+and both scrolling behaviours — is identical before and after the change. That identity *is* the check: below the prose
 measure neither new bound can bind, so nothing may move.

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from tests.conftest import config_dict, make_boundaries, monkey_token, seed_item
 
-from robot_army import operations
+from robot_army import db, operations
 from robot_army.cli import build_parser, main
 from robot_army.config import load as load_config
 from robot_army.effects import EffectLevel
@@ -30,7 +30,7 @@ from robot_army.operations import (
     EXIT_PRECONDITION,
     EXIT_USAGE,
 )
-from robot_army.states import WorkItemState
+from robot_army.states import SessionState, WorkItemState, transition_session
 
 
 @pytest.fixture
@@ -587,11 +587,16 @@ def test_onboarding_asks_its_question_on_stderr(capsys, monkeypatch):
     assert captured.err == "Approve jantman/demo for dispatch? [y/N] "
 
 
-def test_onboard_prompts_through_that_helper_and_its_neighbours_do_not():
-    """011 FR-014. Onboarding is the only command with a screen above its question, so it
-    is the only one whose prompt moved. `cancel`, `purge-simulated` and
-    `worktree remove --force` each ask something self-contained and are left alone —
-    an asymmetry that is cheaper than changing three commands to fix one."""
+def test_every_prompt_asks_on_stderr_now_that_two_of_them_have_documents():
+    """Supersedes 011 FR-014, which left `cancel`, `purge-simulated` and
+    `worktree remove --force` on `input` and its stdout prompt because none of them has a
+    screen composed above its question to protect.
+
+    That weighed the screen and not the document. `purge-simulated` and `worktree remove`
+    both take `--json`, and a `--json` run's output goes to stdout whatever the exit code
+    — so their questions were landing inside it and neither ran parsed. The asymmetry was
+    cheaper right up until issue #23 made all four go through one guard, at which point
+    two streams for one guard is not cheaper than one."""
     import inspect
 
     defaults = {
@@ -599,10 +604,7 @@ def test_onboard_prompts_through_that_helper_and_its_neighbours_do_not():
         for name in ("onboard", "cancel", "purge_simulated", "worktree_remove")
     }
 
-    assert defaults["onboard"] is operations._ask
-    assert defaults["cancel"] is input
-    assert defaults["purge_simulated"] is input
-    assert defaults["worktree_remove"] is input
+    assert set(defaults.values()) == {operations._ask}, defaults
 
 
 def ctx_over(conn, audit, config_file):
@@ -616,11 +618,10 @@ def ctx_over(conn, audit, config_file):
     )
 
 
-def test_the_other_prompts_keep_their_wording_and_their_stdout_stream(
-    conn, audit, config_file, capsys
-):
-    """FR-014 concretely. Nothing in the suite pinned these strings before, so nothing
-    would have noticed if the stderr change had been applied across the board."""
+def test_the_other_prompts_keep_their_wording(conn, audit, config_file, capsys):
+    """The wording half of 011 FR-014, which issue #23 leaves exactly alone: the prompts
+    moved streams, and not one character of what they say changed. Nothing in the suite
+    pinned these strings before FR-014, so nothing would have noticed if they had."""
     seed_item(conn, dry_run=True)
     asked: list[str] = []
 
@@ -633,7 +634,9 @@ def test_the_other_prompts_keep_their_wording_and_their_stdout_stream(
     assert asked and asked[0].startswith("Delete 1 simulated work item(s)")
     assert asked[0].endswith("? [y/N] ")
     assert result.code == EXIT_FAILED and result.lines == ["aborted"]
-    assert captured.err == "", "this prompt did not move; only onboarding's did"
+    assert captured.out == "" and captured.err == "", (
+        "the injected `confirm` did the asking, so neither stream saw anything"
+    )
 
 
 def test_onboard_accepts_json_because_011_describes_what_it_does_in_that_mode():
@@ -737,3 +740,114 @@ def test_the_force_flag_says_what_it_does_not_bypass(command):
     )
     assert "Does not bypass" in action.help
     assert "author" in action.help
+
+
+# -- issue #23: the prompts, from the terminal -------------------------------
+#
+# `robot-army purge-simulated < /dev/null` printed a traceback. The tests below drive the
+# real entry point with a stdin that has nothing in it, which is what the reproduction in
+# the issue does, and with the interrupt that is the other way out of a question.
+#
+# `onboard` is not among them: this module's fixture keys its repository `demo` rather than
+# `owner/name` deliberately (see the module docstring), so onboarding refuses before it can
+# ask anything. Its two ways out have been covered end to end in
+# `tests/integration/test_onboard.py` since milestone 011, and they still pass unmodified —
+# which is the check that this change left the one command that worked alone.
+
+
+@pytest.fixture
+def stdin_ran_out(monkeypatch):
+    """`< /dev/null`, as `input()` experiences it."""
+
+    def eof() -> str:
+        raise EOFError("EOF when reading a line")
+
+    monkeypatch.setattr("builtins.input", eof)
+
+
+@pytest.fixture
+def maintainer_walks_away(monkeypatch):
+    def interrupt() -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", interrupt)
+
+
+@pytest.fixture
+def item_that_can_be_asked_about(conn, audit):
+    """One item with a worktree and a live session, so `cancel` and `worktree remove
+    --force` both reach their question instead of refusing before it."""
+    item_id = seed_item(conn, state=str(WorkItemState.ACTIVE), dry_run=True)
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn, item_id, worktree_path="/w/demo/issue-42", branch="robot-army/42-fix"
+        )
+        row_id = db.insert_session(
+            conn,
+            work_item_id=item_id,
+            session_id="s-live",
+            attempt=1,
+            dry_run=True,
+            host_socket="/run/robot-army/demo.sock",
+        )
+        transition_session(
+            conn, audit, session_row_id=row_id, target=SessionState.RUNNING, reason="seeded"
+        )
+    return item_id
+
+
+PROMPTING = [
+    (["purge-simulated"], "purge"),
+    (["cancel", "1"], "cancel"),
+    (["worktree", "remove", "1", "--force"], "worktree-remove-force"),
+]
+
+
+@pytest.mark.parametrize(
+    "command", [c for c, _ in PROMPTING], ids=[i for _, i in PROMPTING]
+)
+def test_no_prompt_lets_a_traceback_out_when_input_ends(
+    command, config_file, item_that_can_be_asked_about, capsys, stdin_ran_out
+):
+    """Three of issue #23's four rows, through `main`. Before the fix each of these raised
+    out of `main` entirely — which is not an exit code, it is a crash."""
+    code = run_cli(command, config_file)
+    captured = capsys.readouterr()
+
+    assert code == EXIT_CHECK_FAILED, captured.err
+    assert "input ended before the prompt was answered" in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == "", "the question and the answer both belong on stderr"
+
+
+@pytest.mark.parametrize(
+    "command", [c for c, _ in PROMPTING], ids=[i for _, i in PROMPTING]
+)
+def test_no_prompt_lets_a_traceback_out_when_the_maintainer_interrupts(
+    command, config_file, item_that_can_be_asked_about, capsys, maintainer_walks_away
+):
+    code = run_cli(command, config_file)
+    captured = capsys.readouterr()
+
+    assert code == EXIT_FAILED, captured.err
+    assert captured.err.strip().endswith("interrupted")
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["purge-simulated", "--json"], ["worktree", "remove", "1", "--force", "--json"]],
+    ids=["purge", "worktree-remove-force"],
+)
+def test_a_machine_readable_run_that_was_given_up_on_still_parses(
+    command, config_file, item_that_can_be_asked_about, capsys, stdin_ran_out
+):
+    """The reason all four prompts moved to stderr. `--json`'s document goes to stdout
+    whatever the exit code, so a question printed there — which is what `input(prompt)`
+    does — sat inside the document and stopped it parsing."""
+    code = run_cli(command, config_file)
+    captured = capsys.readouterr()
+
+    assert code == EXIT_CHECK_FAILED
+    assert isinstance(json.loads(captured.out), dict), captured.out
+    assert "? [y/N]" in captured.err or "Type the item id" in captured.err

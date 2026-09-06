@@ -12,6 +12,7 @@ machine-readable payload. The CLI chooses which to print; it makes no decisions 
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import shutil
 import sqlite3
@@ -1624,12 +1625,118 @@ def _ask(prompt: str) -> str:
     (FR-012). stderr is where a question belongs regardless: it is not the command's
     output, and an interactive terminal shows both streams anyway.
 
-    Only ``onboard`` uses this. ``cancel``, ``purge_simulated`` and ``worktree_remove``
-    each ask a self-contained question with nothing composed above it, so none of them has
-    a screen to protect; they keep ``input`` and their stdout prompts (FR-014).
+    All four prompting commands use this. Milestone 011 left ``cancel``,
+    ``purge_simulated`` and ``worktree_remove`` on ``input`` and its stdout prompt
+    (011 FR-014), on the grounds that each asks something self-contained with no screen
+    composed above it to protect. That weighed the screen and not the document:
+    ``purge-simulated`` and ``worktree remove`` both take ``--json``, whose output goes
+    to stdout whatever the exit code, so their questions were landing in it. Issue #23
+    moved them, and FR-014 is superseded rather than merely unobserved.
     """
     print(prompt, end="", file=sys.stderr, flush=True)
     return input()
+
+
+class PromptAbandoned(Exception):
+    """A confirmation prompt went unanswered. Carries what the command returns instead.
+
+    A whole ``Result`` rather than a cause code, because two of the four prompting
+    commands have already composed output by the time they ask — ``onboard`` its approval
+    screen, ``worktree_remove`` the ``data`` a ``--json`` run renders — and an exception
+    carrying only a cause would throw both away.
+
+    Never seen outside this module: it is raised by :func:`_answer_or_give_up` and caught
+    by :func:`_guards_its_prompt`, which every prompting operation wears. Those two between
+    them are the whole of the handling, which is the point — a call site that had to catch
+    this itself would be a call site that could forget to.
+    """
+
+    def __init__(self, result: Result) -> None:
+        super().__init__(result.lines[-1] if result.lines else "prompt abandoned")
+        self.result = result
+
+
+def _guards_its_prompt(func: Callable[..., Result]) -> Callable[..., Result]:
+    """Turn an abandoned prompt inside ``func`` into the result it stands for.
+
+    Wraps every operation that asks the maintainer something, so the conversion is written
+    once. Writing it at the call site is exactly how it came to be written at one call site
+    out of four: milestone 011 guarded ``onboard`` and left ``cancel``, ``purge_simulated``
+    and ``worktree_remove`` to traceback, two of them destructively (issue #23).
+
+    A decorator rather than a ``try`` inside each function, and rather than one ``except``
+    up in ``cli.main``, because an operation returns a ``Result``. That is the currency
+    ``cli._dispatch`` and the web interface both deal in, and
+    ``specs/005-onboard-is-enough/contracts/onboarding.md`` describes onboarding's ways out
+    as non-zero *exits with messages*, not as an exception a caller has to know to catch.
+    Moving that up to ``main`` would fix three commands by making a fourth harder to call.
+
+    Nothing else is caught. An error from inside the guarded work, after the answer, is not
+    an abandoned prompt and keeps whatever handling it already has.
+    """
+
+    @functools.wraps(func)
+    def guarded(*args: Any, **kwargs: Any) -> Result:
+        try:
+            return func(*args, **kwargs)
+        except PromptAbandoned as gone:
+            return gone.result
+
+    return guarded
+
+
+def _answer_or_give_up(
+    prompt: str,
+    *,
+    confirm: Any,
+    record: Callable[[str], None],
+    lines: list[str] | None = None,
+    data: dict[str, Any] | None = None,
+) -> str:
+    """Put a question, and turn giving up on it into a recorded result (issue #23).
+
+    Every command that asks something before acting comes through here, so that the
+    handling exists once instead of at each call site — which is precisely how it came to
+    exist at one call site out of four. Milestone 011 wrapped ``onboard``'s prompt in
+    ``try/except KeyboardInterrupt/EOFError`` and the other three tracebacked for another
+    eleven milestones, including the one that discards uncommitted work and the one that
+    signals a running worker.
+
+    The guard wraps the **injected** ``confirm``, not the default one. ``confirm`` is a
+    parameter on every prompting operation, and that is how the CLI and every test drive
+    these prompts; a guard living inside ``_ask`` would be bypassed by all of them — the
+    tests that prove the guard works included.
+
+    ``record`` is the caller's own way of saying what happened, because the record belongs
+    under the command's own action name: an abandoned force-removal is a
+    ``worktree.remove`` outcome, not an entry in some separate log of abandoned prompts.
+    It is called with the cause label, before the exception is raised. ``lines`` and
+    ``data`` are whatever the command has said and gathered so far, and ride along so a
+    ``--json`` run still emits a document and a given-up-on ``onboard`` still shows the
+    screen the maintainer was looking at.
+
+    **An absent answer is never an answer.** Neither path below returns a value, so there
+    is nothing a caller could read as consent — which matters most at the force-removal
+    prompt, where the expected answer is a typed item id and the empty string is not it.
+
+    The two causes stay distinguishable all the way out. "The maintainer changed their
+    mind" and "this ran somewhere with no maintainer attached" are different things to
+    find in a log, and different things to branch on in a shell script.
+    """
+    try:
+        return confirm(prompt)
+    except KeyboardInterrupt:
+        cause, code, line = "interrupted_at_prompt", EXIT_FAILED, "interrupted"
+    except EOFError:
+        cause, code, line = (
+            "no_answer_available",
+            EXIT_CHECK_FAILED,
+            "no answer available: input ended before the prompt was answered",
+        )
+    record(cause)
+    raise PromptAbandoned(
+        Result(code=code, lines=[*(lines or []), line], data=dict(data or {}))
+    )
 
 
 def _fingerprint_diff_lines(previous: dict[str, str], current: dict[str, str]) -> list[str]:
@@ -1700,6 +1807,7 @@ def _numbering_lines(numbering: speckit.Numbering) -> list[str]:
     ]
 
 
+@_guards_its_prompt
 def onboard(
     ctx: Context,
     repo_key: str,
@@ -1866,39 +1974,20 @@ def onboard(
         )
 
     if not assume_yes:
-        try:
-            answer = confirm(
-                f"Approve {repo_key} for dispatch, recording this fingerprint? [y/N] "
-            )
-        except KeyboardInterrupt:
-            # Ctrl-C used to propagate to ``cli.main``, which printed "interrupted" and
-            # exited 1 — before this function had opened any audit action, so the log held
-            # no trace that onboarding was attempted. contracts/onboarding.md requires
-            # every non-zero exit to be recorded and Principle III requires the log alone
-            # to answer what was attempted. The gap was safe only while nobody reached
-            # this prompt informed enough to walk away from it; now that the screen
-            # arrives first, giving up here is the expected second answer (FR-011).
-            #
-            # The code and the message are deliberately today's. What changes is the
-            # record, and only the record.
-            _record_onboard_outcome(ctx, repo_key, "interrupted_at_prompt", resolved)
-            return Result(
-                code=EXIT_FAILED, lines=[*result.lines, "interrupted"], data=result.data
-            )
-        except EOFError:
-            # ``onboard some/repo < /dev/null``. Nothing caught this either, so it was a
-            # traceback rather than a result. An absent answer is not an approval, so it
-            # exits like the decline it effectively is — with its own cause, because
-            # "input ran out" and "I said no" are different things to find in a log.
-            _record_onboard_outcome(ctx, repo_key, "no_answer_available", resolved)
-            return Result(
-                code=EXIT_CHECK_FAILED,
-                lines=[
-                    *result.lines,
-                    "no answer available: input ended before the prompt was answered",
-                ],
-                data=result.data,
-            )
+        # Giving up here is the expected second answer, now that the screen arrives before
+        # the question (011 FR-011) — and it is recorded, because contracts/onboarding.md
+        # requires every non-zero exit to be recorded and Principle III requires the log
+        # alone to answer what was attempted. The `except` clauses that used to spell that
+        # out here are gone: issue #23 found the same argument unmet at the other three
+        # prompts, which is what a guard written at a call site does. `result.lines` and
+        # `result.data` ride along so the screen and the document survive the giving up.
+        answer = _answer_or_give_up(
+            f"Approve {repo_key} for dispatch, recording this fingerprint? [y/N] ",
+            confirm=confirm,
+            record=lambda cause: _record_onboard_outcome(ctx, repo_key, cause, resolved),
+            lines=result.lines,
+            data=result.data,
+        )
         if str(answer).strip().lower() not in ("y", "yes"):
             # Exit 4, distinct from the 3 every refusal uses (contracts/onboarding.md):
             # "I decided not to" and "the system would not let me" are different results,
@@ -2303,8 +2392,9 @@ def _refuse_for_live_session(
     return reason
 
 
+@_guards_its_prompt
 def worktree_remove(
-    ctx: Context, item_id: int, *, force: bool = False, confirm: Any = input
+    ctx: Context, item_id: int, *, force: bool = False, confirm: Any = _ask
 ) -> Result:
     """Remove **both** the worktree and its branch (FR-016), under three guards.
 
@@ -2409,7 +2499,19 @@ def worktree_remove(
                     f"{item.worktree_path} — {described.process}. Forcing leaves that "
                     f"worker running in a deleted directory. "
                 ) + prompt
-            answer = confirm(prompt)
+            # The abandonment lands on the audit action that is *already open* — its
+            # intent, carrying `force: true` and the worktree path as `target`, was
+            # flushed before this prompt blocked. `PromptAbandoned` then propagates out
+            # through `ctx.audit.action`, whose own handler writes the outcome as an
+            # error with these keys merged in, so the pair reads: a forced removal of
+            # that path was attempted, and abandoned, and nothing was removed. Before
+            # issue #23 the same pair said only "EOFError".
+            answer = _answer_or_give_up(
+                prompt,
+                confirm=confirm,
+                record=lambda cause: outcome.update(abandoned=True, cause=cause),
+                data=result.data,
+            )
             if str(answer).strip() != str(item_id):
                 outcome["aborted"] = True
                 return Result(code=EXIT_FAILED, lines=["aborted"])
@@ -2486,7 +2588,8 @@ def worktree_prune(ctx: Context) -> Result:
 # -- lifecycle verbs --------------------------------------------------------
 
 
-def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = input) -> Result:
+@_guards_its_prompt
+def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = _ask) -> Result:
     """Stop that item's running session and **only** that session (FR-050)."""
     item = db.get_work_item(ctx.conn, item_id)
     if item is None:
@@ -2498,7 +2601,24 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = in
             lines=[f"work item {item_id} has no running session to cancel"],
         )
     if not force:
-        answer = confirm(f"Stop session {session.session_id} for item {item_id}? [y/N] ")
+        # Nothing is open when this asks — a cancel that goes through is reconstructable
+        # from `session.terminate` and the two transitions, so it never needed an
+        # intent/outcome pair of its own. An abandoned one has none of those to be read
+        # from, hence a record here under a name that says what was attempted. It is
+        # written *only* for the abandonment; inventing a matching pair around the
+        # working path is not this fix's business (issue #23).
+        answer = _answer_or_give_up(
+            f"Stop session {session.session_id} for item {item_id}? [y/N] ",
+            confirm=confirm,
+            record=lambda cause: ctx.audit.record(
+                "session.cancel",
+                outcome="error",
+                entity_type="session",
+                entity_id=session.session_id,
+                detail={"abandoned": True, "cause": cause, "item_id": item_id},
+                dry_run=bool(item.dry_run),
+            ),
+        )
         if str(answer).strip().lower() not in ("y", "yes"):
             return Result(code=EXIT_FAILED, lines=["aborted"])
 
@@ -3744,7 +3864,8 @@ def drain_spool(ctx: Context) -> Result:
     )
 
 
-def purge_simulated(ctx: Context, *, assume_yes: bool = False, confirm: Any = input) -> Result:
+@_guards_its_prompt
+def purge_simulated(ctx: Context, *, assume_yes: bool = False, confirm: Any = _ask) -> Result:
     """Remove ``dry_run`` rows and their sessions (FR-058). Never touches live rows.
 
     Does not remove worktrees those rows created — those are real directories on disk,
@@ -3754,10 +3875,19 @@ def purge_simulated(ctx: Context, *, assume_yes: bool = False, confirm: Any = in
     if not any(counts.values()):
         return Result(lines=["no simulated rows to purge"], data={"purged": counts})
     if not assume_yes:
-        answer = confirm(
+        # The counts go into the record as well as into the question, so the log says
+        # what was nearly deleted rather than that something was (issue #23). The action
+        # below is not open yet — it wraps the delete, not the asking.
+        answer = _answer_or_give_up(
             f"Delete {counts['work_items']} simulated work item(s), "
             f"{counts['sessions']} simulated session(s) and "
-            f"{counts['cards']} simulated card(s)? [y/N] "
+            f"{counts['cards']} simulated card(s)? [y/N] ",
+            confirm=confirm,
+            record=lambda cause: ctx.audit.record(
+                "purge.simulated",
+                outcome="error",
+                detail={**counts, "abandoned": True, "cause": cause},
+            ),
         )
         if str(answer).strip().lower() not in ("y", "yes"):
             return Result(code=EXIT_FAILED, lines=["aborted"])

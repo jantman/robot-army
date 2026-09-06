@@ -6,8 +6,9 @@ in the existing audit log.
 
 ## `PromptAbandoned` (in-process, `operations.py`)
 
-Raised when a confirmation prompt goes unanswered; caught in exactly one place,
-`cli.main`.
+Raised when a confirmation prompt goes unanswered by `_answer_or_give_up`, and caught in
+exactly one place — the `@_guards_its_prompt` decorator every prompting operation wears,
+which returns the `Result` it carries. It is never seen outside `operations.py`.
 
 | Attribute | Type | Meaning |
 |---|---|---|

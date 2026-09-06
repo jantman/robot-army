@@ -2,32 +2,41 @@
 
 ## R1 — Where the handling goes so that one place holds it
 
-**Decision**: a single module-private helper in `operations.py` wraps the *injected*
-`confirm` callable, catches `KeyboardInterrupt` and `EOFError`, calls a caller-supplied
-recording callback with a cause label, and raises one exception carrying a fully-formed
-`Result`. `cli.main` — which already wraps `_dispatch` in a `try` — catches that exception
-and uses the `Result` it carries. No call site handles anything.
+**Decision**: two pieces, both module-private, both in `operations.py`. A helper wraps the
+*injected* `confirm` callable, catches `KeyboardInterrupt` and `EOFError`, calls a
+caller-supplied recording callback with a cause label, and raises `PromptAbandoned`
+carrying a fully-formed `Result`. A decorator, `@_guards_its_prompt`, worn by each
+prompting operation, catches that exception and returns the `Result` it carries. No call
+site handles anything.
 
 **Rationale**: the issue's diagnosis is that the handling was written at a call site and
 therefore got written once out of four times. Anything that leaves each call site with its
-own `try/except` re-arms the same trap. Two shapes were weighed:
+own `try/except` re-arms the same trap. Three shapes were weighed:
 
 - Wrapping the *default* `confirm` (`_ask`) with the handling. Rejected: `confirm` is an
-  injected parameter — that is how every test drives these prompts — so a guard that lives
-  in the default callable is bypassed by every caller that supplies its own, including the
-  tests that must prove the guard works.
-- A decorator on the four operation functions, converting the exception to a `Result`.
-  Rejected: it makes the author of the fifth prompt remember two things (call the helper,
-  decorate the function) instead of one. Catching in `main` makes them remember one.
-
-Catching in `main` is also where the knowledge already is: `main` owns exit codes, the
-stdout/stderr split and `--json` rendering, and it already catches `KeyboardInterrupt` for
-interrupts that happen anywhere else.
+  injected parameter — that is how the CLI and every test drive these prompts — so a guard
+  that lives in the default callable is bypassed by every caller that supplies its own,
+  including the tests that must prove the guard works.
+- One `except operations.PromptAbandoned` in `cli.main`, with no decorator. Attractive
+  because it is the fewest moving parts and a fifth prompt inherits it with *nothing*
+  written at all — and it was built first. **Rejected on contact with the test suite.** It
+  makes an operation *raise* where it used to return, and an operation returns a `Result`:
+  that is the currency `cli._dispatch` and the web interface both deal in, and
+  `specs/005-onboard-is-enough/contracts/onboarding.md` describes onboarding's ways out as
+  non-zero *exits with messages*, not as an exception a caller must know to catch. Four
+  existing tests said so directly, one of them named
+  `test_input_ending_before_an_answer_is_a_result_not_a_traceback`. Fixing three commands
+  by making the fourth harder to call is a bad trade, and issue #23's closing note asks for
+  the opposite.
+- The decorator. Costs the author of the fifth prompt one line they have to remember —
+  which is why `test_every_operation_that_prompts_wears_the_decorator` exists: an operation
+  with a `confirm` parameter and no decorator fails the suite. The reminder is automatic
+  even though the wrapping is not.
 
 **Alternatives considered**: returning a sentinel value the caller must test for (four
-`isinstance` checks — the same trap, quieter); letting the exception reach `main` with no
-`Result` attached (loses the `data` a `--json` run must still emit, and loses `onboard`'s
-approval screen, both of which today's `onboard` handling preserves).
+`isinstance` checks — the same trap, quieter); letting the exception carry only a cause
+(loses the `data` a `--json` run must still emit, and loses `onboard`'s approval screen,
+both of which today's `onboard` handling preserves).
 
 ## R2 — Why the exception carries a `Result` rather than just a cause
 

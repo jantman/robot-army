@@ -14,6 +14,10 @@ fifth without amendment.
 Nothing else is caught. An error raised *inside* the guarded work, after the answer, is not
 an abandonment and keeps whatever handling it has now.
 
+The operation still **returns a `Result`** on both paths. Nothing propagates out of it:
+`cli._dispatch` and the web interface both deal in results, and a give-up is an ordinary,
+expected way for these commands to end.
+
 ## What the command does
 
 1. **Nothing it was about to do happens.** No worktree or branch removed, no signal sent to

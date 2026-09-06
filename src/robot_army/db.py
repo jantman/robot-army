@@ -646,6 +646,32 @@ def find_card_by_issue(
     return from_row(Card, row) if row else None
 
 
+def highest_simulated_issue_number(conn: sqlite3.Connection, *, repo_key: str) -> int | None:
+    """The highest fake issue number already recorded for ``repo_key``, or ``None``.
+
+    Read by ``SimulatedIssueWriter`` to decide the next one. The three columns here are
+    exactly ``idx_cards_issue``'s three, and that is the whole point: a number derived from
+    the same record the constraint is checked against cannot be refused by it. Deriving it
+    from anything else — a per-process counter, which is what this replaces — makes every
+    restart replay numbers the index already holds, so the card is refused, retried with the
+    next number in the sequence, and refused again once per row that exists (issue #22).
+
+    ``dry_run = 1`` rather than a parameter because the simulated writer is selected under
+    exactly the condition that makes the rows it produces simulated: ``REAL_AT`` gives the
+    real writer only at ``live``, and card rows carry ``dry_run=effect_level.is_simulated``.
+    Filtering on it is what keeps the simulated numbering out of the live number space.
+
+    ``MAX`` ignores ``NULL``, which is why rows with no issue yet — every ``needs_info``
+    card, and every ``creating`` card before its issue exists — need no exclusion clause.
+    """
+    row = conn.execute(
+        "SELECT MAX(issue_number) FROM cards WHERE repo_key = ? AND dry_run = 1",
+        (repo_key,),
+    ).fetchone()
+    highest = row[0] if row else None
+    return int(highest) if highest is not None else None
+
+
 def _card_filters(
     states: Sequence[CardState] | None, board_id: str | None
 ) -> tuple[str, list[Any]]:

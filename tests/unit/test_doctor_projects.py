@@ -118,7 +118,7 @@ def test_doctor_exits_zero_on_an_installation_with_no_boards(conn, config, monke
     monkeypatch.setattr(
         operations,
         "wire",
-        lambda level, cfg, log: make_boundaries(log, level=level, reader=reader),
+        lambda level, cfg, log, conn: make_boundaries(log, level=level, reader=reader),
     )
     ctx = operations.build_context(config)
     try:
@@ -234,7 +234,7 @@ def test_doctor_surfaces_the_checks_under_a_project_prefix(conn, config, audit, 
     monkeypatch.setattr(
         operations,
         "wire",
-        lambda level, cfg, log: make_boundaries(log, level=level, reader=reader),
+        lambda level, cfg, log, conn: make_boundaries(log, level=level, reader=reader),
     )
     ctx = operations.build_context(config)
     try:

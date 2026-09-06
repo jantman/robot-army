@@ -101,8 +101,8 @@ SIMULATED_CLASSES = {
 
 
 @pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
-def test_every_cell_of_the_table(level, board_config, audit):
-    wired = wire(level, board_config, audit)
+def test_every_cell_of_the_table(level, board_config, audit, conn):
+    wired = wire(level, board_config, audit, conn)
     for boundary, expected in EXPECTED[level].items():
         actual = type(getattr(wired, boundary)).__name__
         want = REAL_CLASSES[boundary] if expected == "real" else SIMULATED_CLASSES[boundary]
@@ -110,11 +110,11 @@ def test_every_cell_of_the_table(level, board_config, audit):
 
 
 @pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
-def test_reads_are_real_at_every_level(level, config, audit):
+def test_reads_are_real_at_every_level(level, config, audit, conn):
     """FR-052. A dry run that fakes its reads tells you nothing about eligibility, which
     is the main thing you want to check."""
     assert is_real("issue_reader", level)
-    assert type(wire(level, config, audit).issue_reader).__name__ == "GitHubReader"
+    assert type(wire(level, config, audit, conn).issue_reader).__name__ == "GitHubReader"
 
 
 def test_there_is_no_simulated_issue_reader_anywhere():
@@ -145,8 +145,8 @@ def test_live_is_the_only_level_that_is_not_simulated():
         assert level.is_simulated is True
 
 
-def test_plan_performs_no_writes_of_any_kind(board_config, audit):
-    wired = wire(EffectLevel.PLAN, board_config, audit)
+def test_plan_performs_no_writes_of_any_kind(board_config, audit, conn):
+    wired = wire(EffectLevel.PLAN, board_config, audit, conn)
     for boundary in (
         "issue_writer",
         "card_writer",
@@ -158,10 +158,10 @@ def test_plan_performs_no_writes_of_any_kind(board_config, audit):
         assert type(getattr(wired, boundary)).__name__.startswith("Simulated")
 
 
-def test_the_wired_set_describes_itself_for_the_startup_log(config, audit):
+def test_the_wired_set_describes_itself_for_the_startup_log(config, audit, conn):
     """FR-057: the effect level must be stated loudly at startup, and knowing *which
     implementations* it selected is what makes that statement checkable."""
-    described = wire(EffectLevel.LOCAL, config, audit).describe()
+    described = wire(EffectLevel.LOCAL, config, audit, conn).describe()
     assert described["version_control"] == "GitVersionControl"
     assert described["session_host"] == "SimulatedSessionHost"
 
@@ -170,8 +170,8 @@ def test_the_wired_set_describes_itself_for_the_startup_log(config, audit):
 
 
 @pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
-def test_every_wired_implementation_satisfies_its_protocol(level, board_config, audit):
-    wired = wire(level, board_config, audit)
+def test_every_wired_implementation_satisfies_its_protocol(level, board_config, audit, conn):
+    wired = wire(level, board_config, audit, conn)
     assert isinstance(wired.issue_reader, IssueSourceReader)
     assert isinstance(wired.issue_writer, IssueSourceWriter)
     assert isinstance(wired.card_reader, CardSourceReader)
@@ -182,12 +182,12 @@ def test_every_wired_implementation_satisfies_its_protocol(level, board_config, 
     assert isinstance(wired.display, Display)
 
 
-def test_real_and_simulated_pairs_have_the_same_method_surface(board_config, audit):
+def test_real_and_simulated_pairs_have_the_same_method_surface(board_config, audit, conn):
     """The simulated path must not be able to diverge from the real one by *omission* —
     a missing method would surface as an AttributeError only on the code path that
     happens to call it."""
-    live = wire(EffectLevel.LIVE, board_config, audit)
-    plan = wire(EffectLevel.PLAN, board_config, audit)
+    live = wire(EffectLevel.LIVE, board_config, audit, conn)
+    plan = wire(EffectLevel.PLAN, board_config, audit, conn)
 
     def surface(obj: object) -> set[str]:
         return {
@@ -221,9 +221,9 @@ def test_real_and_simulated_pairs_have_the_same_method_surface(board_config, aud
         "display",
     ],
 )
-def test_matching_methods_accept_the_same_arguments(boundary, board_config, audit):
-    live = getattr(wire(EffectLevel.LIVE, board_config, audit), boundary)
-    plan = getattr(wire(EffectLevel.PLAN, board_config, audit), boundary)
+def test_matching_methods_accept_the_same_arguments(boundary, board_config, audit, conn):
+    live = getattr(wire(EffectLevel.LIVE, board_config, audit, conn), boundary)
+    plan = getattr(wire(EffectLevel.PLAN, board_config, audit, conn), boundary)
     for name in dir(live):
         if name.startswith("_"):
             continue
@@ -249,10 +249,10 @@ def test_matching_methods_accept_the_same_arguments(boundary, board_config, audi
 # -- returning structurally valid handles (T111) -----------------------------
 
 
-def test_simulated_implementations_return_handles_not_none(config, audit, tmp_path):
+def test_simulated_implementations_return_handles_not_none(config, audit, tmp_path, conn):
     """Returning ``None`` or raising would let the simulated path diverge from the real
     one at exactly the point the requirement exists to prevent."""
-    wired = wire(EffectLevel.PLAN, config, audit)
+    wired = wire(EffectLevel.PLAN, config, audit, conn)
 
     url = wired.issue_writer.comment("owner/repo", 1, "body")
     assert isinstance(url, str) and url
@@ -284,8 +284,8 @@ def test_simulated_implementations_return_handles_not_none(config, audit, tmp_pa
     assert wired.display.probe() is not None
 
 
-def test_simulated_lists_are_empty_lists_not_none(config, audit):
-    wired = wire(EffectLevel.PLAN, config, audit)
+def test_simulated_lists_are_empty_lists_not_none(config, audit, conn):
+    wired = wire(EffectLevel.PLAN, config, audit, conn)
     assert wired.version_control.list_worktrees("/clone") == []
     assert wired.version_control.commits_ahead("/clone", "main", "b") == 0
     assert isinstance(wired.version_control.prune_worktrees("/clone"), str)
@@ -398,26 +398,26 @@ def test_the_boundaries_dataclass_is_frozen():
 
 
 @pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
-def test_board_reads_are_real_at_every_level(level, board_config, audit):
+def test_board_reads_are_real_at_every_level(level, board_config, audit, conn):
     """FR-038, and the same reasoning as FR-052: a dry run that faked its board reads
     would tell you nothing about which cards would be acted on."""
     assert is_real("card_reader", level)
-    assert type(wire(level, board_config, audit).card_reader).__name__ == "TrelloCardReader"
+    assert type(wire(level, board_config, audit, conn).card_reader).__name__ == "TrelloCardReader"
 
 
 @pytest.mark.parametrize("level", [EffectLevel.PLAN, EffectLevel.LOCAL, EffectLevel.NO_REMOTE])
-def test_no_board_write_happens_below_live(level, board_config, audit):
+def test_no_board_write_happens_below_live(level, board_config, audit, conn):
     """FR-039. ``no-remote`` is the interesting one: sessions are real there, and the
     board must still be untouched."""
     assert not is_real("card_writer", level)
-    assert type(wire(level, board_config, audit).card_writer).__name__ == "SimulatedCardWriter"
+    assert type(wire(level, board_config, audit, conn).card_writer).__name__ == "SimulatedCardWriter"
 
 
 @pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
-def test_an_unconfigured_installation_wires_no_board_at_all(level, config, audit):
+def test_an_unconfigured_installation_wires_no_board_at_all(level, config, audit, conn):
     """FR-001, structurally. Not a disabled client that call sites must remember to skip:
     no client exists, so no board request can be constructed by accident."""
-    wired = wire(level, config, audit)
+    wired = wire(level, config, audit, conn)
     assert wired.card_reader is None
     assert wired.card_writer is None
     described = wired.describe()
@@ -461,7 +461,7 @@ def test_no_consequence_is_stated_at_live():
 
 
 @pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
-def test_a_simulated_session_host_is_always_available_to_wire(level, config, audit):
+def test_a_simulated_session_host_is_always_available_to_wire(level, config, audit, conn):
     """A session created as simulated stays simulated for the whole of its life.
 
     The configured effect level answers "what should a *new* session use". It cannot
@@ -469,14 +469,14 @@ def test_a_simulated_session_host_is_always_available_to_wire(level, config, aud
     a restart — dispatch at ``local``, raise the level, restart, cancel. That sequence is
     the ordinary go-live step, and before this it handed a ``pid=0`` row to the real host.
     """
-    wired = wire(level, config, audit)
+    wired = wire(level, config, audit, conn)
     assert type(wired.simulated_session_host).__name__ == "SimulatedSessionHost"
 
 
 @pytest.mark.parametrize(
     "level", [EffectLevel.PLAN, EffectLevel.LOCAL], ids=lambda level: level.value
 )
-def test_at_a_simulated_level_the_two_names_are_one_object(level, config, audit):
+def test_at_a_simulated_level_the_two_names_are_one_object(level, config, audit, conn):
     """Not merely equal — *identical*, and that matters.
 
     ``SimulatedSessionHost`` carries an ``_alive`` set. Two instances would diverge the
@@ -484,27 +484,27 @@ def test_at_a_simulated_level_the_two_names_are_one_object(level, config, audit)
     differently depending on which field the caller happened to reach for. One object,
     two names.
     """
-    wired = wire(level, config, audit)
+    wired = wire(level, config, audit, conn)
     assert wired.session_host is wired.simulated_session_host
 
 
 @pytest.mark.parametrize(
     "level", [EffectLevel.NO_REMOTE, EffectLevel.LIVE], ids=lambda level: level.value
 )
-def test_at_a_real_level_they_are_deliberately_different_objects(level, config, audit):
-    wired = wire(level, config, audit)
+def test_at_a_real_level_they_are_deliberately_different_objects(level, config, audit, conn):
+    wired = wire(level, config, audit, conn)
     assert type(wired.session_host).__name__ == "DtachHost"
     assert wired.session_host is not wired.simulated_session_host
 
 
-def test_the_startup_record_names_the_simulated_host_too(config, audit):
+def test_the_startup_record_names_the_simulated_host_too(config, audit, conn):
     """Principle III: the startup log names every wired implementation, not most of them.
 
     A boundary that can be selected later but is absent from the record is exactly the
     kind of gap that makes a log unreconstructable — the reader would see the daemon wire
     ``DtachHost`` and have no way to know a second host was standing by.
     """
-    described = wire(EffectLevel.LIVE, config, audit).describe()
+    described = wire(EffectLevel.LIVE, config, audit, conn).describe()
     assert described["session_host"] == "DtachHost"
     assert described["simulated_session_host"] == "SimulatedSessionHost"
 
@@ -531,28 +531,28 @@ def test_only_cancel_selects_a_host_from_a_record(config, audit):
     )
 
 
-def test_the_startup_record_names_the_configured_channels(board_config, audit):
+def test_the_startup_record_names_the_configured_channels(board_config, audit, conn):
     """FR-057. ``MultiNotifier`` alone would hide which channels are live, which is the one
     fact a reader of the startup record wants from this line (issue #106, R9)."""
     from dataclasses import replace
 
 
-    described = wire(EffectLevel.LIVE, board_config, audit).describe()
+    described = wire(EffectLevel.LIVE, board_config, audit, conn).describe()
     assert described["notifier"] == "MultiNotifier()", "no channel configured"
 
     with_webhook = replace(
         board_config, health=replace(board_config.health, webhook_url="https://hook")
     )
-    described = wire(EffectLevel.LIVE, with_webhook, audit).describe()
+    described = wire(EffectLevel.LIVE, with_webhook, audit, conn).describe()
     assert described["notifier"] == "MultiNotifier(webhook)"
 
 
-def test_the_simulated_notifier_also_names_what_it_would_have_used(board_config, audit):
+def test_the_simulated_notifier_also_names_what_it_would_have_used(board_config, audit, conn):
     """Below ``live`` the startup record must not say less than it would above it."""
     from dataclasses import replace
 
     with_webhook = replace(
         board_config, health=replace(board_config.health, webhook_url="https://hook")
     )
-    described = wire(EffectLevel.LOCAL, with_webhook, audit).describe()
+    described = wire(EffectLevel.LOCAL, with_webhook, audit, conn).describe()
     assert described["notifier"] == "SimulatedNotifier(webhook)"

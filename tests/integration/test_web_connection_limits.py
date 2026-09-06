@@ -65,7 +65,7 @@ def stub_boundaries(monkeypatch) -> None:
     monkeypatch.setattr(
         operations,
         "wire",
-        lambda level, cfg, log: make_boundaries(
+        lambda level, cfg, log, conn: make_boundaries(
             log, level=level, reader=reader, display=display, host=host
         ),
     )

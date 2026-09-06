@@ -424,7 +424,7 @@ def test_the_chrome_and_the_queue_view_still_work_without_a_snapshot_handed_in(
     from robot_army.web import pages
 
     monkeypatch.setattr(
-        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level)
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
     )
     ctx = operations.build_context(config)
     chrome = pages.chrome(ctx)

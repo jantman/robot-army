@@ -82,7 +82,7 @@ def preview(conn, repo_clone, layout, tmp_path, monkeypatch):
         monkeypatch.setattr(
             operations,
             "wire",
-            lambda level, cfg, log: make_boundaries(log, level=level, reader=_reader(reader_issues)),
+            lambda level, cfg, log, conn: make_boundaries(log, level=level, reader=_reader(reader_issues)),
         )
         ctx = operations.build_context(config)
         return ctx
@@ -544,7 +544,7 @@ def cli_setup(conn, repo_clone, layout, tmp_path, monkeypatch):
     onboard_repo(conn, REPO, repo_clone)
     conn.close()
     monkeypatch.setattr(
-        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level, reader=_reader([ISSUE]))
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level, reader=_reader([ISSUE]))
     )
     monkeypatch.setattr(cli, "load_config", lambda _path: config)
     return tmp_path / "config.toml"

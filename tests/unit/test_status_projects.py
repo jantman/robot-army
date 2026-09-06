@@ -32,7 +32,7 @@ def ctx(config, conn, monkeypatch):
     monkeypatch.setattr(
         operations,
         "wire",
-        lambda level, cfg, log: make_boundaries(log, level=level, reader=ExplodingReader()),
+        lambda level, cfg, log, conn: make_boundaries(log, level=level, reader=ExplodingReader()),
     )
     built = operations.build_context(config)
     yield built

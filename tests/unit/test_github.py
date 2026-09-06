@@ -249,17 +249,17 @@ def test_the_writer_posts_a_comment_and_returns_its_url(config, audit):
     assert writer.comment("jantman/demo", 42, "hello") == "https://example.invalid/c1"
 
 
-def test_the_simulated_writer_returns_a_structurally_valid_handle(audit):
+def test_the_simulated_writer_returns_a_structurally_valid_handle(audit, conn):
     """Returning ``None`` would let the simulated path diverge from the real one at
     exactly the point the dry-run feature exists to prevent."""
-    writer = SimulatedIssueWriter(audit)
+    writer = SimulatedIssueWriter(audit, conn)
     url = writer.comment("jantman/demo", 42, "hello")
     assert isinstance(url, str)
     assert url.startswith("https://github.com/jantman/demo/issues/42#issuecomment-")
 
 
-def test_the_simulated_writer_logs_the_full_intended_call(audit, layout):
-    writer = SimulatedIssueWriter(audit)
+def test_the_simulated_writer_logs_the_full_intended_call(audit, layout, conn):
+    writer = SimulatedIssueWriter(audit, conn)
     writer.comment("jantman/demo", 42, "the whole body")
     audit.close()
     text = "\n".join(p.read_text(encoding="utf-8") for p in layout.log_dir.glob("*.jsonl"))

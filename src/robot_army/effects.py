@@ -48,6 +48,8 @@ from robot_army.boundaries import (
 )
 
 if TYPE_CHECKING:
+    import sqlite3
+
     from robot_army.audit import AuditLog
     from robot_army.config import Config
 
@@ -201,11 +203,21 @@ def _describe_one(value: object) -> str:
     return named() if callable(named) else type(value).__name__
 
 
-def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
+def wire(
+    level: EffectLevel, config: Config, audit: AuditLog, conn: sqlite3.Connection
+) -> Boundaries:
     """Select one implementation per boundary. Called exactly once, at startup.
 
     Imports are local so that ``effects`` stays importable by ``config`` without a cycle,
     and so a test can import the table without dragging in httpx.
+
+    ``conn`` is here for one boundary. ``SimulatedIssueWriter`` stands in for GitHub's
+    *server-side allocator*, and an allocator's job is to know what it has already issued;
+    where the real one keeps that in GitHub's database, the simulated one keeps it in ours,
+    because ours is where the simulated issues live. It is required rather than optional
+    because the only thing an optional connection can do is silently restore issue #22 —
+    a writer counting from zero in every process, minting numbers the mapping already
+    holds. Both callers hold the connection before they wire, so nothing is opened for it.
     """
     from robot_army import channels as channels_mod
     from robot_army.boundaries.dtach import DtachHost, SimulatedSessionHost
@@ -247,7 +259,7 @@ def wire(level: EffectLevel, config: Config, audit: AuditLog) -> Boundaries:
     writer: IssueSourceWriter = (
         GitHubWriter(config, audit)
         if is_real("issue_writer", level)
-        else SimulatedIssueWriter(audit)
+        else SimulatedIssueWriter(audit, conn)
     )
     vcs: VersionControl = (
         GitVersionControl(audit)

@@ -142,7 +142,7 @@ def test_a_simulated_run_does_not_suppress_the_later_real_creation(
         audit,
         level=EffectLevel.NO_REMOTE,
         cards=[card],
-        writer=SimulatedIssueWriter(audit),
+        writer=SimulatedIssueWriter(audit, conn),
         card_writer=SimulatedCardWriter(audit),
     )
     cycle(conn, board_config, audit, rehearsal, dry_run=True)
@@ -227,7 +227,7 @@ def test_a_simulated_cards_fake_issue_number_raises_no_anomaly(conn, board_confi
         audit,
         level=EffectLevel.NO_REMOTE,
         cards=[make_card("card-1", body=f"https://github.com/{REPO}")],
-        writer=SimulatedIssueWriter(audit),
+        writer=SimulatedIssueWriter(audit, conn),
         card_writer=SimulatedCardWriter(audit),
     )
     cycle(conn, board_config, audit, boundaries, dry_run=True)
@@ -267,3 +267,74 @@ def test_a_live_cards_vanished_issue_still_raises(conn, board_config, audit):
     )
     assert counts["missing_issue"] == 1
     assert [a.kind for a in db.list_anomalies(conn)] == ["card_issue_missing"]
+
+
+# -- issue #22: the number is allocated from the record, not from a count ---
+
+
+def test_the_highest_simulated_number_is_none_for_a_repository_with_no_rows(conn):
+    """The empty case has to be answerable without a branch at the call site: the writer
+    floors the result at ``SIMULATED_ISSUE_BASE``, so ``None`` and "nothing yet" are the
+    same thing to it."""
+    assert db.highest_simulated_issue_number(conn, repo_key=REPO) is None
+
+
+def test_the_highest_simulated_number_is_the_highest_not_the_latest(conn):
+    """A gapped sequence is the ordinary state of a board that has been purged in parts.
+    Allocating above the highest keeps a number that once meant something else from
+    meaning something new; filling the gap would not."""
+    linked_row(conn, card_id="card-1", issue_number=900_004, dry_run=True)
+    linked_row(conn, card_id="card-2", issue_number=900_001, dry_run=True)
+    assert db.highest_simulated_issue_number(conn, repo_key=REPO) == 900_004
+
+
+def test_the_highest_simulated_number_ignores_live_rows(conn):
+    """``dry_run`` is the third column of ``idx_cards_issue``, so it has to be the third
+    column of the query that predicts it. A live issue number leaking into the simulated
+    allocation would be a number the index never objected to."""
+    linked_row(conn, card_id="card-1", issue_number=900_001, dry_run=True)
+    linked_row(conn, card_id="card-2", issue_number=4_242, dry_run=False)
+    assert db.highest_simulated_issue_number(conn, repo_key=REPO) == 900_001
+
+
+def test_the_highest_simulated_number_is_per_repository(conn):
+    """Numbering is per repository because the index is. Two repositories rehearsed from
+    one board must not push each other's numbers along."""
+    linked_row(conn, card_id="card-1", issue_number=900_009, dry_run=True)
+    with db.transaction(conn):
+        row_id = db.insert_card(
+            conn,
+            board_id="board-1",
+            card_id="card-2",
+            card_url="https://trello.com/c/card-2",
+            title="Elsewhere",
+            body="",
+            dry_run=True,
+        )
+        conn.execute(
+            "UPDATE cards SET state = ?, repo_key = ?, issue_number = ? WHERE id = ?",
+            (str(CardState.LINKED), "jantman/other", 900_100, row_id),
+        )
+
+    assert db.highest_simulated_issue_number(conn, repo_key=REPO) == 900_009
+    assert db.highest_simulated_issue_number(conn, repo_key="jantman/other") == 900_100
+
+
+def test_the_highest_simulated_number_ignores_cards_without_an_issue(conn):
+    """Every ``needs_info`` card and every ``creating`` card mid-flight carries a NULL
+    issue number. ``MAX`` skips them, which is why no exclusion clause is needed — and why
+    a board full of held cards does not make the query fail or return nothing."""
+    with db.transaction(conn):
+        db.insert_card(
+            conn,
+            board_id="board-1",
+            card_id="card-held",
+            card_url="https://trello.com/c/card-held",
+            title="No repository named",
+            body="",
+            dry_run=True,
+        )
+    assert db.highest_simulated_issue_number(conn, repo_key=REPO) is None
+
+    linked_row(conn, card_id="card-1", issue_number=900_001, dry_run=True)
+    assert db.highest_simulated_issue_number(conn, repo_key=REPO) == 900_001

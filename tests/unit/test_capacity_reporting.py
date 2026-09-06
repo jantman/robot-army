@@ -25,7 +25,7 @@ from robot_army.states import SessionState, WorkItemState
 @pytest.fixture
 def ctx(config, conn, monkeypatch):
     monkeypatch.setattr(
-        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level)
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
     )
     built = operations.build_context(config)
     yield built
@@ -67,7 +67,7 @@ def test_an_inherited_cap_is_reported_as_inherited(ctx, conn, repo_clone):
 
 def test_an_inherited_wait_for_merge_is_reported_as_inherited(config, conn, repo_clone, monkeypatch):
     monkeypatch.setattr(
-        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level)
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
     )
     onboard_repo(conn, "demo", repo_clone)
     built = operations.build_context(
@@ -85,7 +85,7 @@ def test_a_chosen_wait_for_merge_is_reported_as_chosen(config, conn, repo_clone,
     """US3 AS1. "You chose this" and "this is what you get" send the author to different
     files, and only one of them is a file they already have open."""
     monkeypatch.setattr(
-        operations, "wire", lambda level, cfg, log: make_boundaries(log, level=level)
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
     )
     onboard_repo(conn, "demo", repo_clone)
     section = replace(config.repos["demo"], wait_for_merge=True)

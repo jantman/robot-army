@@ -156,9 +156,10 @@ whose default branch is `main` and confirm every surface says `develop`.
   not resolve" failure, which is already reported rather than swallowed.
 - **The primary remote is not `origin`.** The clone's remote is already resolved when the
   repository's identity is verified; detection asks the same remote, not a hardcoded name.
-- **The detected branch does not exist locally.** Detection names a remote-tracking branch;
-  reading files at that ref and creating a worktree from it must work in a clone that has
-  never checked the branch out.
+- **The detected branch is not checked out locally.** What detection produces is a branch
+  name, used exactly as a configured one is today — including the existing preference for the
+  remote-tracking ref when a worktree is created. A clone that has the remote ref but no local
+  branch is no better and no worse off than it is today with a configured value.
 - **The path is not a git repository at all**, or git fails. Detection produces no answer,
   the configured value is used, and the failure is recorded rather than swallowed.
 - **The repository is not onboarded yet.** Detection happens against the clone path
@@ -185,7 +186,9 @@ whose default branch is `main` and confirm every surface says `develop`.
   be read at the resolved base ref.
 - **FR-006**: Dispatch's fingerprint gate, worktree creation, the landed check, the
   ahead-count and every listing MUST resolve the base ref by FR-003, so no two surfaces can
-  disagree about it.
+  disagree about it. The one surface that cannot resolve it — the queue, which must stay free
+  of I/O because it is recomputed on every web page render — MUST stop naming a branch in its
+  wait-for-merge hold message rather than name one it did not resolve.
 - **FR-007**: When detection produces no answer, the system MUST fall back to the configured
   value, continue, and make the fallback visible where the base ref is displayed.
 - **FR-008**: Detection MUST be recorded as an action against the clone, consistent with

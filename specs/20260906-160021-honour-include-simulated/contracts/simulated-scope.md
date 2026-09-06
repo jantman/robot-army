@@ -113,6 +113,20 @@ rather than twenty records of which some are hidden. The filter is applied insid
 to a finished page, so a page whose region is entirely rehearsed cannot come back empty while
 older matching records remain.
 
+**A limit bounds the withheld count too, and changes the sentence.** Counted over the whole
+scan, `log --limit 3` against ten rehearsed and five real records would promise ten withheld
+while `--limit 3 --include-simulated` returned the same three and revealed none of them — a
+number true of the file and false of the output printed beneath it. Under a limit the count
+describes the stretch beginning at the oldest record shown, and says so:
+
+```
+N simulated record(s) among these withheld — pass --include-simulated to show them
+```
+
+Unlimited, the count really is every record the flag would add, and the shared unqualified
+sentence is used. This is the same distinction `read_log_page` draws with "on this page", for
+the same reason: a bounded reader may only make claims about what it bounded.
+
 Records shown under the flag keep the `[simulated]` marker `_format_record` has always written.
 The unparseable-line count is independent of the simulated filter and is reported as it is today.
 
@@ -157,6 +171,10 @@ handed to both views. Two of them discard it.
 |---|---|
 | `/anomalies` | filtered by the toggle; the withheld count stated on the page |
 | `/log` | filtered by the toggle; the page's scanned-region withheld count stated |
+
+Each view discloses a withheld row **exactly once**. A section that rendered nothing carries its
+count in place of its empty text, so the standalone note stands down when there is nothing to
+stand beside it — otherwise a page whose whole window was rehearsed states the number twice.
 | the anomaly pill in the chrome | counts within the scope the page was served with, on **every** page |
 
 The pill is the part most easily left behind: it is rendered on every view and links to

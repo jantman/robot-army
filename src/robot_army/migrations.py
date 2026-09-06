@@ -653,13 +653,52 @@ SCHEMA_014_SQL = """
 --
 -- **NOT NULL DEFAULT 0, deliberately unlike migrations 011 and 013.** Those chose nullable
 -- columns precisely so "never asked" stayed distinguishable from "asked, and empty". Here the
--- two readings do not cost the same. There is nothing to back-fill from -- an existing row
--- carries no evidence of which run raised it -- and `0` reads as *real*, so every pre-014 row
--- stays visible. Showing a real anomaly that was in fact rehearsed is a row the reader
--- dismisses; hiding a rehearsed one that was in fact real is a condition nobody ever sees.
--- Only the first is recoverable. The Python default on `db.raise_anomaly` is `False` for the
--- same asymmetry: a future call site that forgets the argument raises a *visible* anomaly.
+-- two readings do not cost the same: showing a real anomaly that was in fact rehearsed is a
+-- row the reader dismisses, while hiding a rehearsed one that was in fact real is a condition
+-- nobody ever sees. Only the first is recoverable, so `0` -- *real* -- is the safe default and
+-- what a row keeps whenever nothing better can be established. The Python default on
+-- `db.raise_anomaly` is `False` for the same asymmetry: a future call site that forgets the
+-- argument raises a *visible* anomaly.
 ALTER TABLE anomalies ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0;
+
+-- **Back-filled wherever the answer is derivable, which is most rows.**
+--
+-- Leaving every existing row at `0` would have meant this migration fixed nothing for the
+-- anomalies that prompted it. The two `card_create_failing` rows in the report belong to
+-- `dry_run = 1` cards, so they would have stayed in the default view *and* become permanently
+-- unretractable: the resolver looks its card up by `(card_id, dry_run)`, and a row stamped
+-- real would send it hunting a real card that does not exist, failing the same way on every
+-- pass forever.
+--
+-- This is not the read-time derivation the feature rejected, and the difference is what makes
+-- it safe. That one had to answer for six entity types in one expression, was undefined for
+-- the kinds naming no entity, and changed its answer whenever `purge-simulated` removed the
+-- row it depended on. This runs *once*, only for the three entity types that carry a `dry_run`
+-- of their own, and stores its result -- so a later purge cannot alter it.
+--
+-- A row moves only when the join is unambiguous. `work_items.id` and `sessions.session_id` are
+-- unique by construction. A `card_id` can hold both a real and a rehearsed row, because the
+-- identity index is over `(board_id, card_id, dry_run)` -- so the card clause moves a row only
+-- when exactly one card matches it and that card is rehearsed. Anything ambiguous, anything
+-- whose entity has since been purged, and every anomaly about a repo, a board or the machine
+-- keeps `0` and stays visible, which is the safe direction.
+--
+-- The index rebuild below follows this, and the order cannot produce a conflict either way:
+-- the old index made `(kind, entity_type, entity_id)` unique among open rows, so no two of
+-- them can collide once a fourth column is added, whatever these statements write.
+UPDATE anomalies SET dry_run = 1
+WHERE entity_type = 'work_item'
+  AND entity_id IN (SELECT CAST(id AS TEXT) FROM work_items WHERE dry_run = 1);
+
+UPDATE anomalies SET dry_run = 1
+WHERE entity_type = 'session'
+  AND entity_id IN (SELECT session_id FROM sessions WHERE dry_run = 1);
+
+UPDATE anomalies SET dry_run = 1
+WHERE entity_type = 'card'
+  AND entity_id IN (
+      SELECT card_id FROM cards GROUP BY card_id HAVING COUNT(*) = 1 AND MIN(dry_run) = 1
+  );
 
 -- **The index has to be rebuilt, and leaving it alone would be worse than the bug.**
 --

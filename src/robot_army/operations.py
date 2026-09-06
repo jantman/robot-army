@@ -4312,9 +4312,10 @@ def read_log(
         except ValueError as exc:
             return Result(code=EXIT_USAGE, lines=[str(exc)])
 
-    records: list[dict[str, Any]] = []
+    # Verdicts kept in file order, matches and withheld together, because the withheld count
+    # has to be scoped to the same stretch of log the records are — see the trim below.
+    judged: list[tuple[str, dict[str, Any]]] = []
     skipped = 0
-    withheld = 0
     for record, _raw in audit_mod.read_records(ctx.layout.log_dir):
         if record is None:
             skipped += 1
@@ -4329,15 +4330,27 @@ def read_log(
         if verdict is _UNREADABLE:
             skipped += 1
         elif verdict is _WITHHELD:
-            withheld += 1
+            judged.append((_WITHHELD, record))
         elif verdict is _MATCH:
-            records.append(record)
+            judged.append((_MATCH, record))
 
     # After the filter, not before: `--limit 20` means twenty records the reader can see, not
     # twenty of which some are hidden. Trimming first would make the page size depend on how
     # much rehearsal traffic happened to sit at the end of the log.
-    if limit:
-        records = records[-limit:]
+    #
+    # **And the withheld count is trimmed with them**, which is not obvious and was wrong at
+    # first. Counted over the whole scan, `log --limit 3` against ten rehearsed and five real
+    # records would promise ten withheld — while `--limit 3 --include-simulated` returned the
+    # same three, revealing none of them. The note has to describe the stretch of log the
+    # reader is actually looking at, which is what `read_log_page` means by "on this page";
+    # here that stretch begins at the oldest record shown.
+    matched = [index for index, (verdict, _) in enumerate(judged) if verdict is _MATCH]
+    span_from = 0
+    if limit and len(matched) > limit:
+        span_from = matched[-limit]
+    records = [record for verdict, record in judged[span_from:] if verdict is _MATCH]
+    withheld = sum(1 for verdict, _ in judged[span_from:] if verdict is _WITHHELD)
+    limited = span_from > 0
 
     result = Result(
         data={
@@ -4351,7 +4364,16 @@ def read_log(
         result.say(_format_record(record))
     if withheld:
         result.say()
-        result.say(_withheld_note(withheld))
+        # Two sentences because there are two honest claims. Unlimited, the count is every
+        # record the flag would add, and `_withheld_note`'s wording says exactly that. Limited,
+        # it is every record the flag would add *among these*, and saying so is the difference
+        # between a number the reader can check and one that quietly means something else.
+        result.say(
+            f"{withheld} simulated record(s) among these withheld — pass "
+            "--include-simulated to show them"
+            if limited
+            else _withheld_note(withheld)
+        )
     if skipped:
         result.say()
         result.say(f"({skipped} unparseable line(s) skipped)")

@@ -27,12 +27,42 @@ ALTER TABLE anomalies ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0;
 
 Migrations 011 and 013 both chose nullable columns so that "never asked" stayed distinguishable
 from "asked and the answer was empty". This one deliberately does the opposite, and the
-difference is that here the two readings do not cost the same.
+difference is that here the two readings do not cost the same. `0` reads as *real*: showing a
+real anomaly that was in fact rehearsed is a row the reader dismisses, while hiding a rehearsed
+one that was in fact real is a condition nobody ever sees. Only the first is recoverable, so the
+default errs toward visible.
 
-There is nothing to back-fill from — an existing row carries no evidence of which run raised it.
-`0` reads as *real*, so every pre-014 row stays visible. Showing a real anomaly that was in fact
-rehearsed is a row the reader dismisses; hiding a rehearsed one that was in fact real is a
-condition nobody ever sees. Only the first is recoverable, so the default errs toward visible.
+### The back-fill, and why it is not the derivation this feature rejected
+
+**Existing rows are back-filled wherever the answer is derivable**, which is most of them. The
+first draft of this migration left every one at `0` on the grounds that "there is nothing to
+back-fill from", and that was simply wrong for the rows that prompted the feature: a
+`card_create_failing` anomaly's `entity_id` *is* a `card_id`, and `cards` carries `dry_run`.
+
+The consequence of getting it wrong was not one bug but two. The report's two anomalies would
+have stayed in the default view — so the issue's own motivating case would have remained
+unfixed for existing data — and they would have become **permanently unretractable**, because
+`find_card_on_any_board` looks up `(card_id, dry_run)` and a row stamped real sends it hunting a
+real card that does not exist, failing identically on every pass forever.
+
+This is not the read-time derivation [R1](research.md) rejected, and three things separate them.
+That one had to answer for six entity types in a single expression; this handles the three that
+carry a `dry_run` of their own and leaves the rest alone. That one was undefined for the kinds
+naming no entity; this leaves them at `0`. And that one changed its answer whenever
+`purge-simulated` removed the row it depended on; this runs **once** and stores the result.
+
+A row moves only when the join is unambiguous:
+
+| Entity type | Join | Ambiguity |
+|---|---|---|
+| `work_item` | `entity_id` = `CAST(work_items.id AS TEXT)` | none — primary key |
+| `session` | `entity_id` = `sessions.session_id` | none — `UNIQUE` |
+| `card` | `entity_id` = `cards.card_id` | possible: the identity index is `(board_id, card_id, dry_run)`, so a card id can hold a real row *and* a rehearsed one. Moved only when exactly one card matches and it is rehearsed |
+| `repo`, `board`, none | — | no `dry_run` to read; stays `0` |
+
+Anything ambiguous, anything whose entity has since been purged, and every anomaly about the
+machine keeps `0` and stays visible. "I cannot tell" and "it was a rehearsal" are different
+answers and only one of them is safe to guess.
 
 The same asymmetry sets the Python default: `db.raise_anomaly(..., dry_run: bool = False)`. A
 future call site that forgets the argument raises a *visible* anomaly.

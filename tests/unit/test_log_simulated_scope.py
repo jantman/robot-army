@@ -257,6 +257,67 @@ def test_limit_counts_records_the_reader_can_actually_see(ctx) -> None:
     assert all(not operations._is_rehearsed(r) for r in result.data["records"])
 
 
+def test_the_withheld_count_under_a_limit_describes_the_records_shown(ctx) -> None:
+    """A limit bounds what the reader sees, so it has to bound the claim made beside it.
+
+    Counted over the whole scan, this said "10 simulated rows withheld — pass
+    --include-simulated to show them" while the flag, with the same limit, returned the very
+    same three records and revealed none of them. The number was true of the file and false of
+    the output it was printed under, which is the failure this feature exists to remove.
+    """
+    write_log(
+        ctx,
+        [record(f"rehearsed.{n}", simulated=True) for n in range(10)]
+        + [record(f"real.{n}") for n in range(5)],
+    )
+
+    result = operations.read_log(ctx, limit=3)
+    text = "\n".join(result.lines)
+
+    assert result.data["withheld_simulated"] == 0, (
+        "the three newest real records have no rehearsed records among them"
+    )
+    assert "withheld" not in text
+    revealed = operations.read_log(ctx, limit=3, include_simulated=True)
+    assert [r["action"] for r in revealed.data["records"]] == [
+        r["action"] for r in result.data["records"]
+    ], "and the flag would indeed have added nothing, which is what the silence now says"
+
+
+def test_the_withheld_count_under_a_limit_counts_what_is_interleaved(ctx) -> None:
+    """The other half: rehearsed records *within* the shown stretch are still disclosed."""
+    write_log(
+        ctx,
+        [record(f"old.real.{n}") for n in range(5)]
+        + [
+            record("real.a"),
+            record("rehearsed.x", simulated=True),
+            record("real.b"),
+            record("rehearsed.y", simulated=True),
+            record("real.c"),
+        ],
+    )
+
+    result = operations.read_log(ctx, limit=3)
+    text = "\n".join(result.lines)
+
+    assert [r["action"] for r in result.data["records"]] == ["real.a", "real.b", "real.c"]
+    assert result.data["withheld_simulated"] == 2
+    assert "2 simulated record(s) among these withheld" in text, (
+        "worded for the stretch it describes, the way read_log_page says 'on this page'"
+    )
+
+
+def test_without_a_limit_the_unqualified_sentence_is_still_used(ctx) -> None:
+    """Unlimited, the count really is every record the flag would add, so it says so."""
+    write_log(ctx, [record("real.one"), record("rehearsed", simulated=True)])
+
+    text = "\n".join(operations.read_log(ctx).lines)
+
+    assert f"1 simulated rows withheld — pass {FLAG} to show them" in text
+    assert "among these" not in text
+
+
 def test_a_partial_final_line_is_still_counted_in_both_spellings(ctx) -> None:
     """The unparseable count is independent of the simulated filter (R14).
 

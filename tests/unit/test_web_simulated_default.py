@@ -367,3 +367,24 @@ def test_the_log_page_never_claims_no_records_match_while_withholding(web_at, la
 
     assert "No records match." not in body
     assert "1 simulated record" in body
+
+
+def test_the_log_page_states_the_withheld_count_once(web_at, layout) -> None:
+    """A view discloses each withheld row exactly once — `withheld_note`'s own invariant.
+
+    When the page has no visible records, the empty state already carries the count in place
+    of its text, so the standalone paragraph must stand down. `anomalies_view` has always done
+    this; `/log` printed the number twice for a page whose whole scanned window was rehearsed.
+    """
+    _write_log(
+        layout,
+        [
+            {"action": "rehearsed.one", "outcome": "ok", "simulated": True},
+            {"action": "rehearsed.two", "outcome": "ok", "simulated": True},
+        ],
+    )
+
+    body = web_at("plan").get("/log?include_simulated=0").text
+
+    assert body.count("2 simulated record") == 1, "the count is stated once, not twice"
+    assert "Nothing to show here." in body

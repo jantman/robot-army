@@ -1585,3 +1585,173 @@ def test_a_killed_migration_014_leaves_user_version_at_thirteen_and_re_runs(
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(anomalies)")}
     assert "dry_run" in columns
     conn.close()
+
+
+def test_migration_014_backfills_a_card_anomaly_from_its_card(tmp_path):
+    """The motivating case from issue #21, which a bare DEFAULT 0 would have left broken.
+
+    Two `card_create_failing` anomalies belonging to `dry_run = 1` cards. Stamped real, they
+    stay in the default view *and* become permanently unretractable — the resolver looks the
+    card up by `(card_id, dry_run)` and would hunt a real card that does not exist.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    _ladder_to(conn, 13)
+    conn.execute(
+        "INSERT INTO cards (board_id, card_id, card_url, title, body, state, dry_run, "
+        "first_seen_at, updated_at) VALUES ('b', 'sim-card', 'u', 't', '', 'creating', 1, "
+        "'2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO cards (board_id, card_id, card_url, title, body, state, dry_run, "
+        "first_seen_at, updated_at) VALUES ('b', 'real-card', 'u', 't', '', 'creating', 0, "
+        "'2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z')"
+    )
+    for entity in ("sim-card", "real-card"):
+        conn.execute(
+            "INSERT INTO anomalies (kind, entity_type, entity_id, detail, detected_at) "
+            "VALUES ('card_create_failing', 'card', ?, '{}', '2026-08-29T00:00:00Z')",
+            (entity,),
+        )
+    conn.commit()
+
+    migrate(conn)
+
+    flags = {
+        row["entity_id"]: row["dry_run"]
+        for row in conn.execute("SELECT entity_id, dry_run FROM anomalies")
+    }
+    assert flags == {"sim-card": 1, "real-card": 0}
+    assert [a.entity_id for a in db.list_anomalies(conn)] == ["real-card"]
+    conn.close()
+
+
+def test_migration_014_backfills_work_item_and_session_anomalies(tmp_path):
+    """The other two entity types that carry a `dry_run` of their own."""
+    conn = db.connect(tmp_path / "state.db")
+    _ladder_to(conn, 13)
+    conn.execute(
+        "INSERT INTO repos (repo_key, onboarded_at, fingerprint_approved_at) "
+        "VALUES ('jantman/demo', '2026-09-05T00:00:00Z', '2026-09-05T00:00:00Z')"
+    )
+    for issue, dry in ((1, 1), (2, 0)):
+        conn.execute(
+            "INSERT INTO work_items (id, source, source_id, source_url, repo_key, "
+            "issue_number, title, body, labels, state, dry_run, discovered_at, updated_at) "
+            "VALUES (?, 'github', ?, 'u', 'jantman/demo', ?, 't', 'b', '[]', 'active', ?, "
+            "'2026-09-05T00:00:00Z', '2026-09-05T00:00:00Z')",
+            (issue, f"jantman/demo#{issue}", issue, dry),
+        )
+        conn.execute(
+            "INSERT INTO sessions (work_item_id, session_id, attempt, state, dry_run, "
+            "started_at) VALUES (?, ?, 1, 'running', ?, '2026-09-05T00:00:00Z')",
+            (issue, f"sess-{issue}", dry),
+        )
+    for kind, etype, eid in (
+        ("prunable_worktree", "work_item", "1"),
+        ("prunable_worktree", "work_item", "2"),
+        ("no_transcript", "session", "sess-1"),
+        ("no_transcript", "session", "sess-2"),
+    ):
+        conn.execute(
+            "INSERT INTO anomalies (kind, entity_type, entity_id, detail, detected_at) "
+            "VALUES (?, ?, ?, '{}', '2026-09-05T00:00:00Z')",
+            (kind, etype, eid),
+        )
+    conn.commit()
+
+    migrate(conn)
+
+    flags = {
+        row["entity_id"]: row["dry_run"]
+        for row in conn.execute("SELECT entity_id, dry_run FROM anomalies")
+    }
+    assert flags == {"1": 1, "2": 0, "sess-1": 1, "sess-2": 0}
+    conn.close()
+
+
+def test_migration_014_leaves_an_ambiguous_card_alone(tmp_path):
+    """One card id can hold a real row and a rehearsed one, and then the join says nothing.
+
+    Real is the safe direction: showing an anomaly that was in fact a rehearsal's is a row the
+    maintainer dismisses, hiding one that was real is a condition nobody sees.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    _ladder_to(conn, 13)
+    for board, dry in (("b1", 1), ("b2", 0)):
+        conn.execute(
+            "INSERT INTO cards (board_id, card_id, card_url, title, body, state, dry_run, "
+            "first_seen_at, updated_at) VALUES (?, 'both', 'u', 't', '', 'creating', ?, "
+            "'2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z')",
+            (board, dry),
+        )
+    conn.execute(
+        "INSERT INTO anomalies (kind, entity_type, entity_id, detail, detected_at) "
+        "VALUES ('card_create_failing', 'card', 'both', '{}', '2026-08-29T00:00:00Z')"
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    assert conn.execute("SELECT dry_run FROM anomalies").fetchone()["dry_run"] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "entity_type", "entity_id"),
+    [
+        ("registry_version_unknown", None, None),
+        ("capacity_unobservable", None, None),
+        ("board_unreachable", "board", "ZrAG4gAx"),
+        ("clone_path_missing", "repo", "jantman/demo"),
+        ("no_transcript", "session", "sess-purged"),
+    ],
+)
+def test_migration_014_leaves_underivable_rows_real(tmp_path, kind, entity_type, entity_id):
+    """Anything about the machine, a board, a repo, or an entity that is gone keeps `0`.
+
+    "I cannot tell" and "it was a rehearsal" are different answers, and only one of them is
+    safe to guess.
+    """
+    conn = db.connect(tmp_path / "state.db")
+    _ladder_to(conn, 13)
+    conn.execute(
+        "INSERT INTO anomalies (kind, entity_type, entity_id, detail, detected_at) "
+        "VALUES (?, ?, ?, '{}', '2026-09-05T00:00:00Z')",
+        (kind, entity_type, entity_id),
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    assert conn.execute("SELECT dry_run FROM anomalies").fetchone()["dry_run"] == 0
+    conn.close()
+
+
+def test_a_backfilled_card_anomaly_can_then_be_retracted(tmp_path):
+    """The second half of the consequence: the resolver has to be able to find its card.
+
+    Stamped real against a rehearsed card, `find_card_on_any_board` returns None and the
+    resolver's "I could not check" branch skips it on every pass, forever.
+    """
+    from robot_army import reconcile
+    from robot_army.audit import AuditLog
+
+    conn = db.connect(tmp_path / "state.db")
+    _ladder_to(conn, 13)
+    conn.execute(
+        "INSERT INTO cards (board_id, card_id, card_url, title, body, state, dry_run, "
+        "first_seen_at, updated_at) VALUES ('b', 'sim-card', 'u', 't', '', 'linked', 1, "
+        "'2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO anomalies (kind, entity_type, entity_id, detail, detected_at) "
+        "VALUES ('card_create_failing', 'card', 'sim-card', '{}', '2026-08-29T00:00:00Z')"
+    )
+    conn.commit()
+    migrate(conn)
+
+    with AuditLog(tmp_path / "logs", component="test") as audit:
+        assert reconcile._resolve_card_create_anomalies(conn, audit=audit) == 1
+
+    assert db.list_anomalies(conn, include_simulated=True) == []
+    conn.close()

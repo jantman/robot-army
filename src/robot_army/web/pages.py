@@ -2100,7 +2100,10 @@ def log_view(
                 _reveal("/log", include_simulated=include_simulated),
                 class_="withheld",
             )
-            if payload["withheld_simulated"]
+            # `and records` because `_nothing_on_this_page` below states the same count in
+            # place of its empty text. A view discloses each withheld row exactly once, which
+            # is `withheld_note`'s own invariant and what `anomalies_view` does here too.
+            if payload["withheld_simulated"] and records
             else Markup(""),
             _nothing_on_this_page(records, payload, include_simulated=include_simulated)
             if not records

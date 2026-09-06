@@ -91,11 +91,11 @@ number, and no action is refused on account of one.
 **Independent Test**: render with the two caps differing and confirm the sentence appears
 naming both, and that a control still acts.
 
-- [ ] T019 [US2] Render `capacity["cap_disagreement"]` as a `banner warn` notice in `_chrome_bar` in `src/robot_army/web/html.py`, placed after the effect-level banner, with a comment placing it in the same family — conditions under which what you are reading does not mean what it appears to mean — and saying why this one warns rather than errors
-- [ ] T020 [US2] Add a `.banner.warn { border-color: var(--warn); }` rule beside `.banner.ok` in the stylesheet in `src/robot_army/web/html.py`
-- [ ] T021 [P] [US2] Add tests to `tests/unit/test_web_views.py`: the notice renders on every view when the caps differ, names both numbers, and is absent when they agree
-- [ ] T022 [P] [US2] Add tests for the three silent states of §4 of [contracts/enforced-cap.md](contracts/enforced-cap.md): no daemon running; a daemon holding the lock whose heartbeat cannot be read (which must render the existing unknown-level banner and **no** cap notice); and a heartbeat carrying no cap
-- [ ] T023 [P] [US2] Add a test to `tests/unit/test_web_effect_guard.py` that a cap disagreement refuses nothing — a POST that would be refused on an effect-level mismatch succeeds with only the caps differing
+- [X] T019 [US2] Render `capacity["cap_disagreement"]` as a `banner warn` notice in `_chrome_bar` in `src/robot_army/web/html.py`, placed after the effect-level banner, with a comment placing it in the same family — conditions under which what you are reading does not mean what it appears to mean — and saying why this one warns rather than errors
+- [X] T020 [US2] Add a `.banner.warn { border-color: var(--warn); }` rule beside `.banner.ok` in the stylesheet in `src/robot_army/web/html.py`
+- [X] T021 [P] [US2] Add tests to `tests/unit/test_web_views.py`: the notice renders on every view when the caps differ, names both numbers, and is absent when they agree
+- [X] T022 [P] [US2] Add tests for the three silent states of §4 of [contracts/enforced-cap.md](contracts/enforced-cap.md): no daemon running; a daemon holding the lock whose heartbeat cannot be read (which must render the existing unknown-level banner and **no** cap notice); and a heartbeat carrying no cap
+- [X] T023 [P] [US2] Add a test to `tests/unit/test_web_effect_guard.py` that a cap disagreement refuses nothing — a POST that would be refused on an effect-level mismatch succeeds with only the caps differing
 
 **Checkpoint**: the web half of the feature is complete and testable on its own.
 

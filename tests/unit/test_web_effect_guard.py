@@ -269,3 +269,30 @@ def test_the_level_order_is_least_to_most_consequential():
     from robot_army.effects import EffectLevel
 
     assert [str(level) for level in EffectLevel] == ["plan", "local", "no-remote", "live"]
+
+
+# -- a cap disagreement is not a guard (issue #30) --------------------------
+
+
+def test_a_cap_disagreement_refuses_nothing(web, conn, layout, running_daemon):
+    """The asymmetry that decides everything about issue #30's fix.
+
+    An effect-level mismatch refuses because acting at the wrong level does something in
+    the world the author believes is being simulated. A cap disagreement cannot: the daemon
+    enforces its own cap whatever this interface believes, so no action taken through a
+    stale one can oversubscribe the machine. Refusing here would turn a display defect into
+    an outage — at the exact moment the author had just raised the cap to get work moving.
+    """
+    from dataclasses import replace
+
+    web.app.config = replace(
+        web.app.config, daemon=replace(web.app.config.daemon, max_concurrent_sessions=5)
+    )
+    beat(layout, max_concurrent_sessions=7)
+    item_id = seed_item(conn, state="interrupted")
+
+    assert "SESSION CAP MISMATCH" in web.get("/active").text, "the disagreement is real"
+    abandoned = web.post_json(f"/item/{item_id}/abandon")
+    assert abandoned.status == 303, "it acted and redirected, rather than being refused"
+    assert abandoned.json()["ok"] is True
+    assert web.post_json("/poll").status in (200, 303)

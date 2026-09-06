@@ -832,3 +832,63 @@ def test_the_queues_reasons_are_planned_against_the_enforced_cap(
     row = {r["id"]: r for r in payload["ready"]}[queued]
     assert row["hold"] is None, row
     assert payload["capacity"]["global_cap"] == 3
+
+
+# -- and the disagreement that produced it is announced (issue #30) ---------
+
+
+def test_the_disagreement_is_announced_on_every_view(web, conn, layout, running_daemon):
+    """A corrected number with no explanation is a page whose fraction disagrees with the
+    operator's editor for no visible reason. On every view for the reason the pill is: the
+    question is asked from wherever the reader happens to be looking."""
+    stale_cap(web, ours=5)
+    beat(layout, max_concurrent_sessions=7)
+    seed_item(conn, issue_number=1, state="ready")
+
+    for path in ("/active", "/queue", "/interrupted"):
+        text = web.get(path).text
+        assert "SESSION CAP MISMATCH" in text, path
+        assert "cap of 7" in text and "configured for 5" in text, path
+
+
+def test_no_notice_when_the_two_caps_agree(web, conn, layout, running_daemon):
+    stale_cap(web, ours=7)
+    beat(layout, max_concurrent_sessions=7)
+    assert "SESSION CAP MISMATCH" not in web.get("/active").text
+
+
+def test_no_notice_when_no_daemon_is_running(web, conn, layout):
+    """Nothing is enforcing a cap, so there is nothing for this process to disagree with."""
+    stale_cap(web, ours=5)
+    beat(layout, max_concurrent_sessions=7)
+    assert "SESSION CAP MISMATCH" not in web.get("/active").text
+
+
+def test_no_second_notice_when_the_heartbeat_cannot_be_read(web, conn, layout, running_daemon):
+    """A daemon holds the lock but nothing about it can be read. That state already has a
+    banner saying so and that actions are refused; a second one about one field of an
+    unreadable file competes with the account that matters."""
+    layout.heartbeat_path.unlink()
+    stale_cap(web, ours=5)
+
+    text = web.get("/active").text
+    assert "EFFECT LEVEL UNKNOWN" in text
+    assert "SESSION CAP MISMATCH" not in text
+
+
+def test_no_notice_when_the_heartbeat_carries_no_cap(web, conn, layout, running_daemon):
+    stale_cap(web, ours=5)
+    beat(layout)
+    assert "SESSION CAP MISMATCH" not in web.get("/active").text
+
+
+def test_the_notice_is_a_warning_rather_than_an_error(web, conn, layout, running_daemon):
+    """Nothing is wrong with the page and nothing is refused. Only the effect level, where
+    acting at the wrong one really does something in the world, earns the error colour."""
+    stale_cap(web, ours=5)
+    beat(layout, max_concurrent_sessions=7)
+
+    banner = [
+        line for line in web.get("/active").text.splitlines() if "SESSION CAP MISMATCH" in line
+    ]
+    assert banner and 'class="banner warn"' in banner[0], banner

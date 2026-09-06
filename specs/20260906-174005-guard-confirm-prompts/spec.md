@@ -22,14 +22,19 @@ undo:
 
 Only `onboard` handles the two ways a maintainer gives up on a question: pressing Ctrl-C,
 and having no input at all (`< /dev/null`, a pipeline, a cron entry, an editor's terminal
-pane that has already closed its stdin). The other three crash with a Python traceback,
-exit with a code that means nothing in particular, and — for the two destructive commands
-— leave no usable trace that the destructive act was ever attempted.
+pane that has already closed its stdin). For the other three, the two halves fail
+differently:
 
-That last part is the real defect. `worktree remove --force` is the command that discards
-uncommitted work. Giving up at its prompt today produces a traceback and an audit record
-whose only content is `EOFError`, and `cancel` and `purge-simulated` produce no record at
-all, because neither has opened an audit action by the time it asks.
+- **No input at all** crashes with a Python traceback, which is the reproduction in the
+  issue.
+- **Ctrl-C** already prints `interrupted` and exits 1 — the top level has caught it all
+  along — but says nothing about *which question* was walked away from.
+
+The record is where both halves land, and that is the real defect. `worktree remove --force`
+is the command that discards uncommitted work; giving up at its prompt today leaves an audit
+record whose only content is the name of an exception, under an intent that had already
+named the path. `cancel` and `purge-simulated` leave no record at all, because neither has
+opened an audit action by the time it asks.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -178,7 +183,9 @@ guarded without any per-call-site code.
   and a single line of explanation. Zero produce a traceback. Today three of four do.
 - **SC-002**: All four, given up on either way, leave a record in the audit log from which
   the command, the target and the cause can be read without re-running anything. Today one
-  of four does.
+  of four does. Of the other three, two write nothing at all, and the third writes a record
+  that names the command and the target but reports the cause as the name of a Python
+  exception.
 - **SC-003**: In every abandonment, the guarded action's effect on the world is nil —
   verifiable by inspecting the worktree, the session's state, and the row counts afterward.
 - **SC-004**: The number of places in the codebase that separately handle interrupt or

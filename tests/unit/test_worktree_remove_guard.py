@@ -617,9 +617,10 @@ def test_the_payload_discriminator_covers_all_three_outcomes(conn, audit, config
 
 # -- issue #23: giving up at the force prompt --------------------------------
 #
-# The prompt that discards uncommitted work. Before #23, Ctrl-C or a closed stdin here
-# produced a traceback and an outcome record whose entire content was the exception name —
-# so the log could say a force-removal had been *started* and nothing about how it ended.
+# The prompt that discards uncommitted work. The intent was always written before the prompt
+# blocked, so the log could say a force-removal had been *started*. What it could not say is
+# how it ended: before #23 a closed stdin tracebacked out and a Ctrl-C exited 1 via
+# `cli.main`, and either way the outcome record's entire content was the exception's name.
 
 
 class GivesUp:

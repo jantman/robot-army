@@ -388,9 +388,12 @@ parseable document on stdout. And every one of them leaves a record — what was
 against what, and which way I gave up — under the command's own action name. The shapes are
 on [the audit log page](audit-log.md#the-issue-23-records).
 
-Until issue #23 only `onboard` did any of this. The other three printed a Python traceback,
-and two of those are the destructive ones: there was no record that a force-removal had been
-reached for at all.
+Until issue #23 only `onboard` did all of this, and the two halves failed differently. A
+**closed stdin** tracebacked out of the other three — that is the reproduction in the issue.
+**Ctrl-C** already printed `interrupted` and exited 1, because `main` has caught it all
+along; what it did not do was say which question had been walked away from. `cancel` and
+`purge-simulated` wrote no record at all, and `worktree remove --force` wrote one naming an
+exception and nothing else, under an intent that had already named the path.
 
 ## Noticing it has died
 

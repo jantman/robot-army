@@ -800,9 +800,12 @@ jq -r 'select(.detail.cause == "interrupted_at_prompt" or .detail.cause == "no_a
 **`session.cancel` appears only here.** A cancel that goes through is already
 reconstructable from `session.terminate` and the session and work-item transitions, so it
 never needed an intent/outcome pair of its own; an abandoned one has none of those to be
-read from. The asymmetry is deliberate rather than an oversight. Declining a prompt — typing
-`n`, or the wrong item id — writes no record either: that is a command that ran and changed
-nothing, which the absence of any record already says.
+read from. The asymmetry is deliberate rather than an oversight. Declining `cancel` or
+`purge-simulated` — typing `n` — writes no record either, for the same reason: a command that
+ran and changed nothing is what the absence of a record already says. The other two prompts
+are not like that, and already were not before issue #23: `onboard` records a decline as
+`aborted_at_prompt`, and typing the wrong item id at the force prompt sets `aborted` on the
+`worktree.remove` outcome that is open by then.
 
 ## Reconstructing an item's history
 

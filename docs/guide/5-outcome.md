@@ -198,8 +198,9 @@ rather than reporting an ending it did not observe.
 `cancel` asks before it signals anything. Ctrl-C at that question, or running it with no
 stdin, stops the command with nothing signalled and the item exactly where it was — and
 writes a `session.cancel` record saying which session I reached for and which way I gave up.
-Until issue #23 it printed a traceback and left nothing behind. `cancel --force` skips the
-question, and is a different `--force` from the ones on this page.
+Until issue #23 a closed stdin tracebacked here, and a Ctrl-C — which `main` has always caught
+— left nothing behind at all. `cancel --force` skips the question, and is a different
+`--force` from the ones on this page.
 
 ### The tab
 

@@ -1,10 +1,13 @@
 """Giving up at a confirmation prompt is a recorded result, not a traceback (issue #23).
 
 Four commands stop and ask the maintainer something before acting. Milestone 011 wrapped
-`onboard`'s question in `try/except KeyboardInterrupt/EOFError` and left the other three,
-so `robot-army purge-simulated < /dev/null` printed a Python traceback, `cancel` did the
-same to the command that signals a running worker, and `worktree remove --force` — the one
-that discards uncommitted work — left an audit outcome whose entire content was `EOFError`.
+`onboard`'s question in `try/except KeyboardInterrupt/EOFError` and left the other three, so
+`robot-army purge-simulated < /dev/null` printed a Python traceback and so did the command
+that signals a running worker. Ctrl-C at those prompts did not traceback — `cli.main` has
+caught it all along — but it left the same hole in the record, which is the half that
+matters: `cancel` and `purge-simulated` wrote nothing at all, and `worktree remove --force`
+— the one that discards uncommitted work — wrote an outcome whose entire content was the
+name of an exception.
 
 The fix is not three more `except` clauses. It is one guard the prompts pass through and
 one decorator that turns what it raises back into a `Result`, so the fifth prompt someone

@@ -7,10 +7,11 @@
 ## Summary
 
 Three of the four commands that stop and ask the maintainer a question crash with a Python
-traceback when the maintainer presses Ctrl-C or when there is no input to read, and two of
-those three are the destructive ones. `cancel` and `purge-simulated` leave no record that
-the command was even attempted; `worktree remove --force` leaves one whose only content is
-`EOFError`.
+traceback when there is no input to read, and two of those three are the destructive ones.
+Ctrl-C at the same prompts does not traceback — the top level has caught it all along — but
+leaves the same gap in the record that a closed stdin does: `cancel` and `purge-simulated`
+leave no record that the command was even attempted, and `worktree remove --force` leaves
+one whose only content is the name of an exception.
 
 The fix moves the handling off the call sites entirely. One helper wraps the injected
 `confirm` callable, records the abandonment under the command's own audit action, and

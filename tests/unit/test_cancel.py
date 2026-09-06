@@ -746,8 +746,9 @@ def test_a_surviving_process_under_a_terminal_item_settles_nothing(conn, audit, 
 #
 # A cancel that goes through is reconstructable from `session.terminate` and the two state
 # transitions, so it never needed an intent/outcome pair of its own. An abandoned one has
-# none of those, and before #23 it had a traceback instead — the command that signals a
-# running worker, leaving no evidence it had been reached for.
+# none of those, and before #23 it had nothing else either: a closed stdin tracebacked, a
+# Ctrl-C exited 1 quietly via `cli.main`, and neither left any evidence that the command
+# which signals a running worker had been reached for.
 
 
 class GivesUp:

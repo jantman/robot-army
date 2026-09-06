@@ -745,8 +745,10 @@ def test_the_force_flag_says_what_it_does_not_bypass(command):
 # -- issue #23: the prompts, from the terminal -------------------------------
 #
 # `robot-army purge-simulated < /dev/null` printed a traceback. The tests below drive the
-# real entry point with a stdin that has nothing in it, which is what the reproduction in
-# the issue does, and with the interrupt that is the other way out of a question.
+# real entry point with a stdin that has nothing in it, which is what the reproduction in the
+# issue does, and with the interrupt that is the other way out of a question. Ctrl-C never
+# tracebacked — `main` has caught it since long before #23 — so what the second test pins is
+# that the exit code and the word did not drift while the record was being added.
 #
 # `onboard` is not among them: this module's fixture keys its repository `demo` rather than
 # `owner/name` deliberately (see the module docstring), so onboarding refuses before it can
@@ -810,7 +812,8 @@ def test_no_prompt_lets_a_traceback_out_when_input_ends(
     command, config_file, item_that_can_be_asked_about, capsys, stdin_ran_out
 ):
     """Three of issue #23's four rows, through `main`. Before the fix each of these raised
-    out of `main` entirely — which is not an exit code, it is a crash."""
+    out of `main` entirely — which is not an exit code, it is a crash. Exit 4 is also new
+    here: an uncaught exception exits 1, the same as every other kind of failure."""
     code = run_cli(command, config_file)
     captured = capsys.readouterr()
 

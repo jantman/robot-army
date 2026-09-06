@@ -70,12 +70,14 @@ enforcing, in both directions of staleness.
 **Independent Test**: run a daemon at one cap, render the chrome from a context configured for
 another, and confirm the denominator and the "at capacity" styling are the daemon's.
 
-- [ ] T013 [US1] In `handle` in `src/robot_army/web/server.py`, take the health report and the lock probe **once** and pass them to `effective_level`, which already accepts both — replacing the reads it performs internally today (research.md R9)
-- [ ] T014 [US1] In the same place, resolve `health.published_cap(report, running=running)` and pass it as `enforced_cap` to the per-request `capacity_mod.snapshot`, with a comment saying why the resolution happens here: one reading of the daemon per page, handed to every consumer of it
-- [ ] T015 [US1] Add optional `report` and `running` parameters to `pages.chrome` in `src/robot_army/web/pages.py` so it uses the handler's reading instead of retaking it, defaulting to taking its own for a direct caller — matching what `effective_level` and `effect_mismatch` already do
-- [ ] T016 [US1] Confirm and, if needed, adjust that the two `capacity is None` fallbacks in `src/robot_army/web/pages.py` (`chrome` and the queue view) still resolve to the configured cap, and document that as the meaning of "no enforced cap supplied" rather than an oversight
-- [ ] T017 [P] [US1] Add tests to `tests/unit/test_web_views.py`: with a heartbeat naming a cap that differs from the app's configuration, the chrome payload's `global_cap` is the daemon's, the rendered pill shows that denominator, and the pill is not styled "at capacity" when the enforced cap leaves room
-- [ ] T018 [P] [US1] Add a test that the queue view's per-item reasons are planned against the enforced cap — with a daemon cap that leaves a free slot and a configured cap that does not, no item is held for capacity and the pill and the reasons agree
+- [X] T013 [US1] In `handle` in `src/robot_army/web/server.py`, take the health report and the lock probe **once** and pass them to `effective_level`, which already accepts both — replacing the reads it performs internally today (research.md R9)
+- [X] T014 [US1] In the same place, resolve `health.published_cap(report, running=running)` and pass it as `enforced_cap` to the per-request `capacity_mod.snapshot`, with a comment saying why the resolution happens here: one reading of the daemon per page, handed to every consumer of it
+- [X] T015 [US1] Add optional `report` and `running` parameters to `pages.chrome` in `src/robot_army/web/pages.py` so it uses the handler's reading instead of retaking it, defaulting to taking its own for a direct caller — matching what `effective_level` and `effect_mismatch` already do
+- [X] T016 [US1] Confirm and, if needed, adjust that the two `capacity is None` fallbacks in `src/robot_army/web/pages.py` (`chrome` and the queue view) still resolve to the configured cap, and document that as the meaning of "no enforced cap supplied" rather than an oversight
+- [X] T017 [P] [US1] Add tests to `tests/unit/test_web_views.py`: with a heartbeat naming a cap that differs from the app's configuration, the chrome payload's `global_cap` is the daemon's, the rendered pill shows that denominator, and the pill is not styled "at capacity" when the enforced cap leaves room
+- [X] T018 [P] [US1] Add a test that the queue view's per-item reasons are planned against the enforced cap — with a daemon cap that leaves a free slot and a configured cap that does not, no item is held for capacity and the pill and the reasons agree
+
+- [X] T036 [US1] **Added during implementation.** Clamp a repository's effective cap by the cap the *snapshot* is reporting against rather than by this process's configured one — `effective_repo_cap(key, ceiling=...)` in `src/robot_army/config.py`, passed `capacity.global_cap` from `ordering.repo_capacity` and `operations._repo_settings`. Found while writing T018: a per-repository limit is `min(repo, global)`, so a stale global cap could hold a row for `repo_cap` underneath a pill reading `1/3` — the same defect one level down. Behaviour is identical wherever no enforced cap is supplied, which is every dispatch path
 
 **Checkpoint**: the issue's reproduction now reads `6/7`. Nothing yet says why it differs from the file.
 
@@ -110,7 +112,7 @@ and a web reading and compare the denominators.
 - [ ] T024 [US3] In `status` in `src/robot_army/operations.py`, add the lock probe beside the health report it already takes and pass the resolved `enforced_cap` into the snapshot it builds when no snapshot was handed in
 - [ ] T025 [US3] In `capacity` in `src/robot_army/operations.py`, take the health report and the lock probe, pass the resolved `enforced_cap` into its snapshot, and add the `cap          : ` line carrying `snap.cap_disagreement` when there is one
 - [ ] T026 [US3] Add `configured_cap` and `cap_disagreement` to the `capacity --json` document in `src/robot_army/operations.py`, keeping `global_cap` as the cap in force so an existing consumer is correct without changing
-- [ ] T027 [US3] Add the same two keys to `_capacity_dict` in `src/robot_army/operations.py`, which both `status --json` and the web chrome render from
+- [X] T027 [US3] Add the same two keys to `_capacity_dict` in `src/robot_army/operations.py`, which both `status --json` and the web chrome render from
 - [ ] T028 [P] [US3] Add tests to `tests/unit/test_capacity_cli.py` (or the existing home of the `capacity` command's tests): both directions of disagreement report the daemon's cap, the `cap` line appears only when they differ, and the three JSON keys carry the contracted values
 - [ ] T029 [P] [US3] Add a test that `status`'s capacity line carries the disagreement clause, and that its `--json` payload carries the same three keys as the web chrome's
 

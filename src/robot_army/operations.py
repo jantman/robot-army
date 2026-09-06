@@ -660,7 +660,7 @@ def _repo_settings(ctx: Context, snap: Any) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     for key in sorted(set(repos_mod.known(ctx.conn)) | set(snap.per_repo)):
-        cap, cap_explicit = ctx.config.effective_repo_cap(key)
+        cap, cap_explicit = ctx.config.effective_repo_cap(key, ceiling=snap.global_cap)
         wait, wait_explicit = ctx.config.effective_wait_for_merge(key)
         ordering_on, ordering_explicit = ctx.config.effective_project_ordering(key)
         rows.append(
@@ -679,12 +679,21 @@ def _repo_settings(ctx: Context, snap: Any) -> list[dict[str, Any]]:
 
 
 def _capacity_dict(snap: Any, order: str) -> dict[str, Any]:
-    """The capacity summary both the terminal and the web chrome render."""
+    """The capacity summary both the terminal and the web chrome render.
+
+    ``global_cap`` is **the cap in force** (issue #30) — the running daemon's when it could
+    be learned, this process's own otherwise — so a consumer that reads only that key, which
+    is every consumer written before this, gets the right number without being changed.
+    ``configured_cap`` is non-``None`` only when this process disagrees with it, so detecting
+    a disagreement is reading one key rather than comparing two numbers.
+    """
     return {
         "observable": snap.observable,
         "degraded": snap.degraded,
         "total": snap.total,
         "global_cap": snap.global_cap,
+        "configured_cap": snap.configured_cap,
+        "cap_disagreement": snap.cap_disagreement,
         "ours": len(snap.ours),
         "others": snap.others,
         "per_repo": dict(sorted(snap.per_repo.items())),

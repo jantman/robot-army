@@ -99,6 +99,39 @@ opposite. It now re-reads the issue from GitHub and re-runs the same verdict, so
 blocked because somebody else wrote it stays blocked. A second comparison at dispatch, against
 the author recorded on the item, is a backstop rather than the gate.
 
+### What the approval screen puts in front of you
+
+Between the resolution lines and the prompt, `onboard` prints the **full text** of any
+`.claude/settings*.json` committed at the base branch tip:
+
+```
+committed tool-permission settings at the base ref:
+  These are applied to a dispatched session WITHOUT asking. Read them.
+
+  --- .claude/settings.json ---
+  {"hooks": {"SessionStart": [{"hooks": [{"type": "command",
+     "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.bmad-loop/hook.py SessionStart"}]}]}}
+```
+
+That is the control. A session dispatched into the repository honours those settings without
+asking, so a committed `SessionStart` hook runs a script from the repository the moment the
+session opens. The hash of what you approved is recorded, and dispatch blocks if it changes
+later, naming the files and pointing at `onboard --reapprove`.
+
+It is read from **git, at the base branch tip** — not from the working tree — because that is
+what a freshly created worktree will contain.
+
+**This screen is real at every effect level, including `plan`.** It did not used to be: the
+read behind it was simulated below `local` and answered "no such file" for every path, so the
+screen said `no committed .claude/settings*.json at the base ref` for every repository and an
+empty set of hashes was recorded as approved. Rehearsing onboarding at `plan` first — the
+natural instinct — was the one way to see nothing at all (issue #20).
+
+If you onboarded anything while that was true, the recorded approval claims the repository
+commits no settings. Nothing backfills it, deliberately: an approval means a human read the
+file and said yes. The next dispatch blocks instead, names the files as `added:`, and
+`onboard --reapprove` shows you the real review.
+
 ### The one thing onboarding warns about rather than refuses
 
 If the repository uses Spec Kit and numbers its feature directories by scanning, the approval
@@ -188,8 +221,16 @@ Cleanup follows the *worktree* row rather than the GitHub one: simulated at `pla
 `local` and above, because removing a worktree is a local effect. A notification leaves the
 machine, so it follows the GitHub row.
 
-Polling and eligibility are always real — a dry run that fakes its reads tells you nothing
-about the main thing you want to check.
+Reads are always real — a dry run that fakes its reads tells you nothing about the main
+thing you want to check. That covers polling and eligibility, and it covers the onboarding
+settings review above: **nothing about approving a repository is reduced below `live`.**
+
+The one nuance is what "read" means at a boundary that also invents things. Asking what is
+committed in your clone has a true answer at every level, so it is answered truthfully.
+Asking whether the worktree a `plan` run pretended to create is dirty does not, so that is
+answered as-if. The rule is *the subject of the question decides, not the verb*, and it is
+written down at `SimulatedVersionControl` because the two times it was left implicit, it was
+got wrong.
 
 ```bash
 uv run robot-army run --dry-run --once          # plan

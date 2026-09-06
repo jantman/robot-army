@@ -134,6 +134,63 @@ def test_read_committed_settings_returns_the_full_text_for_review(tmp_path, audi
     assert contents[".claude/settings.local.json"] == body
 
 
+# -- the review and the fingerprint below ``local`` (issue #20) --------------
+#
+# ``version_control`` is simulated at ``plan``, and its ``show_file_at_ref`` used to
+# answer ``None`` unconditionally. Both functions above therefore returned ``{}`` for
+# every repository: the review screen was structurally blank and an empty mapping was
+# recorded as the approved fingerprint. These assert the property that fixes it — the
+# simulated boundary answers what the real one answers.
+
+
+@pytest.mark.requires_git
+def test_the_fingerprint_is_the_same_under_a_simulated_boundary(tmp_path, audit):
+    from robot_army.boundaries.git import SimulatedVersionControl
+
+    clone = make_repo(
+        tmp_path / "fp",
+        files={
+            ".claude/settings.json": '{"hooks": {"SessionStart": []}}',
+            ".claude/settings.local.json": '{"permissions": {"allow": ["Bash"]}}',
+        },
+    )
+    real = compute_fingerprint(make_boundaries(audit), str(clone), "main")
+    simulated = compute_fingerprint(
+        make_boundaries(audit, vcs=SimulatedVersionControl(audit)), str(clone), "main"
+    )
+
+    assert set(real) == {".claude/settings.json", ".claude/settings.local.json"}
+    assert simulated == real, "a plan-level onboarding recorded an empty fingerprint"
+
+
+@pytest.mark.requires_git
+def test_the_review_text_is_the_same_under_a_simulated_boundary(tmp_path, audit):
+    """The FR-003 screen itself: the maintainer must read the same file at every effect
+    level, because approving is the same act at every effect level."""
+    from robot_army.boundaries.git import SimulatedVersionControl
+
+    body = '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "x"}]}]}}'
+    clone = make_repo(tmp_path / "fp", files={".claude/settings.json": body})
+
+    contents = read_committed_settings(
+        make_boundaries(audit, vcs=SimulatedVersionControl(audit)), str(clone), "main"
+    )
+    assert contents[".claude/settings.json"] == body
+
+
+@pytest.mark.requires_git
+def test_a_simulated_boundary_still_reports_a_repository_that_commits_nothing(
+    repo_clone, audit
+):
+    """The fix must not turn the message into a lie in the other direction: "none" has to
+    mean the files were looked for and were genuinely absent."""
+    from robot_army.boundaries.git import SimulatedVersionControl
+
+    boundaries = make_boundaries(audit, vcs=SimulatedVersionControl(audit))
+    assert compute_fingerprint(boundaries, str(repo_clone), "main") == {}
+    assert read_committed_settings(boundaries, str(repo_clone), "main") == {}
+
+
 # -- the combined gate ------------------------------------------------------
 
 
@@ -215,6 +272,56 @@ def test_gates_pass_once_the_new_fingerprint_is_approved(conn, audit, config, tm
     check_gates(
         conn, boundaries=boundaries, config=config, repo=config.repos["demo"], trust_file=trust
     )
+
+
+@pytest.mark.requires_git
+def test_an_approval_recorded_against_a_blank_review_no_longer_passes(
+    conn, audit, config, tmp_path
+):
+    """Issue #20's remediation, and the reason the fix is not only forward-looking.
+
+    Every repository onboarded on this installation while the read was blank holds an
+    approval whose fingerprint is ``{}`` — a record asserting the repository commits no
+    settings, made against a screen that showed none. Nothing backfills those rows: an
+    approval means a human read exactly this and said yes, and writing hashes into one on
+    the strength of a code change would forge that. So the correction is this block.
+
+    **No production code exists for this test to exercise.** ``check_gates`` was always
+    right; only its input was wrong, because ``compute_fingerprint`` read through the same
+    blanked boundary the approval had been recorded through, so the two blanks matched and
+    the gate passed. With the read real, they no longer match. The test is here to prove
+    the gate now does what it always claimed, and it is deliberately driven through a
+    *simulated* boundary, which is the configuration that was broken.
+    """
+    from robot_army.boundaries.git import SimulatedVersionControl
+
+    clone = config.repos["demo"].path
+    trust = write_trust(
+        tmp_path / "claude.json", {str(clone.resolve()): {"hasTrustDialogAccepted": True}}
+    )
+    settings = clone / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"hooks": {"SessionStart": []}}', encoding="utf-8")
+    _commit(clone, "add committed settings")
+
+    # The approval as it was recorded below ``local``: empty, for a repository that is not.
+    onboard_repo(conn, "demo", clone, settings_fingerprint={})
+
+    with pytest.raises(DispatchBlocked) as blocked:
+        check_gates(
+            conn,
+            boundaries=make_boundaries(audit, vcs=SimulatedVersionControl(audit)),
+            config=config,
+            repo=config.repos["demo"],
+            trust_file=trust,
+        )
+
+    message = str(blocked.value)
+    assert "differ from what was approved" in message
+    # The operator is told which files and what to do, not merely that they are refused.
+    assert ".claude/settings.json" in message
+    assert "added:" in message
+    assert "onboard 'demo' --reapprove" in message or "--reapprove" in message
 
 
 def _commit(path, message: str) -> None:

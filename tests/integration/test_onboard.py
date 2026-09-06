@@ -26,6 +26,7 @@ from tests.conftest import (
     make_repo,
     make_speckit_tree,
     monkey_token,
+    onboard_repo,
 )
 
 from robot_army import db, operations, poll, repos
@@ -550,6 +551,137 @@ def test_yes_refuses_unapproved_committed_settings_and_records_that_too(
         if r["action"] == "repo.onboard" and r.get("detail", {}).get("refused")
     ]
     assert causes == ["unapproved_committed_settings"]
+
+
+# -- the review below ``local`` (issue #20) ----------------------------------
+#
+# ``version_control`` is simulated at ``plan``, and its ``show_file_at_ref`` answered
+# ``None`` unconditionally, so this screen — the FR-003 control that stops a repository
+# silently running code in a dispatched session — printed "no committed
+# .claude/settings*.json at the base ref" for every repository, and the approval recorded
+# an empty fingerprint. These onboard through a *simulated* boundary deliberately.
+
+
+def simulated_ctx(config, conn, audit):
+    from robot_army.boundaries.git import SimulatedVersionControl
+
+    return context(config, conn, audit, make_boundaries(audit, vcs=SimulatedVersionControl(audit)))
+
+
+def test_the_review_screen_is_not_blank_under_a_simulated_boundary(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """Issue #20: this whole screen was missing below ``local``, so the human approved an
+    empty review every time and the record asserted the repository commits nothing."""
+    body = '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "x.py"}]}]}}'
+    clone = make_repo(repo_root / "demo", files={".claude/settings.json": body})
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:jantman/demo.git"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    config = build_config(repo_root, layout, tmp_path)
+
+    result = run_onboard(
+        simulated_ctx(config, conn, audit), "jantman/demo", trust=trust_file(tmp_path, clone)
+    )
+
+    screen = "\n".join(result.lines)
+    assert "committed tool-permission settings at the base ref:" in screen
+    assert "These are applied to a dispatched session WITHOUT asking" in screen
+    assert "SessionStart" in screen, "the hook the operator has to actually read"
+    assert "no committed .claude/settings*.json" not in screen
+
+    record = db.get_repo(conn, "jantman/demo")
+    assert record.fingerprint and ".claude/settings.json" in record.fingerprint
+
+
+def test_a_repository_that_really_commits_nothing_still_says_so(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """The other direction. "None found" has to mean the files were looked for and were
+    genuinely absent, or the fix has only moved which message is a constant."""
+    clone = clone_with_origin(repo_root / "demo", "git@github.com:jantman/demo.git")
+    config = build_config(repo_root, layout, tmp_path)
+
+    result = run_onboard(
+        simulated_ctx(config, conn, audit), "jantman/demo", trust=trust_file(tmp_path, clone)
+    )
+
+    assert "no committed .claude/settings*.json at the base ref" in "\n".join(result.lines)
+    assert db.get_repo(conn, "jantman/demo").fingerprint in (None, {})
+
+
+def test_the_screen_and_the_record_are_the_same_at_every_effect_level(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """SC-001, stated as the comparison the quickstart makes by hand: a simulated boundary
+    and a real one must produce the same review and the same hashes, because approving is
+    the same act at every effect level."""
+    clone = make_repo(
+        repo_root / "demo",
+        files={
+            ".claude/settings.json": '{"hooks": {"Stop": []}}',
+            ".claude/settings.local.json": '{"permissions": {"allow": ["Bash"]}}',
+        },
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:jantman/demo.git"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    config = build_config(repo_root, layout, tmp_path)
+
+    real = run_onboard(
+        context(config, conn, audit, make_boundaries(audit)),
+        "jantman/demo",
+        trust=trust_file(tmp_path, clone),
+    )
+    simulated = run_onboard(
+        simulated_ctx(config, conn, audit),
+        "jantman/demo",
+        trust=trust_file(tmp_path, clone),
+        reapprove=True,
+    )
+
+    assert simulated.data["committed_settings"] == real.data["committed_settings"]
+    assert simulated.data["fingerprint"] == real.data["fingerprint"]
+    assert len(real.data["fingerprint"]) == 2
+
+
+def test_reapprove_shows_the_diff_against_the_blank_approval(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """The remedy the block points at, under the boundary that was broken: the operator is
+    shown the settings appearing against an approved set that held nothing, rather than a
+    heading over blank space."""
+    clone = make_repo(
+        repo_root / "demo", files={".claude/settings.json": '{"hooks": {"Stop": []}}'}
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:jantman/demo.git"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    config = build_config(repo_root, layout, tmp_path)
+    onboard_repo(conn, "jantman/demo", clone, settings_fingerprint={})
+
+    result = run_onboard(
+        simulated_ctx(config, conn, audit),
+        "jantman/demo",
+        trust=trust_file(tmp_path, clone),
+        reapprove=True,
+    )
+
+    screen = "\n".join(result.lines)
+    assert "fingerprint diff against the approved version:" in screen
+    assert "* .claude/settings.json" in screen
+    assert "approved: (absent)" in screen
+    assert "no settings files on either side" not in screen
+    assert db.get_repo(conn, "jantman/demo").fingerprint[".claude/settings.json"]
 
 
 # -- what may be onboarded at all (User Story 6, T063, T064) ----------------

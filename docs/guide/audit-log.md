@@ -549,7 +549,7 @@ the log knows what its silence means:
 | Individual SQLite statements — the **transition** they effect is logged instead | The transition is the meaningful unit for reconstruction, and the database is directly inspectable |
 | Heartbeat writes, every 5 seconds | ~17,000 records a day of noise. The heartbeat file *is* the record, and its staleness is the signal |
 | Individual `/proc` and registry reads during reconciliation — one aggregate per pass | Same disproportion. The *conclusions* — sessions found, orphans detected, states changed — are each logged individually |
-| **Actions the session itself takes** inside the worktree | They happen outside this process entirely. This log records the dispatch, the session identity, and where the transcript lives; the worker's own transcript is the record of what it did. Claiming otherwise would be dishonest about what this log covers |
+| **Actions the session itself takes** inside the worktree | They happen outside this process entirely. This log records the dispatch, the session identity, and where the transcript lives; the worker's own transcript is the record of what it did. Claiming otherwise would be dishonest about what this log covers. Issue #32 is the sharp case: at `no-remote` a session pushed a branch to GitHub, and this log's only honest account of it is `daemon.start` saying which delivery form the session was handed. What it *did* with that instruction is the transcript's business, and no effect level makes it ours |
 | Individual board **reads** made within a poll cycle — the freshness re-read before a move, and the comment fetch on the recovery path | Same reasoning as the GitHub one, and the same limit: they change no state outside the process, and the cycle *is* logged with what it evaluated and what it decided about each card. Every board **write** is an intent/outcome pair, without exception |
 | A **notification never attempted** because the process died between a state transition and the send | The state change itself is fully recorded, so nothing the system *did* is unreconstructable. What is lost is the knowledge that I was not told. Closing it would need a durable outbound queue with its own retry and persistence, which is more machinery than an optional stretch feature is worth — the gap is named here rather than hidden |
 | A **passing** dispatch-time clone re-verification | The worktree-creation record that follows on the same item milliseconds later already implies it passed, so a record here would be one line per dispatch answering a question the next line answers anyway. Every **failure** is logged, and the two that mean the machine changed under an approval also raise an anomaly. See the milestone 005 section above |
@@ -736,7 +736,7 @@ to be able to answer.
 
 | Action | When | What it carries |
 |---|---|---|
-| `prompt.preview` | Once per invocation, on **every** path | The repository, the issue, the branch and whether it was recorded or derived, which directory the contextual sections were read from, and whether each optional section was included |
+| `prompt.preview` | Once per invocation, on **every** path | The repository, the issue, the branch and whether it was recorded or derived, which directory the contextual sections were read from, whether each optional section was included, and which delivery form was composed |
 
 Keyed `entity_type: issue`, `entity_id: <owner>/<repo>#<number>` — the same shape
 `poll.rejected` uses for an issue with no row. Refusals carry `refused: true` and a `cause` of
@@ -747,6 +747,20 @@ the exit code makes.
 work item it is keyed on the repository rather than the row, because a sentinel id would put a
 claim about work item 0 into an append-only file. `component` separates the two callers
 otherwise: `daemon` for a dispatch, `cli` for a preview.
+
+`delivery` is `push` or `local` (issue #32). The two flags beside it say whether an *optional*
+section was there at all; this one says which of two mandatory forms was used, because the
+delivery block is never absent and since #32 its content follows the effect level. It is one
+word rather than the block itself, for the reason the next section gives — and it is the only
+thing in the record that answers "was that session told to push?".
+
+The same question about a *dispatch* is answered a level up: `daemon.start`'s `boundaries` map
+carries `delivery` alongside the implementation each seam got, so the startup record says what
+every session that daemon launches will be told.
+
+```bash
+uv run robot-army log --limit 20 | grep daemon.start
+```
 
 ### What a preview does not record, and why
 

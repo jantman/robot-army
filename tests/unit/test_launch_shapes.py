@@ -25,6 +25,7 @@ from tests.conftest import make_boundaries, make_issue
 
 from robot_army import dispatch, prompt
 from robot_army.config import VALID_PERMISSION_MODES
+from robot_army.effects import EffectLevel
 
 PRIOR = "11111111-1111-4111-8111-111111111111"
 CHOSEN = "22222222-2222-4222-8222-222222222222"
@@ -51,6 +52,30 @@ def plan_for(config, layout, audit, **overrides: Any):
 def flags_of(plan) -> list[str]:
     """The argv without the prompt body, which is composed elsewhere and tested there."""
     return list(plan.worker_argv[:-1])
+
+
+# -- the delivery form the plan carries (issue #32) -------------------------
+
+
+@pytest.mark.parametrize(
+    ("level", "expected"),
+    [(EffectLevel.LIVE, "DELIVERY_PUSH"), (EffectLevel.NO_REMOTE, "DELIVERY_LOCAL")],
+)
+def test_the_prompt_carries_the_form_the_boundaries_were_wired_with(
+    config, layout, audit, level, expected
+):
+    """A dispatch at ``no-remote`` must not hand a real session the push instructions.
+
+    Asserted against ``build_launch_plan``'s own output rather than against ``compose``,
+    because the argv is what actually reaches the worker — the same reason the resume shape
+    is checked here rather than in the composer.
+    """
+    plan = plan_for(config, layout, audit, boundaries=make_boundaries(audit, level=level))
+    body = plan.worker_argv[-1]
+
+    assert getattr(prompt, expected).text in body
+    other = "DELIVERY_LOCAL" if expected == "DELIVERY_PUSH" else "DELIVERY_PUSH"
+    assert getattr(prompt, other).text not in body
 
 
 # -- composition ------------------------------------------------------------

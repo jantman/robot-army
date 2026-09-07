@@ -233,16 +233,35 @@ saving, producing sessions that look perfect, exit 0, and can never be resumed.
 
 Four graduated effect levels, enforced at the boundaries rather than at call sites:
 
-| Level | Polls | Worktrees | Sessions | GitHub writes | Notifications |
-|---|---|---|---|---|---|
-| `plan` | real | no | no | no | no |
-| `local` | real | **real** | no | no | no |
-| `no-remote` | real | real | **real** | no | no |
-| `live` | real | real | real | **real** | **real** |
+| Level | Polls | Worktrees | Sessions | GitHub writes | Notifications | The session is told to |
+|---|---|---|---|---|---|---|
+| `plan` | real | no | no | no | no | — |
+| `local` | real | **real** | no | no | no | — |
+| `no-remote` | real | real | **real** | no | no | commit, and not push |
+| `live` | real | real | real | **real** | **real** | commit, push, open a PR |
 
 Cleanup follows the *worktree* row rather than the GitHub one: simulated at `plan`, real at
 `local` and above, because removing a worktree is a local effect. A notification leaves the
 machine, so it follows the GitHub row.
+
+### What the level does not reach
+
+Every column but the last is about **what robot-army does**. The last one is different in kind,
+and the difference is worth being blunt about, because it cost me a surprise: the session a
+dispatch launches is a full Claude Code session running as me, with my `gh` credentials and my
+network, and no effect level constrains it. It cannot. Below `live` the daemon simulates its own
+comment — and at `no-remote` one of those sessions committed and pushed a branch to GitHub while
+it did (issue #32).
+
+So below `live` the prompt now *asks*: the delivery block tells the session to commit its work on
+the branch and to leave it there — no push, no pull request, no comment on the issue, nothing to
+any remote — and says that an instruction above it asking for a push describes a `live` dispatch.
+At `live` it reads exactly as it always did. [What a session is told](4-session.md) has both.
+
+**Asking is not enforcing, and no wording here should be read as a boundary.** A session that
+pushes anyway is not stopped. If that ever matters more than having a real interactive session
+with my own tooling, the answer is a credential-less environment or a sandbox, and that is a
+different program.
 
 Reads are always real — a dry run that fakes its reads tells you nothing about the main
 thing you want to check. That covers polling and eligibility, and it covers the onboarding

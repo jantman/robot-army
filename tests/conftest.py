@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from robot_army import db
+from robot_army import db, effects
 from robot_army.audit import AuditLog
 from robot_army.boundaries import (
     BoardInfo,
@@ -804,6 +804,7 @@ def make_boundaries(
     simulated_host: Any = None,
     display: Any = None,
     notifier: Any = None,
+    delivery: Any = None,
 ) -> Boundaries:
     from robot_army.boundaries.dtach import SimulatedSessionHost
     from robot_army.boundaries.git import GitVersionControl
@@ -826,6 +827,10 @@ def make_boundaries(
         simulated_session_host=simulated_host or SimulatedSessionHost(audit),
         display=display or StubDisplay(),
         notifier=notifier or RecordingNotifier(),
+        # Selected from the level like the real wiring does, rather than pinned to one form:
+        # a helper that always handed back the ``push`` block would make every test at a
+        # reduced level agree with a bug (issue #32).
+        delivery=delivery or effects.delivery_for(level),
     )
 
 

@@ -11,13 +11,13 @@ The prompt is composed at dispatch from four parts, in this order:
 ## The delivery rules
 
 Two things I was writing into issues by hand, or not writing and regretting. Every dispatched
-prompt now carries them, in every repository, with nothing to configure and no file to add:
+prompt carries them, in every repository, with nothing to configure and no file to add:
 
-- **The work ends pushed, with a pull request open.** Stay on the feature branch the worktree
-  was made on, and when the work is done, commit, push to `origin`, and open a PR. Commits on a
-  branch nobody fetched are the one thing `worktree remove` can destroy, which is why the
-  cleanup guards are as paranoid as they are — this is the same problem addressed a step
-  earlier.
+- **The work ends pushed, with a pull request open** — at `live`. Stay on the feature branch the
+  worktree was made on, and when there is work to deliver, commit, push to `origin`, and open a
+  PR. Commits on a branch nobody fetched are the one thing `worktree remove` can destroy, which
+  is why the cleanup guards are as paranoid as they are — this is the same problem addressed a
+  step earlier. **Below `live` this rule inverts**, and the next section is why.
 - **The repository is the mechanism, not the record.** Where a repo is how a thing gets changed
   — configuration management, infrastructure as code, deployment or schedule definitions — an
   issue asking for that thing is asking for the code that produces it. "Set up and run this
@@ -68,6 +68,46 @@ tools that already answer it still answer:
 uv run robot-army show <id>       # uncommitted changes? commits on the branch? PR open?
 ```
 
+## Below `live`, the rules invert
+
+The [effect ladder](1-setup.md#what-the-level-does-not-reach) governs what robot-army does. It
+does not govern the session, which runs as me with my credentials — and at `no-remote` one of
+them pushed a branch to GitHub while the daemon beside it recorded its own comment as
+`[simulated]`. With the delivery rules above going out on every dispatch, that stopped being an
+accident and became the design: every `no-remote` run was asking for a push.
+
+So there are two forms of the block now, and the effect level picks one. At `live`, the text
+above, unchanged. Below it, the same block with the middle inverted:
+
+- Commit the work on the feature branch **and stop there**. Do not push, do not open a pull
+  request, do not comment on the issue or write to any remote.
+- Where the work goes instead is said outright — the commits in the worktree are the finished
+  job, and that is where I will read them. "Do not push" on its own leaves a session to invent
+  an answer to "then what?".
+- Reading stays real, and the block says so, because reads are real at every level. A session
+  that will not read the API documentation it needs is as broken as one that pushes.
+
+**And it narrows one thing above it, which nothing else in the prompt does.** A repository's
+`.claude/robot-army.md` can say "always push"; so can a configured Spec Kit instruction — this
+repository's `implement` string does, and it is composed *above* the delivery block where
+position gives it precedence. Without a sentence about it, `no-remote` would still push here, by
+my own words. The block therefore says that an instruction above asking for a push or a pull
+request describes a `live` dispatch and does not apply to this run, and it changes nothing else
+about those instructions. The carve-out is only in this form, covers outward writes only, and is
+unreachable from inside the issue fence — the issue's author cannot select an effect level.
+
+The wiring picks the form once, at startup, in the same place it picks every real-or-simulated
+implementation, and the startup record says which:
+
+```bash
+uv run robot-army log --limit 20 | grep daemon.start   # "delivery": "local" or "push"
+```
+
+**None of this is enforcement.** It is a paragraph asking a session with my credentials to do
+less than it could, and it is worth exactly what that is worth. What it buys is that `no-remote`
+now means something close to its name, and that the two documents describing it agree with the
+prompt.
+
 ## Reading a prompt before it is sent
 
 Everything above describes what goes into a prompt. This prints one:
@@ -81,6 +121,16 @@ own `.claude/robot-army.md` if it has one, the Spec Kit block if it applies, the
 rules, and the fenced issue — and writes it to stdout and nothing else, so it redirects and
 diffs cleanly. Everything explanatory, including which directory the repository's instructions
 were read from, goes to stderr.
+
+Since the delivery rules follow the effect level, so does the preview: it composes for the
+configured level unless told otherwise, and `--effect-level` asks about another one without
+editing `config.toml`.
+
+```bash
+uv run robot-army prompt jantman/some-repo 42 --effect-level no-remote > /tmp/contained.txt
+uv run robot-army prompt jantman/some-repo 42 --effect-level live > /tmp/live.txt
+diff /tmp/contained.txt /tmp/live.txt      # the delivery section, and the fence nonce
+```
 
 Two runs of it differ in exactly one thing: the fence delimiter, which is random per compose by
 design. Diff two previews of the same issue and the four lines carrying it — the two markers,

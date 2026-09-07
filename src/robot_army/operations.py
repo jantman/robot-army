@@ -1548,6 +1548,10 @@ def prompt_preview(
         issue,
         repo_key=repo_key,
         branch=branch,
+        # The wired form, for the same reason the whole preview reads from the worktree a
+        # dispatch would read from: a preview that showed the ``live`` wording at every level
+        # would be a new way to be wrong about exactly the thing issue #32 was filed about.
+        delivery=ctx.boundaries.delivery,
         instructions=instructions,
         speckit_block=block,
     )
@@ -1561,6 +1565,10 @@ def prompt_preview(
         "context_source": context_source,
         "instructions": instructions is not None,
         "speckit": block is not None,
+        # Which of the two mandatory forms, where the two above say whether an optional
+        # section was there at all. The text is still not recorded — this is the one word
+        # that answers "was this session told to push?" without it (issue #32, FR-010).
+        "delivery": ctx.boundaries.delivery.name,
     }
     if item_id is not None:
         detail["item_id"] = item_id

@@ -265,7 +265,11 @@ SECTIONS: tuple[SectionSpec, ...] = (
             KeySpec(
                 "effect_level",
                 '"live"',
-                "plan, local, no-remote or live — see the guide's setup page",
+                # Not "how much of the world this may touch": that framing is what made a
+                # `no-remote` run's pushed branch a surprise rather than a known limit
+                # (issue #32). The level governs this program's own writes; the session it
+                # launches is asked, not constrained.
+                "how much of its own work robot-army really does: plan, local, no-remote, live",
             ),
             KeySpec("tick_seconds", "5", "how often the main loop wakes"),
             KeySpec("poll_seconds", "60", "how often GitHub is polled"),

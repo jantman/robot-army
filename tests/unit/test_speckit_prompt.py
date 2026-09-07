@@ -29,6 +29,12 @@ via the autouse fixture below. That pin is honest only because
 ``tests/unit/test_prompt_fence.py`` separately holds the nonce to being the *sole* source of
 variation; without that test this file would be asserting a value it had arranged to see. See
 ``specs/20260904-093845-fence-untrusted-issue-text/research.md`` R2 and R11.
+
+Issue #32 did **not** change ``GOLDEN``, and that is the point of it here. The delivery block
+now has two forms and the effect level chooses; ``GOLDEN`` is the ``live`` one, so an edit that
+disturbed a live dispatch's prompt would show up as a diff of this literal.
+``test_below_live_only_the_delivery_section_changes`` holds the other form against it, so the
+pair says both "``live`` is untouched" and "nothing else moved when the other form is used".
 """
 
 from __future__ import annotations
@@ -111,11 +117,12 @@ ISSUE = Issue(
 )
 
 
-def compose(**kwargs: object) -> str:
+def compose(*, delivery: prompt.Delivery = prompt.DELIVERY_PUSH, **kwargs: object) -> str:
     return prompt.compose(
         ISSUE,
         repo_key="jantman/robot-army",
         branch="robot-army/issue-9-speckit-extensions",
+        delivery=delivery,
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -123,6 +130,19 @@ def compose(**kwargs: object) -> str:
 def test_the_whole_assembly_matches_the_golden_string(self=None) -> None:
     """With no repository instructions and no Spec Kit block, this is the whole prompt."""
     assert compose() == GOLDEN
+
+
+def test_below_live_only_the_delivery_section_changes() -> None:
+    """Issue #32 SC-002 and SC-003, held as one assertion.
+
+    The ``local`` form is substituted into ``GOLDEN`` in place of the ``push`` one and nothing
+    else is allowed to differ. A change that moved a separator, reordered a section, or leaked
+    the level into any other part of the prompt fails here rather than in a diff nobody reads.
+    """
+    expected = GOLDEN.replace(prompt.DELIVERY_PUSH.text, prompt.DELIVERY_LOCAL.text)
+
+    assert prompt.DELIVERY_PUSH.text in GOLDEN, "the golden string is the live prompt"
+    assert compose(delivery=prompt.DELIVERY_LOCAL) == expected
 
 
 def test_the_block_sits_between_repository_instructions_and_the_issue() -> None:

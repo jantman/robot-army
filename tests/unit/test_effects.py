@@ -556,3 +556,62 @@ def test_the_simulated_notifier_also_names_what_it_would_have_used(board_config,
     )
     described = wire(EffectLevel.LOCAL, with_webhook, audit, conn).describe()
     assert described["notifier"] == "SimulatedNotifier(webhook)"
+
+
+# -- the delivery form (issue #32) ------------------------------------------
+#
+# Not a boundary, and selected here anyway. The ladder governs robot-army's five seams and
+# structurally cannot govern the session ``SessionHost`` launches — same user, same
+# credentials, no sandbox — so at ``no-remote`` the daemon simulated its own comment while
+# the prompt beside it told a real session to push a branch. It did. Below ``live`` the
+# session is now asked to keep its work local, and the asking is selected exactly where every
+# other per-level decision is.
+
+
+@pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
+def test_every_level_is_given_a_delivery_form(level, config, audit, conn):
+    """Parametrised over the whole enum rather than over two named levels.
+
+    A fifth rung added without deciding what a session dispatched at it is told would fail
+    here, which is the point: "we forgot" must not be spelled "it pushes".
+    """
+    from robot_army import prompt
+
+    expected = prompt.DELIVERY_PUSH if level is EffectLevel.LIVE else prompt.DELIVERY_LOCAL
+
+    assert wire(level, config, audit, conn).delivery is expected
+
+
+@pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
+def test_the_session_is_asked_to_push_only_where_our_own_writes_go_out(level, config, audit, conn):
+    """The agreement that makes the level's name honest, asserted rather than assumed.
+
+    ``delivery_for`` is deliberately its own table rather than a spelling of
+    ``is_real("issue_writer", …)`` — they answer different questions and a future level could
+    reasonably change one without the other. This test is where a change to either has to be
+    noticed and argued, instead of one silently following the other.
+    """
+    from robot_army.effects import delivery_for, is_real
+
+    assert (delivery_for(level).name == "push") is is_real("issue_writer", level)
+
+
+def test_the_startup_record_names_the_delivery_form(config, audit, conn):
+    """Principle III. The startup record is where a reader learns what every session this
+    daemon launches will be told about pushing — the question issue #32 was filed about."""
+    assert wire(EffectLevel.NO_REMOTE, config, audit, conn).describe()["delivery"] == "local"
+    assert wire(EffectLevel.LIVE, config, audit, conn).describe()["delivery"] == "push"
+
+
+def test_the_delivery_form_is_wired_rather_than_read_from_the_level_downstream():
+    """FR-009, and the reason the form is on ``Boundaries`` at all.
+
+    ``prompt.py`` composes the block and ``dispatch.py`` hands it over; neither may name an
+    effect level, because a caller that can ask for the level can decide for itself, which is
+    the scattered branch FR-053 exists to prevent. ``test_only_effects_py_knows_the_effect_
+    level_exists`` covers the whole package — this asserts it of the two modules this feature
+    would most plausibly have broken it in, so a widened allowlist reads as the regression it
+    would be.
+    """
+    for name in ("prompt.py", "dispatch.py"):
+        assert "EffectLevel" not in (SRC / name).read_text(encoding="utf-8")

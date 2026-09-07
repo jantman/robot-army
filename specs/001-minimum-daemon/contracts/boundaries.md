@@ -20,6 +20,30 @@ guarantee structural rather than a rule someone has to remember.
 Reads are always real (FR-052) — a dry run that fakes its reads tells you nothing about eligibility,
 which is the main thing you want to check.
 
+### What the level does **not** govern
+
+**The session `SessionHost` launches is not one of these seams.** It is a full Claude Code
+session running as the same operating-system user, with the same `gh` credentials, the same
+network and no sandbox. Nothing in this table constrains it, and nothing in this codebase can:
+the moment the process exists it has everything the operator has.
+
+That is not a theoretical hole. At `no-remote`, a dispatched session committed and pushed a
+branch to GitHub while the writer beside it recorded its own comment as `[simulated]` — issue
+#32. The daemon was correct throughout; the promise a reader took from the level's name was not
+one the daemon had made.
+
+So the ladder's guarantee is exactly this: **it is a statement about robot-army's own calls, at
+the seams above.** Two things follow, and both are the contract rather than commentary:
+
+1. Below `live`, the prompt asks the session to match — it is told to commit its work on the
+   branch and not to push, open a pull request, comment on the issue, or write to any remote.
+   The two forms of that block, and which level selects each, are
+   [`specs/20260907-063858-effect-aware-delivery/contracts/delivery-forms.md`](../../20260907-063858-effect-aware-delivery/contracts/delivery-forms.md).
+2. **Asking is not enforcing.** The delivery form is prose in a prompt. A session that ignores
+   it is not prevented, and any document that implies otherwise is wrong. Constraining the
+   session for real would mean a credential-less environment or a sandbox, which is a different
+   product: this one launches a real interactive session on purpose.
+
 **Every simulated implementation must**: emit an audit record naming the call and its full
 arguments, and return a **structurally valid** fake handle. Returning `None` or raising would let the
 simulated path diverge from the real one at exactly the point the requirement exists to prevent.

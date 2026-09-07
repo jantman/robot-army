@@ -581,6 +581,7 @@ def test_the_listing_makes_no_network_call(conn, audit, config, tmp_path):
     clone = make_repo(tmp_path / "clones" / "sk", files=SPECKIT_FILES)
     onboard_repo(conn, "jantman/sk", clone)
 
+    from robot_army import prompt
     from robot_army.boundaries.git import GitVersionControl
 
     boundaries = Boundaries(
@@ -595,6 +596,7 @@ def test_the_listing_makes_no_network_call(conn, audit, config, tmp_path):
         simulated_session_host=None,
         display=None,
         notifier=None,
+        delivery=prompt.DELIVERY_PUSH,
     )
     ctx = operations.Context(
         config=config,

@@ -36,6 +36,7 @@ from tests.conftest import (
 from robot_army import db, dispatch, operations, prompt
 from robot_army.boundaries import Issue
 from robot_army.config import parse
+from robot_army.effects import EffectLevel
 
 REPO = "jantman/demo"
 
@@ -57,8 +58,16 @@ ISSUE = Issue(
 )
 
 
-@pytest.fixture
-def wired(conn, repo_clone, layout, tmp_path, monkeypatch):
+@pytest.fixture(params=[EffectLevel.LIVE, EffectLevel.NO_REMOTE], ids=lambda level: level.value)
+def wired(request, conn, repo_clone, layout, tmp_path, monkeypatch):
+    """Parametrised over two levels since issue #32, and both existing tests get both.
+
+    The delivery block now differs between them, so "the preview is the dispatch's prompt"
+    stopped being a claim about one string and became a claim about a selection. Running the
+    whole file at both levels is what keeps it the first kind of claim: if the preview ever
+    resolved the form differently from ``build_launch_plan`` — by defaulting it, say — the
+    ``no-remote`` half fails and the ``live`` half does not, which names the bug on sight.
+    """
     monkey_token()
     raw = config_dict(repo_clone, layout, tmp_path / "worktrees")
     raw["repos"] = {REPO: {"path": str(repo_clone), "base_branch": "main"}}
@@ -69,7 +78,7 @@ def wired(conn, repo_clone, layout, tmp_path, monkeypatch):
         "wire",
         lambda level, cfg, log, conn: make_boundaries(log, level=level, reader=_reader()),
     )
-    ctx = operations.build_context(config)
+    ctx = operations.build_context(config, effect_level=request.param)
     yield ctx
     ctx.close()
 
@@ -160,3 +169,19 @@ def test_a_dispatched_item_previews_from_its_own_worktree(wired, tmp_path, repo_
 
     assert preview.data["prompt"] == expected
     assert "This worktree has its own rules." in preview.data["prompt"]
+
+
+def test_the_level_reaches_both_sides_of_the_comparison(wired, repo_clone):
+    """The equality above is only worth something if the two levels really differ here.
+
+    A fixture parametrised over two levels that composed identical prompts would make the
+    ``no-remote`` half of every test in this file a duplicate that proves nothing. This
+    asserts the form actually follows the level, so the equality tests are comparing two
+    things that could have disagreed.
+    """
+    preview = operations.prompt_preview(wired, REPO, 11).data["prompt"]
+
+    if wired.effect_level is EffectLevel.LIVE:
+        assert prompt.DELIVERY_PUSH.text in preview
+    else:
+        assert prompt.DELIVERY_LOCAL.text in preview

@@ -61,7 +61,7 @@ project_ordering = true  # let a linked project board decide the order
 # Loop timings and the global session cap. poll_seconds and reconcile_seconds
 # must both be at least tick_seconds.
 [daemon]
-effect_level = "live"  # plan, local, no-remote or live — see the guide's setup page
+effect_level = "live"  # how much of its own work robot-army really does: plan, local, no-remote, live
 tick_seconds = 5  # how often the main loop wakes
 poll_seconds = 60  # how often GitHub is polled
 reconcile_seconds = 60  # how often sessions are reconciled with reality

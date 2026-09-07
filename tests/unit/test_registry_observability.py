@@ -16,9 +16,16 @@ empty-but-present directory are always checked together, in one test, against on
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
-from tests.conftest import make_boundaries, seed_item, seed_session, write_registry
+from tests.conftest import (
+    make_boundaries,
+    seed_item,
+    seed_session,
+    write_proc,
+    write_registry,
+)
 
 from robot_army import capacity, db, reconcile, sessions
 from robot_army.states import SessionState, WorkItemState
@@ -512,3 +519,46 @@ def test_the_kind_is_one_the_system_admits_it_can_raise(conn, audit, config, tmp
     from robot_army.models import ANOMALY_KINDS
 
     assert "registry_unobservable" in ANOMALY_KINDS
+
+
+def test_the_orphan_sweep_still_reports_what_it_saw(conn, audit, config, tmp_path):
+    """The guard withholds *death*; it must not withhold a live process it can see.
+
+    Only the degraded path can show this: ``scan_via_proc`` returns real pids with no
+    session ids at all, so a pass can be blind for the database join and still be looking
+    at live workers. An earlier version of this feature that had guarded ``_orphan_sweep``
+    too would report zero here — hiding the one thing the pass genuinely observed, on a
+    pass that already declined to conclude anything else.
+
+    What *did* change is above it, and is the fix: the item stays ``active`` and its row
+    stays ``running``, instead of both being torn down on the same blind pass.
+    """
+    item_id = active_item(conn, session_id="s-0", issue_number=230, pid=6001)
+    registry = tmp_path / "registry"
+    proc = tmp_path / "proc"
+    # A refused version with no readable entry is what sends `scan_registry` to /proc.
+    write_registry(registry, pid=6001, session_id="s-0", version="9.9.9")
+    cwd = Path(config.worktree_root) / "demo" / "issue-230"
+    cwd.mkdir(parents=True, exist_ok=True)
+    write_proc(proc, 6001, starttime="6001", cwd=str(cwd), exe="/usr/bin/claude")
+
+    result = reconcile.reconcile(
+        conn,
+        boundaries=make_boundaries(audit),
+        audit=audit,
+        config=config,
+        layout=config.layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+
+    assert result.orphans == 1, "the live worker is still reported; only death is withheld"
+    assert result.liveness_withheld == 1
+    assert result.interrupted == 0
+    assert db.get_work_item(conn, item_id).state is WorkItemState.ACTIVE
+    assert db.latest_session_for_item(conn, item_id).state is SessionState.RUNNING
+    assert kinds(conn) == {
+        "orphan_session",
+        "registry_version_unknown",
+        "registry_unobservable",
+    }

@@ -107,15 +107,19 @@ section differs, and matches what a dispatch at each level composes.
    printed, **Then** its delivery section is the local-only one.
 3. **Given** a preview and a dispatch at the same level for the same issue, **When** both
    compose a prompt, **Then** their delivery sections are identical.
+4. **Given** the preview is asked for a level other than the configured one, **When** the prompt
+   is printed, **Then** it is the one a dispatch at the asked-for level would compose.
 
 ---
 
 ### Edge Cases
 
-- **A repository's own `.claude/robot-army.md` says to push.** It outranks everything composed
-  below it, at every level, and that is unchanged. The reduced-level block does not claim to
-  overrule it; the guide names this as the one way an operator can contradict the level, and as
-  their decision to make.
+- **An instruction above the block says to push.** Not hypothetical: this repository's own
+  configured Spec Kit instruction for `implement` says "commit, push the branch to origin, and
+  open a PR", and it is composed *above* the delivery block, where position gives it precedence.
+  A `.claude/robot-army.md` can say the same. The local-only form therefore says that such an
+  instruction describes a `live` dispatch and does not apply to a contained run — and says it
+  about outward writes only, changing nothing else those instructions ask for.
 - **`plan` and `local` never launch a session.** The reduced wording is still what those levels
   compose, because the preview can be run at them and a prompt that varies by anything other
   than the level would be a second rule to remember.
@@ -146,11 +150,20 @@ section differs, and matches what a dispatch at each level composes.
   mechanism for changing the things the repository manages; building, running, testing,
   installing dependencies and reading live systems are outside the limit; and the section
   asserts its own precedence over the issue text rather than conceding it.
+- **FR-006a**: The local-only form MUST reconcile itself with instructions composed above it:
+  where a repository's standing instructions or a configured Spec Kit instruction ask for a push
+  or a pull request, the form MUST say that those describe a `live` dispatch and do not apply to
+  this run. It MUST scope that to outward writes and leave every other instruction above it
+  intact, and it MUST NOT appear in the push-and-pull-request form.
 - **FR-007**: Neither form may be selected, suppressed or overridden by anything the issue's
   author wrote, by a configuration key, or by a per-repository setting. The effect level is the
   only input.
 - **FR-008**: The prompt preview MUST compose the same delivery section that a dispatch at the
   same effect level would compose.
+- **FR-008a**: The prompt preview MUST accept an effect level for the run, overriding the
+  configured one, so that "what would a session be told at this level?" can be asked without
+  editing the configuration file. It is the same override the daemon and the web interface
+  already accept.
 - **FR-009**: The effect level MUST stay out of the code downstream of boundary wiring: the
   choice between the two forms is made where the boundaries are selected, not by a later caller
   asking what level it is running at.
@@ -182,7 +195,8 @@ section differs, and matches what a dispatch at each level composes.
 
 - **SC-001**: A dispatch at `no-remote` of an issue whose work produces commits leaves zero new
   branches on the remote and zero new pull requests, where before this change it left one of
-  each.
+  each — including for a Spec Kit issue in a repository whose configured `implement` instruction
+  says to push.
 - **SC-002**: Composing the prompt for the same issue at `live` and at `no-remote` produces
   delivery sections that differ, and the two forms are the only two that can be produced.
 - **SC-003**: The `live` prompt's delivery section is unchanged from what it is today, so no

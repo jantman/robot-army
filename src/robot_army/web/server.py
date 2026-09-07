@@ -576,6 +576,13 @@ def require_dispatchable(ctx: Context, item_id: int, action: str) -> None:
             config=ctx.config,
             item=item,
             surface="web",
+            # Measured against the daemon's cap, not this process's (issue #30). A refusal
+            # is a surface too: without this, a page correctly reading ``6/7`` offers
+            # *Resume* and answers it with "6 of 5 sessions running" — the very number the
+            # header no longer shows. Taken fresh rather than from the request's reading,
+            # which is right here: this gate's whole character is that the check at the
+            # launch decides, and minutes can pass between a render and a press.
+            enforced_cap=operations._enforced_cap(ctx),
         )
     except dispatch.DispatchRefused as exc:
         raise Refusal(
@@ -1553,19 +1560,41 @@ def handle(app: WebApp, request: Request) -> Response:
         )
 
     try:
-        # Resolved once, here, and handed to both the chrome and the handler. Deriving it
-        # twice would read the heartbeat and the lock twice and could — across a daemon
-        # starting mid-request — answer differently in the two halves of one page.
-        level = effective_level(ctx)
+        # One reading of the daemon per request, taken here and handed to everything that
+        # needs it. Deriving any of it twice would read the heartbeat and the lock twice and
+        # could — across a daemon starting mid-request — answer differently in the two
+        # halves of one page. Three facts now hang off this single reading: the effect
+        # level, the session cap in force, and the chrome's own account of the daemon.
+        report = health.check(
+            ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+        )
+        running = daemon_mod.is_locked(ctx.layout.lock_path)
+        level = effective_level(ctx, report, running=running)
         include_simulated = include_simulated_for(request, ctx, level=level)
         # The same argument, for the same reason, about a more expensive fact (RA-14). A
         # capacity snapshot reads the session registry and enumerates ``/proc``; ``/queue``
         # took one for the chrome's pill and a second for its own block, so a page could
         # report two different counts of what is running, moments apart.
-        capacity = capacity_mod.snapshot(ctx.conn, config=ctx.config)
+        #
+        # The cap it is built against is the daemon's, not this process's (issue #30). This
+        # process read its configuration when it started and never rereads it, so its own
+        # cap is a claim about the past; the daemon is what enforces one. Resolved here so
+        # that the pill, the queue block, and the planner behind every "at capacity" reason
+        # are all reported against the same number.
+        capacity = capacity_mod.snapshot(
+            ctx.conn,
+            config=ctx.config,
+            enforced_cap=health.published_cap(
+                report,
+                running=running,
+                lock_holder=daemon_mod.read_lock_holder(ctx.layout.lock_path),
+            ),
+        )
         chrome = pages.chrome(
             ctx,
             capacity=capacity,
+            report=report,
+            running=running,
             include_simulated=include_simulated,
             simulated_preference=request.simulated_preference,
             # A GET-able path, because the chrome's visibility toggle links to it — and a

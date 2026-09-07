@@ -41,6 +41,14 @@ class Heartbeat:
     #: documents this file's shape for a human reading it at 2am, and a named field is
     #: what that reader will look for. Defaults to ``None``, so an older heartbeat parses.
     board: dict[str, Any] | None = None
+    #: The global session cap this daemon is enforcing (issue #30). A first-class field for
+    #: the same reason ``dispatch_paused`` and ``board`` are — ``docs/state.md`` documents
+    #: this file's shape for a human reading it at 2am, and a named field is what that
+    #: reader will look for. It is here at all because **the daemon is the authority on the
+    #: cap**: it reads the value once at startup and cannot change it while it runs, so a
+    #: surface that reports a fraction against anything else is guessing at what the process
+    #: doing the enforcing believes. Defaults to ``None``, so an older heartbeat parses.
+    max_concurrent_sessions: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
@@ -57,6 +65,7 @@ def write_heartbeat(
     errors: int = 0,
     dispatch_paused: bool = False,
     board: dict[str, Any] | None = None,
+    max_concurrent_sessions: int | None = None,
     extra: dict[str, Any] | None = None,
 ) -> Heartbeat:
     """Write the heartbeat atomically.
@@ -75,6 +84,7 @@ def write_heartbeat(
         errors=errors,
         dispatch_paused=dispatch_paused,
         board=board,
+        max_concurrent_sessions=max_concurrent_sessions,
         extra=extra or {},
     )
     atomic_write(Path(path), beat.to_json(), mode=0o644)
@@ -146,6 +156,74 @@ def check(
         age_seconds=age,
         heartbeat=payload,
     )
+
+
+def published_cap(
+    report: HealthReport, *, running: bool, lock_holder: str | None
+) -> int | None:
+    """The session cap the *running* daemon says it is enforcing, or ``None`` (issue #30).
+
+    Issue #30 is a web header reading ``6/5`` — over capacity, apparently, so nothing can
+    dispatch — while the truth was ``6/7`` with two slots free. The numerator is observed
+    from the machine on every render; the denominator was whatever configuration that
+    process loaded when it started, and no process rereads it. So the two halves of one
+    fraction could be days apart in age with nothing saying so.
+
+    Rereading the file more eagerly does not fix it, because **the file is not the
+    authority**. The daemon is the only process that admits or withholds a dispatch, its cap
+    is fixed when it starts, and a number reported against anything else is a guess about
+    what some other process believes. So the cap travels on the heartbeat, and this is the
+    one function that reads it.
+
+    ``running`` and ``lock_holder`` are parameters rather than probes taken here, for a
+    mechanical reason and a design one. ``daemon`` imports this module, so importing it back
+    would be a cycle; and every caller has already probed the lock for the effect level, so
+    taking a second one would let the two halves of one page answer differently across a
+    daemon starting mid-request. Together they mean:
+
+    * **No daemon holds the lock** (``running`` false). ``None``. Nothing is enforcing
+      anything, and deferring to a heartbeat left by a dead process would be the same
+      surprise in the other direction — the reasoning ``pages.effect_mismatch`` already
+      records for the level.
+    * **A daemon holds the lock, and wrote this heartbeat.** Its cap decides, *including
+      from a stale heartbeat*. A daemon's cap, like its effect level, cannot change while it
+      runs, so a stale heartbeat from the process currently holding the lock still names
+      that process's cap correctly. Staleness means a tick is running long — which is when
+      the machine is busy, which is exactly when the fraction is being read.
+    * **A daemon holds the lock and somebody else wrote this heartbeat.** ``None``.
+
+    **That third case is a real window, not a hypothetical**, and it is why the pid is
+    compared at all rather than the lock being taken as proof. ``run_daemon`` acquires the
+    lock and then wires boundaries, checks preconditions and runs ``startup`` — network work,
+    seconds of it — before the first beat, and nothing unlinks the previous daemon's
+    heartbeat. So for the length of a restart, ``is_locked`` is true while the newest
+    heartbeat on disk belongs to the *dead* process. Lower the cap from 7 to 2 and restart,
+    and without this check every surface would report 7 and, worse, the launch gate would
+    admit sessions up to 7 against a daemon about to enforce 2. Both files carry their
+    writer's pid, so the link is checkable; unreadable or mismatched, this fails to "use your
+    own configuration", which is what it does for every other doubt.
+
+    A value is believed only when it could have come from the loader: an ``int`` (``bool``
+    is an ``int`` in Python and is not one here) of at least 1, which is the floor
+    ``config`` itself enforces. Anything else — absent, a string, zero, negative — is *not
+    published* rather than *a cap of zero*, because replacing a stale number with a
+    nonsensical one is not an improvement.
+    """
+    if not running:
+        return None
+    beat = report.heartbeat
+    if not beat:
+        return None
+    # The heartbeat must be the lock holder's own. Compared as text because the lock file
+    # holds a line of it and the heartbeat holds a number, and a pid that cannot be read
+    # from either side is a doubt rather than a match.
+    holder = (lock_holder or "").strip()
+    if not holder or str(beat.get("pid")) != holder:
+        return None
+    raw = beat.get("max_concurrent_sessions")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        return None
+    return raw
 
 
 def post_json(

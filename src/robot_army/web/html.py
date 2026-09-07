@@ -352,7 +352,23 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     mismatch = chrome.get("effect_mismatch")
     if mismatch:
         notices.append(div(mismatch, class_="banner error"))
-    # The third member of the family the two above belong to: conditions under which what
+    # The same family, one step down in severity (issue #30). The cap the pill counts
+    # against is the running daemon's, which can differ from the one this process read at
+    # startup — and a number silently substituted is a number the reader cannot reconcile
+    # with the file open in their editor.
+    #
+    # It **warns** rather than errors because nothing is wrong with the page and nothing is
+    # refused: the daemon enforces its own cap whatever this process believes, so a
+    # disagreement cannot make an action unsafe. Only the effect level, where acting at the
+    # wrong one really does something in the world, earns the error colour and a refusal.
+    #
+    # Nothing is said when the daemon's cap could not be read at all — the notice is absent
+    # rather than hedged — for the reason the block below gives about the level: that state
+    # already has a banner saying more than this one could.
+    cap_note = (chrome.get("capacity") or {}).get("cap_disagreement")
+    if cap_note:
+        notices.append(div(cap_note, class_="banner warn"))
+    # The last member of the family the three above belong to: conditions under which what
     # you are reading does not mean what it appears to mean. This one is the broadest, since
     # it changes the meaning of *every* value on the page rather than one of them — an item
     # shown as `linked` against issue #900001 is linked to nothing at all.
@@ -566,6 +582,7 @@ h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
   border: 1px solid var(--line); background: var(--panel);
 }
 .banner.ok { border-color: var(--ok); }
+.banner.warn { border-color: var(--warn); }
 .banner.error { border-color: var(--error); color: var(--error); }
 .banner .reason { color: var(--text); font-size: .9375rem; margin-top: .4rem; }
 .card {

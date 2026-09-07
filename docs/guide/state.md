@@ -32,6 +32,23 @@ would silently downgrade a clean completion into a phantom that reconciliation c
 ever classify as `interrupted`. This is the single deliberate departure from the planning
 document; the reasoning is [research.md R5](https://github.com/jantman/robot-army/blob/main/specs/001-minimum-daemon/research.md).
 
+**The heartbeat is the only place the cap in force is written down.** It carries
+`max_concurrent_sessions` alongside the effect level, the pause flag and the board's health,
+and it is the daemon's answer to "what am I enforcing?" rather than a copy of the
+configuration file. That distinction is the point: the daemon reads the cap once at startup
+and cannot change it while it runs, so the heartbeat names the right number even when the
+file on disk has since been edited. Every surface that prints a session fraction takes it
+from here, and says so when it disagrees with its own configuration — see
+[what runs next](3-selection.md#which-cap-you-are-being-shown).
+
+```bash
+jq .max_concurrent_sessions ~/.local/state/robot-army/heartbeat.json
+```
+
+A heartbeat written before this field existed has no key for it, and readers treat that as
+*not published* rather than as a cap of zero — as they do any value that could not have come
+from the loader.
+
 **The lock file survives but the lock does not.** `flock` is released by the kernel when
 the holding process dies by any means, including `SIGKILL`. A stale `daemon.lock` file
 containing an old PID is normal and harmless.

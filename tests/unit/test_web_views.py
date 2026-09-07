@@ -730,3 +730,165 @@ def test_the_json_body_carries_the_same_board_facts_as_the_page(web, conn):
     assert row["governs"] is True
     assert row["project_number"] == 3
     assert row["column"] == "Ready"
+
+
+# -- the fraction is against the cap the daemon is enforcing (issue #30) ----
+
+
+def stale_cap(web, *, ours: int) -> None:
+    """Configure this interface for a cap it read before the daemon was restarted."""
+    from dataclasses import replace
+
+    web.app.config = replace(
+        web.app.config,
+        daemon=replace(web.app.config.daemon, max_concurrent_sessions=ours),
+    )
+
+
+def test_the_pill_counts_against_the_daemons_cap_not_this_processs(web, conn, layout, running_daemon):
+    """Issue #30's reproduction. The web read 5 at startup, the daemon is enforcing 7, and
+    a header saying ``1/5`` when the truth is ``1/7`` answers "why is nothing dispatching?"
+    with the opposite of the answer."""
+    stale_cap(web, ours=5)
+    beat(layout, max_concurrent_sessions=7)
+    item = seed_item(conn, issue_number=9, state="active")
+    seed_session(conn, item, state="running")
+
+    payload = web.get_json("/active").json()
+    assert payload["capacity"]["global_cap"] == 7
+    assert payload["capacity"]["configured_cap"] == 5
+    assert "1/7 sessions" in web.get("/active").text
+
+
+def test_the_daemons_cap_wins_in_the_other_direction_too(web, conn, layout, running_daemon):
+    """The file edited and nothing restarted: this process is the fresh one and is wrong."""
+    stale_cap(web, ours=9)
+    beat(layout, max_concurrent_sessions=2)
+
+    payload = web.get_json("/active").json()
+    assert payload["capacity"]["global_cap"] == 2
+    assert payload["capacity"]["configured_cap"] == 9
+
+
+def test_the_pill_is_not_styled_at_capacity_when_the_enforced_cap_leaves_room(
+    web, conn, layout, running_daemon
+):
+    """FR-003: the styling and the fraction are decided by the same number."""
+    stale_cap(web, ours=1)
+    beat(layout, max_concurrent_sessions=3)
+    item = seed_item(conn, issue_number=9, state="active")
+    seed_session(conn, item, state="running")
+
+    text = web.get("/active").text
+    assert "1/3 sessions" in text
+    pill = [line for line in text.splitlines() if "1/3 sessions" in line]
+    assert pill and "pill warn" not in pill[0], pill
+
+
+def test_a_heartbeat_with_no_cap_leaves_this_processs_own_in_place(
+    web, conn, layout, running_daemon
+):
+    """A build that did not publish one. Nothing is claimed and nothing is corrected."""
+    stale_cap(web, ours=5)
+    beat(layout)
+
+    payload = web.get_json("/active").json()
+    assert payload["capacity"]["global_cap"] == 5
+    assert payload["capacity"]["configured_cap"] is None
+
+
+def test_a_heartbeat_from_a_daemon_that_is_not_running_is_not_an_authority(web, conn, layout):
+    """No lock held: nothing is enforcing anything, and a file left by a dead process does
+    not get to overrule the configuration this process actually read."""
+    stale_cap(web, ours=5)
+    beat(layout, max_concurrent_sessions=7)
+
+    payload = web.get_json("/active").json()
+    assert payload["capacity"]["global_cap"] == 5
+    assert payload["capacity"]["configured_cap"] is None
+
+
+def test_the_queues_reasons_are_planned_against_the_enforced_cap(
+    web, conn, layout, running_daemon
+):
+    """The reason the cap lives in the snapshot rather than being swapped in at render
+    time: the queue re-runs the planner to explain each row, and a planner run against the
+    stale cap would print "at capacity" underneath a pill reading 1/3."""
+    from dataclasses import replace
+
+    stale_cap(web, ours=1)
+    # The repository allows three of its own, so the only thing that could hold this row is
+    # a global cap — including the one a per-repository limit is clamped by.
+    section = replace(web.app.config.repos["demo"], max_sessions=3)
+    web.app.config = replace(
+        web.app.config, repos={**web.app.config.repos, "demo": section}
+    )
+    beat(layout, max_concurrent_sessions=3)
+    running = seed_item(conn, issue_number=9, state="active")
+    seed_session(conn, running, state="running")
+    queued = seed_item(conn, issue_number=1, state="ready")
+
+    payload = web.get_json("/queue").json()
+    row = {r["id"]: r for r in payload["ready"]}[queued]
+    assert row["hold"] is None, row
+    assert payload["capacity"]["global_cap"] == 3
+
+
+# -- and the disagreement that produced it is announced (issue #30) ---------
+
+
+def test_the_disagreement_is_announced_on_every_view(web, conn, layout, running_daemon):
+    """A corrected number with no explanation is a page whose fraction disagrees with the
+    operator's editor for no visible reason. On every view for the reason the pill is: the
+    question is asked from wherever the reader happens to be looking."""
+    stale_cap(web, ours=5)
+    beat(layout, max_concurrent_sessions=7)
+    seed_item(conn, issue_number=1, state="ready")
+
+    for path in ("/active", "/queue", "/interrupted"):
+        text = web.get(path).text
+        assert "SESSION CAP MISMATCH" in text, path
+        assert "cap of 7" in text and "configured for 5" in text, path
+
+
+def test_no_notice_when_the_two_caps_agree(web, conn, layout, running_daemon):
+    stale_cap(web, ours=7)
+    beat(layout, max_concurrent_sessions=7)
+    assert "SESSION CAP MISMATCH" not in web.get("/active").text
+
+
+def test_no_notice_when_no_daemon_is_running(web, conn, layout):
+    """Nothing is enforcing a cap, so there is nothing for this process to disagree with."""
+    stale_cap(web, ours=5)
+    beat(layout, max_concurrent_sessions=7)
+    assert "SESSION CAP MISMATCH" not in web.get("/active").text
+
+
+def test_no_second_notice_when_the_heartbeat_cannot_be_read(web, conn, layout, running_daemon):
+    """A daemon holds the lock but nothing about it can be read. That state already has a
+    banner saying so and that actions are refused; a second one about one field of an
+    unreadable file competes with the account that matters."""
+    layout.heartbeat_path.unlink()
+    stale_cap(web, ours=5)
+
+    text = web.get("/active").text
+    assert "EFFECT LEVEL UNKNOWN" in text
+    assert "SESSION CAP MISMATCH" not in text
+
+
+def test_no_notice_when_the_heartbeat_carries_no_cap(web, conn, layout, running_daemon):
+    stale_cap(web, ours=5)
+    beat(layout)
+    assert "SESSION CAP MISMATCH" not in web.get("/active").text
+
+
+def test_the_notice_is_a_warning_rather_than_an_error(web, conn, layout, running_daemon):
+    """Nothing is wrong with the page and nothing is refused. Only the effect level, where
+    acting at the wrong one really does something in the world, earns the error colour."""
+    stale_cap(web, ours=5)
+    beat(layout, max_concurrent_sessions=7)
+
+    banner = [
+        line for line in web.get("/active").text.splitlines() if "SESSION CAP MISMATCH" in line
+    ]
+    assert banner and 'class="banner warn"' in banner[0], banner

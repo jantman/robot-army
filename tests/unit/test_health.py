@@ -474,3 +474,120 @@ def test_the_health_alert_ignores_the_effect_level_deliberately(
     assert [c["channel"] for c in sent] == ["webhook", "pushover"], (
         f"the alert must still be delivered at {level}"
     )
+
+
+# -- the cap the daemon publishes (issue #30) -------------------------------
+
+
+def test_the_heartbeat_carries_the_cap_the_daemon_is_enforcing(tmp_path):
+    """The whole point: the file alone answers "what cap is in force?"."""
+    path = tmp_path / "heartbeat.json"
+    health.write_heartbeat(
+        path, effect_level="live", activity="idle", cycles=1, max_concurrent_sessions=7
+    )
+    assert json.loads(path.read_text(encoding="utf-8"))["max_concurrent_sessions"] == 7
+
+
+def test_a_heartbeat_written_without_a_cap_still_parses(tmp_path):
+    """An older build's file, or one written before this field existed."""
+    path = tmp_path / "heartbeat.json"
+    health.write_heartbeat(path, effect_level="live", activity="idle", cycles=1)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["max_concurrent_sessions"] is None
+    assert health.check(path, max_age_seconds=180).healthy is True
+
+
+#: The pid every helper below agrees on: the heartbeat's writer *is* the lock holder.
+HOLDER = 4242
+
+
+def report_with(**beat):
+    """A health report carrying whatever heartbeat the case needs."""
+    if beat:
+        beat.setdefault("pid", HOLDER)
+    return health.HealthReport(True, "fresh", age_seconds=1.0, heartbeat=beat or None)
+
+
+def cap_of(report, *, running=True, lock_holder=str(HOLDER)):
+    """``published_cap`` with the ordinary case's arguments, so a case states its own."""
+    return health.published_cap(report, running=running, lock_holder=lock_holder)
+
+
+def test_no_daemon_running_publishes_no_cap(tmp_path):
+    """Nothing is enforcing anything, so a heartbeat left behind is not an authority."""
+    assert cap_of(report_with(max_concurrent_sessions=7), running=False) is None
+
+
+def test_a_daemon_with_an_unreadable_heartbeat_publishes_no_cap(tmp_path):
+    path = tmp_path / "heartbeat.json"
+    report = health.check(path, max_age_seconds=180)
+    assert report.heartbeat is None
+    assert cap_of(report) is None
+
+
+def test_a_running_daemons_cap_is_taken_from_its_heartbeat(tmp_path):
+    assert cap_of(report_with(max_concurrent_sessions=7)) == 7
+
+
+def test_a_stale_heartbeat_still_names_the_cap_in_force(tmp_path):
+    """R5. A daemon's cap cannot change while it runs, so staleness is not ignorance.
+
+    Staleness means a tick is running long — which is when the machine is busy, which is
+    exactly when the fraction is being read.
+    """
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=3600, max_concurrent_sessions=7, pid=HOLDER)
+    report = health.check(path, max_age_seconds=180)
+    assert report.healthy is False, "the report really is stale"
+    assert cap_of(report) == 7
+
+
+def test_a_heartbeat_with_no_cap_field_publishes_nothing(tmp_path):
+    assert cap_of(report_with(effect_level="live")) is None
+
+
+@pytest.mark.parametrize("value", [0, -1, "7", True, False, None, 7.5, [7], {"n": 7}])
+def test_an_unusable_cap_is_not_published_rather_than_believed(value):
+    """Replacing a stale number with a nonsensical one is not an improvement.
+
+    ``True`` is in the list because ``bool`` is an ``int`` in Python, and a heartbeat
+    carrying ``true`` would otherwise be read as a cap of one session.
+    """
+    assert cap_of(report_with(max_concurrent_sessions=value)) is None
+
+
+def test_a_heartbeat_from_a_process_that_is_not_the_lock_holder_publishes_nothing():
+    """The restart window, which is a real window and not a hypothetical.
+
+    ``run_daemon`` takes the lock and then wires boundaries, checks preconditions and runs
+    ``startup`` — network work, seconds of it — before its first beat, and nothing unlinks
+    the previous daemon's heartbeat. So mid-restart the lock is held by the new process
+    while the newest heartbeat on disk is the dead one's.
+
+    Lower the cap from 7 to 2 and restart: believing the file here would report 7 on every
+    surface and, worse, admit sessions up to 7 through the launch gate against a daemon
+    about to enforce 2 — an over-dispatch, the one direction that does harm.
+    """
+    dead = health.HealthReport(
+        True, "fresh", age_seconds=1.0, heartbeat={"pid": 111, "max_concurrent_sessions": 7}
+    )
+    assert health.published_cap(dead, running=True, lock_holder="222") is None
+
+
+def test_an_unreadable_lock_holder_is_a_doubt_rather_than_a_match():
+    """Fails to "use your own configuration", which is what every other doubt here does."""
+    report = report_with(max_concurrent_sessions=7)
+    assert health.published_cap(report, running=True, lock_holder=None) is None
+    assert health.published_cap(report, running=True, lock_holder="   ") is None
+
+
+def test_a_heartbeat_with_no_pid_publishes_nothing():
+    report = health.HealthReport(
+        True, "fresh", age_seconds=1.0, heartbeat={"max_concurrent_sessions": 7}
+    )
+    assert health.published_cap(report, running=True, lock_holder="222") is None
+
+
+def test_the_lock_holders_trailing_newline_is_not_a_mismatch():
+    """``read_lock_holder`` returns the file's line; the lock is written with a newline."""
+    assert cap_of(report_with(max_concurrent_sessions=7), lock_holder=f"{HOLDER}\n") == 7

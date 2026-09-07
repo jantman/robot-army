@@ -206,6 +206,8 @@ def chrome(
     simulated_consequences: list[str] | None = None,
     all_effects_simulated: bool = False,
     capacity: capacity_mod.CapacitySnapshot | None = None,
+    report: Any = None,
+    running: bool | None = None,
 ) -> dict[str, Any]:
     """The facts every view carries. Assembled once per request.
 
@@ -215,12 +217,19 @@ def chrome(
     ``effective_level`` is computed here and **only** here (009 FR-018). The banner and the
     level pill both read it out of this payload rather than each deriving it, which is what
     makes "the two cannot disagree" structural rather than a matter of remembering.
+
+    ``report`` and ``running`` are the request's single reading of the daemon, handed down by
+    ``handle`` so that the chrome, the effect level and the session cap describe the same
+    instant — the reason ``effective_level`` and ``effect_mismatch`` already accept them.
+    Taken here when a direct caller supplies neither.
     """
-    report = health.check(
-        ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
-    )
+    if report is None:
+        report = health.check(
+            ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+        )
     beat = report.heartbeat or {}
-    running = daemon_mod.is_locked(ctx.layout.lock_path)
+    if running is None:
+        running = daemon_mod.is_locked(ctx.layout.lock_path)
     # Defaulting to our own configured level keeps a direct caller — a test, or a future
     # second entry point — from silently rendering a page with no level at all.
     effective_level = effective_level or str(ctx.effect_level)
@@ -269,6 +278,12 @@ def chrome(
         # the machine (RA-14) — ``/queue`` used to take two, and two readings of a moving
         # machine disagree. The ``None`` default is for a direct caller: a test, or a future
         # second entry point, neither of which has a snapshot to hand.
+        #
+        # A snapshot taken here carries **no** enforced cap, and so reports this process's
+        # own configured one with nothing said about it. That is the documented meaning of
+        # "no enforced cap supplied" rather than an oversight: a caller with no snapshot to
+        # hand has taken no reading of the daemon either, and inventing one here would take
+        # a second reading of the very facts this parameter exists to avoid re-reading.
         "capacity": operations._capacity_dict(
             capacity if capacity is not None else capacity_mod.snapshot(
                 ctx.conn, config=ctx.config

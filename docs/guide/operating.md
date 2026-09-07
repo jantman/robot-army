@@ -180,6 +180,35 @@ branch has exactly our name, because a branch name belongs to nobody and this re
 public. One linked to the issue *is* shown whoever opened it — that link was made by GitHub
 from our own issue, which is a different kind of evidence.
 
+**The session count is against the cap the daemon is enforcing, not against the config this
+process read at startup.** `serve` reads the file once and never rereads it, so after the
+documented go-live procedure — edit the file, restart `robot-army.service` — a long-running
+web service would otherwise keep counting against the old cap. It printed `6/5` once, which
+reads as *full and then some, nothing can dispatch*, when the truth was `6/7` with two slots
+free (issue #30). The cap now comes from the daemon's heartbeat, the way the effect level
+already did.
+
+When the two disagree the page says so on every view, names both numbers, and says which is
+in force:
+
+```
+SESSION CAP MISMATCH: the running daemon is enforcing a cap of 7, and this process is
+configured for 5. …
+```
+
+It is a warning, not a refusal: nothing on the page is disabled and no control is blocked on
+account of the disagreement. The cap itself is still enforced — pressing *Resume* runs a
+launch gate in this very process — but that gate measures against the daemon's cap too, so a
+button this page offers is never answered with the number the page stopped showing. The fix
+is to restart whichever of the two has been running since before the configuration changed —
+usually this one, `systemctl --user restart robot-army-web.service`, and the same restart
+picks up every other key it read at startup. The notice cannot tell you which, because
+neither process knows when the other read its configuration.
+
+With no daemon running, or with nothing readable from its heartbeat, the page falls back to
+its own configured cap and says nothing — the second of those already has a louder banner
+saying the daemon cannot be read at all.
+
 Resume and restart here obey the session cap, the pause and holds exactly as the terminal
 does, and say so on the page rather than appearing to work and then quietly doing nothing.
 There is no `--force` button: the answer to a refusal is the control that lifts the

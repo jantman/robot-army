@@ -588,3 +588,82 @@ def test_the_successful_path_leaves_no_anomaly_over_repeated_passes(
     assert db.list_anomalies(conn) == []
     snapshot = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
     assert snapshot.total == 0, "the slot must not be held by finished work"
+
+
+# -- issue #44: the fourth branch, when the registry could not be read --------
+
+
+def test_a_row_is_withheld_rather_than_guessed_at_when_the_registry_is_gone(
+    conn, config, audit, layout, proc, tmp_path
+):
+    """The fourth outcome of the same decision (contracts/observability-guard.md C4.2).
+
+    The two branches this sits above both rest on the registry having been *read*: one says
+    "I can see this worker", the other says "I cannot, so it is gone". A scan that could not
+    observe the registry at all supports neither, and taking the second on its strength
+    closes every open row on the machine at once — the under-count this module's second
+    paragraph is about, reached by making every live worker look absent simultaneously.
+    """
+    absent = tmp_path / "registry-that-moved"
+    item = seed_item(conn, repo_key=REPO, dry_run=True, state="interrupted")
+    seed_session(conn, item, state="running", dry_run=True, pid=0)
+
+    assert apply(conn, audit, item, absent, proc) == "withheld"
+
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+    assert audit_actions(layout, "state.session") == [], (
+        "withholding writes nothing: the row is left byte-for-byte as it was found"
+    )
+
+
+def test_the_two_registry_independent_answers_survive_a_blind_scan(
+    conn, config, audit, proc, tmp_path
+):
+    """FR-004 at this call site. A row under a `dispatching` or `active` item is legitimate
+    for a reason that has nothing to do with the registry, and the guard sits below both."""
+    absent = tmp_path / "registry-that-moved"
+    item = seed_item(conn, repo_key=REPO, dry_run=True, state="active")
+    seed_session(conn, item, state="running", dry_run=True, pid=0)
+
+    assert apply(conn, audit, item, absent, proc) == "left"
+
+
+def test_abandon_says_when_it_left_a_row_open_because_it_could_not_look(
+    conn, config, audit, boundaries, proc, tmp_path
+):
+    """`abandon` inherits the guard, and must not inherit it silently (issue #44, R7).
+
+    Being told an item was abandoned while a capacity slot quietly stays subscribed is the
+    class of silence this feature exists to remove, so the one caller outside the
+    reconciliation pass says so in its own output rather than relying on a pass summary it
+    never writes.
+    """
+    absent = tmp_path / "registry-that-moved"
+    item = seed_item(conn, repo_key=REPO, dry_run=True, state="interrupted")
+    seed_session(conn, item, state="running", dry_run=True, pid=0)
+
+    ctx = context(conn, config, audit, boundaries)
+    result = operations.abandon(ctx, item, registry_dir=absent, proc_root=proc)
+
+    assert result.code == 0
+    assert db.get_work_item(conn, item).state is WorkItemState.ABANDONED
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+    text = "\n".join(result.lines)
+    assert "registry" in text.lower()
+    assert "session" in text.lower()
+
+
+def test_abandon_with_a_readable_registry_is_unchanged(
+    conn, config, audit, boundaries, registry, proc
+):
+    """The other half of the pair. An empty-but-present directory is a usable observation,
+    and the row is reclaimed exactly as it was before the guard existed."""
+    item = seed_item(conn, repo_key=REPO, dry_run=True, state="interrupted")
+    seed_session(conn, item, state="running", dry_run=True, pid=0)
+
+    ctx = context(conn, config, audit, boundaries)
+    result = operations.abandon(ctx, item, registry_dir=registry, proc_root=proc)
+
+    assert result.code == 0
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+    assert "registry" not in "\n".join(result.lines).lower()

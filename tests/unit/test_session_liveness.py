@@ -19,6 +19,14 @@ The third is that an item's *current* attempt is not the only session it owns. A
 item leaves an earlier row open, and nothing visited it: the liveness sweep reads only the
 latest attempt, and the orphan sweep passes over any worker whose row still says
 ``running`` -- which it does because nothing visits it. Each blind spot held the other up.
+
+Everything here runs against an **empty-but-present** registry directory, and issue #44
+turned that from an incidental detail of the fixture into the property this module fences.
+That issue guards the same sweeps against a registry that could not be read at all -- and a
+guard that also fired on an empty directory would switch off every conclusion below, on any
+machine with nothing running, permanently. So this module now carries the other half of that
+pair explicitly: an empty directory is a *usable* observation, and a dead session found
+through one is still dead.
 """
 
 from __future__ import annotations
@@ -383,3 +391,33 @@ def test_a_closed_superseded_row_is_not_revisited(conn, audit, config, tmp_path)
     second = run(conn, audit, config, tmp_path, registry=registry, proc=proc)
 
     assert (first.superseded, second.superseded) == (1, 0)
+
+
+# -- the other half of issue #44's pair --------------------------------------
+
+
+def test_an_empty_registry_is_an_observation_not_a_failure_to_observe(
+    conn, audit, config, tmp_path
+):
+    """Issue #44's guard must not reach the ordinary idle machine (US4).
+
+    An absent registry directory and an empty one are byte-for-byte identical at the glob,
+    and only ``RegistryScan.directory_missing`` separates them. A guard written against
+    "the scan found nothing" rather than against that flag would pass every test in the new
+    module -- all its unusable conditions also find nothing -- and would silently disable
+    everything above on a machine whose registry is simply empty, which is every machine
+    between sessions.
+    """
+    item_id = active_item(conn, dry_run=False, pid=REAL_PID, issue_number=44)
+
+    result = run(conn, audit, config, tmp_path)
+
+    assert result.interrupted == 1
+    assert result.liveness_withheld == 0, (
+        "an empty-but-present directory is a usable observation; nothing may be withheld"
+    )
+    assert db.get_work_item(conn, item_id).state is WorkItemState.INTERRUPTED
+    assert db.latest_session_for_item(conn, item_id).state is SessionState.LOST
+    assert "registry_unobservable" not in {
+        a.kind for a in db.list_anomalies(conn, include_simulated=True)
+    }

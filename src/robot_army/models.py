@@ -453,6 +453,13 @@ ANOMALY_KINDS: tuple[str, ...] = (
     # than zero. Dispatch is withheld while it holds (R4, FR-007), which makes it the one
     # anomaly here that stops work rather than merely describing it.
     "capacity_unobservable",
+    # Issue #44. The reconciliation pass could not read the session registry — the
+    # directory is absent or unlistable, the scan fell back to /proc, or a registry file
+    # was refused by the version gate — so it declined to conclude that any session had
+    # died. Distinct from ``capacity_unobservable``, which is about a count that could not
+    # be taken; this is about conclusions that were deliberately not drawn. The third kind
+    # that retracts itself, on the first pass that can read the registry.
+    "registry_unobservable",
     # Milestone 005. The machine changed under an approval: the clone approved at
     # onboarding is no longer where it was, or a different repository is now there. Both
     # are distinct from an ordinary gate refusal, which means a precondition was never met

@@ -14,13 +14,16 @@ day for one orphan, and a resolved row left inside it would silently block that 
 from ever being reported again. Getting that wrong produces no error and no failing
 assertion anywhere else — the symptom is an anomaly that never appears, months later.
 
-**The scope.** Two kinds now, and still not a general mechanism. ``orphan_session`` resolves
-when the pid and start time it recorded no longer name a live process; ``card_create_failing``
-resolves when the card it named has reached ``linked``, which is terminal and is written in
-the same transaction that records the issue. Both are conditions that can be positively
-re-established as *false*. Widening this to every anomaly whose condition "looks passed" is
-the speculative generality Principle I forbids, and each other kind has its own settling
-story that this mechanism has no business guessing at.
+**The scope.** Three kinds now, and still not a general mechanism. ``orphan_session``
+resolves when the pid and start time it recorded no longer name a live process;
+``card_create_failing`` resolves when the card it named has reached ``linked``, which is
+terminal and is written in the same transaction that records the issue; ``registry_unobservable``
+(issue #44) resolves when a later pass reads the session registry successfully, which is the
+most direct of the three -- the observation that retracts it has already been taken by the pass
+doing the retracting. All three are conditions that can be positively re-established as
+*false*. Widening this to every anomaly whose condition "looks passed" is the speculative
+generality Principle I forbids, and each other kind has its own settling story that this
+mechanism has no business guessing at.
 
 Contract: ``specs/20260905-121903-retire-finished-sessions/contracts/anomaly-resolution.md``.
 """
@@ -578,3 +581,79 @@ def test_both_resolvers_mark_a_rehearsed_retraction_as_rehearsed(conn, audit, la
     assert all(record.get("dry_run") is True for record in written), (
         "both retractions concern rehearsed work and must say so"
     )
+
+
+# -- the third kind: a registry that could not be read (issue #44) ------------
+
+
+def raise_unobservable(conn, *, withheld: int = 2) -> int:
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn,
+            kind="registry_unobservable",
+            entity_type=None,
+            entity_id=None,
+            detail={
+                "reason": "the registry directory is absent or unreadable",
+                "liveness_withheld": withheld,
+            },
+        )
+    return next(a.id for a in db.list_anomalies(conn) if a.kind == "registry_unobservable")
+
+
+def resolve_registry(conn, audit) -> int:
+    return reconcile._resolve_registry_anomalies(conn, audit=audit)
+
+
+def test_a_registry_anomaly_is_resolved_once_the_registry_can_be_read(conn, audit, layout):
+    """The caller only reaches this on a pass whose observation succeeded, so there is
+    nothing to re-check: the retracting observation has already been taken."""
+    anomaly_id = raise_unobservable(conn)
+
+    assert resolve_registry(conn, audit) == 1
+
+    assert db.list_anomalies(conn) == []
+    every = db.list_anomalies(conn, unacknowledged_only=False)
+    assert [a.id for a in every] == [anomaly_id]
+    assert every[0].resolved_at is not None
+    assert every[0].acknowledged_at is None, (
+        "resolved and acknowledged are different facts and must stay distinguishable"
+    )
+
+    records_written = records(layout, "anomaly.resolved")
+    assert len(records_written) == 1
+    assert records_written[0]["detail"]["kind"] == "registry_unobservable"
+
+
+def test_resolving_a_registry_anomaly_twice_writes_once(conn, audit, layout):
+    """The ``resolved_at IS NULL`` guard, which is what makes a repeated pass a genuine
+    no-op rather than a second write with the same effect."""
+    raise_unobservable(conn)
+
+    assert resolve_registry(conn, audit) == 1
+    assert resolve_registry(conn, audit) == 0
+    assert len(records(layout, "anomaly.resolved")) == 1
+
+
+def test_resolving_a_registry_anomaly_leaves_the_other_kinds_alone(conn, audit, proc):
+    """Narrow by construction, exactly like its two siblings. A resolver that reached for
+    every open row would retract conditions it never re-checked."""
+    raise_orphan(conn)
+    raise_unobservable(conn)
+
+    assert resolve_registry(conn, audit) == 1
+    assert [a.kind for a in db.list_anomalies(conn)] == ["orphan_session"]
+
+
+def test_an_acknowledged_registry_anomaly_is_not_re_resolved(conn, audit):
+    """A maintainer's dismissal stands; the resolver must not overwrite it with its own."""
+    anomaly_id = raise_unobservable(conn)
+    with db.transaction(conn):
+        db.acknowledge_anomaly(conn, anomaly_id)
+
+    assert resolve_registry(conn, audit) == 0
+    stored = next(
+        a for a in db.list_anomalies(conn, unacknowledged_only=False) if a.id == anomaly_id
+    )
+    assert stored.acknowledged_at is not None
+    assert stored.resolved_at is None

@@ -128,13 +128,16 @@ The first two are separate columns because they are separate facts, and `--all` 
 able to tell them apart: "this stopped being true" and "somebody dismissed it" say very
 different things about whether the underlying problem was dealt with.
 
-**Two kinds resolve themselves**, and only two, because only these two conditions can be
+**Three kinds resolve themselves**, and only three, because only these conditions can be
 positively re-established as *false*. `orphan_session` records the pid *and* the process
 start time, so a recycled pid answers correctly rather than reading as still-alive.
 `card_create_failing` names a card, and `linked` is terminal and written in the same
-transaction that records the issue — so a linked card *is* the failed creation, negated. An
-anomaly whose detail carries no pid, or whose card is no longer in the database, is left
-alone permanently: "I could not check" must never be stored as "it is fine".
+transaction that records the issue — so a linked card *is* the failed creation, negated.
+`registry_unobservable` says a pass could not read the session registry, and the pass that
+retracts it has already read it — the most direct of the three, since the retracting
+observation is the retraction. An anomaly whose detail carries no pid, or whose card is no
+longer in the database, is left alone permanently: "I could not check" must never be stored
+as "it is fine".
 
 **`dry_run` is a property of the run, not of the entity named** (added by migration 14,
 issue #21). Deriving it from `entity_id` looks like one join and is six — work item,
@@ -749,21 +752,32 @@ summary:
 | Mid-sweep of an item's superseded session rows | Each superseded row is decided and committed on its own, so a killed pass leaves the rows it reached settled and the rest for the next one. The item's own state is decided by its current attempt alone and is never touched by this sweep, so a partial sweep cannot leave the item disagreeing with its sessions |
 | A superseded row is closed, then its worker turns out to have been alive | Cannot happen in that order: the liveness check runs *before* the decision to close, and a row whose worker can be seen is reported and left open rather than closed. The failure direction is always *leave it counting* — an under-count of running sessions is the only capacity error that does harm |
 
-## An accepted gap: an unobservable registry reads as death
+## A registry that cannot be read is not a machine with nothing on it
 
-Reconciliation decides a session is gone by failing to find it in the session registry. When
-the registry cannot be observed at all — the directory is missing, or its version is
-unrecognised — that failure is indistinguishable from every session having exited, and every
-`active` item is marked `interrupted` in one pass.
+Reconciliation decides a session is gone by failing to find it in the session registry. That
+reading is only sound if the registry was read. When it cannot be — the directory is missing or
+unlistable, the scan fell back to `/proc`, or a file carries a version this daemon refuses — an
+absence is indistinguishable from every session having exited, and **every `active` item used to
+be marked `interrupted` in one pass**, silently and wholesale.
 
-This is **pre-existing at `live`** and is not introduced by issue #33; what #33 changes is that
-`no-remote` now behaves the same way, because the skip that was masking the sweep there is gone.
-`sessions.RegistryScan` already distinguishes the two conditions and `capacity.py` acts on the
-distinction; `reconcile.py` does not consult either flag.
+Issue #44 closed that. A pass in any of those conditions declines to conclude that anything died:
+items stay `active`, session rows stay open, their capacity slots stay subscribed, and the pass
+records how many conclusions it withheld and raises a `registry_unobservable` anomaly. The next
+pass that can read the registry reaches those conclusions and retracts the anomaly, so a machine
+that was blind for a while needs no repair.
 
-It is recoverable — interruption touches no worktree and resumes nothing automatically — but it
-is silent and wholesale. Tracked as issue #44 rather than fixed alongside #33, because closing it
-changes `live` behaviour and is a separate subject.
+**The test is per session, not per pass**, and the distinction is load-bearing. A refused version
+is a *per-file* failure: one file is skipped and every other file's live entry is read in the
+same scan. So a pass can be blind overall while holding a directly observed entry for the very
+session being judged — and an entry that was read is an observation about *that* session whatever
+happened to other files. What is withheld is a conclusion drawn from an absence the scan cannot
+vouch for. Keying it on the pass instead leaked the row of every worker retirement terminated
+while any unrelated file was refused: process dead, row `running`, slot held for ever.
+
+What is **not** guarded is a file that could not be parsed — a truncated read, which is the
+ordinary result of reading while the worker writes. Treating that as blindness would switch the
+liveness sweep off at random on a healthy busy machine. The residual exposure is one item on one
+pass, `unreadable` appears in the pass summary, and `resume` recovers it.
 
 ## Disk
 

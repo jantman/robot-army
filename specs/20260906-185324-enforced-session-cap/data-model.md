@@ -16,7 +16,9 @@ Everything else in the file is unchanged. The value comes from
 is therefore constant for the life of the process.
 
 **Read rule.** A reader accepts the value only when it is an `int` (and not a `bool`) of at
-least 1. Absent, wrongly typed, or out of range is *not published*, never *a cap of zero*.
+least 1, **and** the heartbeat's `pid` is the pid in the lock file. Absent, wrongly typed, or
+out of range is *not published*, never *a cap of zero*; a pid that does not match the lock
+holder means the file belongs to a daemon that has already exited.
 
 ## `CapacitySnapshot` — the cap a fraction is reported against
 
@@ -38,15 +40,16 @@ Derived:
 
 ## Resolution
 
-`health.published_cap(report, *, running) -> int | None` is the only place that turns a
-health report into a cap.
+`health.published_cap(report, *, running, lock_holder) -> int | None` is the only place that
+turns a health report into a cap.
 
-| Daemon holds the lock | Heartbeat readable | Cap field usable | Result |
-|---|---|---|---|
-| no | — | — | `None` — nothing is enforcing anything |
-| yes | no | — | `None` — genuinely unknown |
-| yes | yes (fresh **or** stale) | no | `None` — not published |
-| yes | yes (fresh **or** stale) | yes | that integer |
+| Daemon holds the lock | Heartbeat readable | Its pid is the lock holder's | Cap field usable | Result |
+|---|---|---|---|---|
+| no | — | — | — | `None` — nothing is enforcing anything |
+| yes | no | — | — | `None` — genuinely unknown |
+| yes | yes | no, or either pid unreadable | — | `None` — a restart is in progress, or cannot be ruled out |
+| yes | yes (fresh **or** stale) | yes | no | `None` — not published |
+| yes | yes (fresh **or** stale) | yes | yes | that integer |
 
 `capacity.snapshot(conn, *, config, enforced_cap=None, ...)` turns that into the two fields
 above:
@@ -72,12 +75,17 @@ chrome render from:
 | `configured_cap` | new | Present and non-`None` only when this process's configuration disagrees with the cap in force. |
 | `cap_disagreement` | new | The sentence, or `null`. So a consumer never has to build prose from two integers. |
 
-`robot-army capacity --json` carries the same three keys, since it assembles its own document.
+`robot-army capacity` assembles its own document carrying the same three keys. It has no
+`--json` flag on the CLI — `status --json` is where that payload is read — but the two must
+not be free to disagree.
 
 ## What does not change
 
-- `dispatch` and `ordering` take their cap from the snapshot exactly as before, and the
-  daemon's snapshot is built with no `enforced_cap`, so its numbers are identical.
+- `ordering` takes its cap from the snapshot exactly as before, and the daemon's snapshot is
+  built with no `enforced_cap`, so the daemon's numbers are identical.
+- `dispatch.check_launch_gate` gains the same optional `enforced_cap`, threaded through
+  `dispatch_item`/`_dispatch_item`, so a gate running outside the daemon measures against the
+  same number the surfaces report. The daemon passes nothing and is unchanged.
 - No table, no column, no migration, no configuration key.
 - The per-repository limits (`[repos.*] max_sessions`) are untouched: they are enforced by
   the same daemon from the same file and are not reported as a fraction anywhere.

@@ -739,7 +739,11 @@ def _enforced_cap(ctx: Context) -> int | None:
     report = health.check(
         ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
     )
-    return health.published_cap(report, running=daemon_mod.is_locked(ctx.layout.lock_path))
+    return health.published_cap(
+        report,
+        running=daemon_mod.is_locked(ctx.layout.lock_path),
+        lock_holder=daemon_mod.read_lock_holder(ctx.layout.lock_path),
+    )
 
 
 def _capacity_dict(snap: Any, order: str) -> dict[str, Any]:

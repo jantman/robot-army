@@ -1584,7 +1584,11 @@ def handle(app: WebApp, request: Request) -> Response:
         capacity = capacity_mod.snapshot(
             ctx.conn,
             config=ctx.config,
-            enforced_cap=health.published_cap(report, running=running),
+            enforced_cap=health.published_cap(
+                report,
+                running=running,
+                lock_holder=daemon_mod.read_lock_holder(ctx.layout.lock_path),
+            ),
         )
         chrome = pages.chrome(
             ctx,

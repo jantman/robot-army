@@ -8,18 +8,28 @@ know is here; nothing derives its own answer from the two integers.
 Inputs: does a daemon hold the lock, can its heartbeat be read, does that heartbeat carry a
 usable cap, and what is in the reading process's own configuration.
 
-| Lock held | Heartbeat | Published cap | Cap reported | Disagreement reported |
-|---|---|---|---|---|
-| no | — | — | configured | never |
-| yes | unreadable / absent | — | configured | **never** (§4) |
-| yes | readable, fresh | absent or unusable | configured | never |
-| yes | readable, fresh | *n* = configured | *n* | no |
-| yes | readable, fresh | *n* ≠ configured | ***n*** | **yes** |
-| yes | readable, **stale** | *n* ≠ configured | ***n*** | **yes** |
+| Lock held | Heartbeat | Written by the holder | Published cap | Cap reported | Disagreement |
+|---|---|---|---|---|---|
+| no | — | — | — | configured | never |
+| yes | unreadable / absent | — | — | configured | **never** (§4) |
+| yes | readable | **no**, or unknowable | — | configured | never |
+| yes | readable, fresh | yes | absent or unusable | configured | never |
+| yes | readable, fresh | yes | *n* = configured | *n* | no |
+| yes | readable, fresh | yes | *n* ≠ configured | ***n*** | **yes** |
+| yes | readable, **stale** | yes | *n* ≠ configured | ***n*** | **yes** |
 
 A stale heartbeat from the process holding the lock is authoritative about the cap, for the
 reason it is authoritative about the effect level: a daemon's cap is fixed when it starts and
 cannot change while it runs.
+
+**"Written by the holder" is checked, not assumed.** `run_daemon` acquires the lock and then
+wires boundaries, checks preconditions and runs `startup` — seconds of network work — before
+its first beat, and nothing unlinks the previous daemon's heartbeat. So for the length of a
+restart the lock is held by the new process while the newest heartbeat on disk is the dead
+one's. Both files carry their writer's pid; they are compared, and anything but a match — a
+mismatch, an unreadable lock file, a heartbeat with no pid — resolves to *not published*.
+Without it, lowering the cap and restarting would report the old higher number on every
+surface and admit launches up to it, which is an over-dispatch.
 
 "Usable" means: an `int`, not a `bool`, at least 1. Anything else is *not published*.
 

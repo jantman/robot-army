@@ -142,6 +142,8 @@ a backgrounded agent.
 - [X] T039 **The remedy was unactionable from a terminal.** The shared sentence will not say which process is behind, because on the web either can be — but a command read the file milliseconds ago, so the daemon necessarily is. `operations.FRESH_READER_REMEDY` adds that one line to `capacity` and `status` without the shared sentence growing a second wording
 - [X] T040 Corrected the spec's false assumption ("the daemon is the sole enforcer"), FR-005, FR-007 and a new FR-011; added [research.md](research.md) R8a and the plan's post-implementation amendment; added §6 to [contracts/enforced-cap.md](contracts/enforced-cap.md); and fixed the over-broad "it never refuses anything" claim in `docs/guide/3-selection.md`, `docs/guide/operating.md`, `src/robot_army/web/html.py` and a test docstring
 
+- [X] T041 **A dead daemon's heartbeat was trusted during a restart** (raised by the CI review on PR #158). `is_locked` proves only that *some* process holds the lock; `run_daemon` acquires it and then wires boundaries, checks preconditions and runs `startup` — seconds of network work — before its first beat, and nothing unlinks the old heartbeat. So lowering the cap 7→2 and restarting left every surface reporting 7 and the launch gate admitting sessions up to 7 against a daemon about to enforce 2. `health.published_cap` now takes `lock_holder` and returns `None` unless the heartbeat's own pid matches it. Four tests in `tests/unit/test_health.py`; the decision tables in [contracts/enforced-cap.md](contracts/enforced-cap.md) §1 and [data-model.md](data-model.md) gain the row
+
 ---
 
 ## Dependencies & Execution Order

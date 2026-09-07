@@ -158,7 +158,9 @@ def check(
     )
 
 
-def published_cap(report: HealthReport, *, running: bool) -> int | None:
+def published_cap(
+    report: HealthReport, *, running: bool, lock_holder: str | None
+) -> int | None:
     """The session cap the *running* daemon says it is enforcing, or ``None`` (issue #30).
 
     Issue #30 is a web header reading ``6/5`` — over capacity, apparently, so nothing can
@@ -173,20 +175,33 @@ def published_cap(report: HealthReport, *, running: bool) -> int | None:
     what some other process believes. So the cap travels on the heartbeat, and this is the
     one function that reads it.
 
-    ``running`` is a parameter rather than a lock probe taken here, for a mechanical reason
-    and a design one. ``daemon`` imports this module, so importing it back would be a cycle;
-    and every caller has already probed the lock for the effect level, so taking a second
-    one would let the two halves of one page answer differently across a daemon starting
-    mid-request. Its two values mean:
+    ``running`` and ``lock_holder`` are parameters rather than probes taken here, for a
+    mechanical reason and a design one. ``daemon`` imports this module, so importing it back
+    would be a cycle; and every caller has already probed the lock for the effect level, so
+    taking a second one would let the two halves of one page answer differently across a
+    daemon starting mid-request. Together they mean:
 
-    * **No daemon holds the lock.** ``None``. Nothing is enforcing anything, and deferring
-      to a heartbeat left by a dead process would be the same surprise in the other
-      direction — the reasoning ``pages.effect_mismatch`` already records for the level.
-    * **A daemon holds the lock.** Its heartbeat decides, *including a stale one*. A
-      daemon's cap, like its effect level, cannot change while it runs, so a stale heartbeat
-      from the process currently holding the lock still names that process's cap correctly.
-      Staleness means a tick is running long — which is when the machine is busy, which is
-      exactly when the fraction is being read.
+    * **No daemon holds the lock** (``running`` false). ``None``. Nothing is enforcing
+      anything, and deferring to a heartbeat left by a dead process would be the same
+      surprise in the other direction — the reasoning ``pages.effect_mismatch`` already
+      records for the level.
+    * **A daemon holds the lock, and wrote this heartbeat.** Its cap decides, *including
+      from a stale heartbeat*. A daemon's cap, like its effect level, cannot change while it
+      runs, so a stale heartbeat from the process currently holding the lock still names
+      that process's cap correctly. Staleness means a tick is running long — which is when
+      the machine is busy, which is exactly when the fraction is being read.
+    * **A daemon holds the lock and somebody else wrote this heartbeat.** ``None``.
+
+    **That third case is a real window, not a hypothetical**, and it is why the pid is
+    compared at all rather than the lock being taken as proof. ``run_daemon`` acquires the
+    lock and then wires boundaries, checks preconditions and runs ``startup`` — network work,
+    seconds of it — before the first beat, and nothing unlinks the previous daemon's
+    heartbeat. So for the length of a restart, ``is_locked`` is true while the newest
+    heartbeat on disk belongs to the *dead* process. Lower the cap from 7 to 2 and restart,
+    and without this check every surface would report 7 and, worse, the launch gate would
+    admit sessions up to 7 against a daemon about to enforce 2. Both files carry their
+    writer's pid, so the link is checkable; unreadable or mismatched, this fails to "use your
+    own configuration", which is what it does for every other doubt.
 
     A value is believed only when it could have come from the loader: an ``int`` (``bool``
     is an ``int`` in Python and is not one here) of at least 1, which is the floor
@@ -198,6 +213,12 @@ def published_cap(report: HealthReport, *, running: bool) -> int | None:
         return None
     beat = report.heartbeat
     if not beat:
+        return None
+    # The heartbeat must be the lock holder's own. Compared as text because the lock file
+    # holds a line of it and the heartbeat holds a number, and a pid that cannot be read
+    # from either side is a doubt rather than a match.
+    holder = (lock_holder or "").strip()
+    if not holder or str(beat.get("pid")) != holder:
         return None
     raw = beat.get("max_concurrent_sessions")
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:

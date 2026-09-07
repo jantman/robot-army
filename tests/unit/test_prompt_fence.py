@@ -68,8 +68,10 @@ def issue(**overrides: object) -> Issue:
     return Issue(**fields)  # type: ignore[arg-type]
 
 
-def compose(**overrides: object) -> str:
-    return prompt.compose(issue(**overrides), repo_key=REPO, branch=BRANCH)
+def compose(*, delivery: prompt.Delivery = prompt.DELIVERY_PUSH, **overrides: object) -> str:
+    return prompt.compose(
+        issue(**overrides), repo_key=REPO, branch=BRANCH, delivery=delivery
+    )
 
 
 OPENING_SHAPE = re.compile(rf"<<<{prompt.FENCE_LABEL} ([0-9a-f]{{16}})>>>")
@@ -156,7 +158,7 @@ def test_the_issues_own_text_is_inside_the_fence_and_the_systems_is_outside() ->
     assert REPO in before
     assert BRANCH in before
     assert URL in before
-    assert prompt.DELIVERY in before
+    assert prompt.DELIVERY_PUSH.text in before
 
 
 def test_the_preamble_says_the_contents_are_data_and_not_instructions() -> None:

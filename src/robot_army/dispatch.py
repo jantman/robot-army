@@ -690,6 +690,10 @@ def build_launch_plan(
         issue,
         repo_key=repo_key,
         branch=branch,
+        # Whichever form the wiring selected. This function does not ask why, and must not:
+        # the effect level is the one thing downstream of ``wire`` deliberately cannot see
+        # (issue #32, FR-009).
+        delivery=boundaries.delivery,
         instructions=instructions,
         speckit_block=block,
     )

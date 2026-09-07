@@ -27,6 +27,15 @@ Notifier             simulated   simulated   simulated    real
 
 Reads are always real (FR-052) — a dry run that fakes its reads tells you nothing about
 eligibility, which is the main thing you want to check.
+
+Issue #32 adds one more thing this module selects, and it is not a boundary: the *form of the
+delivery block* the dispatched session is told to work by. The ladder governs the seams above
+and structurally cannot govern the session ``SessionHost`` launches — same user, same
+credentials, no sandbox — which is how a ``no-remote`` run came to push a branch to GitHub
+while the writer beside it simulated its own comment. Below ``live`` the session is now *asked*
+to keep its work local. Asking is not enforcing, and the documents that describe the ladder say
+so; but the asking has to be selected somewhere, and this is the only place allowed to know
+which level is in force.
 """
 
 from __future__ import annotations
@@ -35,6 +44,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from robot_army import prompt as prompt_mod
 from robot_army.boundaries import (
     CardSourceReader,
     CardSourceWriter,
@@ -126,6 +136,24 @@ REAL_AT: dict[str, frozenset[EffectLevel]] = {
 }
 
 
+def delivery_for(level: EffectLevel) -> prompt_mod.Delivery:
+    """Which delivery block a session dispatched at ``level`` is handed (issue #32).
+
+    ``live`` is told to push its branch and open a pull request; every level below it is told
+    to commit its work and leave it in the worktree. See
+    ``specs/20260907-063858-effect-aware-delivery/contracts/delivery-forms.md``.
+
+    Deliberately its own line rather than ``is_real("issue_writer", level)`` spelled
+    differently. The two agree today and for the same reason — a push, a pull request and a
+    comment are all writes to the same remote — but they answer different questions. One is
+    "does robot-army's own write go out"; the other is "is the session asked to make one".
+    Deriving the second from the first would mean a future level that changed either answer
+    silently changed the other, and the second is prose reaching a real session holding real
+    credentials. It costs one line either way; this way the line is a decision.
+    """
+    return prompt_mod.DELIVERY_PUSH if level is EffectLevel.LIVE else prompt_mod.DELIVERY_LOCAL
+
+
 def is_real(boundary: str, level: EffectLevel) -> bool:
     try:
         return level in REAL_AT[boundary]
@@ -165,9 +193,16 @@ class Boundaries:
     simulated_session_host: SessionHost
     display: Display
     notifier: Notifier
+    #: Not an implementation, and the only member of this set that is prose rather than a
+    #: seam. It is here because it is the same *kind* of thing — one per-level selection,
+    #: made once, at startup, by the only module permitted to ask what the level is — and
+    #: because the alternative is a caller reading ``boundaries.level`` and deciding for
+    #: itself, which is the scattered ``if dry_run:`` FR-053 exists to prevent.
+    delivery: prompt_mod.Delivery
 
     def describe(self) -> dict[str, str]:
-        """Which implementation each boundary got, for the startup log (FR-057)."""
+        """Which implementation each boundary got, for the startup log (FR-057) — plus the
+        delivery form, which is not one but is the other thing this wiring decides."""
         return {
             # ``NoneType`` for the board pair on an installation with no ``[trello]``
             # section, which is exactly what FR-001 means by inert and is worth seeing in
@@ -193,6 +228,11 @@ class Boundaries:
                 "simulated_session_host",
                 "display",
                 "notifier",
+                # Not a boundary, and named here anyway: the startup record is where a reader
+                # finds out what every session this daemon launches will be told about pushing,
+                # and that is exactly the question issue #32 was filed about. ``Delivery``
+                # answers ``describe_name`` with ``push`` or ``local``.
+                "delivery",
             )
         }
 
@@ -305,4 +345,5 @@ def wire(
         simulated_session_host=simulated_host,
         display=display,
         notifier=notifier,
+        delivery=delivery_for(level),
     )

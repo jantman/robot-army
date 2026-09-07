@@ -64,6 +64,48 @@ Four things worth knowing:
   unreliable, fix the registry.
 - **Running work is never touched to reclaim capacity.** Lowering the cap under running
   sessions withholds new dispatch and leaves everything in flight alone.
+- **A changed cap takes effect when the daemon restarts, and not before.** The daemon reads
+  the file once at startup and never rereads it, so the cap it is enforcing is whatever the
+  file said the last time `systemctl --user restart robot-army.service` ran.
+
+### Which cap you are being shown
+
+Every surface reports the count against **the cap the running daemon is enforcing**, not
+against the file the reporting process happens to have read. The daemon publishes it on its
+heartbeat, and `status`, `capacity` and every web view take it from there.
+
+This matters because the two can differ in both directions, and the number is the one used
+to answer "why is nothing dispatching?":
+
+- Raise the cap and restart the daemon only — the documented go-live procedure — and a
+  long-running `robot-army serve` is still holding the old, lower number. It used to print
+  `6/5`: full and then some, when the truth was `6/7` with two slots free (issue #30).
+- Raise the cap and restart *nothing*, and a freshly-run `robot-army capacity` reads the new
+  number out of the file while the daemon is still enforcing the old one. The fresh reading
+  is the wrong one, and it looks the most trustworthy.
+
+When the two disagree, the surface says so and names both:
+
+```
+SESSION CAP MISMATCH: the running daemon is enforcing a cap of 7, and this process is
+configured for 5. The cap shown is the daemon's, because the daemon is what enforces it.
+One of the two has been running since before the configuration changed — restart that one
+and they will agree.
+```
+
+The disagreement itself refuses nothing — unlike an effect-level mismatch, which does. It
+just means one of the two processes needs restarting. Which one, the notice cannot tell you:
+neither knows when the other read its configuration. A terminal command *can* narrow it and
+does — it read the file a moment ago, so the daemon is the one behind.
+
+The cap is still enforced, and by more than the daemon: pressing *Resume* on the web, or
+typing `resume` or `restart`, runs a launch gate inside that process. Those gates measure
+against the same enforced cap the surfaces report, so what a page shows, what it offers and
+what it refuses are one number. A gate left on the reader's own cap would refuse a launch the
+daemon would allow — or permit one past what the daemon is enforcing.
+
+With no daemon running, or with nothing readable from its heartbeat, each surface falls back
+to its own configured cap and says nothing — there is then nothing to disagree with.
 
 `repo-priority` drains higher-priority repositories first and breaks ties oldest-first.
 There is deliberately no aging: a low-priority repository can wait indefinitely while a

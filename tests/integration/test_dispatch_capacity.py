@@ -1716,3 +1716,74 @@ def test_a_global_refusal_still_ends_the_dispatcher_pass(
     monkeypatch.setattr(dispatch, "check_launch_gate", refuse)
 
     assert run(conn, audit, config, layout, tmp_path, machine) == 0
+
+
+# -- the daemon does not read its own heartbeat (issue #30) -----------------
+
+
+def test_a_heartbeat_naming_another_cap_does_not_move_the_dispatch_line(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """Issue #30 made every *read* surface defer to the daemon's published cap. Dispatch is
+    not a read surface, and this is the test that says so.
+
+    The daemon is the authority. Asking the file it wrote what it thinks would be circular,
+    would put a file read in the dispatch path, and would make a safety decision from a
+    value that originates outside the process — one a stale or hand-edited heartbeat could
+    move. So a heartbeat naming a cap of nine changes nothing about a daemon configured for
+    one.
+    """
+    from robot_army import health
+
+    config = capped_at(config, 1, per_repo=5)
+    health.write_heartbeat(
+        layout.heartbeat_path,
+        effect_level="live",
+        activity="idle",
+        cycles=1,
+        max_concurrent_sessions=9,
+    )
+    first = ready_item(conn, config, issue_number=1)
+    second = ready_item(conn, config, issue_number=2)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 1, (
+        "exactly one dispatch, as the daemon's own cap of one allows"
+    )
+    states = [db.get_work_item(conn, i).state for i in (first, second)]
+    assert WorkItemState.READY in states, "the second item is still waiting for a slot"
+
+
+def test_the_planners_snapshot_reports_the_daemons_own_cap(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """The value-level companion: a snapshot taken on the dispatch path carries the
+    daemon's configured cap and reports no disagreement, whatever any heartbeat says."""
+    from robot_army import health
+
+    registry, proc = machine
+    config = capped_at(config, 2)
+    health.write_heartbeat(
+        layout.heartbeat_path,
+        effect_level="live",
+        activity="idle",
+        cycles=1,
+        max_concurrent_sessions=9,
+    )
+
+    snap = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
+    assert snap.global_cap == 2
+    assert snap.configured_cap is None
+    assert snap.cap_disagreement is None
+
+
+def test_dispatch_is_unchanged_with_no_heartbeat_at_all(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """A daemon caught before its first beat, or a heartbeat file removed underneath one."""
+    config = capped_at(config, 1, per_repo=5)
+    if layout.heartbeat_path.exists():
+        layout.heartbeat_path.unlink()
+    ready_item(conn, config, issue_number=1)
+    ready_item(conn, config, issue_number=2)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 1

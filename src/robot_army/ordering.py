@@ -547,5 +547,9 @@ def repo_capacity(
     you get" (US2 AS4), which is the difference between a limit the author can raise in a
     file they already have and one they would have to discover.
     """
-    cap, explicit = config.effective_repo_cap(repo_key)
+    # Clamped by the cap the snapshot is reporting against rather than by the one in this
+    # process's configuration (issue #30). For the daemon the two are the same value; for a
+    # long-running interface they need not be, and a per-repository limit computed from a
+    # cap nobody is enforcing would explain a held row with a number the page is not showing.
+    cap, explicit = config.effective_repo_cap(repo_key, ceiling=capacity.global_cap)
     return capacity.per_repo.get(repo_key, 0), cap, explicit

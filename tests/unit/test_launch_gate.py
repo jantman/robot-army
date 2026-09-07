@@ -813,3 +813,84 @@ def test_the_gate_is_the_only_thing_force_reaches(conn, config, audit, idle_mach
         registry_dir=registry,
         proc_root=proc,
     )
+
+
+# -- the gate measures against the enforced cap (issue #30) -----------------
+
+
+def test_the_gate_defers_to_the_daemons_cap_rather_than_this_processs(
+    conn, config, audit, layout, idle_machine
+):
+    """A refusal is a surface too, and it was the one still showing the stale number.
+
+    Issue #30's own scenario, one press further on: the cap is raised 5→7, the daemon is
+    restarted and `serve` is not. The header now correctly reads `6/7` and offers *Resume*
+    — and without this the press came back "6 of 5 sessions running", the very number the
+    header no longer shows, from a process that is not the one enforcing anything.
+    """
+    registry, proc = idle_machine
+    live_session(conn, issue_number=90)
+    live_session(conn, repo_key="other", issue_number=91)
+
+    gate(
+        conn,
+        item(conn),
+        config=capped(config, machine=2, per_repo=9),
+        audit=audit,
+        enforced_cap=4,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+
+    assert records(layout, audit, "dispatch.refused") == [], (
+        "the daemon allows four; this process's own two must not refuse the launch"
+    )
+
+
+def test_the_gate_tightens_to_the_daemons_cap_when_this_process_is_the_generous_one(
+    conn, config, audit, layout, idle_machine
+):
+    """The other direction, and the one that matters for the machine rather than the page.
+
+    A process holding a higher cap than the daemon would otherwise launch past the limit
+    the daemon is enforcing — an over-dispatch, which is the harmful direction: it
+    oversubscribes the one subscription the cap exists to protect.
+    """
+    registry, proc = idle_machine
+    live_session(conn, issue_number=90)
+    live_session(conn, repo_key="other", issue_number=91)
+
+    with pytest.raises(dispatch.DispatchRefused) as caught:
+        gate(
+            conn,
+            item(conn),
+            config=capped(config, machine=9, per_repo=9),
+            audit=audit,
+            enforced_cap=2,
+            registry_dir=registry,
+            proc_root=proc,
+        )
+
+    assert caught.value.hold is HoldReason.GLOBAL_CAP
+    assert "2 of 2 sessions running" in caught.value.detail
+
+
+def test_the_gate_uses_this_processs_cap_when_no_enforced_one_is_given(
+    conn, config, audit, layout, idle_machine
+):
+    """The daemon's own call, unchanged: it is the authority and consults nothing."""
+    registry, proc = idle_machine
+    live_session(conn, issue_number=90)
+    live_session(conn, repo_key="other", issue_number=91)
+
+    with pytest.raises(dispatch.DispatchRefused) as caught:
+        gate(
+            conn,
+            item(conn),
+            config=capped(config, machine=2, per_repo=9),
+            audit=audit,
+            registry_dir=registry,
+            proc_root=proc,
+        )
+
+    assert "2 of 2 sessions running" in caught.value.detail

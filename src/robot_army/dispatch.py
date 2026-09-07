@@ -217,6 +217,7 @@ def check_launch_gate(
     item: Any,
     surface: str,
     force: bool = False,
+    enforced_cap: int | None = None,
     registry_dir: Path | None = None,
     proc_root: Path | None = None,
 ) -> None:
@@ -254,6 +255,14 @@ def check_launch_gate(
         capacity=capacity.snapshot(
             conn,
             config=config,
+            # Which cap this refusal is measured against (issue #30). ``None`` — the
+            # daemon's call — means its own configuration, because it is the authority.
+            # Every other caller runs in a process that may have read the file at a
+            # different time from the daemon, and a gate measuring against *its* number
+            # refuses a launch the daemon would allow while the page above the button
+            # shows the daemon's. That is the reported-versus-enforced split this feature
+            # exists to close, surfacing in a refusal instead of in a header.
+            enforced_cap=enforced_cap,
             audit=audit,
             registry_dir=registry_dir,
             proc_root=proc_root,
@@ -740,6 +749,7 @@ def dispatch_item(
     resume_session_id: str | None = None,
     skip_gates: bool = False,
     force: bool = False,
+    enforced_cap: int | None = None,
     surface: str = "dispatcher",
 ) -> bool:
     """Prepare and launch one item. Returns ``True`` when it reached ``active``.
@@ -773,6 +783,7 @@ def dispatch_item(
             proc_root=proc_root,
             resume_session_id=resume_session_id,
             skip_gates=skip_gates,
+            enforced_cap=enforced_cap,
             force=force,
             surface=surface,
         )
@@ -922,6 +933,7 @@ def _dispatch_item(
     resume_session_id: str | None = None,
     skip_gates: bool = False,
     force: bool = False,
+    enforced_cap: int | None = None,
     surface: str = "dispatcher",
 ) -> bool:
     """The launch itself. Always called through ``dispatch_item``, never directly."""
@@ -967,6 +979,7 @@ def _dispatch_item(
         item=item,
         surface=surface,
         force=force,
+        enforced_cap=enforced_cap,
         registry_dir=registry_dir,
         proc_root=proc_root,
     )

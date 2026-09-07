@@ -316,7 +316,15 @@ def status(
     # calls this twice, once per section — and each snapshot reads the session registry and
     # enumerates ``/proc``, so a page was paying for the same observation repeatedly.
     snap = capacity or capacity_mod.snapshot(
-        ctx.conn, config=ctx.config, registry_dir=registry_dir, proc_root=proc_root
+        ctx.conn,
+        config=ctx.config,
+        # The cap the running daemon is enforcing, not the one in the file this process just
+        # read (issue #30). Both directions are reachable and a freshly-started command is
+        # the more misleading of the two: it looks maximally trustworthy while reporting a
+        # limit nothing is applying.
+        enforced_cap=_enforced_cap(ctx),
+        registry_dir=registry_dir,
+        proc_root=proc_root,
     )
     queue = ordering_mod.plan(ctx.conn, config=ctx.config, capacity=snap)
 
@@ -384,6 +392,8 @@ def status(
         )
     )
     result.say(f"capacity     : {snap.describe()}")
+    if snap.cap_disagreement:
+        result.say(f"             : {FRESH_READER_REMEDY}")
     result.say(f"order        : {ctx.config.dispatch.order}")
     _say_holds_summary(result, ctx)
     result.say(f"database     : {ctx.layout.db_path} (schema {SCHEMA_VERSION})")
@@ -479,9 +489,13 @@ def capacity(
     for a check that ran and did not pass.
     """
     result = Result()
+    # The cap the daemon is enforcing (issue #30). The terminal is fixed alongside the web
+    # because the issue's reproduction is two surfaces printing different fractions seconds
+    # apart; correcting one would leave them free to disagree.
     snap = capacity_mod.snapshot(
         ctx.conn,
         config=ctx.config,
+        enforced_cap=_enforced_cap(ctx),
         audit=ctx.audit,
         registry_dir=registry_dir,
         proc_root=proc_root,
@@ -494,6 +508,11 @@ def capacity(
         "degraded": snap.degraded,
         "total": snap.total,
         "global_cap": snap.global_cap,
+        # Non-null only when this process's configuration disagrees with the cap in force,
+        # so a consumer detects a disagreement by reading one key rather than comparing two
+        # numbers and deciding for itself when there is anything to say (issue #30).
+        "configured_cap": snap.configured_cap,
+        "cap_disagreement": snap.cap_disagreement,
         "ours": len(snap.ours),
         "others": snap.others,
         # Unchanged in key and in meaning: the live-session count per repository. Anything
@@ -505,14 +524,24 @@ def capacity(
         "reason": snap.reason,
     }
 
+    # Said on both paths below, and before anything else on each: a reader who is about to
+    # take a number away from this command should learn first that it is not the number in
+    # the file they were just editing.
+    def say_cap_disagreement() -> None:
+        if snap.cap_disagreement:
+            result.say(f"cap          : {snap.cap_disagreement}")
+            result.say(f"             : {FRESH_READER_REMEDY}")
+
     if not snap.observable:
         result.code = EXIT_CHECK_FAILED
         result.say(f"capacity     : UNOBSERVABLE — {snap.reason}")
+        say_cap_disagreement()
         result.say("dispatch     : withheld until capacity can be observed again")
         result.say(f"order        : {order}")
         return result
 
     result.say(f"capacity     : {snap.total} of {snap.global_cap} sessions running")
+    say_cap_disagreement()
     # FR-003. The split is the actionable half: "two of these are mine" tells the author to
     # close one of their own, and "two are the daemon's" tells them to wait.
     result.say(f"  ours       : {len(snap.ours)}")
@@ -660,7 +689,7 @@ def _repo_settings(ctx: Context, snap: Any) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     for key in sorted(set(repos_mod.known(ctx.conn)) | set(snap.per_repo)):
-        cap, cap_explicit = ctx.config.effective_repo_cap(key)
+        cap, cap_explicit = ctx.config.effective_repo_cap(key, ceiling=snap.global_cap)
         wait, wait_explicit = ctx.config.effective_wait_for_merge(key)
         ordering_on, ordering_explicit = ctx.config.effective_project_ordering(key)
         rows.append(
@@ -678,13 +707,61 @@ def _repo_settings(ctx: Context, snap: Any) -> list[dict[str, Any]]:
     return rows
 
 
+#: What a command knows that the shared sentence deliberately does not (issue #30).
+#:
+#: ``CapacitySnapshot.cap_disagreement`` will not say which of the two processes is behind,
+#: because on the web either one can be. A command cannot be: it loaded the configuration
+#: milliseconds ago, so if the two differ it is the daemon that has been running since
+#: before the change. Saying "restart that one" to someone whose process has already exited
+#: is a remedy they cannot act on, so the surface that *can* narrow it does — without the
+#: shared sentence growing a second wording.
+FRESH_READER_REMEDY = (
+    "This command read the configuration a moment ago, so the daemon is the one behind: "
+    "restart it to apply the cap in the file."
+)
+
+
+def _enforced_cap(ctx: Context) -> int | None:
+    """The cap the running daemon is enforcing, for a process that is not the daemon.
+
+    Issue #30. Every surface outside the daemon — a terminal command, the web, a worker
+    thread about to launch — asks this rather than trusting the configuration it loaded,
+    because the daemon is what enforces a cap and its own may have been read at a different
+    time. ``None`` means no daemon holds the lock or it published nothing usable, in which
+    case the caller's own configuration is the best answer there is.
+
+    Takes its own reading rather than accepting one. Its callers are either short-lived
+    commands, where there is nothing to share, or the launch gate, where the reading being
+    as late as possible is the point — that gate's documented character is that the check
+    at the launch decides. ``web.handle`` deliberately does **not** use this: it holds one
+    reading for the whole request so that the two halves of a page cannot disagree.
+    """
+    report = health.check(
+        ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+    )
+    return health.published_cap(
+        report,
+        running=daemon_mod.is_locked(ctx.layout.lock_path),
+        lock_holder=daemon_mod.read_lock_holder(ctx.layout.lock_path),
+    )
+
+
 def _capacity_dict(snap: Any, order: str) -> dict[str, Any]:
-    """The capacity summary both the terminal and the web chrome render."""
+    """The capacity summary both the terminal and the web chrome render.
+
+    ``global_cap`` is **the cap in force** (issue #30) — the running daemon's when it could
+    be learned, this process's own otherwise — so a consumer that reads only that key, which
+    is every consumer written before this, gets the right number without being changed.
+    ``configured_cap`` is non-``None`` only when this process disagrees with it, so detecting
+    a disagreement is reading one key rather than comparing two numbers.
+    """
     return {
         "observable": snap.observable,
         "degraded": snap.degraded,
         "total": snap.total,
         "global_cap": snap.global_cap,
+        "configured_cap": snap.configured_cap,
+        "cap_disagreement": snap.cap_disagreement,
         "ours": len(snap.ours),
         "others": snap.others,
         "per_repo": dict(sorted(snap.per_repo.items())),
@@ -2904,6 +2981,10 @@ def resume(
             proc_root=proc_root,
             resume_session_id=previous.session_id,
             force=force,
+            # The gate measures against what the daemon is enforcing, not against what this
+            # process read (issue #30) — otherwise a page reading `6/7` offers a button
+            # whose refusal says `6 of 5`.
+            enforced_cap=_enforced_cap(ctx),
             surface=surface,
         )
     except dispatch.DispatchRefused as exc:
@@ -2961,6 +3042,7 @@ def restart(
             registry_dir=registry_dir,
             proc_root=proc_root,
             force=force,
+            enforced_cap=_enforced_cap(ctx),
             surface=surface,
         )
     except dispatch.DispatchRefused as exc:

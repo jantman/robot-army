@@ -2,8 +2,15 @@
 
 This module observes and nothing else. It reads the live session registry, falls back to
 ``/proc`` when the registry is unusable, and returns a :class:`CapacitySnapshot` saying how
-many worker sessions are running, how many of them the system started, and how many are
-running in each repository. It does not decide what to do about any of that.
+many worker sessions are running, how many of them the system started, how many are running
+in each repository, and **which cap that count is being reported against**. It does not
+decide what to do about any of that.
+
+The last of those is issue #30, and it is an observation rather than a setting: the cap in
+force is whatever the running daemon is enforcing, which is not necessarily what the file
+this process read at startup says. A caller that has read the daemon's heartbeat passes the
+cap it published; one that has not gets its own configuration and is told nothing, because
+there is then nothing to tell.
 
 The split from :mod:`robot_army.ordering` is the plan's Structure Decision, and it is a
 split by *input*: this module's input is the machine, ``ordering``'s input is the
@@ -69,7 +76,16 @@ class CapacitySnapshot:
     ours: tuple[str, ...]
     #: How many sessions are running that this system did not start. A count, never a handle.
     others: int
+    #: **The cap in force**: the running daemon's published cap when one could be learned,
+    #: and this process's own configured cap otherwise. Every fraction rendered from this
+    #: snapshot, ``at_capacity``, and every ``ordering.plan`` built on it use it, so a
+    #: surface cannot show one number and explain itself with another (issue #30).
     global_cap: int
+    #: This process's own configured cap, **present only when it differs from the cap in
+    #: force**. ``None`` means there is nothing to report — either the two agree, or no
+    #: enforced cap could be learned. Its presence *is* the disagreement, so no consumer
+    #: compares two integers and no two consumers can disagree about the answer.
+    configured_cap: int | None = None
     #: ``repo_key`` → live sessions in that repository. Only repositories the system
     #: started something in appear: an out-of-band session is not attributable to a
     #: repository, because the author's own clone is not under the worktree root.
@@ -81,10 +97,45 @@ class CapacitySnapshot:
     def at_capacity(self) -> bool:
         return self.total >= self.global_cap
 
+    @property
+    def cap_disagreement(self) -> str | None:
+        """The one sentence about a stale cap, or ``None`` (issue #30).
+
+        Built here, once, and rendered verbatim by the terminal and the web. Two surfaces
+        each composing this from two integers is how they come to word it differently, or
+        to disagree about when there is anything to say — which is the class of defect this
+        whole feature exists to remove.
+
+        **It does not say which of the two processes is stale, because it cannot.** Both
+        directions are reachable and their remedies are opposite: a long-running interface
+        in front of a restarted daemon needs the interface restarted, while an edited file
+        and a daemon nobody restarted needs the daemon. Nothing here can tell those apart —
+        neither process knows when the other read its configuration — and a confident wrong
+        instruction would send the reader to restart the process that was already right.
+        """
+        if self.configured_cap is None:
+            return None
+        return (
+            f"SESSION CAP MISMATCH: the running daemon is enforcing a cap of "
+            f"{self.global_cap}, and this process is configured for {self.configured_cap}. "
+            "The cap shown is the daemon's, because the daemon is what enforces it. One of "
+            "the two has been running since before the configuration changed — restart that "
+            "one and they will agree."
+        )
+
     def describe(self) -> str:
         """One line, for a terminal summary or the web chrome."""
         if not self.observable:
-            return f"capacity unobservable: {self.reason}"
+            # The disagreement is appended here too. An uncountable machine does not make
+            # the *limit* unknowable, and ``robot-army status`` has no other channel for
+            # this — every other surface would report the stale cap while its one line
+            # said nothing.
+            unobservable = f"capacity unobservable: {self.reason}"
+            return (
+                f"{unobservable} — {self.cap_disagreement}"
+                if self.cap_disagreement
+                else unobservable
+            )
         parts = [
             f"{self.total}/{self.global_cap} sessions",
             f"{len(self.ours)} ours",
@@ -92,7 +143,12 @@ class CapacitySnapshot:
         ]
         if self.degraded:
             parts.append("degraded (/proc)")
-        return ", ".join(parts)
+        line = ", ".join(parts)
+        # Appended rather than kept for a second line, because every caller of this prints
+        # it as one: a reader who sees the fraction has seen the reason it is not the one
+        # in their editor.
+        disagreement = self.cap_disagreement
+        return f"{line} — {disagreement}" if disagreement else line
 
 
 def _registry_unusable(scan: sessions.RegistryScan) -> str | None:
@@ -118,6 +174,7 @@ def snapshot(
     conn: sqlite3.Connection,
     *,
     config: Config,
+    enforced_cap: int | None = None,
     audit: AuditLog | None = None,
     registry_dir: Path | None = None,
     proc_root: Path | None = None,
@@ -130,8 +187,16 @@ def snapshot(
     thousand times a day to say the same thing; the anomaly is raised either way, because
     that is what makes a persistent observation failure visible in
     ``robot-army anomalies`` rather than only to whoever happened to be looking.
+
+    ``enforced_cap`` is the cap the running daemon published, from
+    :func:`robot_army.health.published_cap`, and is what the fraction is reported against
+    when it is known (issue #30). ``None`` means *no daemon-published cap is available*, and
+    covers two callers that want the same thing: a read surface that could not learn one,
+    and **the daemon itself**, which must plan against its own configuration rather than
+    consult a file it wrote — that would be circular, would put a file read in the dispatch
+    path, and would make a safety decision from a value originating outside the process.
     """
-    cap = config.daemon.max_concurrent_sessions
+    cap, configured_cap = _resolve_cap(config, enforced_cap)
     scan = sessions.scan(registry_dir=registry_dir, proc_root=proc_root)
     degraded_reason = _registry_unusable(scan)
     degraded = degraded_reason is not None
@@ -153,6 +218,7 @@ def snapshot(
                 conn,
                 audit=audit,
                 cap=cap,
+                configured_cap=configured_cap,
                 reason=(
                     f"{degraded_reason}, and /proc enumeration returned no processes at "
                     "all — the enumeration failed rather than the machine being idle"
@@ -197,9 +263,22 @@ def snapshot(
         ours=ours,
         others=others,
         global_cap=cap,
+        configured_cap=configured_cap,
         per_repo=_per_repo(conn, live_rows),
         reason=None,
     )
+
+
+def _resolve_cap(config: Config, enforced_cap: int | None) -> tuple[int, int | None]:
+    """Which cap to report against, and the stale one to mention (issue #30).
+
+    One place, so that "is there a disagreement?" is decided once rather than by each
+    surface comparing two integers and reaching its own conclusion about when to say so.
+    """
+    configured = config.daemon.max_concurrent_sessions
+    if enforced_cap is None or enforced_cap == configured:
+        return configured, None
+    return enforced_cap, configured
 
 
 def _per_repo(conn: sqlite3.Connection, live_rows: list[Session]) -> dict[str, int]:
@@ -240,6 +319,7 @@ def _unobservable(
     *,
     audit: AuditLog | None,
     cap: int,
+    configured_cap: int | None,
     reason: str,
 ) -> CapacitySnapshot:
     """Record the failure and return the snapshot that withholds dispatch (R4, FR-007).
@@ -272,6 +352,10 @@ def _unobservable(
         ours=(),
         others=0,
         global_cap=cap,
+        # Carried even here. "How full is it?" being unanswerable does not make "what is the
+        # limit?" unanswerable, and a reader looking at an unobservable machine is not owed
+        # a stale cap on top of it.
+        configured_cap=configured_cap,
         per_repo={},
         reason=reason,
     )

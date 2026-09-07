@@ -655,6 +655,12 @@ class Daemon:
                 ingesting=self.ingesting,
                 failures=[c.name for c in self.board.failures] if self.board else [],
             ),
+            # Issue #30: what this daemon is actually enforcing, so no other process has to
+            # guess it from a configuration file it may have read at a different time. The
+            # value is trustworthy for the life of the heartbeat because it cannot move: the
+            # cap is fixed when this process loads its configuration and there is no path
+            # that rereads it, so even a heartbeat written an hour ago names the right one.
+            max_concurrent_sessions=self.config.daemon.max_concurrent_sessions,
             extra={"config": str(self.config.path)},
         )
 

@@ -733,7 +733,7 @@ class Config:
             return repo.project_ordering, True
         return self.dispatch.project_ordering, False
 
-    def effective_repo_cap(self, key: str) -> tuple[int, bool]:
+    def effective_repo_cap(self, key: str, *, ceiling: int | None = None) -> tuple[int, bool]:
         """How many sessions this repository may run, and whether the author said so.
 
         Returns ``(cap, explicit)``. The cap is the lower of the repository's own setting
@@ -744,6 +744,15 @@ class Config:
         The second half of the tuple exists for US2's fourth scenario: a surface reporting
         "1 of 1" should be able to say whether that 1 was chosen or merely inherited, so the
         author knows which file to edit.
+
+        ``ceiling`` is the global cap to clamp against, and exists because *this object's*
+        global cap is a claim about the configuration this process read at startup rather
+        than about what is being enforced (issue #30). A surface holding a capacity snapshot
+        passes ``snapshot.global_cap``, so a repository's limit is clamped by the same
+        number the surface is printing — otherwise a page could read ``1/3 sessions`` above
+        a row held for a repository cap that only exists because this process still thinks
+        the machine allows one session. It defaults to this object's own cap, which is what
+        the daemon's snapshot carries anyway, so nothing about dispatch changes.
         """
         repo = self.repos.get(key)
         explicit = repo is not None and repo.max_sessions is not None
@@ -752,7 +761,9 @@ class Config:
             if repo is not None and repo.max_sessions is not None
             else self.dispatch.default_repo_max_sessions
         )
-        return min(requested, self.daemon.max_concurrent_sessions), explicit
+        if ceiling is None:
+            ceiling = self.daemon.max_concurrent_sessions
+        return min(requested, ceiling), explicit
 
     def effective_wait_for_merge(self, key: str) -> tuple[bool, bool]:
         """Whether this repository waits for its work to land, and whether the author said so.

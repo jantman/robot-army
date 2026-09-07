@@ -613,6 +613,54 @@ def test_stdout_carries_the_prompt_and_the_note_goes_to_stderr(cli_setup, capsys
     assert "context read from" not in captured.out
 
 
+def test_the_effect_level_flag_reaches_the_composed_prompt(cli_setup, capsys, monkeypatch):
+    """Issue #32 FR-008a, driven through ``cli.main`` rather than around it.
+
+    The flag is two pieces of translation — an argparse ``choices`` on the ``prompt`` parser
+    and the ``getattr(args, "effect_level", None)`` that turns it into ``build_context``'s
+    argument — and neither is exercised by a test that calls ``build_context`` directly. Since
+    the whole feature is "the prompt follows the level", a preview that silently ignored the
+    flag would answer confidently about the wrong level, which is the failure mode this
+    feature exists to remove.
+    """
+    from robot_army import prompt
+
+    assert _run(monkeypatch, cli_setup, "prompt", REPO, "7", "--effect-level", "no-remote") == (
+        operations.EXIT_OK
+    )
+    contained = capsys.readouterr().out
+
+    assert prompt.DELIVERY_LOCAL.text in contained
+    assert prompt.DELIVERY_PUSH.text not in contained
+
+
+def test_without_the_flag_the_configured_level_still_decides(cli_setup, capsys, monkeypatch):
+    """The other half of FR-008a: an override that is not asked for changes nothing.
+
+    ``getattr(args, "effect_level", None)`` runs for every verb routed through ``cli.main``,
+    so "absent" has to mean "the configured level" rather than a level of its own.
+    """
+    from robot_army import prompt
+
+    assert _run(monkeypatch, cli_setup, "prompt", REPO, "7") == operations.EXIT_OK
+    default = capsys.readouterr().out
+
+    assert prompt.DELIVERY_PUSH.text in default, "the fixture's config is live"
+    assert prompt.DELIVERY_LOCAL.text not in default
+
+
+def test_a_level_the_ladder_does_not_have_is_a_usage_error(cli_setup, monkeypatch):
+    """The parser's failure path, which CLAUDE.md asks for by name.
+
+    Argparse refuses before anything is built, so the answer is exit 2 and nothing read —
+    the same treatment ``run --effect-level wat`` gets.
+    """
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, cli_setup, "prompt", REPO, "7", "--effect-level", "no-remotes")
+
+    assert exc.value.code == 2
+
+
 def test_two_runs_produce_byte_identical_stdout(cli_setup, capsys, monkeypatch):
     """SC-003, with the fence nonce pinned.
 

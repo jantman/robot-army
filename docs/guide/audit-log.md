@@ -646,11 +646,12 @@ the session-host boundary and is `0` for a simulated host — so the record answ
 without anyone having to remember to ask it correctly, and without reconciliation learning what
 an effect level is.
 
-**One gap in the record is accepted and not closed here.** When the session registry cannot be
-observed at all — the directory is missing, or its format is unrecognised — reconciliation reads
-that as every session being dead, and nothing distinguishes "observed dead" from "could not
-observe". This is pre-existing at `live`; issue #33 makes the two levels behave alike rather than
-introducing it. Tracked as issue #44.
+**One gap in the record was accepted here and closed by issue #44.** When the session registry
+could not be observed at all, reconciliation read that as every session being dead, and nothing
+distinguished "observed dead" from "could not observe". That was pre-existing at `live`; issue
+#33 made the two levels behave alike rather than introducing it, and enumerated the omission
+rather than leaving it silent. [The issue #44 record](#the-issue-44-record) below is what closes
+it.
 
 A session row occupies a global and a per-repository capacity slot for exactly as long as it
 is `starting` or `running`, and only the wrapper's exit record used to close it. A simulated

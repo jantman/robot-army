@@ -93,8 +93,9 @@ while its worker lives is a slot the cap will hand out twice.
 - exactly one open `registry_unobservable` anomaly, not sixty
 - it appears in `uv run robot-army anomalies`, and the kind appears in that command's "kinds this
   system can raise" line
-- every `reconcile.pass` record carries `registry_observable`-style detail: `directory_missing`
-  true, and `liveness_withheld` equal to the number of rows in flight
+- every `reconcile.pass` record carries `directory_missing: true` (or, for the version-refused
+  conditions, `degraded`/`unknown_versions`) and `liveness_withheld` equal to the number of rows
+  in flight
 
 **Then make the registry readable** and run one more pass.
 

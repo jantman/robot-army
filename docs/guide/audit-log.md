@@ -821,6 +821,33 @@ are not like that, and already were not before issue #23: `onboard` records a de
 `aborted_at_prompt`, and typing the wrong item id at the force prompt sets `aborted` on the
 `worktree.remove` outcome that is open by then.
 
+## The issue #44 record
+
+The record of what a reconciliation pass *declined* to do. Nothing distinguished a pass
+across an idle machine from a pass across a registry that had moved, so the mass interruption
+the second caused reconstructed afterwards as a genuine finding.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `reconcile.pass` | **Changed** — as before, once per pass | Gains `liveness_withheld`, and `directory_missing` alongside the `degraded`, `unknown_versions` and `unreadable` the scan summary already carried |
+| `registry_unobservable` anomaly | The first pass that could not read the registry | The `reason` — which of the three conditions it was — and `liveness_withheld`. Raised at the end of the pass, because that count is only final once every guarded sweep has run |
+| `anomaly.resolved` | The first pass that *could* read it | The kind, and the reason: the observation failure the anomaly reported no longer holds |
+
+Three passes used to write the same line, and the two new fields separate them:
+
+| `directory_missing` / `degraded` / `unknown_versions` | `liveness_withheld` | The pass was |
+|---|---|---|
+| all clear | `0` | ordinary — an idle or healthy machine |
+| any set | `0` | blind, but nothing was running to withhold a conclusion about |
+| any set | `> 0` | blind, with work in flight that was deliberately left alone |
+
+**No record is written per withheld decision**, and that is this feature's one documented
+Principle III omission. Three open rows on a blind machine would put ~4,320 records a day into
+the log, each carrying one bit, and the condition is re-derivable from the registry at any
+instant. `_retire_finished_sessions` declines to record its own "not yet" for the same reason.
+The one caller outside the pass is `abandon`, which writes no pass summary — so it says in its
+own output that it left a session row open, and why.
+
 ## Reconstructing an item's history
 
 ```bash

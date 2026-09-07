@@ -130,9 +130,9 @@ flipped.
 against an empty-but-present registry directory, so any of them breaking means the guard is
 firing where the observation was usable.
 
-- [ ] T027 [US4] Run `uv run pytest` and confirm the whole suite passes unchanged. This is the story's primary test and it is not a formality: the suite *is* the regression fence for "an empty directory is a usable observation".
-- [ ] T028 [P] [US4] In `tests/unit/test_session_liveness.py`, make the invariant explicit rather than incidental: add a case asserting that an `active` item whose session process is gone is still `interrupted` against an empty-but-present directory, with `liveness_withheld == 0` and no anomaly of the new kind. The module's docstring gains a paragraph naming the guard as the thing that must not reach this case.
-- [ ] T029 [P] [US4] In `tests/integration/test_reconcile_pass.py`, add a whole-pass scenario covering the recovery arc: a blind pass leaves three items alone and raises the anomaly, then a pass with the registry restored reaches the conclusions the visible registry supports and retracts the anomaly. This is the only test that exercises the two halves in sequence, which is what SC-006 asserts.
+- [X] T027 [US4] Run `uv run pytest` and confirm the whole suite passes unchanged. This is the story's primary test and it is not a formality: the suite *is* the regression fence for "an empty directory is a usable observation".
+- [X] T028 [P] [US4] In `tests/unit/test_session_liveness.py`, make the invariant explicit rather than incidental: add a case asserting that an `active` item whose session process is gone is still `interrupted` against an empty-but-present directory, with `liveness_withheld == 0` and no anomaly of the new kind. The module's docstring gains a paragraph naming the guard as the thing that must not reach this case.
+- [X] T029 [P] [US4] In `tests/integration/test_reconcile_pass.py`, add a whole-pass scenario covering the recovery arc: a blind pass leaves three items alone and raises the anomaly, then a pass with the registry restored reaches the conclusions the visible registry supports and retracts the anomaly. This is the only test that exercises the two halves in sequence, which is what SC-006 asserts.
 
 **Checkpoint**: all four stories are functional and the fix is fenced in both directions.
 
@@ -140,11 +140,11 @@ firing where the observation was usable.
 
 ## Phase 6: Documentation & Cross-Cutting Concerns
 
-- [ ] T030 [P] Document the new anomaly kind in `docs/guide/operating.md` beside `registry_version_unknown`: what makes an observation unusable, that a pass in that condition withholds its liveness conclusions rather than concluding death, that the anomaly retracts itself when the registry returns, and what the maintainer should actually check (a moved `XDG_RUNTIME_DIR`, a directory not yet created, a permission change).
-- [ ] T031 [P] Record what `reconcile.pass` gains in `docs/guide/audit-log.md`, in the table that already tracks that record's shape: `liveness_withheld`, `directory_missing`, and how the three-way distinction in data-model.md §3 is read out of them.
-- [ ] T032 Walk [quickstart.md](./quickstart.md) scenarios 1–6 against the built tree and correct either the guide or the code wherever they disagree. Scenario 6 (`abandon` while blind) is the only one that leaves pytest, and it is the one most likely to have drifted.
-- [ ] T033 Confirm `test_only_effects_py_knows_the_effect_level_exists` still passes — nothing added to `reconcile.py`, comments included, may name the effect level (contracts C7.3). The test greps the file's text, so a comment mentioning `no-remote` fails the suite.
-- [ ] T034 Run `uv run pytest` once more, then `git diff --stat` against the merge base, and confirm the changed-file set matches the tree in [plan.md](./plan.md) — no migration, no configuration key, no `capacity.py`, no `states.py`.
+- [X] T030 [P] Document the new anomaly kind in `docs/guide/operating.md` beside `registry_version_unknown`: what makes an observation unusable, that a pass in that condition withholds its liveness conclusions rather than concluding death, that the anomaly retracts itself when the registry returns, and what the maintainer should actually check (a moved `XDG_RUNTIME_DIR`, a directory not yet created, a permission change).
+- [X] T031 [P] Record what `reconcile.pass` gains in `docs/guide/audit-log.md`, in the table that already tracks that record's shape: `liveness_withheld`, `directory_missing`, and how the three-way distinction in data-model.md §3 is read out of them.
+- [X] T032 Walk [quickstart.md](./quickstart.md) scenarios 1–6 against the built tree and correct either the guide or the code wherever they disagree. Scenario 6 (`abandon` while blind) is the only one that leaves pytest, and it is the one most likely to have drifted.
+- [X] T033 Confirm `test_only_effects_py_knows_the_effect_level_exists` still passes — nothing added to `reconcile.py`, comments included, may name the effect level (contracts C7.3). The test greps the file's text, so a comment mentioning `no-remote` fails the suite.
+- [X] T034 Run `uv run pytest` once more, then `git diff --stat` against the merge base, and confirm the changed-file set matches the tree in [plan.md](./plan.md) — no migration, no configuration key, no `capacity.py`, no `states.py`.
 
 ---
 

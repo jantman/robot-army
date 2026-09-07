@@ -3,6 +3,12 @@
 Unit coverage in ``tests/unit/test_session_liveness.py`` pins the decision. These pin the
 *consequence*: that the pass which makes the decision also gives the capacity slot back, and
 that the pass's several sweeps compose without reporting the same worker twice.
+
+Issue #44 added a third consequence that only a whole pass can show: the *sequence*. A pass
+that could not read the registry withholds every liveness conclusion and says so; the next
+pass that can read it reaches those conclusions and retracts what the first one raised.
+Each half is pinned in units, and neither of them can show that the second half undoes the
+first.
 """
 
 from __future__ import annotations
@@ -209,3 +215,53 @@ def test_a_whole_pass_reports_a_session_that_never_wrote_a_transcript(
         a.kind for a in db.list_anomalies(conn, include_simulated=True)
     ] == ["no_transcript"]
     assert result.summary()["no_transcript"] == 1
+
+
+def test_a_blind_pass_then_a_sighted_one_recovers_with_no_maintainer_action(
+    conn, audit, config, tmp_path
+):
+    """Issue #44's recovery arc, which only a sequence of passes can show (SC-006).
+
+    Three items whose workers are gone. A registry that has moved makes the first pass
+    unable to tell that from three workers that are running, so it concludes nothing, keeps
+    every slot subscribed, and raises one anomaly. Nothing is torn down and nothing is
+    resumed; the maintainer is not asked to do anything.
+
+    The registry comes back. The second pass reaches every conclusion the first declined,
+    hands back all three slots, and retracts the anomaly -- so a machine that was blind for
+    a while needs no repair, which is the difference between a recoverable failure and one
+    that leaves a permanent entry on a list read as things needing attention.
+    """
+    ids = []
+    for n in range(3):
+        item_id = seed_item(
+            conn, repo_key="demo", issue_number=440 + n, state=str(WorkItemState.ACTIVE)
+        )
+        seed_session(
+            conn, item_id, state="running", pid=REAL_PID + n, session_id=f"s-{n}"
+        )
+        ids.append(item_id)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    moved = tmp_path / "registry-that-moved"
+    present = tmp_path / "registry"
+    present.mkdir()
+
+    blind = _pass(conn, audit, config, moved, proc)
+
+    assert (blind.interrupted, blind.liveness_withheld) == (0, 3)
+    assert [db.get_work_item(conn, i).state for i in ids] == [WorkItemState.ACTIVE] * 3
+    assert [a.kind for a in db.list_anomalies(conn)] == ["registry_unobservable"]
+    held = capacity.snapshot(conn, config=config, registry_dir=present, proc_root=proc)
+    assert held.total == 3, "every slot stays subscribed while the workers are unknown"
+
+    sighted = _pass(conn, audit, config, present, proc)
+
+    assert (sighted.interrupted, sighted.liveness_withheld) == (3, 0)
+    assert sighted.anomalies_resolved == 1
+    assert [db.get_work_item(conn, i).state for i in ids] == [
+        WorkItemState.INTERRUPTED
+    ] * 3
+    assert db.list_anomalies(conn) == []
+    freed = capacity.snapshot(conn, config=config, registry_dir=present, proc_root=proc)
+    assert freed.total == 0

@@ -307,13 +307,16 @@ names. Anything about the machine, the filesystem or the network is real whateve
 level — board *reads* included, since only writes are simulated — so those stay visible
 always. See [the anomalies table](state.md#anomalies--two-different-ways-a-row-leaves-the-list-and-whether-it-was-a-rehearsal).
 
-**Two kinds now clear themselves.** Every other kind waits for `--acknowledge`, because
-these two are the only ones whose truth can be positively re-established as *false*:
+**Three kinds now clear themselves.** Every other kind waits for `--acknowledge`, because
+these three are the only ones whose truth can be positively re-established as *false*:
 
 - **`orphan_session`** — the pid and start time it recorded no longer name a live process.
 - **`card_create_failing`** — the card it named has since reached `linked`, so the creation
   it reported as failing has succeeded. Re-checked by reconciliation, which needs no network,
   so the retraction does not wait on Trello being reachable.
+- **`registry_unobservable`** — a later pass read the session registry successfully. The most
+  direct of the three: the observation that retracts it is the one the retracting pass has
+  already taken.
 
 A resolved anomaly leaves the default listing and shows under `--all` marked `resolved`
 rather than `acknowledged`, which are different facts: one is the system re-checking, the
@@ -344,6 +347,23 @@ Anomalies worth understanding rather than dismissing:
 - **`registry_version_unknown`** — the worker's session-registry format changed. The
   daemon degraded to scanning `/proc` rather than crashing; identification is weaker until
   the version is reviewed.
+- **`registry_unobservable`** — reconciliation could not read the session registry, so it
+  declined to conclude that anything had died. **Nothing was torn down**: items stay
+  `active`, session rows stay open, and their capacity slots stay subscribed. The pass
+  summary says how many conclusions were withheld.
+
+  This is the one anomaly that reports work *not* done, and that is the point. Absent and
+  empty look identical at the glob, and reconciliation used to read both as "every session
+  on this machine is dead" — three running items became three `interrupted` in a single
+  pass, with nothing anywhere saying the sweep had been blind rather than informed.
+
+  Three things cause it, and the fix for each is different: the registry directory is gone
+  or unreadable (`XDG_RUNTIME_DIR` differs after a re-login, the directory has not been
+  created because the worker has not run since boot, a permission changed); the scan fell
+  back to `/proc`; or a registry file was refused by the version gate, which usually comes
+  with `registry_version_unknown` beside it. `robot-army doctor` shows the path being read.
+  Fix the cause and the next pass retracts this and reaches the conclusions it declined —
+  there is nothing to acknowledge and nothing to resume by hand.
 
 ## Recovering
 

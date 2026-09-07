@@ -251,11 +251,17 @@ rather than three, because FR-008 asks how many conclusions were withheld and no
 would have drawn them — the sweep is recoverable from the state each row is left in, and three
 counters that are always zero together would be three ways to say one thing.
 
-The pass summary also gains `registry_observable`, a boolean, and the reason string when it is
-false. Between them a reader can tell "nothing to withhold" (`registry_observable: true`,
-`liveness_withheld: 0`) from "withheld everything" (`false`, `3`) from "blind, but there was
-nothing running anyway" (`false`, `0`) — three genuinely different passes that today write the
-same line.
+The pass summary also gains `directory_missing` — the one flag it was missing, since `degraded`,
+`unknown_versions` and `unreadable` were already reported. Between them a reader can tell
+"nothing to withhold" (every flag clear, `liveness_withheld: 0`) from "withheld everything" (a
+flag set, `3`) from "blind, but there was nothing running anyway" (a flag set, `0`) — three
+genuinely different passes that today write the same line.
+
+**Not a synthesised `registry_observable` boolean**, which an earlier draft of this decision
+proposed. It would restate what the flags beside it already say and would have to be kept in
+step with a predicate living in another module. The predicate's *reason* string is worth
+recording once, and the anomaly is where a reader looking for something needing attention will
+actually find it.
 
 ---
 

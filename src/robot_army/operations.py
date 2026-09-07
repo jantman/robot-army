@@ -3076,6 +3076,7 @@ def abandon(
     if item is None:
         return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
     session = db.latest_session_for_item(ctx.conn, item_id)
+    settled = "left"
     try:
         with db.transaction(ctx.conn):
             transition_work_item(
@@ -3093,7 +3094,7 @@ def abandon(
             # likelier case, not the exotic one. The item moves first so the rule sees the
             # state that makes the row stale.
             if session is not None:
-                reconcile.reclaim_stale_session(
+                settled = reconcile.reclaim_stale_session(
                     ctx.conn,
                     ctx.audit,
                     session=session,
@@ -3125,14 +3126,23 @@ def abandon(
             entity_id=item_id,
             detail={"stage": "returning the card to its origin list"},
         )
-    return Result(
-        lines=[
-            f"item {item_id} abandoned. Its worktree at "
-            f"{item.worktree_path or '(none)'} was left in place — "
-            f"`robot-army worktree remove {item_id}` removes it"
-        ],
-        data={"item_id": item_id},
-    )
+    lines = [
+        f"item {item_id} abandoned. Its worktree at "
+        f"{item.worktree_path or '(none)'} was left in place — "
+        f"`robot-army worktree remove {item_id}` removes it"
+    ]
+    if settled == "withheld":
+        # `abandon` inherits issue #44's guard from the rule it calls, and must not inherit
+        # it silently. Everywhere else the withheld decision is accounted for in a
+        # reconciliation pass summary; this is the one caller that writes none, so being
+        # told the item was abandoned while a capacity slot quietly stayed subscribed would
+        # be exactly the silence that feature exists to remove.
+        lines.append(
+            "the session row was left open: the session registry could not be read, so "
+            "whether its worker is still running is unknown. Reconciliation settles it on "
+            "the first pass that can read the registry"
+        )
+    return Result(lines=lines, data={"item_id": item_id})
 
 
 def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Result:

@@ -48,6 +48,19 @@ class ReconcileResult:
     reclaimed: int = 0
     skipped_never_real: int = 0
     superseded: int = 0
+    #: Liveness conclusions this pass declined to draw because it could not observe the
+    #: registry (issue #44). Incremented once per work item or session row that would
+    #: otherwise have been settled.
+    #:
+    #: One counter rather than one per guarded sweep, deliberately: the question is how
+    #: many conclusions were withheld, not which sweep would have drawn each — that is
+    #: recoverable from the state every row is left in — and three counters that are always
+    #: zero together would be three ways of saying one thing.
+    #:
+    #: Here for the reason ``skipped_never_real`` is: ``checked`` is incremented once per
+    #: ``active`` item *before* any skip, so a pass that concluded nothing reports the same
+    #: ``checked`` as one that concluded everything.
+    liveness_withheld: int = 0
     orphans: int = 0
     stale_sockets: int = 0
     prunable: int = 0
@@ -80,6 +93,7 @@ class ReconcileResult:
             "reclaimed": self.reclaimed,
             "skipped_never_real": self.skipped_never_real,
             "superseded": self.superseded,
+            "liveness_withheld": self.liveness_withheld,
             "orphans": self.orphans,
             "stale_sockets": self.stale_sockets,
             "prunable_worktrees": self.prunable,
@@ -147,6 +161,56 @@ def scan_registry(
     return result
 
 
+def _registry_unobservable(scan: sessions.RegistryScan) -> str | None:
+    """Why this pass may not conclude that a session is dead, or ``None`` if it may (#44).
+
+    An absent registry directory and an empty one are byte-for-byte identical at the glob —
+    no version refused, no file unreadable, the scan simply returns nothing — and one of
+    them means "the machine is idle" while the other means "the registry moved and this
+    observation is worthless". ``RegistryScan.directory_missing`` exists to keep those
+    apart. This module used to consult neither it nor ``degraded``, so a registry that had
+    moved read as proof that every session on the machine was dead: measured, three
+    ``active`` items and one pass produced three ``interrupted``.
+
+    Returns the reason rather than a boolean because the reason is what the record has to
+    carry, and a boolean would leave each of the three guards to invent its own wording for
+    the same condition.
+
+    **Not a function of ``len(scan.entries)``.** An observation that saw nothing is exactly
+    as blind whether or not it also happened to find a process, and a clause counting
+    entries would re-collapse the two conditions this function exists to separate.
+
+    **The third clause is deliberately not ``capacity._registry_unusable``'s.** That
+    function tolerates a partly-refused registry — its test is ``unknown_versions and not
+    entries`` — and it is right to: it is producing a *count*, a refused file makes the
+    count low, and a low count withholds dispatch, which is the safe direction. Here the
+    product is a conclusion about a *named* session, and a conclusion drawn about a session
+    whose file we declined to parse is not conservative in any direction, it is unfounded.
+    The blindness is systematic rather than incidental, too: a worker upgrade changes the
+    version every registry file is written with, so one refused file is the leading edge of
+    all of them rather than a stable minority.
+
+    Merging the two into one shared predicate is therefore forbidden. They read the same
+    object and answer different questions about it, and a single function would make one of
+    the two callers silently wrong the next time either was edited.
+
+    ``scan.unreadable`` is deliberately absent from the list. A truncated file is the
+    ordinary result of reading while the worker writes — ``parse_entry``'s docstring says
+    so — which means treating it as blindness would switch the liveness sweep off at random
+    on a healthy busy machine, which is the failure that sweep exists to prevent. The
+    residual exposure is one item on one pass, it is already reported in the pass summary,
+    and ``resume`` recovers it.
+    """
+    if scan.directory_missing:
+        return "the registry directory is absent or unreadable"
+    if scan.degraded:
+        return "the registry scan fell back to /proc enumeration"
+    if scan.unknown_versions:
+        seen = ", ".join(str(v) for v in dict.fromkeys(scan.unknown_versions))
+        return f"registry version(s) not recognised: {seen}"
+    return None
+
+
 #: The only two work item states that may legitimately hold an open session row.
 #:
 #: Derived from the dispatch path, which is the only code that opens one: ``dispatch_item``
@@ -174,9 +238,9 @@ def reclaim_stale_session(
 ) -> str:
     """Decide what one open session row is: legitimate, alive, or a leaked slot (#28).
 
-    Returns ``"left"``, ``"reported"`` or ``"reclaimed"`` — the same shape as
-    ``spool.apply_record``, and for the same reason: the caller usually wants to count the
-    outcomes rather than re-derive them.
+    Returns ``"left"``, ``"reported"``, ``"reclaimed"`` or ``"withheld"`` — the same shape
+    as ``spool.apply_record``, and for the same reason: the caller usually wants to count
+    the outcomes rather than re-derive them.
 
     A session row occupies a global and a per-repository capacity slot for exactly as long
     as it is ``starting`` or ``running``. Nothing closes it but the wrapper's exit record,
@@ -195,6 +259,18 @@ def reclaim_stale_session(
     state change and its audit record commit together with whatever else the caller is
     doing.
 
+    **``"withheld"`` is the fourth outcome and it protects the same direction** (#44). The
+    two branches below both rest on the registry having been *read*: one says "I can see
+    this worker", the other says "I cannot, so it is gone". A scan that could not observe
+    the registry at all supports neither, and taking the second on its strength would close
+    every open row on the machine at once — the under-count above, reached by making every
+    live worker look absent simultaneously rather than one at a time.
+
+    The guard lives here rather than at the callers because this function *is* the rule
+    that a worker which can be seen is reported and left open. Blindness is a case of that
+    rule, not a separate policy, and putting it here carries it to ``operations.abandon``
+    without anyone having to decide twice.
+
     ``reason`` names the route — cancellation, abandonment, or the sweep — because that is
     the difference between "the maintainer stopped this" and "this was found stale later",
     and the log is the only place that distinction survives.
@@ -208,6 +284,10 @@ def reclaim_stale_session(
     # An open row whose work item is gone still holds a global slot and nothing else can
     # ever close it, so it is stale by the same argument.
     item_state = str(item.state) if item is not None else "absent"
+
+    # Below both registry-independent answers, above both registry-dependent ones.
+    if _registry_unobservable(scan) is not None:
+        return "withheld"
 
     entry = scan.find(session.session_id)
     if entry is not None and entry.alive(proc_root=proc_root):
@@ -254,7 +334,8 @@ def _sweep_superseded_sessions(
     scan: sessions.RegistryScan,
     claimed_pids: set[int],
     proc_root: Path | None,
-) -> int:
+    unobservable: str | None,
+) -> tuple[int, int]:
     """Open session rows an ``active`` item owns that are **not** its current attempt (#33).
 
     Resuming or restarting an item opens a second row without closing the first. Nothing
@@ -274,10 +355,18 @@ def _sweep_superseded_sessions(
     sessions than exist would oversubscribe the one subscription the cap protects, and an
     under-count is the only direction of capacity error that does real harm.
 
+    ``unobservable`` is the pass's judgement about its own registry observation, passed in
+    rather than recomputed so every sweep in one pass decides from one picture of the world
+    (#44). When it is set, the last branch below is unfounded: an entry missing from a scan
+    that could not read the registry says nothing about the attempt it belongs to.
+
+    Returns ``(acted, withheld)``.
+
     The caller owns no transaction here -- each row is decided and committed independently,
     so a pass killed midway leaves the rows it reached settled and the rest for next time.
     """
     acted = 0
+    withheld = 0
     for other in db.list_sessions_for_item(conn, item.id):
         if other.id == current.id:
             continue
@@ -320,6 +409,13 @@ def _sweep_superseded_sessions(
             # same rule the current attempt is judged by, applied to a superseded one.
             continue
 
+        if unobservable is not None:
+            # Nor is its absence evidence of anything when the registry itself could not be
+            # read. Below the two registry-independent skips above, for the same reason the
+            # guard in the active-item sweep sits where it does.
+            withheld += 1
+            continue
+
         with db.transaction(conn):
             transition_session(
                 conn,
@@ -332,7 +428,7 @@ def _sweep_superseded_sessions(
                 ),
             )
         acted += 1
-    return acted
+    return acted, withheld
 
 
 def reconcile(
@@ -352,6 +448,13 @@ def reconcile(
     )
     by_session = scan.by_session_id()
     claimed_pids: set[int] = set()
+    # Decided once, from the one observation this pass took, and threaded to every sweep
+    # that would otherwise conclude death from an absent entry (issue #44). Once rather
+    # than per sweep because a pass whose halves disagreed about whether they could see
+    # would be a worse failure than the one being fixed: the registry can appear or vanish
+    # between two reads, and the pass has to settle every row against one picture of the
+    # world. `scan` is already that picture; this is the pass's judgement about it.
+    unobservable = _registry_unobservable(scan)
 
     # -- active items: is the session really there? (FR-038, FR-040) -------
     active = db.list_work_items(
@@ -368,7 +471,7 @@ def reconcile(
         # Before judging the current attempt, settle any the item has already replaced.
         # Placed here rather than as a pass of its own so it runs before #28's sweep sees
         # these rows, which is what keeps one worker to one report (C5).
-        result.superseded += _sweep_superseded_sessions(
+        acted, withheld = _sweep_superseded_sessions(
             conn,
             audit=audit,
             item=item,
@@ -376,7 +479,10 @@ def reconcile(
             scan=scan,
             claimed_pids=claimed_pids,
             proc_root=proc_root,
+            unobservable=unobservable,
         )
+        result.superseded += acted
+        result.liveness_withheld += withheld
 
         entry = by_session.get(session.session_id)
         alive = entry is not None and entry.alive(proc_root=proc_root)
@@ -411,6 +517,19 @@ def reconcile(
             # `test_only_effects_py_knows_the_effect_level_exists` greps this file's text --
             # comments included -- so even naming the type here fails the suite.
             result.skipped_never_real += 1
+            continue
+
+        if unobservable is not None:
+            # An observation that saw nothing is not evidence that nothing is alive (#44).
+            #
+            # **The position of this guard is the guarantee**, not the guard itself. Every
+            # branch above reaches its conclusion from the database — an item with no
+            # session row has no process to be alive, a row with no pid never had one, a
+            # row that already records an exit has been settled by the spool — so those
+            # conclusions survive a blind pass by construction rather than because a test
+            # remembered to check them. The line below is the pass's only registry-
+            # dependent conclusion, and this is the only place a guard can sit.
+            result.liveness_withheld += 1
             continue
 
         with db.transaction(conn):
@@ -556,9 +675,11 @@ def reconcile(
     # every item is seen in the state this pass has already settled it into and no row they
     # closed is examined twice. *Before* the orphan sweep, whose inputs are left exactly as
     # they were — this feature adds a caller of the anomaly, not a change to that sweep.
-    result.reclaimed += _sweep_stale_sessions(
+    swept, withheld = _sweep_stale_sessions(
         conn, audit=audit, scan=scan, proc_root=proc_root
     )
+    result.reclaimed += swept
+    result.liveness_withheld += withheld
 
     # -- transcripts that never appeared (issue #58) ------------------------
     #
@@ -1207,6 +1328,11 @@ def _retire_one(
     # the daemon drained this session's own exit record in its own process while we were
     # signalling. That is an ordinary outcome of a successful retirement, not a failure,
     # and it is counted as one.
+    #
+    # `withheld` (#44) is not in the set and does not need to be: it is unreachable from
+    # here. This function is only called after `scan.find()` returned an entry that was
+    # *alive*, which a scan that could not observe the registry cannot produce — so a
+    # retirement is never decided on a blind pass in the first place.
     return 1 if settled in ("reclaimed", "left") else 0
 
 
@@ -1216,8 +1342,14 @@ def _sweep_stale_sessions(
     audit: AuditLog,
     scan: sessions.RegistryScan,
     proc_root: Path | None,
-) -> int:
+) -> tuple[int, int]:
     """Close every session row that outlived the work item it belongs to (#28).
+
+    Returns ``(reclaimed, withheld)`` — the second being rows this pass declined to decide
+    about because it could not observe the registry (#44). A tuple rather than a single
+    number for the reason ``_sweep_transcripts`` returns one: a sweep that acted on nothing
+    and a sweep that was not permitted to act are different facts, and a caller adding both
+    into one counter would lose the difference at the only place it still exists.
 
     The invariant the reported bug violates: a row is only ``starting`` or ``running``
     while its item is ``dispatching`` or ``active``. Nothing else in this module could
@@ -1228,6 +1360,7 @@ def _sweep_stale_sessions(
     a scan of the sessions table's history.
     """
     reclaimed = 0
+    withheld = 0
     for session in db.list_sessions(
         conn,
         include_simulated=True,
@@ -1247,7 +1380,9 @@ def _sweep_stale_sessions(
             )
         if outcome == "reclaimed":
             reclaimed += 1
-    return reclaimed
+        elif outcome == "withheld":
+            withheld += 1
+    return reclaimed, withheld
 
 
 #: How long a session gets to write its transcript before its absence means anything.

@@ -349,7 +349,16 @@ def transcript_exists(session_id: str, *, home: Path | None = None) -> bool:
 
 
 def summarise(scan_result: RegistryScan, worktree_root: Path) -> dict[str, Any]:
-    """The aggregate record a reconciliation pass logs, per the plan's Principle III gap."""
+    """The aggregate record a reconciliation pass logs, per the plan's Principle III gap.
+
+    ``directory_missing`` was the one flag this omitted, and its absence was itself a gap
+    (issue #44): a pass across a registry that had moved wrote the same line as a pass
+    across an idle machine, so the mass interruption the first one caused reconstructed
+    afterwards as a genuine finding. With it, and with the pass's own ``liveness_withheld``
+    beside it, three passes that were indistinguishable become distinguishable — an
+    ordinary pass, a blind one with nothing running, and a blind one with work in flight
+    that was deliberately left alone.
+    """
     ours = [e for e in scan_result.entries if under_root(e.cwd, worktree_root)]
     return {
         "sessions_found": len(scan_result.entries),
@@ -357,4 +366,5 @@ def summarise(scan_result: RegistryScan, worktree_root: Path) -> dict[str, Any]:
         "unknown_versions": list(dict.fromkeys(scan_result.unknown_versions)),
         "unreadable": list(scan_result.unreadable),
         "degraded": scan_result.degraded,
+        "directory_missing": scan_result.directory_missing,
     }

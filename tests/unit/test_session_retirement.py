@@ -685,9 +685,12 @@ def test_a_surviving_worker_keeps_its_row_its_slot_and_its_anomaly(
     assert after.total == 1, "the slot must stay subscribed while the worker lives"
     assert len(records(layout, "session.retire_unconfirmed")) == 1
 
-    # And the existing sweep still reports it, because it is genuinely an orphan.
+    # And the existing sweep still reports it, because it is genuinely an orphan. The
+    # second half of the pair is issue #44's: this observation was usable — an
+    # empty-but-present registry is — so nothing is withheld and the sweep really did
+    # decide, rather than declining to.
     assert reconcile._sweep_stale_sessions(conn, audit=audit, scan=sessions.scan(
-        registry_dir=registry, proc_root=proc), proc_root=proc) == 0
+        registry_dir=registry, proc_root=proc), proc_root=proc) == (0, 0)
     assert [a.kind for a in db.list_anomalies(conn)] == ["orphan_session"]
 
 

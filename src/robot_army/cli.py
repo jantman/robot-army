@@ -138,6 +138,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preview.add_argument("repo_key", metavar="owner/repo")
     preview.add_argument("issue_number", type=int)
+    # The delivery block a session is handed depends on the effect level (issue #32), so a
+    # preview that could only answer for the configured one would leave "what would a
+    # `no-remote` dispatch say?" answerable only by editing config.toml. Same flag, same
+    # meaning, as `run` and `serve`.
+    preview.add_argument(
+        "--effect-level",
+        choices=[level.value for level in EffectLevel],
+        default=None,
+        help="compose as a dispatch at this level would, overriding the configured one",
+    )
 
     worktree = sub.add_parser("worktree", help="worktree listing and removal")
     worktree_sub = worktree.add_subparsers(dest="worktree_command", required=True)
@@ -410,7 +420,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  (warning) {warning}", file=sys.stderr)
         return EXIT_PRECONDITION
 
-    ctx = operations.build_context(config)
+    # ``prompt`` is the only verb routed through here that takes ``--effect-level``; ``run``
+    # and ``serve`` resolve their own above. ``getattr`` rather than a branch on the command,
+    # so a second verb that adds the flag is honoured by defining it and nothing else.
+    override = getattr(args, "effect_level", None)
+    ctx = operations.build_context(
+        config, effect_level=EffectLevel(override) if override else None
+    )
     try:
         result = _dispatch(args, ctx)
     except PreconditionFailed as exc:

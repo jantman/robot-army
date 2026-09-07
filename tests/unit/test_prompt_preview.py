@@ -75,7 +75,13 @@ def build_config(
 def preview(conn, repo_clone, layout, tmp_path, monkeypatch):
     """A built context, an onboarded repository, and a reader holding :data:`ISSUE`."""
 
-    def build(*, issues: list[Issue] | None = None, clone: Path | None = None, **overrides: Any):
+    def build(
+        *,
+        issues: list[Issue] | None = None,
+        clone: Path | None = None,
+        effect_level: Any = None,
+        **overrides: Any,
+    ):
         config = build_config(repo_clone, layout, tmp_path, **overrides)
         onboard_repo(conn, REPO, clone or repo_clone)
         reader_issues = [ISSUE] if issues is None else issues
@@ -84,7 +90,10 @@ def preview(conn, repo_clone, layout, tmp_path, monkeypatch):
             "wire",
             lambda level, cfg, log, conn: make_boundaries(log, level=level, reader=_reader(reader_issues)),
         )
-        ctx = operations.build_context(config)
+        # ``effect_level`` reaches ``wire`` exactly as ``--effect-level`` does, so a preview
+        # composed here is composed by the same selection a dispatch at that level uses
+        # (issue #32).
+        ctx = operations.build_context(config, effect_level=effect_level)
         return ctx
 
     contexts: list[Any] = []
@@ -132,12 +141,55 @@ def test_an_untracked_issue_composes_a_full_prompt(preview, layout):
 
 
 def test_the_delivery_block_is_always_present(preview):
-    """Unconditional in a dispatch, so unconditional here (FR-011)."""
+    """Never absent in a dispatch, so never absent here (FR-011)."""
     from robot_army import prompt
 
     outcome = operations.prompt_preview(preview(), REPO, 7)
 
-    assert prompt.DELIVERY in "\n".join(outcome.lines)
+    assert prompt.DELIVERY_PUSH.text in "\n".join(outcome.lines)
+
+
+def test_the_preview_composes_the_form_for_the_level_it_runs_at(preview):
+    """Issue #32 FR-008. The preview exists to answer "what would this session be told?".
+
+    After #32 that answer depends on the effect level, so a preview pinned to the ``live``
+    wording would be a fresh way to be wrong about the very thing the level is supposed to
+    contain — and the operator would find out from ``git ls-remote``.
+    """
+    from robot_army import prompt
+    from robot_army.effects import EffectLevel
+
+    live = "\n".join(operations.prompt_preview(preview(), REPO, 7).lines)
+    contained = "\n".join(
+        operations.prompt_preview(
+            preview(effect_level=EffectLevel.NO_REMOTE), REPO, 7
+        ).lines
+    )
+
+    assert prompt.DELIVERY_PUSH.text in live
+    assert prompt.DELIVERY_LOCAL.text not in live
+    assert prompt.DELIVERY_LOCAL.text in contained
+    assert prompt.DELIVERY_PUSH.text not in contained
+
+
+@pytest.mark.parametrize(
+    ("level", "expected"),
+    [("plan", "local"), ("local", "local"), ("no-remote", "local"), ("live", "push")],
+)
+def test_the_record_names_which_form_was_composed(preview, layout, level, expected):
+    """Issue #32 FR-010. One word, beside the two flags the record already carried.
+
+    The prompt itself is still not recorded — the gap is deliberate and enumerated — so this
+    field is the only way the log answers "was that session told to push?".
+    """
+    from robot_army.effects import EffectLevel
+
+    outcome = operations.prompt_preview(
+        preview(effect_level=EffectLevel(level)), REPO, 7
+    )
+
+    assert outcome.data["delivery"] == expected
+    assert records(layout, "prompt.preview")[-1]["detail"]["delivery"] == expected
 
 
 def test_the_branch_is_the_one_a_dispatch_would_derive(preview):

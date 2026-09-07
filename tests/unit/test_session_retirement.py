@@ -1091,3 +1091,48 @@ def test_a_genuine_orphan_is_still_reported_after_the_liveness_recheck(
 
     assert result.orphans == 1
     assert [a.entity_id for a in db.list_anomalies(conn)] == ["ghost"]
+
+
+# -- issue #44 review: retirement must not be blocked by an unrelated bad file ---
+
+
+def test_a_retirement_settles_its_row_even_when_another_registry_file_is_refused(
+    conn, config, audit, layout, registry, proc
+):
+    """The interleaving PR #160's review caught, and the leak it caused.
+
+    ``unknown_versions`` is a **per-file** failure: ``sessions.scan`` appends the refused
+    file's version and skips it, and goes on appending every other file's live entry in the
+    same loop. So a scan can be "unobservable" as a whole and still hold a directly observed
+    live entry for a different session.
+
+    That is exactly what retirement runs on. It finds this session alive through
+    ``scan.find()``, terminates it, and asks ``reclaim_stale_session`` to settle the row.
+    A blindness guard that answered "withheld" from a fact about *someone else's* file would
+    leave the row ``running`` with its process already dead — a capacity slot leaked
+    permanently, by the feature that exists to stop slots being mis-counted.
+
+    The rule that fixes it is narrower and truer: an entry we read is an observation about
+    *that* session, and no amount of blindness about other files makes it less so.
+    """
+    item = finished_item(conn, config, registry, proc)
+    merge_pull_request(conn, item)
+    # A second worker, on a version this daemon refuses. Nothing to do with the item above.
+    write_registry(registry, pid=999_001, session_id="s-stranger", version="9.9.9")
+
+    scan = sessions.scan(registry_dir=registry, proc_root=proc)
+    assert scan.unknown_versions, "the fixture must produce a refused file"
+    assert scan.find(SESSION) is not None, (
+        "and must still hold this session's own entry, or it proves nothing"
+    )
+    assert reconcile._registry_unobservable(scan) is not None, (
+        "the pass as a whole is blind; the point is that this session is not"
+    )
+
+    host = KillingHost(proc)
+    assert sweep(conn, audit, registry, proc, host) == 1
+
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+    after = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
+    assert after.total == 0, "the slot comes back; a killed worker must not hold one"
+    assert records(layout, "session.retired")[0]["detail"]["settled"] == "reclaimed"

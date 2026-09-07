@@ -33,6 +33,10 @@ Five changes, in three files:
    shared with it: its third clause differs, for a reason written at the guard (R3).
 2. **Three guards** — one immediately above the only registry-dependent conclusion in the
    active-item sweep (R6), one inside `reclaim_stale_session` (R7), one in the superseded sweep.
+   Each tests the pass's blindness **and** the absence of an entry for the session in hand
+   (R12): `unknown_versions` is a per-file failure, so a blind pass can still hold a directly
+   observed entry, and a guard keyed on the pass alone leaked the row of every worker
+   retirement terminated.
 3. **One counter and one flag in the record** — `liveness_withheld`, plus `directory_missing` in
    the scan summary, so three genuinely different passes stop writing the same line (R10).
 4. **One anomaly kind** — `registry_unobservable`, raised once per blind condition and retracted

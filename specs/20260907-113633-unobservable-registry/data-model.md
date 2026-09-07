@@ -106,14 +106,14 @@ The function returns a string naming what it decided, in the same shape as `spoo
 | `"left"` | yes | the row is legitimate — its work item is still running one |
 | `"reported"` | yes | the worker is alive under a finished item; an orphan anomaly is raised and the row stays open |
 | `"reclaimed"` | yes | the worker is gone; the row is closed `lost` |
-| `"withheld"` | **new** | the registry could not be observed, so neither of the last two can be told from the other |
+| `"withheld"` | **new** | the registry could not be observed **and** holds no entry for this session, so neither of the other two can be told from the other |
 
 Its three callers:
 
 | Caller | Handling |
 |---|---|
 | `_sweep_stale_sessions` | counts `"reclaimed"`; `"withheld"` increments `liveness_withheld` |
-| `_retire_one` | unreachable while blind — it is only called after `scan.find()` returned a *live* entry, which a blind scan cannot produce (R7). Its `settled in ("reclaimed", "left")` test is left as it is |
+| `_retire_one` | reaches `"reclaimed"`, not `"withheld"` — and only because the guard tests for a missing *entry* rather than for a blind pass (R12). It is called after `scan.find()` returned an entry, so the settle finds one too. Keying on the pass alone left every worker it terminated with a `running` row and a leaked slot; its `settled in ("reclaimed", "left")` test is unchanged |
 | `operations.abandon` | says the row was left open and why, so a maintainer is not told an item was abandoned while a slot silently stays subscribed |
 
 ---

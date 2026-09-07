@@ -170,17 +170,23 @@ by a test remembering to check it — every registry-independent branch has alre
 something for all three.
 
 - **`_sweep_stale_sessions`** — the intended target.
-- **`_retire_one`** — unreachable while blind. It is only called after `scan.find()` returned a
-  *live* entry, which a blind scan cannot produce. Its `settled in ("reclaimed", "left")`
-  accounting is therefore unaffected in practice; it is still worth knowing that a third return
-  value exists.
+- **`_retire_one`** — reachable while blind, and **this reasoning was wrong in the first draft**
+  (PR #160's review). The draft said a blind scan cannot produce a live entry. That holds for
+  `directory_missing` and `degraded`, and not for `unknown_versions`, which is a *per-file*
+  failure: `sessions.scan` refuses one file and goes on appending every other file's live entry
+  in the same loop. `_retire_finished_sessions` consults `scan.find()` directly and never asks
+  whether the pass could see, so it retires normally on a scan the predicate calls blind — and a
+  guard keyed on the pass alone then answered `"withheld"` about the row of a worker this pass
+  had just killed. Process dead, row `running`, slot subscribed for ever, caused by the feature
+  meant to stop slots being mis-counted. See R12 for the rule that replaced it.
 - **`operations.abandon`** — reachable, and it takes its own fresh scan. Today a maintainer
   abandoning an item while the registry is unreadable closes a row whose worker may be running.
   With the guard, the row is left open, and the next readable reconciliation pass settles it.
 
 **Decision**: the guard lives in `reclaim_stale_session`, which is the function that already
 holds the rule "a worker that can be seen is reported, not closed". Blindness is a case of that
-same rule and belongs beside it, not copied into each caller.
+same rule and belongs beside it, not copied into each caller. Its *test* is R12's, not this
+section's original one.
 
 `abandon` gains one line of output saying the row was left open and why. Without it the
 maintainer is told the item was abandoned while a slot silently stays subscribed, which is the
@@ -276,3 +282,49 @@ actually find it.
 | Sharing `capacity._registry_unusable` | Its third clause is deliberately different (R3), and the two functions answer different questions about the same object. Sharing them would make one of the two silently wrong the next time either is edited |
 | Treating `unreadable` as blindness | R4 — it happens on healthy machines during normal operation |
 | Guarding `_retire_finished_sessions` or `_orphan_sweep` | R5 — neither draws a false conclusion from an empty scan |
+
+---
+
+## R12 — The test is per session, not per pass (added after PR #160's review)
+
+R3 established that a partly-refused registry is unobservable for these sweeps, and it still is.
+What the first implementation got wrong is what follows from that.
+
+"The pass was blind" and "the pass could not see *this* session" are different claims, and only
+the second justifies withholding. `directory_missing` and `degraded` make them coincide —
+neither can produce an entry that joins to a session row at all — but `unknown_versions` does
+not: one file is refused and every other file's live entry is appended in the same loop. So a
+scan can be blind as a whole while holding a directly observed entry for the very session being
+judged.
+
+Keying the guard on the pass alone therefore withheld conclusions the scan had the evidence for.
+The measured consequence is in R7: `_retire_one` settles a worker it has just terminated, its
+entry was in the scan, and the guard answered `"withheld"` — leaving the row `running` with its
+process dead, for ever.
+
+**Decision**: withhold when the observation was unusable **and** the scan holds no entry for this
+session. Implemented by moving each guard *below* the entry lookup and testing both.
+
+| Case | Before | After |
+|---|---|---|
+| absent or unlistable directory | withhold | withhold (no entry exists) |
+| degraded `/proc` scan | withhold | withhold (entries carry no session id) |
+| refused file, this session unseen | withhold | withhold |
+| refused file, this session's entry read and alive | report | report |
+| refused file, this session's entry read, process now gone | **withhold — the leak** | conclude dead |
+
+The last row is the fix and is why the change is not cosmetic. It is also the *only* row that
+moved, which is what makes the narrowing safe: nothing that was previously withheld for a
+genuine absence stops being withheld.
+
+**Why the rule is better and not merely narrower.** An entry the scan read is a positive
+observation about that session. Whether some other file carried a version we refuse has no
+bearing on it. The original guard was answering a question about the pass when the decision in
+front of it was about one row.
+
+**In the two item sweeps the narrowing barely bites**, and it is worth saying so rather than
+implying otherwise. `sessions.scan` filters on liveness, so a dead session's entry is not in
+`entries` at all — "read but gone" and "never read" both present as `entry is None`. The narrower
+test only differs there for a process that died between the scan and the check. It is applied in
+all three places anyway, because one rule stated once is worth more than two rules that agree in
+most cases, and because the sweep where it *does* bite is the one that kills processes.

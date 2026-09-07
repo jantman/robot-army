@@ -260,16 +260,31 @@ def reclaim_stale_session(
     doing.
 
     **``"withheld"`` is the fourth outcome and it protects the same direction** (#44). The
-    two branches below both rest on the registry having been *read*: one says "I can see
-    this worker", the other says "I cannot, so it is gone". A scan that could not observe
-    the registry at all supports neither, and taking the second on its strength would close
-    every open row on the machine at once — the under-count above, reached by making every
-    live worker look absent simultaneously rather than one at a time.
+    ``reclaimed`` branch rests on an absent registry entry meaning "this worker is gone" —
+    which it does only if the registry was read. A scan that could not observe it supports
+    no such reading, and taking it anyway closes every open row on the machine at once:
+    the under-count above, reached by making every live worker look absent simultaneously
+    rather than one at a time.
 
-    The guard lives here rather than at the callers because this function *is* the rule
-    that a worker which can be seen is reported and left open. Blindness is a case of that
-    rule, not a separate policy, and putting it here carries it to ``operations.abandon``
-    without anyone having to decide twice.
+    **The test is per session, not per pass**, and PR #160's review is why. ``degraded`` and
+    ``directory_missing`` are properties of the whole scan, but ``unknown_versions`` is a
+    *per-file* failure — ``sessions.scan`` refuses one file and goes on appending every other
+    file's live entry in the same loop. So a scan can be blind as a whole while holding a
+    directly observed entry for this very session, and a guard asking only "was the pass
+    blind" answered "withheld" about a session it had just watched exit. That leaked the row
+    of every worker ``_retire_one`` terminated while any unrelated file carried a version we
+    refuse: process dead, row ``running``, slot subscribed for ever, caused by the feature
+    meant to stop slots being mis-counted.
+
+    So the guard sits **below** the entry lookup and asks for both. An entry we read is an
+    observation about *that* session, and no amount of blindness about other files makes it
+    less true; only a session the scan has nothing to say about is one we must decline to
+    judge.
+
+    The guard lives in this function rather than at its callers because this function *is*
+    the rule that a worker which can be seen is reported and left open. Blindness is a case
+    of that rule, not a separate policy, and putting it here carries it to
+    ``operations.abandon`` without anyone having to decide twice.
 
     ``reason`` names the route — cancellation, abandonment, or the sweep — because that is
     the difference between "the maintainer stopped this" and "this was found stale later",
@@ -284,10 +299,6 @@ def reclaim_stale_session(
     # An open row whose work item is gone still holds a global slot and nothing else can
     # ever close it, so it is stale by the same argument.
     item_state = str(item.state) if item is not None else "absent"
-
-    # Below both registry-independent answers, above both registry-dependent ones.
-    if _registry_unobservable(scan) is not None:
-        return "withheld"
 
     entry = scan.find(session.session_id)
     if entry is not None and entry.alive(proc_root=proc_root):
@@ -312,6 +323,9 @@ def reclaim_stale_session(
             },
         )
         return "reported"
+
+    if entry is None and _registry_unobservable(scan) is not None:
+        return "withheld"
 
     transition_session(
         conn,
@@ -409,10 +423,12 @@ def _sweep_superseded_sessions(
             # same rule the current attempt is judged by, applied to a superseded one.
             continue
 
-        if unobservable is not None:
-            # Nor is its absence evidence of anything when the registry itself could not be
-            # read. Below the two registry-independent skips above, for the same reason the
-            # guard in the active-item sweep sits where it does.
+        if unobservable is not None and entry is None:
+            # Nor is its absence evidence of anything when the registry could not be read
+            # *and* had nothing to say about this session in particular. Both halves are
+            # needed: ``unknown_versions`` is a per-file failure, so a blind pass can still
+            # hold a directly observed entry for this row, and an entry that was read and
+            # is not alive is a fact about this attempt whatever happened to other files.
             withheld += 1
             continue
 
@@ -519,7 +535,7 @@ def reconcile(
             result.skipped_never_real += 1
             continue
 
-        if unobservable is not None:
+        if unobservable is not None and entry is None:
             # An observation that saw nothing is not evidence that nothing is alive (#44).
             #
             # **The position of this guard is the guarantee**, not the guard itself. Every
@@ -529,6 +545,11 @@ def reconcile(
             # conclusions survive a blind pass by construction rather than because a test
             # remembered to check them. The line below is the pass's only registry-
             # dependent conclusion, and this is the only place a guard can sit.
+            #
+            # ``entry is None`` is the other half, and PR #160's review is why it is there:
+            # a refused registry file makes the *pass* blind without making it blind about
+            # this session, whose own entry may have been read perfectly well. What must be
+            # withheld is a conclusion drawn from an absence the scan cannot vouch for.
             result.liveness_withheld += 1
             continue
 
@@ -1355,10 +1376,19 @@ def _retire_one(
     # signalling. That is an ordinary outcome of a successful retirement, not a failure,
     # and it is counted as one.
     #
-    # `withheld` (#44) is not in the set and does not need to be: it is unreachable from
-    # here. This function is only called after `scan.find()` returned an entry that was
-    # *alive*, which a scan that could not observe the registry cannot produce — so a
-    # retirement is never decided on a blind pass in the first place.
+    # `withheld` (#44) is not in the set and does not need to be, but the reason is narrower
+    # than it first looks and PR #160's review caught the first version of it being wrong.
+    #
+    # It is *not* that a blind pass never reaches retirement. `_retire_finished_sessions`
+    # consults `scan.find()` directly and never asks whether the pass could see, and
+    # `unknown_versions` is a per-file failure, so a blind scan can hold a perfectly good
+    # entry for this session and retirement will act on it.
+    #
+    # What makes `withheld` unreachable is that this function is only called after that
+    # lookup returned an entry, and `reclaim_stale_session` withholds only when it finds
+    # *none*. The row it settles is one the registry did describe, so the settle reaches
+    # `reclaimed` — which is exactly the case that used to leak: a worker this pass had just
+    # killed, left `running` for ever, holding the slot the feature exists to account for.
     return 1 if settled in ("reclaimed", "left") else 0
 
 

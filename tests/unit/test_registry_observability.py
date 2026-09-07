@@ -16,6 +16,7 @@ empty-but-present directory are always checked together, in one test, against on
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -562,3 +563,70 @@ def test_the_orphan_sweep_still_reports_what_it_saw(conn, audit, config, tmp_pat
         "registry_version_unknown",
         "registry_unobservable",
     }
+
+
+def test_an_entry_that_was_read_is_an_observation_about_that_session(
+    conn, audit, config, tmp_path
+):
+    """The narrowing PR #160's review forced, stated directly (contracts C4.2).
+
+    ``unknown_versions`` is a per-file failure, so "the pass was blind" and "the pass could
+    not see *this* session" are different claims. Here the session's own file was read and
+    its entry was live at the scan; the process dies before the decision. That absence is
+    one the scan can vouch for, so the row is closed rather than withheld — and it must be,
+    because this is the shape retirement settles its own killed workers through.
+    """
+    item_id = seed_item(
+        conn, repo_key="demo", issue_number=240, state=str(WorkItemState.DONE)
+    )
+    row_id = seed_session(conn, item_id, state="running", pid=6100, session_id="s-seen")
+    conn.execute("UPDATE sessions SET proc_start = ? WHERE id = ?", ("6100", row_id))
+
+    registry, proc = tmp_path / "registry", tmp_path / "proc"
+    cwd = Path(config.worktree_root) / "seen"
+    cwd.mkdir(parents=True, exist_ok=True)
+    write_registry(registry, pid=6100, session_id="s-seen", proc_start="6100", cwd=str(cwd))
+    write_registry(registry, pid=999_001, session_id="s-stranger", version="9.9.9")
+    write_proc(proc, 6100, starttime="6100", cwd=str(cwd))
+
+    scan = sessions.scan(registry_dir=registry, proc_root=proc)
+    assert reconcile._registry_unobservable(scan) is not None, "the pass is blind overall"
+    assert scan.find("s-seen") is not None, "and yet it read this session's own file"
+
+    # The worker exits between the scan and the decision -- which is exactly what happens
+    # when this pass is the thing that ended it.
+    shutil.rmtree(proc / "6100")
+
+    with db.transaction(conn):
+        outcome = reconcile.reclaim_stale_session(
+            conn, audit, session=db.get_session(conn, "s-seen"), scan=scan,
+            proc_root=proc, reason="a test",
+        )
+
+    assert outcome == "reclaimed"
+    assert db.get_session(conn, "s-seen").state is SessionState.LOST
+
+
+def test_a_session_the_scan_never_saw_is_still_withheld(conn, audit, config, tmp_path):
+    """The other half. Narrowing the rule must not undo it: a session with no entry in a
+    registry that could not be read is exactly the case the guard exists for."""
+    item_id = seed_item(
+        conn, repo_key="demo", issue_number=241, state=str(WorkItemState.DONE)
+    )
+    row_id = seed_session(conn, item_id, state="running", pid=6200, session_id="s-unseen")
+    conn.execute("UPDATE sessions SET proc_start = ? WHERE id = ?", ("6200", row_id))
+
+    registry, proc = tmp_path / "registry", tmp_path / "proc"
+    proc.mkdir()
+    write_registry(registry, pid=999_001, session_id="s-stranger", version="9.9.9")
+    scan = sessions.scan(registry_dir=registry, proc_root=proc)
+    assert scan.find("s-unseen") is None
+
+    with db.transaction(conn):
+        outcome = reconcile.reclaim_stale_session(
+            conn, audit, session=db.get_session(conn, "s-unseen"), scan=scan,
+            proc_root=proc, reason="a test",
+        )
+
+    assert outcome == "withheld"
+    assert db.get_session(conn, "s-unseen").state is SessionState.RUNNING

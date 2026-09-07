@@ -69,6 +69,17 @@ in the pass summary and `resume` recovers the item.
 
 Every place that concludes "dead" from the *absence* of a registry entry, and nowhere else.
 
+**Each guard tests two things, not one** (added after PR #160's review): the observation was
+unusable, **and** the scan holds no entry for this session. C1's predicate answers a question
+about the *pass*; these guards decide about a *row*, and `unknown_versions` is the case where
+those come apart — one file refused, every other file's live entry appended in the same loop. An
+entry the scan read is a positive observation about that session, and no blindness about other
+files makes it less so.
+
+Keying on the pass alone leaked rows: `_retire_one` settles a worker it has just terminated,
+that worker's entry was in the scan, and the guard answered "withheld" — process dead, row
+`running`, slot subscribed for ever. Every guard below therefore sits *under* the entry lookup.
+
 ### C4.1 — The active-item sweep
 
 ```
@@ -77,7 +88,7 @@ superseded attempts                     -> C4.3
 registry entry found and alive          -> claim its pid; leave
 session already records an exit         -> leave                          (registry-independent)
 session has no process identifier       -> skip; skipped_never_real       (registry-independent)
-observation unusable                    -> leave; liveness_withheld += 1  <- NEW
+unusable AND no entry for this session  -> leave; liveness_withheld += 1  <- NEW
 otherwise                               -> session -> LOST, item -> INTERRUPTED
 ```
 
@@ -91,8 +102,8 @@ impossible, because the line below it is the conclusion.
 ```
 session is not starting/running         -> "left"                         (registry-independent)
 work item is dispatching/active         -> "left"                         (registry-independent)
-observation unusable                    -> "withheld"                     <- NEW
 registry entry found and alive          -> raise orphan_session; "reported"
+unusable AND no entry for this session  -> "withheld"                     <- NEW
 otherwise                               -> session -> LOST; "reclaimed"
 ```
 
@@ -105,8 +116,9 @@ rule. Its three callers are settled in [data-model.md §5](../data-model.md).
 ```
 row is the current attempt              -> skip                           (registry-independent)
 row is not starting/running             -> skip                           (registry-independent)
-observation unusable                    -> leave; liveness_withheld += 1  <- NEW
 registry entry found and alive          -> claim its pid; raise orphan_session; leave open
+row has no process identifier           -> skip                           (registry-independent)
+unusable AND no entry for this session  -> leave; liveness_withheld += 1  <- NEW
 otherwise                               -> session -> LOST
 ```
 
@@ -146,7 +158,8 @@ meant to read, which is the "mostly stale, so cleared without reading" failure i
    still interrupted; a record with no process is still skipped as never-real.
 3. **The effect level is never consulted.** Not in the predicate, not at a guard, not in a
    comment — `test_only_effects_py_knows_the_effect_level_exists` greps this file's text.
-4. **A blind pass writes no state transition** that a sighted pass would have written about the
-   same row.
+4. **A blind pass writes no state transition that rests on an absence it cannot vouch for.**
+   Not "writes no transition at all": a session whose own entry the scan read is one it may
+   still conclude about, and a worker this pass terminated must still have its row settled.
 5. **Repeated blind passes do not accumulate anomalies**, and a returning registry needs no
    maintainer action.

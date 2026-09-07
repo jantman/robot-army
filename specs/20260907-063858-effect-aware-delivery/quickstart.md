@@ -33,13 +33,14 @@ Run it at `plan` and at `local` too: both produce the same delivery section as `
 ## 3. The `live` prompt did not change
 
 ```bash
-git stash list   # nothing of this feature's; the check below is against the merge base
-uv run robot-army prompt jantman/robot-army 32 --effect-level live
+uv run pytest tests/unit/test_speckit_prompt.py -q
 ```
 
-**Expected**: identical to the same command on `main`, modulo the fence nonce. This is SC-003,
-and `tests/unit/test_delivery_prompt.py` asserts the `push` form's text directly so a reflow
-cannot pass as an edit.
+**Expected**: passing, and — the part that matters — `GOLDEN` in that file is *unedited by this
+feature*. It is the whole `live` assembly written out as a literal, so a change to what a live
+dispatch reads shows up there as a diff. `test_below_live_only_the_delivery_section_changes`
+holds the other half: substituting the `local` form into `GOLDEN` is exactly what composing with
+it produces, so nothing outside the delivery section moved (SC-002, SC-003).
 
 ## 4. The Spec Kit contradiction, which is the case that matters here
 
@@ -50,6 +51,9 @@ a Spec Kit issue at `no-remote`:
 uv run robot-army prompt jantman/robot-army 32 --effect-level no-remote | sed -n '1,80p'
 ```
 
+(The issue must be in an onboarded repository; any issue number in one works, dispatched or
+not, because the preview creates nothing.)
+
 **Expected**: the Spec Kit block still carries the operator's configured instruction, unchanged —
 and the delivery section below it says that an instruction above asking for a push describes a
 `live` dispatch and does not apply to this run. If that sentence is missing, a `no-remote`
@@ -59,7 +63,7 @@ dispatch of a Spec Kit issue in this repository will still push (research.md R8)
 
 ```bash
 uv run robot-army prompt jantman/robot-army 32 --effect-level no-remote > /dev/null
-uv run robot-army log --limit 5
+uv run robot-army log --limit 5 --json | grep -A2 prompt.preview
 ```
 
 **Expected**: the `prompt.preview` record carries `"delivery": "local"`, beside the

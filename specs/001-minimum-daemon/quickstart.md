@@ -98,7 +98,7 @@ uv run robot-army show <item-id>
 **not** sit in `dispatching` forever. This is M0 F15 reproduced deliberately — the hang is the
 realistic case, not a contrived one.
 
-## Scenario 3 — A real session, no GitHub writes (effect level `no-remote`)
+## Scenario 3 — A real session, and no GitHub writes *by robot-army* (effect level `no-remote`)
 
 **Validates**: FR-018, FR-020, FR-025, US1, SC-001, SC-002.
 
@@ -109,6 +109,22 @@ uv run robot-army run --effect-level no-remote
 **Expected**: a kitty tab appears with a live Claude Code session in the worktree; the item reaches
 `active` **only after** the registry entry carrying the generated `session_id` was observed; no
 comment appears on the GitHub issue.
+
+**Read the heading carefully — it used to be wrong.** It said "no GitHub writes", and the run it
+describes launches a real session with the operator's own credentials, which pushed a branch
+(issue #32). What this scenario checks is that *robot-army* wrote nothing, which is the only
+thing the effect ladder governs; see
+[`contracts/boundaries.md`](contracts/boundaries.md#what-the-level-does-not-govern). Since #32
+the session is also *told* not to push, so the second check below should now pass too — but it
+is a check rather than a guarantee, and that is the point of running it:
+
+```bash
+git -C <the repo's clone> ls-remote --heads origin 'refs/heads/robot-army/*'
+```
+
+**Expected**: no branch for this issue. If one is there, the session ignored its instructions;
+nothing in this system prevents that, so the finding is about the prompt, not about a broken
+boundary.
 
 Confirm the confirmation actually happened rather than being assumed:
 

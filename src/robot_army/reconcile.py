@@ -715,6 +715,32 @@ def reconcile(
     # it compares two local tables — so it sits here beside its sibling rather than on the
     # intake path, where it would only run when a board poll succeeded.
     result.anomalies_resolved += _resolve_card_create_anomalies(conn, audit=audit)
+    # The third (issue #44), and the pass's own blindness is what it settles. Exactly one
+    # of the two branches below runs on any pass, so the raise and the retraction can never
+    # fight: a pass either could read the registry or could not.
+    #
+    # The raise is *here*, near the end, rather than beside the guards that withhold —
+    # because `liveness_withheld` is only final once every guarded sweep has run, and an
+    # anomaly recording a partial count would be a worse record than none.
+    if unobservable is None:
+        result.anomalies_resolved += _resolve_registry_anomalies(conn, audit=audit)
+    else:
+        with db.transaction(conn):
+            db.raise_anomaly(
+                conn,
+                kind="registry_unobservable",
+                entity_type=None,
+                entity_id=None,
+                detail={
+                    "reason": unobservable,
+                    "liveness_withheld": result.liveness_withheld,
+                    "note": (
+                        "this pass could not read the session registry, so it declined to "
+                        "conclude that any session had died. Nothing was torn down. It "
+                        "retracts itself on the first pass that can read the registry"
+                    ),
+                },
+            )
 
     # -- how far Spec Kit runs have got (milestone 007, FR-012) ------------
     result.speckit_phase_changes += _observe_speckit(conn, audit=audit)
@@ -1747,6 +1773,50 @@ def _resolve_card_create_anomalies(conn: sqlite3.Connection, *, audit: AuditLog)
                     "reason": (
                         "the card this anomaly named has since been linked to an issue, so "
                         "the creation it reported as failing has succeeded"
+                    ),
+                },
+                dry_run=anomaly.dry_run,
+            )
+        resolved += 1
+    return resolved
+
+
+def _resolve_registry_anomalies(conn: sqlite3.Connection, *, audit: AuditLog) -> int:
+    """Close a ``registry_unobservable`` now that the registry has been read (issue #44).
+
+    The third kind whose truth can be positively re-established as *false*, and the most
+    directly of the three: the condition it reports is "this pass could not read the session
+    registry", and the caller only reaches this function on a pass that did. There is no
+    inference and nothing to re-check — the observation that retracts it has already been
+    taken, at the top of the same pass.
+
+    **Called only from the branch where ``_registry_unobservable`` returned ``None``**,
+    which is what makes the raise and the retraction unable to fight. Every pass is one or
+    the other, never both, so no pass can leave a row it also created.
+
+    Without this a registry that vanished for one minute would leave a permanent entry on a
+    list read as *things needing attention*. That is the staleness issue #138 named, and
+    reintroducing it as a side effect of fixing a different bug would be a poor trade.
+
+    One transaction per anomaly, so a pass killed midway leaves what it reached resolved and
+    logged and the rest for next time. In practice there is at most one open row, because
+    the partial unique index dedupes a kind that carries no entity.
+    """
+    resolved = 0
+    for anomaly in db.open_registry_unobservable_anomalies(conn):
+        with db.transaction(conn):
+            if not db.resolve_anomaly(conn, anomaly.id):
+                continue
+            audit.record(
+                "anomaly.resolved",
+                outcome="ok",
+                entity_type="anomaly",
+                entity_id=str(anomaly.id),
+                detail={
+                    "kind": anomaly.kind,
+                    "reason": (
+                        "the session registry was read successfully on this pass, so the "
+                        "observation failure this anomaly reported no longer holds"
                     ),
                 },
                 dry_run=anomaly.dry_run,

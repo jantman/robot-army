@@ -966,6 +966,27 @@ def open_card_create_failing_anomalies(conn: sqlite3.Connection) -> list[Anomaly
     )
 
 
+def open_registry_unobservable_anomalies(conn: sqlite3.Connection) -> list[Anomaly]:
+    """The population ``reconcile._resolve_registry_anomalies`` re-checks (issue #44).
+
+    The third kind, and narrow for the reason the other two are. ``registry_unobservable``
+    qualifies on exactly the property those were chosen for: its condition can be positively
+    re-established as *false*, by a later pass that read the registry successfully. Nothing
+    is inferred and nothing is guessed — the retraction is made by the observation itself.
+
+    Rehearsed rows are included for the same reason ``card_create_failing``'s are, though in
+    practice none exist: this kind is always raised as a fact about the machine, because the
+    registry is a property of the machine and not of the run that looked at it.
+    """
+    return _rows(
+        conn.execute(
+            "SELECT * FROM anomalies WHERE kind = 'registry_unobservable' "
+            "AND acknowledged_at IS NULL AND resolved_at IS NULL ORDER BY id"
+        ),
+        Anomaly,
+    )
+
+
 def acknowledge_anomaly(conn: sqlite3.Connection, anomaly_id: int) -> bool:
     cursor = conn.execute(
         "UPDATE anomalies SET acknowledged_at = ? WHERE id = ? AND acknowledged_at IS NULL",

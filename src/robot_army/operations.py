@@ -1003,17 +1003,19 @@ def _reattach_lines(ctx: Context, session: Any) -> list[str]:
         return []
     if session.state in TERMINAL_SESSION_STATES:
         return []
+    host = ctx.boundaries.session_host
     handle = HostHandle(socket_path=socket_path, argv=(), pid=session.pid)
+    # The host composes the command, as it does for ``attach`` and for the refusal
+    # ``cancel`` prints. Spelling it out here would be a second place to keep in step with
+    # the invocation that is actually run.
+    command = f"       reattach: {' '.join(host.attach_command(handle))}"
     try:
-        alive = ctx.boundaries.session_host.is_alive(handle)
+        alive = host.is_alive(handle)
     except BoundaryError as exc:
-        return [
-            f"       reattach: dtach -a {socket_path}",
-            f"                 unverified: {exc}",
-        ]
+        return [command, f"                 unverified: {exc}"]
     if not alive:
         return [f"       reattach: not available — nothing is listening on {socket_path}"]
-    return [f"       reattach: dtach -a {socket_path}"]
+    return [command]
 
 
 def show(ctx: Context, item_id: int) -> Result:

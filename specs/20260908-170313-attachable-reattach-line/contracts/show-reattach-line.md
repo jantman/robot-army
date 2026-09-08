@@ -39,6 +39,9 @@ Seven leading spaces, aligning with the times line above it, unchanged from toda
        reattach: dtach -a /run/user/1000/robot-army/12.sock
 ```
 
+The command itself is composed by the session host (`attach_command`), not spelled out at
+the render site, so it cannot drift from the invocation `attach` actually runs.
+
 **The refusal** (outcome 4):
 
 ```

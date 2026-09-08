@@ -277,6 +277,20 @@ uv run robot-army attach <id>
 dtach -a /run/user/$(id -u)/robot-army/<item>.sock    # the same thing, by hand
 ```
 
+**`show` offers that command only where it would reach the session on the row it is printed
+under**, so its absence is a statement and not an omission. An attempt that has ended —
+`exited_clean`, `exited_error`, `lost` — carries no attach line at all; an attempt still open
+whose socket answers carries the command; an attempt still open with nothing listening says
+so, and names the path, rather than offering something that fails at the shell. If the probe
+itself cannot answer, the command appears with `unverified:` and the reason beneath it.
+
+The state is checked as well as the socket, and that is not belt-and-braces. **A socket is
+named after the item, not the session**, so every attempt on one item records the same path —
+which means the path an ended attempt wrote down is the one the *next* attempt listens on.
+Guarding on liveness alone would keep offering the finished row's line, and that line works:
+it attaches to a different session than the row above it says. Nothing reopens a session
+record, so a finished attempt is never what is answering, whatever is.
+
 ---
 
 Next: [what happens after](5-outcome.md).

@@ -93,11 +93,12 @@ word a reader sees in `health`, in `status` and in the web chrome is the same wo
 | `healthy` | unchanged; now equals `state is OK` by construction |
 | `reason` | unchanged in type; the sentences change, per the contract |
 | `state` | **new, required, third positional.** No default: `OK` would let a hand-built failing report claim health, and an eighth `unknown` member would exist only to be the value nobody meant |
+| `lock` | **new**, `LockState | None`, keyword with a `None` default. What the report was judged against — `None` means no reading was supplied. Defaulted, unlike `state`, because absence is its honest and commonest value |
 | `age_seconds` | unchanged |
 | `heartbeat` | unchanged |
 
-`to_dict()` gains `"state"` alongside the existing four keys, and gains `"lock"` carrying the
-observed `LockState` value or `null` when none was supplied — FR-009 asks for both the verdict
+`to_dict()` gains `"state"` and `"lock"` alongside the existing four keys, the latter carrying
+the observed `LockState` value or `null` when none was supplied — FR-009 asks for both the verdict
 and what was seen of the lock, and a consumer that cannot tell "unheld" from "not consulted" is
 back to guessing.
 

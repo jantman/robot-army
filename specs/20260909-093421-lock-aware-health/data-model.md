@@ -35,8 +35,8 @@ A frozen slotted dataclass in `src/robot_army/health.py`.
 | field | type | notes |
 |---|---|---|
 | `state` | `LockState` | as above |
-| `holder` | `str | None` | the pid text read from the lock file, **only** when `state is HELD`; `None` otherwise |
 | `path` | `Path` | the lock file that was observed |
+| `holder` | `str | None` | the pid text read from the lock file, **only** when `state is HELD`; `None` otherwise |
 | `running` | `bool` (property) | `state is LockState.HELD`. The bool every existing caller already wanted |
 
 **Why the path travels with the reading**: two of the sentences the check now writes name the

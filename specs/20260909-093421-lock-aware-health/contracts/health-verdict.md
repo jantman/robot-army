@@ -84,7 +84,9 @@ healthy run's output is byte-for-byte what it is today.
 | `starting`, no heartbeat | `a daemon holds {lock} but nothing has been written to {hb} yet — it is starting, or it stopped before its first beat` |
 | `starting`, mismatched pid | `a daemon holds {lock} (pid {holder}) but has not beaten yet; the newest heartbeat is {age}s old and belongs to pid {pid}, which is not the holder` |
 
-**The `UNKNOWN` clause** (FR-013). When the reading is `UNKNOWN`, the sentence is the
+**The `UNKNOWN` clause** (FR-013). It applies to every verdict reached from the heartbeat
+alone — `ok`, `stale` and `never_started`, each of which the lock *would* have decided
+differently had it been readable. When the reading is `UNKNOWN`, the sentence is the
 heartbeat-only sentence above plus:
 
 ```

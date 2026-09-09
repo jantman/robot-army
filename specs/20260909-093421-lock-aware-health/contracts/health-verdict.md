@@ -82,7 +82,8 @@ healthy run's output is byte-for-byte what it is today.
 | `died` | `no process holds {lock} — the daemon is gone; its last heartbeat is {age}s old (pid {pid}, last activity {activity!r})` |
 | `hung` | `pid {holder} still holds {lock} but its heartbeat is {age}s old, past the {max}s threshold — the daemon is wedged, not gone (last activity {activity!r})` |
 | `starting`, no heartbeat | `a daemon holds {lock} but nothing has been written to {hb} yet — it is starting, or it stopped before its first beat` |
-| `starting`, mismatched pid | `a daemon holds {lock} (pid {holder}) but has not beaten yet; the newest heartbeat is {age}s old and belongs to pid {pid}, which is not the holder` |
+| `starting`, mismatched pid | `a daemon holds {lock} but has not beaten yet; the newest heartbeat is {age}s old and belongs to pid {pid}, which is not the holder` |
+| `starting`, unreadable holder | the same, ending `and cannot be matched to the holder, whose pid could not be read` — the claim "is not the holder" may not be made when the holder is the thing that could not be read |
 
 **The `UNKNOWN` clause** (FR-013). It applies to every verdict reached from the heartbeat
 alone — `ok`, `stale` and `never_started`, each of which the lock *would* have decided

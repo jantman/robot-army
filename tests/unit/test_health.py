@@ -195,9 +195,13 @@ def test_a_holder_that_cannot_be_read_is_a_doubt_rather_than_a_match(tmp_path):
     write_at(path, age_seconds=400)
 
     reading = health.LockReading(health.LockState.HELD, tmp_path / "daemon.lock", None)
-    assert health.check(path, max_age_seconds=180, lock=reading).state is (
-        health.HealthState.STARTING
-    )
+    report = health.check(path, max_age_seconds=180, lock=reading)
+
+    assert report.state is health.HealthState.STARTING
+    # And it does not claim a mismatch it could not observe: the holder's pid is exactly
+    # what could not be read here, so "is not the holder" would be an invention.
+    assert "cannot be matched to the holder" in report.reason
+    assert "is not the holder" not in report.reason
 
 
 def test_a_daemon_holding_the_lock_with_no_heartbeat_at_all_is_starting(tmp_path):

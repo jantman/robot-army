@@ -367,12 +367,20 @@ def check(
                 age=age,
                 payload=payload,
             )
+        # Two sentences rather than one with a placeholder in it: "belongs to pid 111,
+        # which is not the holder" is a claim, and it may not be made when the holder is
+        # precisely what could not be read.
+        whose = (
+            f"belongs to pid {payload.get('pid')}, which is not the holder"
+            if holder
+            else f"belongs to pid {payload.get('pid')} and cannot be matched to the holder, "
+            "whose pid could not be read"
+        )
         return report(
             False,
             HealthState.STARTING,
-            f"a daemon holds {lock.path} (pid {holder or 'unknown'}) but has not beaten yet; "
-            f"the newest heartbeat is {int(age)}s old and belongs to pid "
-            f"{payload.get('pid')}, which is not the holder",
+            f"a daemon holds {lock.path} but has not beaten yet; the newest heartbeat is "
+            f"{int(age)}s old and {whose}",
             age=age,
             payload=payload,
         )

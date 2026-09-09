@@ -301,8 +301,14 @@ def status(
     their own, so what this prints as "next" is what the next dispatch will select (R8).
     """
     result = Result()
+    # Both signals (issue #52). The health line below is the *only* line this command prints
+    # about the daemon — there is no separate "running" line to contradict it — so a verdict
+    # reached from the heartbeat alone would let `status` say `ok` beside a dead daemon for
+    # as long as the staleness threshold ran, which is exactly what `health` did.
     report = health.check(
-        ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+        ctx.layout.heartbeat_path,
+        max_age_seconds=ctx.config.health.max_age_seconds,
+        lock=daemon_mod.observe_lock(ctx.layout.lock_path),
     )
     counts = db.count_work_items_by_state(ctx.conn, include_simulated=include_simulated)
     states = [WorkItemState(state)] if state else None
@@ -379,7 +385,7 @@ def status(
     }
 
     result.say(f"effect level : {ctx.effect_level}")
-    result.say(f"health       : {'ok' if report.healthy else 'STALE'} — {report.reason}")
+    result.say(f"health       : {report.state.label} — {report.reason}")
     # FR-036: a system that is healthy and deliberately doing nothing must not read as a
     # system that is healthy and doing nothing for no reason.
     result.say(
@@ -5049,17 +5055,32 @@ def follow_log(ctx: Context, *, include_simulated: bool = False) -> Iterator[str
 
 
 def health_check(ctx: Context, *, max_age: float | None = None, do_notify: bool = False) -> Result:
-    """Exits 0 if fresh, 4 if stale or absent. Intended to be run by a systemd timer —
-    **this, not the daemon, is the dead-man's switch**."""
+    """Exits 0 when a daemon holds the lock and its heartbeat is fresh, 4 for every other
+    verdict. Intended to be run by a systemd timer — **this, not the daemon, is the
+    dead-man's switch**.
+
+    One exit code for all six failures, deliberately: the timer and any shell around it care
+    whether it failed, and the distinction between them — died, hung, starting, never
+    started, unreadable, stale — is in the first line and in ``state``. A second encoding of
+    the same fact, for a caller that does not exist, is what Principle I forbids."""
     threshold = (
         max_age
         if max_age is not None
         else float(ctx.config.health.max_age_seconds or 3 * ctx.config.daemon.reconcile_seconds)
     )
-    report = health.check(ctx.layout.heartbeat_path, max_age_seconds=threshold)
+    # Both signals, not just the heartbeat (issue #52). A released lock is direct evidence
+    # that the process is gone — no threshold, no waiting — and reading only the heartbeat
+    # gave this command, which *is* the dead-man's switch, a detection floor of the whole
+    # staleness threshold while the web interface knew within a second. The heartbeat stays
+    # because it is the only thing that catches the daemon that is alive and wedged.
+    report = health.check(
+        ctx.layout.heartbeat_path,
+        max_age_seconds=threshold,
+        lock=daemon_mod.observe_lock(ctx.layout.lock_path),
+    )
     result = Result(
         code=EXIT_OK if report.healthy else EXIT_CHECK_FAILED,
-        lines=[("ok: " if report.healthy else "STALE: ") + report.reason],
+        lines=[f"{report.state.label}: {report.reason}"],
         data=report.to_dict(),
     )
     if not report.healthy and do_notify:

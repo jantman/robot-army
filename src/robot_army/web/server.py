@@ -678,12 +678,16 @@ def effective_level(
     explains that state, so the caller renders no second banner for it and only the pill
     changes; one account of a situation beats two competing ones.
     """
-    if report is None:
-        report = health.check(
-            ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
-        )
-    if running is None:
-        running = daemon_mod.is_locked(ctx.layout.lock_path)
+    if report is None or running is None:
+        lock = daemon_mod.observe_lock(ctx.layout.lock_path)
+        if report is None:
+            report = health.check(
+                ctx.layout.heartbeat_path,
+                max_age_seconds=ctx.config.health.max_age_seconds,
+                lock=lock,
+            )
+        if running is None:
+            running = lock.running
     ours = ctx.effect_level
     if not running:
         # Nothing to disagree with. Refusing to trust the configured level on the strength of
@@ -1565,10 +1569,13 @@ def handle(app: WebApp, request: Request) -> Response:
         # could — across a daemon starting mid-request — answer differently in the two
         # halves of one page. Three facts now hang off this single reading: the effect
         # level, the session cap in force, and the chrome's own account of the daemon.
+        lock = daemon_mod.observe_lock(ctx.layout.lock_path)
         report = health.check(
-            ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+            ctx.layout.heartbeat_path,
+            max_age_seconds=ctx.config.health.max_age_seconds,
+            lock=lock,
         )
-        running = daemon_mod.is_locked(ctx.layout.lock_path)
+        running = lock.running
         level = effective_level(ctx, report, running=running)
         include_simulated = include_simulated_for(request, ctx, level=level)
         # The same argument, for the same reason, about a more expensive fact (RA-14). A
@@ -1587,7 +1594,10 @@ def handle(app: WebApp, request: Request) -> Response:
             enforced_cap=health.published_cap(
                 report,
                 running=running,
-                lock_holder=daemon_mod.read_lock_holder(ctx.layout.lock_path),
+                # From the same observation, not a second read of the file. Asked
+                # separately these two could come from either side of a restart, which is
+                # the window ``published_cap`` compares the pid to close (issue #52).
+                lock_holder=lock.holder,
             ),
         )
         chrome = pages.chrome(

@@ -195,29 +195,54 @@ def test_an_unparseable_log_duration_is_a_usage_error(config_file, capsys):
 
 
 def test_health_with_no_heartbeat_exits_four(config_file, capsys):
-    """The dead-man's switch's own contract: 0 if fresh, 4 if stale or absent."""
+    """The dead-man's switch's own contract: 0 if healthy, 4 for every other verdict."""
     code = run_cli(["health"], config_file)
     assert code == EXIT_CHECK_FAILED
-    assert "STALE" in capsys.readouterr().err
+    assert "NEVER STARTED" in capsys.readouterr().err
 
 
-def test_health_with_a_fresh_heartbeat_exits_zero(config_file, layout, capsys):
+def test_health_with_a_fresh_heartbeat_and_a_live_daemon_exits_zero(
+    config_file, layout, capsys
+):
+    """Both halves are required now (issue #52). The lock is what says a process is there."""
     from robot_army import health
+    from robot_army.daemon import SingleInstanceLock
 
     health.write_heartbeat(
         layout.heartbeat_path, effect_level="live", activity="idle", cycles=1
     )
-    assert run_cli(["health"], config_file) == EXIT_OK
+    with SingleInstanceLock(layout.lock_path):
+        assert run_cli(["health"], config_file) == EXIT_OK
     assert "ok:" in capsys.readouterr().out
 
 
-def test_health_max_age_is_honoured(config_file, layout):
+def test_health_with_a_fresh_heartbeat_and_no_daemon_exits_four(config_file, layout, capsys):
+    """The reported defect, at the surface a systemd timer runs (issue #52).
+
+    A heartbeat written a second ago says only that something was alive a second ago. With
+    the lock released there is no process, and this command used to report ``ok`` and exit
+    0 for as long as the staleness threshold ran — 180 seconds by default — while the web
+    interface said ``DAEMON NOT RUNNING`` on the next page load.
+    """
     from robot_army import health
 
     health.write_heartbeat(
         layout.heartbeat_path, effect_level="live", activity="idle", cycles=1
     )
-    assert run_cli(["health", "--max-age", "0"], config_file) == EXIT_CHECK_FAILED
+    assert run_cli(["health"], config_file) == EXIT_CHECK_FAILED
+    assert "DIED" in capsys.readouterr().err
+
+
+def test_health_max_age_is_honoured(config_file, layout):
+    """The threshold still decides, on the path where it is the only evidence there is."""
+    from robot_army import health
+    from robot_army.daemon import SingleInstanceLock
+
+    health.write_heartbeat(
+        layout.heartbeat_path, effect_level="live", activity="idle", cycles=1
+    )
+    with SingleInstanceLock(layout.lock_path):
+        assert run_cli(["health", "--max-age", "0"], config_file) == EXIT_CHECK_FAILED
 
 
 # -- success paths ----------------------------------------------------------

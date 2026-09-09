@@ -24,6 +24,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from robot_army import timefmt
+from robot_army.health import HealthState
 
 
 class Markup(str):
@@ -244,7 +245,18 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     if running:
         state = f"daemon running (pid {daemon.get('pid') or '?'})"
         if not daemon.get("healthy"):
-            state += " — heartbeat STALE"
+            # The verdict's own word, not "STALE" for every one of them (issue #52). A
+            # daemon that holds the lock and has stopped beating is HUNG; one that has just
+            # taken the lock and not beaten yet is STARTING, which is an ordinary restart
+            # rather than a fault to go hunting.
+            #
+            # The word comes from the enum rather than being derived here, because the whole
+            # point of the issue is that two surfaces may not describe one machine
+            # differently — and a renderer that upper-cased the value itself would be a
+            # second definition of the label waiting to drift from `robot-army health`'s.
+            # A payload with no verdict at all falls back to ``stale``, which is the word
+            # this line printed for every unhealthy daemon before the issue.
+            state += f" — {HealthState(daemon.get('state') or 'stale').label}"
     else:
         state = "DAEMON NOT RUNNING"
     if age is not None:

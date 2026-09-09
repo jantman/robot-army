@@ -93,6 +93,224 @@ def test_an_unparseable_timestamp_is_unhealthy(tmp_path):
     assert "unparseable" in report.reason
 
 
+# -- the lock, the other half of the evidence (issue #52) -------------------
+#
+# The heartbeat's age can only say a daemon has *stopped beating*, and never sooner than the
+# staleness threshold. The lock says the process is gone, and says it at once. These pin the
+# derivation in contracts/health-verdict.md row by row.
+
+
+def held(path, holder=1234):
+    """A lock reading as ``daemon.observe_lock`` would return it for a running daemon."""
+    return health.LockReading(health.LockState.HELD, path, str(holder))
+
+
+def unheld(path):
+    return health.LockReading(health.LockState.UNHELD, path)
+
+
+def unreadable_lock(path):
+    return health.LockReading(health.LockState.UNKNOWN, path)
+
+
+@pytest.mark.parametrize("age", [1, 30, 179, 300])
+def test_a_released_lock_is_a_death_at_every_heartbeat_age(tmp_path, age):
+    """The bug, and the whole of the ~180s detection floor.
+
+    A heartbeat written a second ago says only that something was alive a second ago. The
+    reported incident had ``health`` printing ``ok`` and exiting 0 for 183 seconds while the
+    web interface, which reads the lock, said ``DAEMON NOT RUNNING`` within one.
+    """
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=age)
+
+    report = health.check(path, max_age_seconds=180, lock=unheld(tmp_path / "daemon.lock"))
+
+    assert report.state is health.HealthState.DIED
+    assert report.healthy is False
+    assert "the daemon is gone" in report.reason
+    assert str(tmp_path / "daemon.lock") in report.reason
+    assert report.age_seconds is not None
+
+
+def test_a_held_lock_and_a_fresh_heartbeat_reads_exactly_as_it_always_did(tmp_path):
+    """The regression that matters most: the switch must not learn to cry wolf."""
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=5)
+
+    with_lock = health.check(path, max_age_seconds=180, lock=held(tmp_path / "daemon.lock"))
+    without = health.check(path, max_age_seconds=180)
+
+    assert with_lock.state is health.HealthState.OK
+    assert with_lock.healthy is True
+    assert with_lock.reason == without.reason
+
+
+def test_a_wedged_daemon_is_hung_not_died(tmp_path):
+    """The case a lock check alone would miss, and why the heartbeat has to stay."""
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=400)
+
+    report = health.check(path, max_age_seconds=180, lock=held(tmp_path / "daemon.lock", 1234))
+
+    assert report.state is health.HealthState.HUNG
+    assert report.healthy is False
+    assert "wedged, not gone" in report.reason
+    assert "past the 180s threshold" in report.reason
+
+
+def test_a_stale_heartbeat_from_another_pid_is_a_restart_not_a_wedge(tmp_path):
+    """``run_daemon`` takes the lock, then wires boundaries and runs ``startup`` — network
+    work — before its first beat, and nothing unlinks the previous daemon's heartbeat. So
+    this state is an ordinary restart, and sending somebody to take a stack of a healthy
+    starting process is the wrong instruction."""
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=400, pid=111)
+
+    report = health.check(path, max_age_seconds=180, lock=held(tmp_path / "daemon.lock", 222))
+
+    assert report.state is health.HealthState.STARTING
+    assert report.healthy is False, "a daemon that holds the lock and never beats is a fault"
+    assert "not the holder" in report.reason
+    assert "wedged" not in report.reason
+
+
+def test_a_fresh_heartbeat_from_another_pid_stays_ok(tmp_path):
+    """The same restart window, caught a moment earlier. Something holds the lock and
+    something beat a second ago; alarming here would fire on every restart, which is a daily
+    event, and an alarm that fires daily is one the reader learns to ignore."""
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=2, pid=111)
+
+    report = health.check(path, max_age_seconds=180, lock=held(tmp_path / "daemon.lock", 222))
+
+    assert report.state is health.HealthState.OK
+    assert report.healthy is True
+
+
+def test_a_holder_that_cannot_be_read_is_a_doubt_rather_than_a_match(tmp_path):
+    """The comparison ``published_cap`` already makes, for the same window: a pid missing
+    from either side is a doubt, so the verdict is the one that claims less."""
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=400)
+
+    reading = health.LockReading(health.LockState.HELD, tmp_path / "daemon.lock", None)
+    report = health.check(path, max_age_seconds=180, lock=reading)
+
+    assert report.state is health.HealthState.STARTING
+    # And it does not claim a mismatch it could not observe: the holder's pid is exactly
+    # what could not be read here, so "is not the holder" would be an invention.
+    assert "cannot be matched to the holder" in report.reason
+    assert "is not the holder" not in report.reason
+
+
+def test_a_daemon_holding_the_lock_with_no_heartbeat_at_all_is_starting(tmp_path):
+    report = health.check(
+        tmp_path / "nothing.json", max_age_seconds=180, lock=held(tmp_path / "daemon.lock")
+    )
+    assert report.state is health.HealthState.STARTING
+    assert report.healthy is False
+    assert "stopped before its first beat" in report.reason
+
+
+def test_no_lock_and_no_heartbeat_is_still_never_started(tmp_path):
+    report = health.check(
+        tmp_path / "nothing.json", max_age_seconds=180, lock=unheld(tmp_path / "daemon.lock")
+    )
+    assert report.state is health.HealthState.NEVER_STARTED
+    assert "never run" in report.reason
+
+
+def test_an_unreadable_lock_falls_back_to_the_heartbeat_and_says_so(tmp_path):
+    """A permission error must not manufacture a death notice. It must also not pass itself
+    off as a verdict reached on both signals."""
+    path = tmp_path / "heartbeat.json"
+    lock = unreadable_lock(tmp_path / "daemon.lock")
+
+    write_at(path, age_seconds=5)
+    fresh = health.check(path, max_age_seconds=180, lock=lock)
+    assert fresh.state is health.HealthState.OK
+    assert "could not be read" in fresh.reason
+
+    write_at(path, age_seconds=400)
+    stale = health.check(path, max_age_seconds=180, lock=lock)
+    assert stale.state is health.HealthState.STALE
+    assert "could not be read" in stale.reason
+    assert "the daemon is gone" not in stale.reason
+
+
+def test_a_corrupt_heartbeat_is_neither_a_death_nor_a_hang(tmp_path):
+    """FR-007. It keeps its own reason — and still tells the reader what the lock said,
+    because that is the next thing they will want to know."""
+    path = tmp_path / "heartbeat.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    report = health.check(path, max_age_seconds=180, lock=unheld(tmp_path / "daemon.lock"))
+
+    assert report.state is health.HealthState.UNREADABLE
+    assert "not valid JSON" in report.reason
+    assert "no process holds" in report.reason
+
+
+def test_consulting_no_lock_at_all_behaves_exactly_as_before(tmp_path):
+    """FR-016. A caller that has not looked gets today's verdicts and today's sentences —
+    and, in the machine output, an honest ``None`` rather than a claim about the lock."""
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=400)
+
+    report = health.check(path, max_age_seconds=180)
+
+    assert report.state is health.HealthState.STALE
+    assert report.lock is None
+    assert report.to_dict()["lock"] is None
+    assert "could not be read" not in report.reason
+
+
+def test_the_machine_output_names_the_verdict_and_the_lock(tmp_path):
+    """FR-009: a consumer names the state by reading a key, never by matching English."""
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=5)
+
+    payload = health.check(
+        path, max_age_seconds=180, lock=unheld(tmp_path / "daemon.lock")
+    ).to_dict()
+
+    assert payload["state"] == "died"
+    assert payload["lock"] == "unheld"
+    assert payload["healthy"] is False
+    assert json.dumps(payload), "the payload must survive --json"
+
+
+def test_every_state_has_a_label_and_only_ok_is_lowercase():
+    """One definition, because three surfaces print it and the point of the feature is that
+    they cannot differ."""
+    assert health.HealthState.OK.label == "ok"
+    assert health.HealthState.DIED.label == "DIED"
+    assert health.HealthState.NEVER_STARTED.label == "NEVER STARTED"
+    assert all(state.label for state in health.HealthState)
+
+
+def test_healthy_is_true_for_ok_and_nothing_else(tmp_path):
+    """The invariant runs one way: the flag is derived from the verdict."""
+    path = tmp_path / "heartbeat.json"
+    lock_path = tmp_path / "daemon.lock"
+    seen = {}
+
+    write_at(path, age_seconds=5)
+    seen["ok"] = health.check(path, max_age_seconds=180, lock=held(lock_path))
+    seen["died"] = health.check(path, max_age_seconds=180, lock=unheld(lock_path))
+    write_at(path, age_seconds=400)
+    seen["hung"] = health.check(path, max_age_seconds=180, lock=held(lock_path))
+    seen["stale"] = health.check(path, max_age_seconds=180)
+    seen["starting"] = health.check(
+        tmp_path / "absent.json", max_age_seconds=180, lock=held(lock_path)
+    )
+
+    for name, report in seen.items():
+        assert report.healthy is (report.state is health.HealthState.OK), name
+        assert str(report.state) == name
+
+
 # -- writing ---------------------------------------------------------------
 
 
@@ -177,8 +395,23 @@ def send_alert(url: str, report: health.HealthReport) -> tuple[bool, str]:
     return webhook(url).send(*health.alert_fields(report))
 
 
+def test_the_alert_carries_the_verdict_to_every_channel(tmp_path):
+    """FR-010. The reader of a 2am notification is not at a terminal, and "restart it" and
+    "look at it before you restart it" are different instructions."""
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=5)
+    report = health.check(path, max_age_seconds=180, lock=unheld(tmp_path / "daemon.lock"))
+
+    title, message, fields = health.alert_fields(report)
+
+    assert title == "robot-army health check failed"
+    assert message == report.reason
+    assert fields["state"] == "died"
+    assert fields["healthy"] is False
+
+
 def test_notify_without_a_webhook_reports_that_rather_than_pretending(tmp_path):
-    report = health.HealthReport(False, "stale")
+    report = health.HealthReport(False, "stale", health.HealthState.STALE)
     sent, message = send_alert("", report)
     assert sent is False
     assert "no webhook_url" in message
@@ -201,7 +434,7 @@ def test_notify_posts_a_plain_json_body(monkeypatch):
         return httpx.Response(200, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    report = health.HealthReport(False, "heartbeat is 400s old", age_seconds=400)
+    report = health.HealthReport(False, "heartbeat is 400s old", health.HealthState.STALE, age_seconds=400)
     sent, message = send_alert("https://ntfy.invalid/robot-army", report)
 
     assert sent is True
@@ -217,6 +450,11 @@ def test_the_health_alert_body_is_unchanged_by_the_second_channel(monkeypatch):
 
     An installation with only a webhook must see byte-for-byte what it saw before, so the
     exact key set is pinned rather than a sample of it.
+
+    ``state`` joined that set in issue #52, deliberately and for a reason the gate is happy
+    to record: the alert is what a person reads when they are not at a terminal, and it now
+    has to say whether the daemon died or hung. The gate's actual subject — that adding a
+    *channel* changes nothing about this body — is untouched.
     """
     import httpx
 
@@ -227,8 +465,19 @@ def test_the_health_alert_body_is_unchanged_by_the_second_channel(monkeypatch):
         return httpx.Response(200, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    send_alert("https://x.invalid", health.HealthReport(False, "stale", age_seconds=400))
-    assert set(captured) == {"title", "message", "healthy", "age_seconds", "host", "ts"}
+    send_alert(
+        "https://x.invalid",
+        health.HealthReport(False, "stale", health.HealthState.STALE, age_seconds=400),
+    )
+    assert set(captured) == {
+        "title",
+        "message",
+        "healthy",
+        "state",
+        "age_seconds",
+        "host",
+        "ts",
+    }
     assert captured["title"] == "robot-army health check failed"
 
 
@@ -239,7 +488,7 @@ def test_a_failing_webhook_is_reported_not_swallowed(monkeypatch):
         raise httpx.ConnectError("unreachable")
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    sent, message = send_alert("https://x.invalid", health.HealthReport(False, "stale"))
+    sent, message = send_alert("https://x.invalid", health.HealthReport(False, "stale", health.HealthState.STALE))
     assert sent is False
     assert "webhook POST failed" in message
 
@@ -251,7 +500,7 @@ def test_a_webhook_error_status_is_reported(monkeypatch):
         return httpx.Response(500, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    sent, message = send_alert("https://x.invalid", health.HealthReport(False, "stale"))
+    sent, message = send_alert("https://x.invalid", health.HealthReport(False, "stale", health.HealthState.STALE))
     assert sent is False
     assert "HTTP 500" in message
 
@@ -333,6 +582,53 @@ def sent(monkeypatch):
         lambda url, data, **k: (calls.append({"channel": "pushover", "url": url}), (True, "ok"))[1],
     )
     return calls
+
+
+def test_health_and_status_describe_one_machine_the_same_way(config, conn, layout, tmp_path):
+    """SC-007, and the incident in issue #52 read in the other direction.
+
+    ``status`` prints exactly one line about the daemon and it is the health line — there is
+    no separate "running" line to contradict it — so a verdict from the heartbeat alone let
+    it say ``ok`` beside a dead daemon for as long as the threshold ran. The two commands
+    are asserted together because "they agree" is the property, not "each is right".
+    """
+    from robot_army import operations
+
+    write_at(layout.heartbeat_path, age_seconds=1)
+    ctx = alert_context(config, conn, tmp_path)
+    try:
+        switch = operations.health_check(ctx)
+        overview = operations.status(ctx)
+    finally:
+        ctx.close()
+
+    assert switch.code == 4
+    assert switch.lines[0].startswith("DIED: ")
+    assert switch.data["state"] == "died"
+
+    health_line = next(line for line in overview.lines if line.startswith("health "))
+    assert "DIED — " in health_line
+    assert overview.data["health"]["state"] == "died"
+    assert health_line.endswith(switch.data["reason"])
+
+
+def test_a_live_daemon_still_reads_ok_on_both(config, conn, layout, tmp_path):
+    """The other half of the same property: neither command may cry wolf."""
+    from robot_army import operations
+    from robot_army.daemon import SingleInstanceLock
+
+    write_at(layout.heartbeat_path, age_seconds=1, pid=os.getpid())
+    ctx = alert_context(config, conn, tmp_path)
+    try:
+        with SingleInstanceLock(layout.lock_path):
+            switch = operations.health_check(ctx)
+            overview = operations.status(ctx)
+    finally:
+        ctx.close()
+
+    assert switch.code == 0
+    assert switch.lines[0].startswith("ok: ")
+    assert any(line.startswith("health       : ok — ") for line in overview.lines)
 
 
 def test_the_alert_reaches_pushover_when_that_is_the_only_channel(
@@ -505,7 +801,9 @@ def report_with(**beat):
     """A health report carrying whatever heartbeat the case needs."""
     if beat:
         beat.setdefault("pid", HOLDER)
-    return health.HealthReport(True, "fresh", age_seconds=1.0, heartbeat=beat or None)
+    return health.HealthReport(
+        True, "fresh", health.HealthState.OK, age_seconds=1.0, heartbeat=beat or None
+    )
 
 
 def cap_of(report, *, running=True, lock_holder=str(HOLDER)):
@@ -569,7 +867,11 @@ def test_a_heartbeat_from_a_process_that_is_not_the_lock_holder_publishes_nothin
     about to enforce 2 — an over-dispatch, the one direction that does harm.
     """
     dead = health.HealthReport(
-        True, "fresh", age_seconds=1.0, heartbeat={"pid": 111, "max_concurrent_sessions": 7}
+        True,
+        "fresh",
+        health.HealthState.OK,
+        age_seconds=1.0,
+        heartbeat={"pid": 111, "max_concurrent_sessions": 7},
     )
     assert health.published_cap(dead, running=True, lock_holder="222") is None
 
@@ -583,7 +885,11 @@ def test_an_unreadable_lock_holder_is_a_doubt_rather_than_a_match():
 
 def test_a_heartbeat_with_no_pid_publishes_nothing():
     report = health.HealthReport(
-        True, "fresh", age_seconds=1.0, heartbeat={"max_concurrent_sessions": 7}
+        True,
+        "fresh",
+        health.HealthState.OK,
+        age_seconds=1.0,
+        heartbeat={"max_concurrent_sessions": 7},
     )
     assert health.published_cap(report, running=True, lock_holder="222") is None
 

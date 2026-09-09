@@ -452,5 +452,43 @@ A dead daemon cannot report its own death, so the checker is a separate process 
 ```bash
 cp systemd/robot-army-health.* ~/.config/systemd/user/
 systemctl --user enable --now robot-army-health.timer
-uv run robot-army health          # exits 4 if the heartbeat is stale or absent
+uv run robot-army health          # exits 0 if healthy, 4 for every other verdict
 ```
+
+### It reads two things, and they catch different failures
+
+The heartbeat's age can only say the daemon has **stopped beating**, and never sooner than
+`[health] max_age_seconds`. The lock says something the heartbeat never can, and says it at
+once: if no process holds it, the process is gone.
+
+Until issue #52 the check read only the heartbeat, so with the daemon genuinely dead it
+printed `ok` and exited 0 for the whole 180 seconds while the web interface — which has
+always read the lock — said `DAEMON NOT RUNNING` on the next page load. Lowering the
+threshold was never the fix: heartbeat age has to stay well above the tick interval or a busy
+daemon trips its own alarm. So both are read, and the report says which failure it found.
+
+| It says | What happened | What to do |
+|---|---|---|
+| `ok` | the lock is held and the heartbeat is fresh | nothing |
+| `DIED` | **nothing holds the lock** — whatever the heartbeat's age | restart it |
+| `HUNG` | the lock is held and its holder's heartbeat has stopped | look at the process **first**; restarting destroys the evidence of why |
+| `STARTING` | the lock is held and no beat of that process's own is on disk yet | look again shortly — this is what an ordinary restart looks like, and a long one is worth investigating |
+| `NEVER STARTED` | no lock, no heartbeat | it has never run here |
+| `UNREADABLE` | the heartbeat is there and will not parse | look at the file |
+| `STALE` | past the threshold with no usable lock reading | as `HUNG` or `DIED`, but the lock could not be consulted — the line says so |
+
+`STARTING` is a real state and not a hedge: `run_daemon` takes the lock and then wires
+boundaries, checks preconditions and runs `startup` — network work, seconds of it — before
+its first beat, and nothing unlinks the previous daemon's heartbeat. During a restart the
+lock is held while the newest heartbeat on disk still belongs to the process that exited.
+
+`robot-army status` prints the same verdict on its health line, the web chrome shows it
+beside a running daemon, and `--json` carries it as `state` beside `lock`, so nothing has to
+be parsed out of the English. A `lock` of `null` means no reading was taken; `unknown` means
+one was taken and failed, which is the only case where the check judges the heartbeat alone —
+and it says so in the sentence rather than reporting a death it did not observe.
+
+**What this did not change.** The timer still runs every five minutes, and that cadence is
+still the outer bound on how quickly anything is noticed; what went away is the up-to-180
+seconds the check itself added on top of it. `max_age_seconds` keeps its meaning and its
+default, because the heartbeat is the only way `HUNG` is visible at all.

@@ -48,6 +48,7 @@ from robot_army import (
 from robot_army.audit import AuditLog
 from robot_army.boundaries.kitty import describe_refusals
 from robot_army.effects import Boundaries, EffectLevel
+from robot_army.health import LockReading, LockState
 from robot_army.migrations import SCHEMA_VERSION
 
 if TYPE_CHECKING:
@@ -127,11 +128,8 @@ def read_lock_holder(path: Path) -> str | None:
         return None
 
 
-def is_locked(path: Path) -> bool:
-    """Non-destructive check: is a daemon holding the lock right now?
-
-    Used by lock-aware commands to decide between delegating to a running daemon and
-    acting directly, and by the web interface's chrome on every page.
+def observe_lock(path: Path) -> LockReading:
+    """One non-destructive observation of the lock: held, unheld, or unobservable.
 
     **The probe takes a SHARED lock, not an exclusive one, and that is load-bearing.**
     A shared lock still conflicts with the daemon's ``LOCK_EX``, so a running daemon is
@@ -149,20 +147,67 @@ def is_locked(path: Path) -> bool:
     microseconds a probe holds its shared lock would fail to acquire and say so loudly.
     That is a deliberate human action, immediately retryable, with a message naming the
     lock — as against a misleading page on every concurrent load.
+
+    Three things changed when issue #52 made ``health`` a caller, and each is here rather
+    than in a second probe written alongside this one, because the shape above was expensive
+    to establish and one copy of it is all anybody can keep correct.
+
+    **The open no longer carries ``O_CREAT``.** Creating the file was harmless while the
+    answer only decided whether a command delegated; it was still a write into the state
+    directory made by something asking a *question* about it, and the dead-man's switch has
+    no business leaving files behind. ``ENOENT`` now means what it always meant in fact —
+    nothing holds a lock that does not exist — which is the same answer creating the file
+    and locking it produced, minus the file.
+
+    **A probe that could not run is no longer "not held".** Every other failure to open, and
+    any ``flock`` error that is not contention, returns ``UNKNOWN``. Before issue #52 that
+    collapse cost a nuisance; now the same value would read as *the daemon has died* and
+    wake somebody, and a permission error must not manufacture a death notice.
+
+    **The holder is read from the descriptor the probe already has**, the way
+    ``SingleInstanceLock.acquire`` reads it — ``flock`` is advisory, so reading is always
+    permitted — and only when the lock is held. Two call sites used to ask "is it held" and
+    "who holds it" a line apart, so their two answers could come from either side of a
+    restart. One open answers both.
     """
+    path = Path(path)
     try:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return LockReading(LockState.UNHELD, path)
     except OSError:
-        return False
+        return LockReading(LockState.UNKNOWN, path)
     try:
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-    except OSError:
-        return True
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EAGAIN):
+            # Not contention. ``EINTR``, ``ENOLCK``, a filesystem that will not lock: we
+            # learned nothing, and saying "unheld" here is exactly the death notice this
+            # function refuses to invent.
+            return LockReading(LockState.UNKNOWN, path)
+        holder = None
+        with contextlib.suppress(OSError):
+            holder = os.read(fd, 64).decode("utf-8", "replace").strip() or None
+        return LockReading(LockState.HELD, path, holder)
     else:
         fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
+        return LockReading(LockState.UNHELD, path)
     finally:
         os.close(fd)
+
+
+def is_locked(path: Path) -> bool:
+    """Non-destructive check: is a daemon holding the lock right now?
+
+    Used by lock-aware commands to decide between delegating to a running daemon and
+    acting directly, and by the web interface's chrome on every page.
+
+    The bool half of :func:`observe_lock`, which is where the probe and the reasoning for
+    its exact shape live. Every one of this function's callers wants a yes or no and would
+    otherwise grow the same two-line collapse; an unobservable lock answers ``False`` here,
+    which is what this function has always answered for one.
+    """
+    return observe_lock(path).running
 
 
 #: An interval no uptime reaches, for jobs that only ever run when explicitly forced.

@@ -108,9 +108,11 @@ things I am told about. Every send is in the audit log whether or not it left th
 Messages carry identifiers and state names only. There is no field a credential could
 reach, and a test asserts it across a run that includes an authentication failure.
 
-**The stale-heartbeat alert goes to every configured channel too** — the one message that
+**The failed-health alert goes to every configured channel too** — the one message that
 matters most is the one saying the daemon itself has stopped, and a channel that could not
-carry it would be the wrong half. Unlike the notifications above, that alert is *not* gated
+carry it would be the wrong half. Since issue #52 it also says *which* stopping: its body
+carries the check's verdict, so `DIED` and `HUNG` reach a phone as the different problems
+they are — [what each one means](operating.md#it-reads-two-things-and-they-catch-different-failures). Unlike the notifications above, that alert is *not* gated
 by the effect level and never has been: `robot-army health --notify` takes no
 `--effect-level` flag, so gating it would silently disable the dead-man's switch whenever
 I am running the daemon at `local`.

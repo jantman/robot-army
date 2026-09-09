@@ -227,7 +227,7 @@ asked long after the fact: *why did nothing dispatch for twenty minutes?* and *w
 | `notify.send` | A **message** is attempted | The kind, the item, and whether the per-cycle bound suppressed it. Written whether or not it left the machine |
 | `notify.channel` | A **delivery** to one channel is attempted | The channel name (`webhook`, `pushover`), the kind, the item, and our own reason on failure. One record per channel per message |
 | `notify.suppressed` | The per-cycle bound was reached | How many were held back, and of which kinds |
-| `health.notify` | The stale-heartbeat alert is sent to one channel | The channel name, the staleness reason, and the outcome. One record per configured channel |
+| `health.notify` | The failed-health alert is sent to one channel | The channel name, the check's own reason — which since issue #52 names the verdict, `DIED` and `HUNG` being different problems — and the outcome. One record per configured channel |
 
 Since issue #106 a *message* and a *delivery* are different things: one message may go to
 zero, one, or two channels. `notify.send` records the message and `notify.channel` records

@@ -106,9 +106,9 @@ daemon as healthy.
 
 ## Phase 6: Polish & cross-cutting
 
-- [ ] T020 Update the "Noticing it has died" section of `docs/guide/operating.md`: what the switch consults now, the table of verdicts and what each one asks the reader to do, and the honest statement that the timer's five-minute cadence is a separate latency this does not change. Per `CLAUDE.md`'s table this is the page — health and recovery live on it.
-- [ ] T021 Confirm nothing else in `docs/guide/` needs a change and say why in the commit: no config key moved, so `share/config.example.toml` needs no regeneration and `configuration.md` no new entry; no file shape changed, so `state.md` stands; no new audit action and no record shape change, so `audit-log.md` stands.
-- [ ] T022 Run `uv run pytest` and the repository's lint/format as configured; walk [quickstart.md](quickstart.md) scenarios 1–8 and confirm each states what it claims.
+- [X] T020 Update the "Noticing it has died" section of `docs/guide/operating.md`: what the switch consults now, the table of verdicts and what each one asks the reader to do, and the honest statement that the timer's five-minute cadence is a separate latency this does not change. Per `CLAUDE.md`'s table this is the page — health and recovery live on it.
+- [X] T021 Confirm nothing else in `docs/guide/` needs a change and say why in the commit: no config key moved, so `share/config.example.toml` needs no regeneration and `configuration.md` no new entry; no file shape changed, so `state.md` stands; no new audit action and no record shape change, so `audit-log.md` stands.
+- [X] T022 Run `uv run pytest` and the repository's lint/format as configured; walk [quickstart.md](quickstart.md) scenarios 1–8 and confirm each states what it claims.
 
 ---
 

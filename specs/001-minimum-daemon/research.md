@@ -347,19 +347,47 @@ full, since they are the prompt and reconstruction requires them.
 1. The daemon writes `~/.local/state/robot-army/heartbeat.json` atomically on every tick, carrying
    UTC timestamp, PID, effect level, current activity, and cycle counters.
 2. `robot-army health` reads it and exits non-zero if the timestamp is older than a configurable
-   threshold (default 3× the reconcile interval). With `--notify`, a failing check also POSTs a
-   plain JSON body to a configured webhook URL. A documented systemd **user timer** runs
-   `robot-army health --notify` every five minutes.
+   threshold (default 3× the reconcile interval). Since issue #52 it also takes a reading of the
+   daemon's single-instance lock, which answers *at once* what the heartbeat can only answer after
+   the threshold. With `--notify`, a failing check also POSTs a plain JSON body to a configured
+   webhook URL. A documented systemd **user timer** runs `robot-army health --notify` every five
+   minutes.
 
-**Rationale**: FR-063 and FR-064. The essential insight is that a dead daemon cannot report its own
-death, so the checker must be a separate process — which makes the systemd timer the actual
-dead-man's switch and the daemon's heartbeat merely the evidence it reads. This keeps the mechanism
-local and dependency-free, satisfies the constitution's requirement that every capability be
-reachable from the terminal, and stays vendor-neutral: a generic webhook covers ntfy and Pushover,
-both named in planning §14, without either being a dependency.
+**Rationale**: FR-063 and FR-064. A process cannot report its own death, so the checker must be a
+separate process — which makes the systemd timer the actual dead-man's switch and the daemon's
+heartbeat merely the evidence it reads. This keeps the mechanism local and dependency-free,
+satisfies the constitution's requirement that every capability be reachable from the terminal, and
+stays vendor-neutral: a generic webhook covers ntfy and Pushover, both named in planning §14,
+without either being a dependency.
 
 Note the timer is a *checker*, not the daemon — planning §8's decision that the daemon is started
-manually after graphical login is unaffected, because the checker needs no display environment.
+after graphical login is unaffected, because the checker needs no display environment. What §8 got
+in practice is a user unit bound to `graphical-session.target`, which is the same rule enforced by
+systemd rather than by hand.
+
+**What the switch covers** (issue #53). This section used to say the switch catches "a dead daemon",
+and that claim outlived the deployment it was written for. The daemon's unit carries
+`Restart=on-failure` with `RestartSec=10`, so a daemon that merely *dies* is back ten seconds later
+— inside `max_age_seconds`, and usually inside one five-minute timer interval. Automatic restart is
+the right behaviour and is not being changed; the switch is the backstop for when it stops working.
+What it is a backstop *for* is every way the daemon stays dead:
+
+| The failure | How it is seen |
+|---|---|
+| systemd exhausts the start limit and gives up | `DIED` — the lock is released and stays released |
+| the daemon is alive but wedged | `HUNG` — the lock is held, the heartbeat has stopped |
+| `graphical-session.target` goes away, taking a unit bound to it | `DIED`; this timer is bound to `timers.target` and outlives the graphical session |
+| the daemon is stopped by hand, or never started after a login | `DIED`, `NEVER STARTED` |
+
+The first of those is the primary case and, with systemd's defaults, is unreachable:
+`StartLimitBurst=5` counts starts inside `StartLimitIntervalSec=10s`, and a restart every ten
+seconds never puts two starts in one window, so a daemon that cannot start is retried forever and
+never reported dead at all. `systemd/robot-army.service.d/start-limit.conf` widens the window to
+five minutes, which is what makes giving up — and therefore the switch — reachable.
+
+The one failure a switch on this machine cannot cover is the machine, or the user manager, wedging:
+the timer does not fire either, and the only symptom is silence. That is the cost of the alternative
+below being rejected, and it is a deliberate cost rather than an oversight.
 
 **Alternatives considered**: an external uptime-monitoring service the daemon pings — rejected as an
 always-on network dependency for core observability, against Principle II. Notifying from inside the

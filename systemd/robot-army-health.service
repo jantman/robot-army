@@ -4,8 +4,22 @@ Documentation=file:%h/GIT/robot-army/docs/state.md
 
 [Service]
 Type=oneshot
-# The timer, not the daemon, is the dead-man's switch: a dead daemon cannot report its
-# own death, so the checker has to be a separate process (research.md R15).
+# The timer, not the daemon, is the dead-man's switch: the checker has to be a separate
+# process, because a process cannot report its own death (research.md R15).
+#
+# What that separate process catches is narrower than "the daemon died", and issue #53 is
+# the correction. The daemon's unit carries Restart=on-failure with RestartSec=10, so a
+# crash is healed by systemd ten seconds later — inside [health] max_age_seconds and
+# usually inside one timer interval. The switch never sees it, and it does not need to.
+# What is left for it is every way the daemon stays dead:
+#   - systemd exhausting the start limit and giving up, which the drop-in in
+#     robot-army.service.d makes reachable at all — reported as DIED, from the lock
+#   - the daemon alive but wedged: the lock still held, the heartbeat stopped — HUNG
+#   - graphical-session.target going away, taking a user unit bound to it with it; this
+#     timer is bound to timers.target instead and outlives the graphical session
+#   - the daemon stopped by hand, or never started after a login — DIED, NEVER STARTED
+# It cannot catch the machine or the user manager itself wedging: nothing that runs on the
+# machine can, and R15 rejected an outside observer deliberately.
 ExecStart=%h/GIT/robot-army/.venv/bin/robot-army health --notify
 # A failing check is the whole point of running this; it must not mark the unit failed
 # in a way that stops the timer.

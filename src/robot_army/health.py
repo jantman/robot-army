@@ -1,8 +1,14 @@
 """The liveness signal and its checker.
 
-The essential insight (research.md R15): **a dead daemon cannot report its own death**, so
-the checker must be a separate process. That makes the systemd user timer the actual
-dead-man's switch, and the daemon's heartbeat merely the evidence it reads.
+The essential insight (research.md R15): **a process cannot report its own death**, so the
+checker must be a separate process. That makes the systemd user timer the actual dead-man's
+switch, and the daemon's heartbeat merely the evidence it reads.
+
+**That is why the checker is separate; it is not a claim about what it catches** (issue
+#53). The daemon's unit restarts it on failure ten seconds later, so a daemon that merely
+dies is healed before either the heartbeat or the timer notices. What is left for the switch
+is every way the daemon stays dead — systemd giving up on it, a wedge, a graphical session
+going away, a login where nobody started it — and R15 lists them against the verdicts below.
 
 The heartbeat carries the *current activity*, not just a timestamp, so a long preparation
 step is visible as work rather than looking like a hang (FR-063). That distinction is the

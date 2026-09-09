@@ -971,6 +971,53 @@ def _pull_request_line(item: Any) -> str:
     return f"{listed}  (as of {timefmt.local(item.pull_requests_at)})"
 
 
+def _reattach_lines(ctx: Context, session: Any) -> list[str]:
+    """What one session attempt is entitled to say about attaching to it (issue #51).
+
+    Two questions, in this order, and the order is not an optimisation.
+
+    **Could this row be what is listening?** A socket is named after the *work item* —
+    ``Layout.socket_for`` is ``socket_dir / f"{item_id}.sock"``, with no session component —
+    so every attempt on an item records the same path and a path that answers proves nothing
+    about *which* attempt is behind it. This is the sharp edge in issue #51, and it is worse
+    than the one reported: the line printed under an ended attempt is not merely broken, it
+    starts working again the moment the item is dispatched afresh, and lands the reader in a
+    different session than the row they read it from. A terminal state settles the question,
+    because nothing reopens a session row — so a finished attempt is told apart from the
+    thing on its old path by its own state, and never by probing.
+
+    **Is anything listening?** Asked only of the rows the first question lets through, and
+    asked of the host boundary, so what this reports and what ``attach`` will find are the
+    same question. ``is_alive`` probes rather than trusting that the file exists, which is
+    the whole distinction here; stale sockets do not clean themselves up.
+
+    The ``BoundaryError`` is caught because ``show`` is a read-only inspection command that
+    calls nothing else which raises, and a probe that hangs past the boundary's timeout must
+    not turn it into a traceback — least of all on the machine that is already misbehaving.
+    An unanswerable probe is reported as unanswered: the command is still offered, since
+    hiding a session that may well be alive is the worse of the two errors, but the caveat
+    is what stops the offer being a claim.
+    """
+    socket_path = session.host_socket
+    if not socket_path:
+        return []
+    if session.state in TERMINAL_SESSION_STATES:
+        return []
+    host = ctx.boundaries.session_host
+    handle = HostHandle(socket_path=socket_path, argv=(), pid=session.pid)
+    # The host composes the command, as it does for ``attach`` and for the refusal
+    # ``cancel`` prints. Spelling it out here would be a second place to keep in step with
+    # the invocation that is actually run.
+    command = f"       reattach: {' '.join(host.attach_command(handle))}"
+    try:
+        alive = host.is_alive(handle)
+    except BoundaryError as exc:
+        return [command, f"                 unverified: {exc}"]
+    if not alive:
+        return [f"       reattach: not available — nothing is listening on {socket_path}"]
+    return [command]
+
+
 def show(ctx: Context, item_id: int) -> Result:
     """Everything about one work item, including the FR-048 resume-decision signals."""
     result = Result()
@@ -1037,8 +1084,8 @@ def show(ctx: Context, item_id: int) -> Result:
                 f"       started {timefmt.local(session.started_at)} "
                 f"ended {timefmt.local(session.ended_at) or '—'}"
             )
-            if session.host_socket:
-                result.say(f"       reattach: dtach -a {session.host_socket}")
+            for line in _reattach_lines(ctx, session):
+                result.say(line)
     else:
         result.say("no session attempts yet")
 

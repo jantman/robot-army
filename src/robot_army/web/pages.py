@@ -223,13 +223,19 @@ def chrome(
     instant — the reason ``effective_level`` and ``effect_mismatch`` already accept them.
     Taken here when a direct caller supplies neither.
     """
-    if report is None:
-        report = health.check(
-            ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
-        )
+    if report is None or running is None:
+        # One observation for both, so a direct caller gets the guarantee ``handle`` gives
+        # every request: the chrome, the level and the cap describe one instant (issue #52).
+        lock = daemon_mod.observe_lock(ctx.layout.lock_path)
+        if report is None:
+            report = health.check(
+                ctx.layout.heartbeat_path,
+                max_age_seconds=ctx.config.health.max_age_seconds,
+                lock=lock,
+            )
+        if running is None:
+            running = lock.running
     beat = report.heartbeat or {}
-    if running is None:
-        running = daemon_mod.is_locked(ctx.layout.lock_path)
     # Defaulting to our own configured level keeps a direct caller — a test, or a future
     # second entry point — from silently rendering a page with no level at all.
     effective_level = effective_level or str(ctx.effect_level)
@@ -249,6 +255,10 @@ def chrome(
                 int(report.age_seconds) if report.age_seconds is not None else None
             ),
             "healthy": report.healthy,
+            # The verdict, so the banner says which failure it is rather than "STALE" for
+            # every one of them, and so this payload agrees word for word with what
+            # ``health`` prints about the same instant (issue #52).
+            "state": str(report.state),
             "reason": report.reason,
             "effect_level": beat.get("effect_level"),
         },
@@ -335,12 +345,16 @@ def effect_mismatch(
     for: a daemon alive at ``plan``, an interface configured for ``live``, a tick running
     longer than the staleness threshold, and every mutation waved through.
     """
-    if report is None:
-        report = health.check(
-            ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
-        )
-    if running is None:
-        running = daemon_mod.is_locked(ctx.layout.lock_path)
+    if report is None or running is None:
+        lock = daemon_mod.observe_lock(ctx.layout.lock_path)
+        if report is None:
+            report = health.check(
+                ctx.layout.heartbeat_path,
+                max_age_seconds=ctx.config.health.max_age_seconds,
+                lock=lock,
+            )
+        if running is None:
+            running = lock.running
     if not running:
         return None
 

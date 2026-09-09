@@ -244,7 +244,13 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
     if running:
         state = f"daemon running (pid {daemon.get('pid') or '?'})"
         if not daemon.get("healthy"):
-            state += " — heartbeat STALE"
+            # The verdict's own word, not "STALE" for everything (issue #52). A daemon that
+            # holds the lock and has stopped beating is HUNG; one that has just taken the
+            # lock and not beaten yet is STARTING, which is an ordinary restart rather than
+            # a fault to go hunting. The label is defined once, in ``health``, so this line
+            # and `robot-army health` cannot describe one machine differently.
+            label = str(daemon.get("state") or "stale").upper().replace("_", " ")
+            state += f" — {label}"
     else:
         state = "DAEMON NOT RUNNING"
     if age is not None:

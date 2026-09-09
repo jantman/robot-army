@@ -271,20 +271,67 @@ def test_with_the_daemon_down_views_render_and_say_so(web, conn):
     assert "not a description of what is happening now" in body
 
 
-def test_a_stale_heartbeat_is_reported_as_stale(web, layout, running_daemon):
+def test_a_daemon_that_holds_the_lock_and_stops_beating_is_reported_as_hung(
+    web, layout, running_daemon
+):
+    """The banner said ``STALE`` for every unhealthy verdict. Since issue #52 it says which.
+
+    The heartbeat carries the lock holder's own pid here, which is what makes this a wedge
+    rather than a restart — a process that is still there and has stopped beating. That is
+    the failure the threshold exists to catch, and the one where restarting first destroys
+    the only evidence of why.
+    """
+    import os
+
     beat(layout)
     conn_free_payload = web.get_json("/active").json()
     assert conn_free_payload["daemon"]["healthy"] is True
+    assert conn_free_payload["daemon"]["state"] == "ok"
 
+    layout.heartbeat_path.write_text(
+        '{"ts":"2020-01-01T00:00:00Z","pid":' + str(os.getpid()) + ',"effect_level":"live",'
+        '"activity":"idle","cycles":1}',
+        encoding="utf-8",
+    )
+    stale = web.get_json("/active").json()
+    assert stale["daemon"]["healthy"] is False
+    assert stale["daemon"]["state"] == "hung"
+    assert stale["daemon"]["heartbeat_age_seconds"] > 0
+    assert "HUNG" in web.get("/active").text
+
+
+def test_a_stale_heartbeat_from_a_departed_pid_is_reported_as_starting(
+    web, layout, running_daemon
+):
+    """A daemon holds the lock and the newest heartbeat belongs to the process it replaced.
+
+    ``run_daemon`` takes the lock and then wires boundaries and runs ``startup`` before its
+    first beat, and nothing unlinks the previous daemon's file, so this is an ordinary
+    restart. The page must not call it a wedge and send somebody hunting one.
+    """
     layout.heartbeat_path.write_text(
         '{"ts":"2020-01-01T00:00:00Z","pid":1,"effect_level":"live","activity":"idle",'
         '"cycles":1}',
         encoding="utf-8",
     )
-    stale = web.get_json("/active").json()
-    assert stale["daemon"]["healthy"] is False
-    assert stale["daemon"]["heartbeat_age_seconds"] > 0
-    assert "STALE" in web.get("/active").text
+    payload = web.get_json("/active").json()
+    assert payload["daemon"]["state"] == "starting"
+    assert payload["daemon"]["healthy"] is False
+    assert "STARTING" in web.get("/active").text
+
+
+def test_a_fresh_heartbeat_with_no_daemon_is_not_reported_as_healthy(web, layout):
+    """The incident in issue #52, on the surface that got it right — with the verdict now
+    agreeing word for word with what ``robot-army health`` says about the same instant."""
+    beat(layout)
+
+    payload = web.get_json("/active").json()
+
+    assert payload["daemon"]["running"] is False
+    assert payload["daemon"]["healthy"] is False
+    assert payload["daemon"]["state"] == "died"
+    assert "the daemon is gone" in payload["daemon"]["reason"]
+    assert "DAEMON NOT RUNNING" in web.get("/active").text
 
 
 def test_human_age_reads_the_way_a_person_would_say_it():

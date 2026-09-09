@@ -79,7 +79,9 @@ The mismatch is not hypothetical: `run_daemon` takes the lock, then wires bounda
 
 ## Scenario 5 — The lock cannot be read (FR-013)
 
-**Setup**: a lock path that cannot be opened — a directory in its place is the cheapest.
+**Setup**: a lock path whose `os.open` refuses — patched, not `chmod 000`, because a test
+that silently passes as root is checking nothing. A directory in its place does **not** work:
+Linux opens and `flock`s a directory happily and the reading comes back `UNHELD`.
 
 **Expect**: `observe_lock` returns `UNKNOWN`; the check falls back to the heartbeat alone, so a
 fresh heartbeat is `ok` and a stale one is `stale` — and **both** sentences end with the clause

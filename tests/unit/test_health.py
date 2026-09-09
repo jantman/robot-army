@@ -580,6 +580,53 @@ def sent(monkeypatch):
     return calls
 
 
+def test_health_and_status_describe_one_machine_the_same_way(config, conn, layout, tmp_path):
+    """SC-007, and the incident in issue #52 read in the other direction.
+
+    ``status`` prints exactly one line about the daemon and it is the health line — there is
+    no separate "running" line to contradict it — so a verdict from the heartbeat alone let
+    it say ``ok`` beside a dead daemon for as long as the threshold ran. The two commands
+    are asserted together because "they agree" is the property, not "each is right".
+    """
+    from robot_army import operations
+
+    write_at(layout.heartbeat_path, age_seconds=1)
+    ctx = alert_context(config, conn, tmp_path)
+    try:
+        switch = operations.health_check(ctx)
+        overview = operations.status(ctx)
+    finally:
+        ctx.close()
+
+    assert switch.code == 4
+    assert switch.lines[0].startswith("DIED: ")
+    assert switch.data["state"] == "died"
+
+    health_line = next(line for line in overview.lines if line.startswith("health "))
+    assert "DIED — " in health_line
+    assert overview.data["health"]["state"] == "died"
+    assert health_line.endswith(switch.data["reason"])
+
+
+def test_a_live_daemon_still_reads_ok_on_both(config, conn, layout, tmp_path):
+    """The other half of the same property: neither command may cry wolf."""
+    from robot_army import operations
+    from robot_army.daemon import SingleInstanceLock
+
+    write_at(layout.heartbeat_path, age_seconds=1, pid=os.getpid())
+    ctx = alert_context(config, conn, tmp_path)
+    try:
+        with SingleInstanceLock(layout.lock_path):
+            switch = operations.health_check(ctx)
+            overview = operations.status(ctx)
+    finally:
+        ctx.close()
+
+    assert switch.code == 0
+    assert switch.lines[0].startswith("ok: ")
+    assert any(line.startswith("health       : ok — ") for line in overview.lines)
+
+
 def test_the_alert_reaches_pushover_when_that_is_the_only_channel(
     config, conn, layout, tmp_path, sent
 ):

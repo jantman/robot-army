@@ -301,8 +301,14 @@ def status(
     their own, so what this prints as "next" is what the next dispatch will select (R8).
     """
     result = Result()
+    # Both signals (issue #52). The health line below is the *only* line this command prints
+    # about the daemon — there is no separate "running" line to contradict it — so a verdict
+    # reached from the heartbeat alone would let `status` say `ok` beside a dead daemon for
+    # as long as the staleness threshold ran, which is exactly what `health` did.
     report = health.check(
-        ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+        ctx.layout.heartbeat_path,
+        max_age_seconds=ctx.config.health.max_age_seconds,
+        lock=daemon_mod.observe_lock(ctx.layout.lock_path),
     )
     counts = db.count_work_items_by_state(ctx.conn, include_simulated=include_simulated)
     states = [WorkItemState(state)] if state else None
@@ -379,7 +385,7 @@ def status(
     }
 
     result.say(f"effect level : {ctx.effect_level}")
-    result.say(f"health       : {'ok' if report.healthy else 'STALE'} — {report.reason}")
+    result.say(f"health       : {report.state.label} — {report.reason}")
     # FR-036: a system that is healthy and deliberately doing nothing must not read as a
     # system that is healthy and doing nothing for no reason.
     result.say(

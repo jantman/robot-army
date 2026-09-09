@@ -33,7 +33,7 @@ Single project: `src/robot_army/`, `tests/` at the repository root.
 
 **Purpose**: know the ground is level before moving anything.
 
-- [ ] T001 Record the baseline: `uv run pytest` is green on `robot-army/issue-52-the-dead-man-s-switch-has-a-180s` before any edit. Anything failing after this point is this feature's doing.
+- [X] T001 Record the baseline: `uv run pytest` is green on `robot-army/issue-52-the-dead-man-s-switch-has-a-180s` before any edit. Anything failing after this point is this feature's doing.
 
 ---
 
@@ -42,12 +42,12 @@ Single project: `src/robot_army/`, `tests/` at the repository root.
 **Purpose**: the vocabulary the verdict is written in, and the probe that supplies half of it.
 Every user story depends on this phase; nothing here changes any surface's output on its own.
 
-- [ ] T002 [P] Add the `LockState` StrEnum — `HELD` / `UNHELD` / `UNKNOWN` — to `src/robot_army/health.py`, with a docstring saying why it lives here rather than in `daemon.py` (the import direction; research R1) and why `UNKNOWN` exists at all (a failed probe must not manufacture a death notice; research R2).
-- [ ] T003 [P] Add the `LockReading` frozen slotted dataclass — `state`, `holder`, `path`, and a `running` property — to `src/robot_army/health.py`, per [data-model.md](data-model.md). Docstring: the holder is `None` unless the lock is held, because an unheld lock file still names the process that exited.
-- [ ] T004 Add the `HealthState` StrEnum with its seven members and its `label` property to `src/robot_army/health.py`, per [contracts/health-verdict.md](contracts/health-verdict.md). The label is defined once here because three surfaces print it and the whole point is that they cannot differ.
-- [ ] T005 Extend `HealthReport` in `src/robot_army/health.py`: `state` required and third positional, `lock` keyword-defaulted to `None`, and `to_dict()` emitting both. Update the reports built by hand in `tests/unit/test_health.py` to name the state they mean.
-- [ ] T006 Add `observe_lock(path) -> LockReading` to `src/robot_army/daemon.py` — open read-only **without `O_CREAT`**, take `LOCK_SH | LOCK_NB`, read the holder from the same descriptor when the lock is held, map `ENOENT` to `UNHELD` and every other failure to `UNKNOWN` — and reimplement `is_locked` as `observe_lock(path).running`. Carry the shared-lock rationale and the 1,558-in-2,400 measurement onto the new function; leave `read_lock_holder` alone.
-- [ ] T007 [P] Probe tests in `tests/integration/test_single_instance.py`: a held lock reads `HELD` with the holder's pid; a free lock file reads `UNHELD` with no holder; an absent lock file reads `UNHELD` **and is still absent afterwards** (FR-012); an unopenable path — a directory will do — reads `UNKNOWN`. Confirm the existing `is_locked` tests, including the six-thread concurrency test, pass unchanged.
+- [X] T002 [P] Add the `LockState` StrEnum — `HELD` / `UNHELD` / `UNKNOWN` — to `src/robot_army/health.py`, with a docstring saying why it lives here rather than in `daemon.py` (the import direction; research R1) and why `UNKNOWN` exists at all (a failed probe must not manufacture a death notice; research R2).
+- [X] T003 [P] Add the `LockReading` frozen slotted dataclass — `state`, `holder`, `path`, and a `running` property — to `src/robot_army/health.py`, per [data-model.md](data-model.md). Docstring: the holder is `None` unless the lock is held, because an unheld lock file still names the process that exited.
+- [X] T004 Add the `HealthState` StrEnum with its seven members and its `label` property to `src/robot_army/health.py`, per [contracts/health-verdict.md](contracts/health-verdict.md). The label is defined once here because three surfaces print it and the whole point is that they cannot differ.
+- [X] T005 Extend `HealthReport` in `src/robot_army/health.py`: `state` required and third positional, `lock` keyword-defaulted to `None`, and `to_dict()` emitting both. Update the reports built by hand in `tests/unit/test_health.py` to name the state they mean.
+- [X] T006 Add `observe_lock(path) -> LockReading` to `src/robot_army/daemon.py` — open read-only **without `O_CREAT`**, take `LOCK_SH | LOCK_NB`, read the holder from the same descriptor when the lock is held, map `ENOENT` to `UNHELD` and every other failure to `UNKNOWN` — and reimplement `is_locked` as `observe_lock(path).running`. Carry the shared-lock rationale and the 1,558-in-2,400 measurement onto the new function; leave `read_lock_holder` alone.
+- [X] T007 [P] Probe tests in `tests/integration/test_single_instance.py`: a held lock reads `HELD` with the holder's pid; a free lock file reads `UNHELD` with no holder; an absent lock file reads `UNHELD` **and is still absent afterwards** (FR-012); an unopenable path — a directory will do — reads `UNKNOWN`. Confirm the existing `is_locked` tests, including the six-thread concurrency test, pass unchanged.
 
 **Checkpoint**: the probe and the vocabulary exist; no output has changed anywhere.
 
@@ -60,9 +60,9 @@ Every user story depends on this phase; nothing here changes any surface's outpu
 **Independent test**: write a heartbeat dated now, hold no lock, run `robot-army health`. It must
 say the daemon is gone and exit 4, and give the same answer at 1s, 30s, 179s and 300s.
 
-- [ ] T008 [US1] Give `check` its `lock: LockReading | None = None` parameter in `src/robot_army/health.py` and implement the derivation rows that story 1 needs — row 4 (`died`, above the freshness test), row 5 (`ok`), and the existing absent/unreadable/stale rows carried over with their `state` and `lock` now set. Every returned report names its state; none of the existing sentences changes.
-- [ ] T009 [US1] In `operations.health_check` (`src/robot_army/operations.py`), observe the lock with `daemon_mod.observe_lock(ctx.layout.lock_path)`, pass it to `check`, and print `f"{report.state.label}: {report.reason}"` in place of the `"ok: "` / `"STALE: "` prefix. The exit code stays `EXIT_OK` / `EXIT_CHECK_FAILED`.
-- [ ] T010 [P] [US1] Tests in `tests/unit/test_health.py`: `died` at four heartbeat ages spanning the threshold, all with the same verdict and reason shape (SC-002); `ok` unchanged under a held lock with a fresh heartbeat, asserting the line is byte-for-byte today's (SC-004); a stale heartbeat under a held lock still failing (SC-003); `never_started` unchanged; and `health_check`'s exit code and first line for each.
+- [X] T008 [US1] Give `check` its `lock: LockReading | None = None` parameter in `src/robot_army/health.py` and implement the derivation rows that story 1 needs — row 4 (`died`, above the freshness test), row 5 (`ok`), and the existing absent/unreadable/stale rows carried over with their `state` and `lock` now set. Every returned report names its state; none of the existing sentences changes.
+- [X] T009 [US1] In `operations.health_check` (`src/robot_army/operations.py`), observe the lock with `daemon_mod.observe_lock(ctx.layout.lock_path)`, pass it to `check`, and print `f"{report.state.label}: {report.reason}"` in place of the `"ok: "` / `"STALE: "` prefix. The exit code stays `EXIT_OK` / `EXIT_CHECK_FAILED`.
+- [X] T010 [P] [US1] Tests in `tests/unit/test_health.py`: `died` at four heartbeat ages spanning the threshold, all with the same verdict and reason shape (SC-002); `ok` unchanged under a held lock with a fresh heartbeat, asserting the line is byte-for-byte today's (SC-004); a stale heartbeat under a held lock still failing (SC-003); `never_started` unchanged; and `health_check`'s exit code and first line for each.
 
 **Checkpoint**: the reported defect is fixed and the switch is honest. Everything below sharpens
 what it says.
@@ -77,10 +77,10 @@ line, in the JSON, and in the alert.
 **Independent test**: produce each of the six failing states and confirm each yields a distinct
 `state` value, a sentence that says which, and an alert body carrying the same.
 
-- [ ] T011 [US2] Implement the remaining derivation rows in `src/robot_army/health.py` — `hung` (row 6, held with a stale beat from the holder), `starting` (rows 1 and 7, held with no beat of its own yet) — with the exact sentences from [contracts/health-verdict.md](contracts/health-verdict.md). The pid comparison is text-against-text, as `published_cap` already does it, and a holder that cannot be read is a doubt rather than a match.
-- [ ] T012 [US2] Implement the partial-evidence clauses in `src/robot_army/health.py`: the `UNKNOWN` suffix on both the healthy and the stale sentence (FR-013), and the lock clause appended to the `unreadable` sentences. A verdict reached without the lock must never read like one reached with it.
-- [ ] T013 [US2] Carry the state into the alert in `src/robot_army/health.py`'s `alert_fields` — `state` beside the existing `healthy` and `age_seconds`, title and message unchanged — so every configured channel and the `health.notify` audit record get the sharper reason with no work at the call site.
-- [ ] T014 [P] [US2] Tests in `tests/unit/test_health.py`: the full lock × heartbeat matrix from the contract, one case per row, asserting `state`, `healthy` and the distinguishing phrase; `hung` versus `starting` decided by the pid comparison in both directions; a **fresh** beat with a mismatched pid staying `ok` (SC-008); `to_dict` carrying `state` and `lock`, with `lock` `None` when no reading was supplied and `"unheld"` when one was (FR-009); `alert_fields` carrying the state.
+- [X] T011 [US2] Implement the remaining derivation rows in `src/robot_army/health.py` — `hung` (row 6, held with a stale beat from the holder), `starting` (rows 1 and 7, held with no beat of its own yet) — with the exact sentences from [contracts/health-verdict.md](contracts/health-verdict.md). The pid comparison is text-against-text, as `published_cap` already does it, and a holder that cannot be read is a doubt rather than a match.
+- [X] T012 [US2] Implement the partial-evidence clauses in `src/robot_army/health.py`: the `UNKNOWN` suffix on both the healthy and the stale sentence (FR-013), and the lock clause appended to the `unreadable` sentences. A verdict reached without the lock must never read like one reached with it.
+- [X] T013 [US2] Carry the state into the alert in `src/robot_army/health.py`'s `alert_fields` — `state` beside the existing `healthy` and `age_seconds`, title and message unchanged — so every configured channel and the `health.notify` audit record get the sharper reason with no work at the call site.
+- [X] T014 [P] [US2] Tests in `tests/unit/test_health.py`: the full lock × heartbeat matrix from the contract, one case per row, asserting `state`, `healthy` and the distinguishing phrase; `hung` versus `starting` decided by the pid comparison in both directions; a **fresh** beat with a mismatched pid staying `ok` (SC-008); `to_dict` carrying `state` and `lock`, with `lock` `None` when no reading was supplied and `"unheld"` when one was (FR-009); `alert_fields` carrying the state.
 
 **Checkpoint**: the switch says which failure it found, everywhere it speaks.
 

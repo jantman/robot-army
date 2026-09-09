@@ -5056,10 +5056,19 @@ def health_check(ctx: Context, *, max_age: float | None = None, do_notify: bool 
         if max_age is not None
         else float(ctx.config.health.max_age_seconds or 3 * ctx.config.daemon.reconcile_seconds)
     )
-    report = health.check(ctx.layout.heartbeat_path, max_age_seconds=threshold)
+    # Both signals, not just the heartbeat (issue #52). A released lock is direct evidence
+    # that the process is gone — no threshold, no waiting — and reading only the heartbeat
+    # gave this command, which *is* the dead-man's switch, a detection floor of the whole
+    # staleness threshold while the web interface knew within a second. The heartbeat stays
+    # because it is the only thing that catches the daemon that is alive and wedged.
+    report = health.check(
+        ctx.layout.heartbeat_path,
+        max_age_seconds=threshold,
+        lock=daemon_mod.observe_lock(ctx.layout.lock_path),
+    )
     result = Result(
         code=EXIT_OK if report.healthy else EXIT_CHECK_FAILED,
-        lines=[("ok: " if report.healthy else "STALE: ") + report.reason],
+        lines=[f"{report.state.label}: {report.reason}"],
         data=report.to_dict(),
     )
     if not report.healthy and do_notify:

@@ -7,6 +7,8 @@ that matters after an unclean shutdown.
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import os
 import subprocess
 import sys
@@ -14,7 +16,14 @@ import textwrap
 
 import pytest
 
-from robot_army.daemon import LockHeld, SingleInstanceLock, is_locked, read_lock_holder
+from robot_army.daemon import (
+    LockHeld,
+    SingleInstanceLock,
+    is_locked,
+    observe_lock,
+    read_lock_holder,
+)
+from robot_army.health import LockState
 
 
 def test_the_lock_records_the_holding_pid(layout):
@@ -183,4 +192,107 @@ def test_the_shared_probe_still_detects_a_real_holder(layout):
     """The fix must not have traded a false positive for a false negative."""
     with SingleInstanceLock(layout.lock_path):
         assert is_locked(layout.lock_path) is True
+    assert is_locked(layout.lock_path) is False
+
+
+# -- the three-valued observation (issue #52) --------------------------------
+#
+# ``health`` became a caller, and a caller that turns "not held" into "the daemon has died"
+# and wakes somebody. What used to be one bool now has to distinguish *nothing is holding
+# it* from *I could not look*, and must stop creating the file it was asked about.
+
+
+def test_observe_lock_reads_the_holder_from_the_probe_itself(layout):
+    """One open answers both questions, so the two answers describe one instant.
+
+    Asked separately — as ``web.handle`` and ``_enforced_cap`` used to ask them — they can
+    come from either side of a daemon restart, which is the window ``published_cap`` exists
+    to close.
+    """
+    with SingleInstanceLock(layout.lock_path):
+        reading = observe_lock(layout.lock_path)
+    assert reading.state is LockState.HELD
+    assert reading.running is True
+    assert reading.holder == str(os.getpid())
+    assert reading.path == layout.lock_path
+
+
+def test_observe_lock_on_a_free_lock_file_names_no_holder(layout):
+    """The file still contains the last holder's pid. Reporting it would name a process
+    that has exited, which is the mistake this whole feature exists to stop making."""
+    with SingleInstanceLock(layout.lock_path):
+        pass
+    assert layout.lock_path.read_text().strip() == str(os.getpid())
+
+    reading = observe_lock(layout.lock_path)
+    assert reading.state is LockState.UNHELD
+    assert reading.running is False
+    assert reading.holder is None
+
+
+def test_observe_lock_on_an_absent_file_is_unheld_and_leaves_no_file(tmp_path):
+    """Nothing holds a lock that does not exist — and asking must not create one.
+
+    The probe used to open with ``O_CREAT``, so every ``robot-army health`` run left an
+    empty file in the state directory as a side effect of reading it. FR-012.
+    """
+    absent = tmp_path / "nothing" / "daemon.lock"
+
+    reading = observe_lock(absent)
+
+    assert reading.state is LockState.UNHELD
+    assert reading.holder is None
+    assert not absent.exists()
+    assert not absent.parent.exists()
+
+
+def test_a_lock_that_cannot_be_opened_is_unknown_not_unheld(tmp_path, monkeypatch):
+    """A permission error must not manufacture a death notice.
+
+    Patched rather than produced with ``chmod 000`` because a test that silently passes as
+    root is worse than no test: root opens the file regardless and the assertion would be
+    checking nothing.
+    """
+
+    def refuse(*args: object, **kwargs: object) -> int:
+        raise PermissionError(errno.EACCES, "nope")
+
+    monkeypatch.setattr(os, "open", refuse)
+
+    reading = observe_lock(tmp_path / "daemon.lock")
+
+    assert reading.state is LockState.UNKNOWN
+    assert reading.running is False
+    assert reading.holder is None
+
+
+def test_a_flock_failure_that_is_not_contention_is_unknown(layout, monkeypatch):
+    """``EACCES``/``EAGAIN`` from ``flock`` is a holder; anything else is ignorance.
+
+    ``ENOLCK`` — a filesystem that will not lock, a kernel table full — tells us nothing
+    about whether a daemon is there, and the one thing this function may not do is answer
+    as though it did.
+    """
+    layout.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    layout.lock_path.write_text("1234\n")
+
+    def refuse(fd: int, operation: int) -> None:
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(fcntl, "flock", refuse)
+
+    assert observe_lock(layout.lock_path).state is LockState.UNKNOWN
+
+
+def test_is_locked_is_the_bool_half_and_answers_as_it_always_did(layout, monkeypatch):
+    """Every existing caller wants a yes or no, and an unobservable lock is still ``False``
+    to them — the answer this function gave before it had a third value to give."""
+    assert is_locked(layout.lock_path) is False
+    with SingleInstanceLock(layout.lock_path):
+        assert is_locked(layout.lock_path) is True
+
+    def refuse(*args: object, **kwargs: object) -> int:
+        raise PermissionError(errno.EACCES, "nope")
+
+    monkeypatch.setattr(os, "open", refuse)
     assert is_locked(layout.lock_path) is False

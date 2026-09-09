@@ -5055,8 +5055,14 @@ def follow_log(ctx: Context, *, include_simulated: bool = False) -> Iterator[str
 
 
 def health_check(ctx: Context, *, max_age: float | None = None, do_notify: bool = False) -> Result:
-    """Exits 0 if fresh, 4 if stale or absent. Intended to be run by a systemd timer —
-    **this, not the daemon, is the dead-man's switch**."""
+    """Exits 0 when a daemon holds the lock and its heartbeat is fresh, 4 for every other
+    verdict. Intended to be run by a systemd timer — **this, not the daemon, is the
+    dead-man's switch**.
+
+    One exit code for all six failures, deliberately: the timer and any shell around it care
+    whether it failed, and the distinction between them — died, hung, starting, never
+    started, unreadable, stale — is in the first line and in ``state``. A second encoding of
+    the same fact, for a caller that does not exist, is what Principle I forbids."""
     threshold = (
         max_age
         if max_age is not None

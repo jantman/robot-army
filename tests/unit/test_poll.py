@@ -167,14 +167,15 @@ def test_the_etag_is_persisted_and_replayed(conn, audit, config):
         conn, boundaries=boundaries, audit=audit, config=config, repo_key="demo", dry_run=False
     )
     assert first.status == 200
-    assert db.get_poll_state(conn, "demo").etag == 'W/"abc"'
+    state = db.get_poll_state(conn, "demo")
+    assert (state.etag, state.etag_request) == ('W/"abc"', reader.request), "stored as a pair"
 
     second = poll.poll_repo(
         conn, boundaries=boundaries, audit=audit, config=config, repo_key="demo", dry_run=False
     )
     assert second.status == 304
     assert second.found == 0
-    assert reader.poll_calls[-1] == ("demo", 'W/"abc"')
+    assert reader.poll_calls[-1] == ("demo", 'W/"abc"', reader.request)
 
 
 def test_a_transport_failure_is_recorded_and_backed_off_not_swallowed(conn, audit, config):
@@ -434,3 +435,126 @@ def test_a_normal_row_reports_its_path_source_verbatim(conn, audit, config, repo
     assert rows["jantman/derived"]["path source"] == "derived"
     assert rows["jantman/explicit"]["path source"] == "configured"
     assert rows["jantman/derived"]["clone path"] == str(repo_clone)
+
+
+# -- issue #60: a stored ETag is bound to the request that produced it -----------------------
+
+
+class _RealPollReader(FakeIssueReader):
+    """The real ``GitHubReader.poll`` over a mock transport; everything else faked.
+
+    Only ``poll`` goes to the wire, so the board read that follows it in ``poll_repo`` is
+    answered by the fake rather than by a GraphQL handler this test has no interest in.
+    """
+
+    def __init__(self, real) -> None:
+        super().__init__()
+        self.real = real
+
+    def poll(self, repo_key, etag, *, etag_request):
+        return self.real.poll(repo_key, etag, etag_request=etag_request)
+
+
+def _issue_json(number: int, label: str, author: str) -> dict:
+    return {
+        "number": number,
+        "title": f"issue {number}",
+        "body": "",
+        "html_url": f"https://github.com/jantman/demo/issues/{number}",
+        "labels": [{"name": label}],
+        "user": {"login": author},
+        "state": "open",
+    }
+
+
+def test_changing_the_label_is_seen_on_the_next_poll(conn, audit, config):
+    """The reported defect, end to end.
+
+    The handler answers 304 to **any** ``If-None-Match`` — what GitHub was observed doing
+    when the label was swapped away and back — so the only thing that can make the second
+    poll see the new label's issue is not offering the old ETag at all.
+    """
+    from dataclasses import replace
+
+    import httpx
+
+    from robot_army.boundaries.github import GitHubReader
+
+    onboard(conn)
+    author = config.github.author
+    listing = {
+        "robot-army-verify": [_issue_json(7, "robot-army-verify", author)],
+        "robot-army": [_issue_json(8, "robot-army", author)],
+    }
+    offered: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        offered.append(request.headers.get("If-None-Match"))
+        if "If-None-Match" in request.headers:
+            return httpx.Response(304)
+        label = request.url.params["labels"]
+        return httpx.Response(200, json=listing[label], headers={"ETag": f'W/"{label}"'})
+
+    def poll_under(label: str):
+        cfg = replace(config, github=replace(config.github, label=label))
+        client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.com")
+        reader = _RealPollReader(GitHubReader(cfg, audit, client=client, sleep=lambda _: None))
+        return poll.poll_repo(
+            conn, boundaries=make_boundaries(audit, reader=reader), audit=audit, config=cfg,
+            repo_key="demo", dry_run=False,
+        )
+
+    assert poll_under("robot-army-verify").created == 1
+    changed = poll_under("robot-army")
+    assert changed.status == 200, "the stale ETag was not offered"
+    assert changed.created == 1
+    assert {i.issue_number for i in db.list_work_items(conn)} == {7, 8}
+
+    again = poll_under("robot-army")
+    assert again.status == 304, "conditional again once the new pair is stored"
+    assert offered == [None, None, 'W/"robot-army"']
+
+
+def test_a_transport_failure_keeps_the_etag_and_its_request_together(conn, audit, config):
+    """FR-006: a failure says nothing about which request the ETag answered."""
+    from robot_army.models import PollState
+
+    onboard(conn)
+    with db.transaction(conn):
+        db.save_poll_state(
+            conn, PollState(repo_key="demo", etag='W/"abc"', etag_request="/repos/demo/issues?x=1")
+        )
+    reader = FakeIssueReader([make_issue()])
+    reader.raise_on_poll = TransportError("connection reset")
+
+    poll.poll_repo(
+        conn, boundaries=make_boundaries(audit, reader=reader), audit=audit, config=config,
+        repo_key="demo", dry_run=False,
+    )
+
+    state = db.get_poll_state(conn, "demo")
+    assert (state.etag, state.etag_request) == ('W/"abc"', "/repos/demo/issues?x=1")
+    assert state.consecutive_failures == 1
+
+
+def test_a_row_from_before_the_request_was_recorded_heals_on_its_next_poll(
+    conn, audit, config
+):
+    """User story 2: the machine that hit this. Its ETag would match — only the missing
+    request stops it being offered — and one full listing later the row holds a real pair."""
+    from robot_army.models import PollState
+
+    onboard(conn)
+    with db.transaction(conn):
+        db.save_poll_state(conn, PollState(repo_key="demo", etag='W/"abc"'))
+    reader = FakeIssueReader([make_issue()], etag='W/"abc"')
+
+    outcome = poll.poll_repo(
+        conn, boundaries=make_boundaries(audit, reader=reader), audit=audit, config=config,
+        repo_key="demo", dry_run=False,
+    )
+
+    assert reader.poll_calls == [("demo", 'W/"abc"', None)]
+    assert (outcome.status, outcome.found) == (200, 1)
+    state = db.get_poll_state(conn, "demo")
+    assert (state.etag, state.etag_request) == ('W/"abc"', reader.request)

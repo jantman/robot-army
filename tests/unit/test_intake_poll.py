@@ -163,6 +163,8 @@ def test_poll_state_is_kept_under_the_synthetic_board_key(conn, board_config, au
     # No ETag: Trello offers no usable conditional request here, which is *why* the
     # interval is 300 seconds rather than 60.
     assert state.etag is None
+    # Nor a request for one to be bound to (issue #60).
+    assert state.etag_request is None
 
 
 # -- FR-009: a failure is not an empty board --------------------------------

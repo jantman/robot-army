@@ -112,11 +112,20 @@ class CardWriteResult:
 
 @dataclass(frozen=True, slots=True)
 class PollResult:
-    """``status == 304`` returns ``items=[]`` and is the healthy steady state."""
+    """``status == 304`` returns ``items=[]`` and is the healthy steady state.
+
+    Healthy only because the ETag that earned it was offered against the same request it
+    was captured under (issue #60). ``request`` is the request line this result answered,
+    and ``etag`` is the validator *that response* supplied: the one sent, on a 304, or the
+    response's own header on a 200 — ``None`` if it carried none, never an older one carried
+    forward, because the caller stores the two as a pair and an ETag paired with a request it
+    did not answer is precisely the defect.
+    """
 
     items: tuple[Issue, ...]
     etag: str | None
     status: int
+    request: str
     rate_limit_remaining: int | None = None
     rate_limit_reset: int | None = None
 
@@ -434,7 +443,15 @@ class TransportError(BoundaryError):
 class IssueSourceReader(Protocol):
     """Reads are real at every effect level (FR-052)."""
 
-    def poll(self, repo_key: str, etag: str | None) -> PollResult: ...
+    def poll(
+        self, repo_key: str, etag: str | None, *, etag_request: str | None
+    ) -> PollResult:
+        """``etag`` is offered only if ``etag_request`` is the request about to be sent.
+
+        ``etag_request`` is required and keyword-only: a caller that forgot it would pay a
+        full listing every minute, and one that swapped the two strings would be wrong.
+        """
+        ...
 
     def get_issue(self, repo_key: str, number: int) -> Issue | None: ...
 

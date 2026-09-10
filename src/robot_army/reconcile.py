@@ -20,7 +20,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robot_army import cleanup, db, intake, notifications, procinfo, repos, sessions, speckit
+from robot_army import (
+    cleanup,
+    db,
+    intake,
+    notifications,
+    procinfo,
+    repos,
+    sessions,
+    speckit,
+    worktree,
+)
 from robot_army.boundaries import BoundaryError, HostHandle, TransportError
 from robot_army.cardstates import CardState
 from robot_army.states import (
@@ -64,6 +74,10 @@ class ReconcileResult:
     orphans: int = 0
     stale_sockets: int = 0
     prunable: int = 0
+    #: ``orphan_worktree`` anomalies newly raised this pass (issue #59): directories no work
+    #: item claims. The mirror of ``prunable``, and a count of *new* ones for the same reason
+    #: — a standing orphan re-detected every 60 seconds is one fact, not 1,440 a day.
+    orphan_worktrees: int = 0
     transcripts_checked: int = 0
     no_transcript: int = 0
     cleaned: int = 0
@@ -97,6 +111,7 @@ class ReconcileResult:
             "orphans": self.orphans,
             "stale_sockets": self.stale_sockets,
             "prunable_worktrees": self.prunable,
+            "orphan_worktrees": self.orphan_worktrees,
             "transcripts_checked": self.transcripts_checked,
             "no_transcript": self.no_transcript,
             "cleaned": self.cleaned,
@@ -784,6 +799,13 @@ def reconcile(
     )
 
     result.prunable += _sweep_worktrees(conn, boundaries=boundaries, audit=audit, config=config)
+    # The opposite direction (issue #59): a directory no row claims. Raised and then
+    # retracted in the same pass, and the two cannot fight — the sweep raises only for a
+    # directory present and unclaimed now, the resolver clears only one absent or claimed now.
+    result.orphan_worktrees += _sweep_orphan_worktrees(
+        conn, boundaries=boundaries, audit=audit, config=config
+    )
+    result.anomalies_resolved += _resolve_orphan_worktree_anomalies(conn, audit=audit)
 
     audit.record(
         "reconcile.pass",
@@ -2114,6 +2136,107 @@ def _sweep_worktrees(
         if created:
             flagged += 1
     return flagged
+
+
+def _sweep_orphan_worktrees(
+    conn: sqlite3.Connection, *, boundaries: Boundaries, audit: AuditLog, config: Config
+) -> int:
+    """Surface worktrees no work item claims (issue #59). Returns how many are new.
+
+    ``_sweep_worktrees`` above answers "is there a directory for this row?". Nothing asked
+    the reverse, so after ``purge-simulated`` deleted a round's rows its 80 MB of worktrees
+    sat under the root while every pass reported ``prunable_worktrees 0`` — true, and
+    beside the point. Reported, never removed: a directory no row vouches for is exactly
+    the one nobody here can say is safe to delete, so the maintainer decides, with the
+    command that does it written into the anomaly.
+
+    The anomaly is raised as real, not rehearsed. There is no row to take a run's flag
+    from, and the rule since issue #21 is that a visible false positive is the mistake
+    that can be recovered from.
+    """
+    raised = 0
+    listings: dict[str, Any] = {}
+    reported_failures: set[str] = set()
+    for path in worktree.orphans(conn, config):
+        detail: dict[str, Any] = {"path": str(path), "listed_by": None, "branch": None}
+        try:
+            found = worktree.locate(
+                boundaries.version_control, conn, config, path, listings=listings
+            )
+        except BoundaryError as exc:
+            # Once per distinct failure per pass, as the prunable sweep does per clone —
+            # not once per orphan, which would repeat one fact for every directory.
+            if str(exc) not in reported_failures:
+                reported_failures.add(str(exc))
+                audit.error("reconcile.list_worktrees", error=exc, detail={"path": str(path)})
+            found = None
+            detail["listing_failed"] = True
+        if found is not None:
+            detail["listed_by"] = found.repo_key
+            detail["branch"] = found.branch
+            detail["note"] = (
+                "no work item claims this worktree; "
+                f"`robot-army worktree remove {path}` removes it and its branch"
+            )
+        else:
+            detail["note"] = (
+                "no work item claims this directory, and no onboarded clone lists it as "
+                "a worktree, so robot-army will not remove it — look inside before "
+                "deleting it by hand"
+            )
+        with db.transaction(conn):
+            if db.raise_anomaly(
+                conn,
+                kind="orphan_worktree",
+                entity_type="worktree",
+                entity_id=str(path),
+                detail=detail,
+            ):
+                raised += 1
+    return raised
+
+
+def _resolve_orphan_worktree_anomalies(conn: sqlite3.Connection, *, audit: AuditLog) -> int:
+    """Close an ``orphan_worktree`` whose directory is gone or has been claimed (#59).
+
+    Both are positive observations of the disk and this database; neither depends on git,
+    so there is no "could not check" to mistake for "it is fine". A directory that is still
+    there and still unclaimed leaves its anomaly open, however many passes run.
+    """
+    claimed = {
+        worktree.resolved(item.worktree_path): item.id
+        for item in db.list_work_items(conn, include_simulated=True)
+        if item.worktree_path
+    }
+    resolved = 0
+    for anomaly in db.open_orphan_worktree_anomalies(conn):
+        if not anomaly.entity_id:
+            continue
+        detail: dict[str, Any] = {
+            "kind": anomaly.kind,
+            "anomaly_entity_id": anomaly.entity_id,
+        }
+        owner = claimed.get(worktree.resolved(anomaly.entity_id))
+        if owner is not None:
+            detail["reason"] = "claimed_by_item"
+            detail["claimed_by_item"] = owner
+        elif not Path(anomaly.entity_id).is_dir():
+            detail["reason"] = "directory_gone"
+        else:
+            continue
+        with db.transaction(conn):
+            if not db.resolve_anomaly(conn, anomaly.id):
+                continue
+            audit.record(
+                "anomaly.resolved",
+                outcome="ok",
+                entity_type="anomaly",
+                entity_id=str(anomaly.id),
+                detail=detail,
+                dry_run=anomaly.dry_run,
+            )
+        resolved += 1
+    return resolved
 
 
 def sweep_startup_note(audit: AuditLog, summary: dict[str, Any]) -> None:

@@ -9,14 +9,22 @@ confusing behaviour inside a real session rather than as a clear item failure.
 
 from __future__ import annotations
 
+import re
 import socket
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from robot_army import repos as repos_mod
 from robot_army import speckit
-from robot_army.boundaries import BoundaryError, HookResult, VersionControl, WorktreeHandle
+from robot_army.boundaries import (
+    BoundaryError,
+    HookResult,
+    VersionControl,
+    WorktreeHandle,
+    WorktreeInfo,
+)
 from robot_army.prompt import branch_name, worktree_dir
 
 if TYPE_CHECKING:
@@ -285,6 +293,119 @@ def condition(
         commits_ahead=ahead,
         status=status,
     )
+
+
+#: The only directory name ``prompt.worktree_dir`` ever produces under a repository folder.
+#: It is what lets a directory be recognised as robot-army's with no row saying so.
+_ISSUE_DIR = re.compile(r"issue-\d+")
+
+
+def resolved(path: str | Path) -> Path:
+    """One spelling per directory, so a ``~``, a trailing slash or a symlinked root in a
+    stored path cannot make a claimed worktree look unclaimed."""
+    return Path(path).expanduser().resolve()
+
+
+def orphans(conn: sqlite3.Connection, config: Config) -> list[Path]:
+    """Directories robot-army would have made that no work item claims (issue #59).
+
+    **What counts as ours** is ``<worktree_root>/<short>/issue-<n>``, where ``short`` is
+    the last segment of an *onboarded* repository's key — the one shape
+    ``prompt.worktree_dir`` creates, and nothing else under the root. The default root is
+    ``~/worktrees``, a name the maintainer may well use for their own checkouts, and a
+    report about those would be noise that teaches the habit of acknowledging this anomaly
+    without reading it. A symlink is never ours either: robot-army does not make them, and
+    following one could name a directory outside the root entirely.
+
+    **Claimed** means any work item — any state, real or rehearsed — records it as its
+    worktree. A ``done`` item not yet cleaned up claims its directory: that one is still
+    reachable through ``worktree remove <id>`` and ``cleanup``, which is precisely what an
+    orphan is not.
+
+    Decided from the disk and the database alone. Git is consulted by :func:`locate` for
+    detail, never for the verdict, so a clone that cannot be listed cannot hide an orphan.
+    """
+    from robot_army import db
+
+    root = Path(config.worktree_root)
+    if not root.is_dir():
+        return []
+    claimed = {
+        resolved(item.worktree_path)
+        for item in db.list_work_items(conn, include_simulated=True)
+        if item.worktree_path
+    }
+    folders = sorted({key.split("/")[-1] for key in repos_mod.resolved_all(conn, config)})
+    found: list[Path] = []
+    for short in folders:
+        try:
+            entries = sorted((root / short).iterdir())
+        except OSError:
+            continue  # no folder for this repository yet, which is the common case
+        for entry in entries:
+            if not _ISSUE_DIR.fullmatch(entry.name) or entry.is_symlink() or not entry.is_dir():
+                continue
+            path = resolved(entry)
+            if path not in claimed:
+                found.append(path)
+    return found
+
+
+@dataclass(frozen=True, slots=True)
+class Located:
+    """Which onboarded clone lists a directory as one of its worktrees, and on what branch.
+
+    ``branch`` is ``None`` for a detached HEAD, which has no second half to remove.
+    """
+
+    repo_key: str
+    clone: str
+    branch: str | None
+
+
+def locate(
+    vcs: VersionControl,
+    conn: sqlite3.Connection,
+    config: Config,
+    path: str | Path,
+    *,
+    listings: dict[str, list[WorktreeInfo] | BoundaryError] | None = None,
+) -> Located | None:
+    """Find the clone that owns the worktree at ``path``, by asking git.
+
+    For a directory no row claims, this is the only way to learn its branch — and the only
+    thing that makes removing it robot-army's business at all: a directory no clone lists
+    is not a worktree, and robot-army removes worktrees through git, never with ``rm``.
+
+    Only clones whose folder the path sits in are asked, since that is the one place their
+    worktrees are made. ``listings`` caches each clone's answer across calls, as the prunable
+    sweep does, so a pass over several orphans lists each clone once.
+
+    Raises ``BoundaryError`` when no clone lists the path and at least one could not be
+    read: "I could not check" must never come back as "no clone lists it".
+    """
+    target = resolved(path)
+    cache: dict[str, list[WorktreeInfo] | BoundaryError] = {} if listings is None else listings
+    failure: BoundaryError | None = None
+    for key, repo in sorted(repos_mod.resolved_all(conn, config).items()):
+        if key.split("/")[-1] != target.parent.name:
+            continue
+        clone = str(repo.path)
+        if clone not in cache:
+            try:
+                cache[clone] = vcs.list_worktrees(clone)
+            except BoundaryError as exc:
+                cache[clone] = exc
+        listing = cache[clone]
+        if isinstance(listing, BoundaryError):
+            failure = listing
+            continue
+        for info in listing:
+            if resolved(info.path) == target:
+                return Located(repo_key=key, clone=clone, branch=info.branch)
+    if failure is not None:
+        raise failure
+    return None
 
 
 def directory_size(path: str | Path) -> int:

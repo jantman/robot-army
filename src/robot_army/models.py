@@ -490,6 +490,12 @@ ANOMALY_KINDS: tuple[str, ...] = (
     # rather than that the world moved (FR-028, US5).
     "clone_path_missing",
     "clone_origin_changed",
+    # Issue #59. A directory shaped like one robot-army made — ``issue-<n>`` under an
+    # onboarded repository's folder in the worktree root — that no work item claims. The
+    # mirror of ``prunable_worktree``, which is a claim with no directory; this is a
+    # directory with no claim, which neither ``worktree remove <id>`` nor ``cleanup`` can
+    # reach because both start from a row. Reported, never removed; retracts itself.
+    "orphan_worktree",
 )
 
 

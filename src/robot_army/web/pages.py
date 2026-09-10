@@ -1383,7 +1383,7 @@ def anomalies_view(ctx: operations.Context, *, include_simulated: bool = False) 
         [
             h(1, f"anomalies ({len(rows)})"),
             p(
-                "Conditions the system detected. Two kinds re-check themselves and are "
+                "Conditions the system detected. Some kinds re-check themselves and are "
                 "retracted when they stop being true; the rest wait for an acknowledgement, "
                 "which lifts the row out of the outstanding count and lets a genuinely new "
                 "occurrence be recorded later.",

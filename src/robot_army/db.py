@@ -944,6 +944,23 @@ def open_orphan_session_anomalies(conn: sqlite3.Connection) -> list[Anomaly]:
     )
 
 
+def open_orphan_worktree_anomalies(conn: sqlite3.Connection) -> list[Anomaly]:
+    """The population ``reconcile._resolve_orphan_worktree_anomalies`` re-checks (#59).
+
+    Narrow for the reason the two neighbours give. ``orphan_worktree`` can be positively
+    re-established as false from the disk and this database alone — the directory is gone,
+    or a work item claims it — so, like them, it gets a population of its own rather than a
+    share of a general mechanism that would have to guess at every other kind.
+    """
+    return _rows(
+        conn.execute(
+            "SELECT * FROM anomalies WHERE kind = 'orphan_worktree' "
+            "AND acknowledged_at IS NULL AND resolved_at IS NULL ORDER BY id"
+        ),
+        Anomaly,
+    )
+
+
 def open_card_create_failing_anomalies(conn: sqlite3.Connection) -> list[Anomaly]:
     """The population ``reconcile._resolve_card_create_anomalies`` re-checks (issue #21).
 

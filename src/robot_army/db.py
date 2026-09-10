@@ -1018,13 +1018,17 @@ def get_poll_state(conn: sqlite3.Connection, repo_key: str) -> PollState:
 
 
 def save_poll_state(conn: sqlite3.Connection, state: PollState) -> None:
+    """Write the whole row. ``etag`` and ``etag_request`` travel in the one statement, so a
+    kill between them is impossible and the row always holds a matched pair (issue #60)."""
     conn.execute(
         """
         INSERT INTO poll_state
-            (repo_key, etag, last_polled_at, last_status, consecutive_failures, backoff_until)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (repo_key, etag, etag_request, last_polled_at, last_status,
+             consecutive_failures, backoff_until)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(repo_key) DO UPDATE SET
             etag                 = excluded.etag,
+            etag_request         = excluded.etag_request,
             last_polled_at       = excluded.last_polled_at,
             last_status          = excluded.last_status,
             consecutive_failures = excluded.consecutive_failures,
@@ -1033,6 +1037,7 @@ def save_poll_state(conn: sqlite3.Connection, state: PollState) -> None:
         (
             state.repo_key,
             state.etag,
+            state.etag_request,
             state.last_polled_at,
             state.last_status,
             state.consecutive_failures,

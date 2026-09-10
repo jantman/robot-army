@@ -511,7 +511,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 14
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 15
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -1754,4 +1754,64 @@ def test_a_backfilled_card_anomaly_can_then_be_retracted(tmp_path):
         assert reconcile._resolve_card_create_anomalies(conn, audit=audit) == 1
 
     assert db.list_anomalies(conn, include_simulated=True) == []
+    conn.close()
+
+
+def test_migration_015_keeps_every_poll_state_value_and_records_no_request(tmp_path):
+    """Issue #60: the upgrade adds the request column and touches nothing else.
+
+    NULL is the honest value for a row written before the request was recorded — nothing can
+    say which label those ETags answered — and the boundary treats it as not matching, which
+    is what heals the machine that exhibited the defect without a hand-written UPDATE.
+    """
+    from robot_army.models import PollState
+
+    conn = db.connect(tmp_path / "state.db")
+    _ladder_to(conn, 14)
+    with db.transaction(conn):
+        conn.execute(
+            "INSERT INTO poll_state (repo_key, etag, last_polled_at, last_status,"
+            " consecutive_failures, backoff_until) VALUES (?, ?, ?, ?, ?, ?)",
+            ("jantman/demo", 'W/"7db3"', "2026-08-30T00:00:00Z", 304, 2, "2026-08-30T00:05:00Z"),
+        )
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (14, SCHEMA_VERSION)
+    assert db.get_poll_state(conn, "jantman/demo") == PollState(
+        repo_key="jantman/demo",
+        etag='W/"7db3"',
+        etag_request=None,
+        last_polled_at="2026-08-30T00:00:00Z",
+        last_status=304,
+        consecutive_failures=2,
+        backoff_until="2026-08-30T00:05:00Z",
+    )
+    conn.close()
+
+
+def test_a_killed_migration_015_leaves_user_version_at_fourteen_and_re_runs(
+    tmp_path, monkeypatch
+):
+    conn = db.connect(tmp_path / "state.db")
+    _ladder_to(conn, 14)
+
+    def _explode(connection: sqlite3.Connection) -> None:
+        migrations._migration_015(connection)
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:14], _explode))
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+
+    assert current_version(conn) == 14
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(poll_state)")}
+    assert "etag_request" not in columns, "no half-applied column may be observable"
+
+    monkeypatch.undo()
+    start, end = migrate(conn)
+
+    assert (start, end) == (14, SCHEMA_VERSION)
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(poll_state)")}
+    assert "etag_request" in columns
     conn.close()

@@ -720,6 +720,36 @@ CREATE UNIQUE INDEX idx_anomalies_open
     WHERE acknowledged_at IS NULL AND resolved_at IS NULL;
 """
 
+SCHEMA_015_SQL = """
+-- Which request a stored ETag answered (issue #60).
+--
+-- `poll_state` held one ETag per repository and nothing about the request that produced it,
+-- but that request is label-filtered. Changing `[github] label` left every repository
+-- replaying a validator captured under a different query, GitHub answered 304, and the poll
+-- read that as "unchanged". Discovery was blind across every repository at once, for as
+-- long as each stayed quiet, while `status`, `doctor`, `health` and the web all reported
+-- normal. Recovery took a hand-written UPDATE.
+--
+-- This column holds the complete request line -- path and sorted query parameters -- whose
+-- response supplied `etag`. The boundary sends the ETag only when the request it is about to
+-- make is identical, so any change to any part of the request invalidates it without anyone
+-- having to remember which parts can vary. Plain text rather than a hash, so the row explains
+-- itself to anyone reading it with sqlite3 and the audit record can say what changed. It
+-- never holds a header, and so never the token.
+--
+-- NULL means *never recorded*, and it is treated as not matching. No backfill, deliberately:
+-- on the machine that found this, nothing can say which label those ETags answered -- the
+-- round swapped it twice -- and writing today's request here would assert that every stored
+-- ETag answers it, which is the exact false assumption this column exists to make checkable.
+-- It would re-create the blindness on the one machine known to be affected. The honest NULL
+-- costs one unconditional request per repository, once. Migration 011 makes the same argument
+-- about `work_items.author`.
+--
+-- Trello board rows (`trello:board:<id>`) never send a conditional request and leave this
+-- NULL alongside their NULL etag.
+ALTER TABLE poll_state ADD COLUMN etag_request TEXT;
+"""
+
 
 def _migration_005(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_005_SQL):
@@ -771,6 +801,11 @@ def _migration_014(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_015(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_015_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -787,6 +822,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_012,
     _migration_013,
     _migration_014,
+    _migration_015,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

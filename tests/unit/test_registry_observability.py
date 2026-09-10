@@ -541,6 +541,10 @@ def test_the_orphan_sweep_still_reports_what_it_saw(conn, audit, config, tmp_pat
     write_registry(registry, pid=6001, session_id="s-0", version="9.9.9")
     cwd = Path(config.worktree_root) / "demo" / "issue-230"
     cwd.mkdir(parents=True, exist_ok=True)
+    # The item records the worktree its worker is in, as every dispatched item does. Left
+    # unrecorded, the directory is one no row claims, and issue #59's sweep rightly says so.
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, item_id, worktree_path=str(cwd))
     write_proc(proc, 6001, starttime="6001", cwd=str(cwd), exe="/usr/bin/claude")
 
     result = reconcile.reconcile(

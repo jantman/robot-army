@@ -626,7 +626,13 @@ def test_every_prompt_asks_on_stderr_now_that_two_of_them_have_documents():
 
     defaults = {
         name: inspect.signature(getattr(operations, name)).parameters["confirm"].default
-        for name in ("onboard", "cancel", "purge_simulated", "worktree_remove")
+        for name in (
+            "onboard",
+            "cancel",
+            "purge_simulated",
+            "worktree_remove",
+            "worktree_remove_path",
+        )
     }
 
     assert set(defaults.values()) == {operations._ask}, defaults

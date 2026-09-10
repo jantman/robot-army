@@ -2409,6 +2409,38 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
                 "cleanup_state": item.cleanup_state,
                 "cleanup_reason": item.cleanup_reason,
                 "cleaned_at": item.cleaned_at,
+                "claimed": True,
+            }
+        )
+    # Directories robot-army made that no row claims (issue #59). Listed whatever
+    # `--include-simulated` says: with no row they are neither real nor rehearsed, and
+    # "no worktrees recorded" printed over them is how the issue was found.
+    orphan_paths = worktree.orphans(ctx.conn, ctx.config)
+    listings: dict[str, Any] = {}
+    for path in orphan_paths:
+        try:
+            found = worktree.locate(
+                ctx.boundaries.version_control, ctx.conn, ctx.config, path, listings=listings
+            )
+        except BoundaryError:
+            found = None
+        branch = found.branch if found is not None else None
+        size = worktree.directory_size(path)
+        rows.append(["—", str(path), branch or "—", "unclaimed", worktree.human_size(size), "—"])
+        payload.append(
+            {
+                "item_id": None,
+                "path": str(path),
+                "branch": branch,
+                "condition": "unclaimed",
+                "dirty": None,
+                "commits_ahead": None,
+                "size_bytes": size,
+                "simulated": None,
+                "cleanup_state": None,
+                "cleanup_reason": None,
+                "cleaned_at": None,
+                "claimed": False,
             }
         )
     result.data = {
@@ -2425,6 +2457,12 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
         return result.say("no worktrees recorded")
     for line in _table(rows, ["item", "path", "branch", "condition", "size", "cleanup"]):
         result.say(line)
+    if orphan_paths:
+        result.say()
+        result.say(
+            f"{len(orphan_paths)} worktree(s) claimed by no work item; "
+            "remove one with: robot-army worktree remove <path>"
+        )
     if withheld:
         result.say()
         result.say(_withheld_note(withheld))
@@ -2760,6 +2798,185 @@ def _remove_checkout(
             "Removal is two steps; skipping the second accumulates robot-army/* branches"
         )
     return True
+
+
+@_guards_its_prompt
+def worktree_remove_path(
+    ctx: Context,
+    path: str,
+    *,
+    force: bool = False,
+    confirm: Any = _ask,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+) -> Result:
+    """Remove a worktree **no work item claims**, and its branch, found by path (issue #59).
+
+    The id form starts from a row, and so does ``cleanup``; a worktree whose row is gone —
+    ``purge-simulated`` deleted it, or anything else did — was reachable only by ``git
+    worktree remove`` by hand, which leaves the branch behind unless someone remembers it.
+    This is the id form's removal (the same core, record and refusals) without the row.
+
+    Five refusals come first, in this order, none of them a question:
+
+    1. **Outside the worktree root.** robot-army removes worktrees it made; this is not a
+       general-purpose ``rm``.
+    2. **Claimed by a work item.** Then the id form is the command, and it names it. A path
+       form that accepted a claimed worktree would be a way round #79's session guard.
+    3. **Not a directory.** Nothing to remove; git's leftover record is ``worktree
+       prune``'s business.
+    4. **No onboarded clone lists it as a worktree.** Only git removes a worktree, and git
+       has to know it. A half-created directory is reported by the ``orphan_worktree``
+       sweep, but deleting a directory nobody can vouch for is the maintainer's call.
+    5. **A live worker is in there**, unless ``--force``. There are no session rows to ask,
+       so this asks what reconciliation asks: the session registry and ``/proc``, with
+       liveness by pid *and* start time.
+
+    ``--force`` then asks for the directory's name to be typed, which is what the item id
+    is to the id form: proof the maintainer read which one.
+    """
+    target = worktree.resolved(path)
+    result = Result(data={"path": str(target)})
+    with ctx.audit.action(
+        "worktree.remove",
+        entity_type="worktree",
+        entity_id=str(target),
+        target=str(target),
+        detail={"force": force, "by": "path"},
+    ) as outcome:
+        outcome["refused"] = False
+        outcome["worktree_removed"] = False
+        outcome["branch_deleted"] = False
+        outcome["forced_over_live_worker"] = False
+        result.data.update(worktree_removed=False, branch_deleted=False)
+
+        def refuse(by: str, code: int, reason: str, *more: str, **extra: Any) -> Result:
+            outcome.update(refused=True, refused_by=by, reason=reason, **extra)
+            result.data.update(refused_by=by, refused_reason=reason, **extra)
+            result.code = code
+            result.say(f"refused to remove {target}:")
+            for line in (reason, *more):
+                result.say(f"  {line}")
+            return result
+
+        root = worktree.resolved(ctx.config.worktree_root)
+        if target == root or not target.is_relative_to(root):
+            return refuse(
+                "outside_root",
+                EXIT_PRECONDITION,
+                f"it is not inside the worktree root ({root})",
+                "robot-army only removes worktrees it made",
+            )
+        owner = next(
+            (
+                item
+                for item in db.list_work_items(ctx.conn, include_simulated=True)
+                if item.worktree_path and worktree.resolved(item.worktree_path) == target
+            ),
+            None,
+        )
+        if owner is not None:
+            return refuse(
+                "claimed",
+                EXIT_PRECONDITION,
+                f"work item {owner.id} claims it",
+                f"use: robot-army worktree remove {owner.id}  "
+                "(which also checks that item's sessions)",
+                claimed_by_item=owner.id,
+            )
+        if not target.is_dir():
+            return refuse(
+                "not_a_directory",
+                EXIT_FAILED,
+                "there is no directory there",
+                "if git still records a worktree at that path, "
+                "`robot-army worktree prune` clears it",
+            )
+        try:
+            found = worktree.locate(
+                ctx.boundaries.version_control, ctx.conn, ctx.config, target
+            )
+        except BoundaryError as exc:
+            return refuse(
+                "listing_failed", EXIT_FAILED, f"could not ask git which clone owns it: {exc}"
+            )
+        if found is None:
+            return refuse(
+                "not_a_worktree",
+                EXIT_PRECONDITION,
+                "no onboarded clone lists it as a worktree",
+                "robot-army removes worktrees through git and will not delete an arbitrary "
+                "directory; look inside, and remove it by hand if that is safe",
+            )
+        outcome["repo_key"] = found.repo_key
+        outcome["branch"] = found.branch
+        result.data.update(repo_key=found.repo_key, branch=found.branch)
+
+        worker = _live_worker_inside(target, registry_dir=registry_dir, proc_root=proc_root)
+        if worker is not None:
+            outcome["live_worker"] = worker
+            result.data["live_worker"] = worker
+            if not force:
+                return refuse(
+                    "live_worker",
+                    EXIT_PRECONDITION,
+                    f"a worker is running in there — pid {worker['pid']}, "
+                    f"session {worker['session_id']}",
+                    "removing it now leaves that worker in a deleted directory, and this "
+                    "command deletes the branch too",
+                    f"remove anyway: robot-army worktree remove {target} --force",
+                )
+
+        if force:
+            prompt = (
+                f"Type the directory name ({target.name}) to force-remove {target} "
+                "and discard its uncommitted work: "
+            )
+            if worker is not None:
+                prompt = (
+                    f"pid {worker['pid']} is running in {target}. Forcing leaves it in a "
+                    "deleted directory. "
+                ) + prompt
+            answer = _answer_or_give_up(
+                prompt,
+                confirm=confirm,
+                record=lambda cause: outcome.update(abandoned=True, cause=cause),
+                data=result.data,
+            )
+            if str(answer).strip() != target.name:
+                outcome["aborted"] = True
+                return Result(code=EXIT_FAILED, lines=["aborted"])
+            if worker is not None:
+                outcome["forced_over_live_worker"] = True
+                result.data["forced_over_live_worker"] = True
+
+        _remove_checkout(
+            ctx,
+            path=str(target),
+            branch=found.branch,
+            clone=found.clone,
+            force=force,
+            outcome=outcome,
+            result=result,
+        )
+        return result
+
+
+def _live_worker_inside(
+    path: Path, *, registry_dir: Path | None, proc_root: Path | None
+) -> dict[str, Any] | None:
+    """A worker process whose working directory is inside ``path``, if one can be seen.
+
+    The path form's session guard, for a worktree with no session rows to ask. The scan is
+    the one reconciliation uses: the registry, falling back to ``/proc`` by executable when
+    the registry cannot be read, so a missing registry does not read as "nothing running".
+    Liveness is pid *and* start time, so a recycled pid is not taken for the worker.
+    """
+    scan = sessions.scan(registry_dir=registry_dir, proc_root=proc_root)
+    for entry in scan.entries:
+        if sessions.under_root(entry.cwd, path) and entry.alive(proc_root=proc_root):
+            return {"pid": entry.pid, "session_id": entry.session_id, "cwd": entry.cwd}
+    return None
 
 
 def worktree_prune(ctx: Context) -> Result:

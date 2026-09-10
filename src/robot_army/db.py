@@ -1332,8 +1332,10 @@ def clear_repo_hold(conn: sqlite3.Connection, repo_key: str) -> Hold | None:
 def purge_simulated(conn: sqlite3.Connection) -> dict[str, int]:
     """Delete every ``dry_run`` row. Never touches live rows, never touches disk.
 
-    Worktrees those rows created are real directories; removing them is
-    ``worktree remove``'s job, deliberately separate so purging is not destructive.
+    Worktrees those rows created are real directories. Removing them is
+    ``operations.purge_simulated``'s business, done *before* this runs and only when the
+    maintainer asks (issue #59) — it has to be before, because once these rows are gone
+    nothing in robot-army knows which directory belonged to which branch.
     """
     sessions = conn.execute("DELETE FROM sessions WHERE dry_run = 1").rowcount
     items = conn.execute("DELETE FROM work_items WHERE dry_run = 1").rowcount

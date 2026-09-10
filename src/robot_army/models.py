@@ -232,6 +232,24 @@ class Session:
     def argv(self) -> list[str]:
         return json.loads(self.launch_argv) if self.launch_argv else []
 
+    @property
+    def hosted_by_simulation(self) -> bool:
+        """Was this session "launched" by the simulated host, so no process ever existed?
+
+        The signature is the one ``SimulatedSessionHost.confirm_session`` writes and nothing
+        else can: ``pid = 0`` and no start time, on a rehearsal row. ``dry_run`` alone is
+        not it — rows created at ``no-remote`` are ``dry_run`` too, with a real worker behind
+        a real pid (issue #34's trap, from the other side). A real session at any level
+        records a real pid.
+
+        Two readers. ``operations.cancel`` routes such a row to the simulated host rather
+        than signalling ``getpgid(0)``, and ``purge-simulated`` does not let such a row stop
+        it removing a worktree (issue #59): at ``local`` every session row has this
+        signature and nothing ever closes it, so treating it as a possible worker would
+        refuse every worktree a purge exists to remove.
+        """
+        return bool(self.dry_run) and self.pid == 0 and self.proc_start is None
+
 
 @dataclass(frozen=True, slots=True)
 class Card:

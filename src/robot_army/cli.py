@@ -266,7 +266,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     purge = sub.add_parser("purge-simulated", help="remove dry-run rows (FR-058)")
-    purge.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    purge.add_argument(
+        "--yes", action="store_true", help="skip the confirmation prompt (rows only)"
+    )
+    purge.add_argument(
+        "--remove-worktrees",
+        action="store_true",
+        help="also remove the worktrees those rows own, and their branches; "
+        "never forced, and --yes alone does not imply it",
+    )
 
     example = sub.add_parser(
         "example-config",
@@ -614,7 +622,9 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
             # where the lines reach `main` and `render(as_json=True)` drops them.
             out=None if bool(getattr(args, "json", False)) else sys.stdout,
         ),
-        "purge-simulated": lambda: operations.purge_simulated(ctx, assume_yes=args.yes),
+        "purge-simulated": lambda: operations.purge_simulated(
+            ctx, assume_yes=args.yes, remove_worktrees=args.remove_worktrees
+        ),
         "pause": lambda: operations.pause_dispatch(ctx, by="cli"),
         "unpause": lambda: operations.unpause_dispatch(ctx, by="cli"),
         "hold": lambda: _hold(args, ctx, holding=True),

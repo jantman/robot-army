@@ -8,6 +8,13 @@ The ordinary route: I write an issue in an onboarded repository and put the labe
 `robot-army` by default, `[github] label` to change it. The next poll sees it, checks the
 issue is mine, and queues it.
 
+Changing the label needs no manual step. Each repository's saved ETag belongs to
+the query built from the *old* label. The poll sees that the query has changed, skips the
+ETag, and makes one full request, so issues with the new label show up on the next poll. It
+used to send the old ETag anyway, and GitHub's `304` hid every new issue without any error.
+The `github.poll` record now says when this happens
+([audit log](audit-log.md#the-issue-60-record)).
+
 Two things are checked and neither can be turned off:
 
 - **The author.** Only issues written by `[github] author` are ever dispatched. There is

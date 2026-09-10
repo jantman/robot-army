@@ -849,6 +849,35 @@ instant. `_retire_finished_sessions` declines to record its own "not yet" for th
 The one caller outside the pass is `abandon`, which writes no pass summary — so it says in its
 own output that it left a session row open, and why.
 
+## The issue #60 record
+
+No new action. `github.poll` still writes one aggregate record per repository per poll, but
+it now says whether the stored ETag was sent. That matters because the first poll after
+`[github] label` changes is a full `200` instead of the usual `304`, and a reader should be
+able to tell why from the log alone.
+
+| Key | When | Value |
+|---|---|---|
+| `etag_sent` | always | `true` if `If-None-Match` was sent |
+| `etag_discarded` | always | `null` if nothing was dropped. `request_changed` if a stored ETag belonged to a different request. `request_unrecorded` if a stored ETag had no request recorded with it (a row from before migration 015) |
+| `request` | only when something was dropped | the request line that was sent |
+| `etag_request` | only for `request_changed` | the request line the dropped ETag belonged to |
+
+The first poll after the label went from `robot-army-verify` back to `robot-army`:
+
+```json
+{"action":"github.poll","outcome":"ok","entity_type":"repo","entity_id":"jantman/robot-army",
+ "detail":{"status":200,"etag_hit":false,"items":9,"rate_limit_remaining":4987,
+  "etag_sent":false,"etag_discarded":"request_changed",
+  "request":"/repos/jantman/robot-army/issues?direction=desc&labels=robot-army&per_page=100&sort=updated&state=open",
+  "etag_request":"/repos/jantman/robot-army/issues?direction=desc&labels=robot-army-verify&per_page=100&sort=updated&state=open"}}
+```
+
+The two request lines appear only when an ETag was dropped, so the minute-by-minute steady
+state stays a short line. Neither can hold a credential: they are built from the path and
+query only, never from headers. What the column holds and why it has no backfill is covered
+under [state](state.md#poll_stateetag_request--which-request-an-etag-answered).
+
 ## Reconstructing an item's history
 
 ```bash

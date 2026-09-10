@@ -236,11 +236,72 @@ def test_a_live_worker_inside_refuses_without_force(
 def test_a_dead_worker_recorded_inside_does_not_refuse(
     conn, audit, config, orphan, scan_dirs
 ):
-    """Liveness is pid *and* start time: a recycled pid is not the worker."""
+    """Liveness is pid *and* start time: a recycled pid is not the worker. The pid now
+    belongs to something that is not a worker at all, which is what recycling looks like —
+    a *worker* holding it with its cwd in there would be a live worker in there."""
     write_registry(
         scan_dirs["registry_dir"], pid=4242, session_id="s-1", proc_start="777", cwd=str(orphan)
     )
-    write_proc(scan_dirs["proc_root"], 4242, starttime="999", cwd=str(orphan))
+    write_proc(
+        scan_dirs["proc_root"], 4242, starttime="999", cwd=str(orphan), exe="/usr/bin/sleep"
+    )
+    vcs = ListingVcs(audit, worktrees={str(orphan): BRANCH})
+
+    result = remove(make_ctx(conn, audit, config, vcs), orphan, scan_dirs)
+
+    assert result.code == EXIT_OK, result.lines
+
+
+def test_a_worker_is_seen_when_the_registry_directory_is_missing(
+    conn, audit, config, layout, orphan, scan_dirs, tmp_path
+):
+    """Review on #165. An absent registry scans as empty, which is not "nothing running";
+    ``/proc`` is asked directly, so the worker is still seen and the removal refused."""
+    write_proc(scan_dirs["proc_root"], 4242, starttime="777", cwd=str(orphan))
+    blind = {**scan_dirs, "registry_dir": tmp_path / "no-registry-here"}
+    vcs = ListingVcs(audit, worktrees={str(orphan): BRANCH})
+
+    result = remove(make_ctx(conn, audit, config, vcs), orphan, blind)
+
+    assert result.code == EXIT_PRECONDITION
+    assert result.data["refused_by"] == "live_worker"
+    assert result.data["live_worker"]["pid"] == 4242
+    assert result.data["live_worker"]["seen_by"] == "/proc"
+    assert result.data["live_worker"]["session_id"] is None
+    assert any("pid 4242 (seen in /proc)" in line for line in result.lines)
+    assert orphan.is_dir() and git_touched(layout) == []
+
+
+def test_a_worker_is_seen_when_the_registry_version_is_refused(
+    conn, audit, config, layout, orphan, scan_dirs
+):
+    """A worker upgrade changes the version every registry file is written with, so every
+    file is refused at once and the registry reads empty while the worker runs."""
+    write_registry(
+        scan_dirs["registry_dir"],
+        pid=4242,
+        session_id="s-1",
+        proc_start="777",
+        cwd=str(orphan),
+        version="9.9.9",
+    )
+    write_proc(scan_dirs["proc_root"], 4242, starttime="777", cwd=str(orphan))
+    vcs = ListingVcs(audit, worktrees={str(orphan): BRANCH})
+
+    result = remove(make_ctx(conn, audit, config, vcs), orphan, scan_dirs)
+
+    assert result.code == EXIT_PRECONDITION
+    assert result.data["refused_by"] == "live_worker"
+    assert result.data["live_worker"]["seen_by"] == "/proc"
+    assert orphan.is_dir() and git_touched(layout) == []
+
+
+def test_a_process_that_is_not_a_worker_does_not_refuse(
+    conn, audit, config, orphan, scan_dirs
+):
+    """A shell left ``cd``'d in there is not a worker; git's dirty-tree refusal covers
+    anything it wrote."""
+    write_proc(scan_dirs["proc_root"], 5151, starttime="1", cwd=str(orphan), exe="/bin/bash")
     vcs = ListingVcs(audit, worktrees={str(orphan): BRANCH})
 
     result = remove(make_ctx(conn, audit, config, vcs), orphan, scan_dirs)

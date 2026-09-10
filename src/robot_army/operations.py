@@ -2912,7 +2912,12 @@ def worktree_remove_path(
         outcome["branch"] = found.branch
         result.data.update(repo_key=found.repo_key, branch=found.branch)
 
-        worker = _live_worker_inside(target, registry_dir=registry_dir, proc_root=proc_root)
+        worker = _live_worker_inside(
+            target,
+            worker_binary=ctx.config.worker.binary,
+            registry_dir=registry_dir,
+            proc_root=proc_root,
+        )
         if worker is not None:
             outcome["live_worker"] = worker
             result.data["live_worker"] = worker
@@ -2920,8 +2925,9 @@ def worktree_remove_path(
                 return refuse(
                     "live_worker",
                     EXIT_PRECONDITION,
-                    f"a worker is running in there — pid {worker['pid']}, "
-                    f"session {worker['session_id']}",
+                    f"a worker is running in there — pid {worker['pid']}"
+                    + (f", session {worker['session_id']}" if worker["session_id"] else "")
+                    + f" (seen in {worker['seen_by']})",
                     "removing it now leaves that worker in a deleted directory, and this "
                     "command deletes the branch too",
                     f"remove anyway: robot-army worktree remove {target} --force",
@@ -2963,19 +2969,43 @@ def worktree_remove_path(
 
 
 def _live_worker_inside(
-    path: Path, *, registry_dir: Path | None, proc_root: Path | None
+    path: Path,
+    *,
+    worker_binary: str,
+    registry_dir: Path | None,
+    proc_root: Path | None,
 ) -> dict[str, Any] | None:
     """A worker process whose working directory is inside ``path``, if one can be seen.
 
-    The path form's session guard, for a worktree with no session rows to ask. The scan is
-    the one reconciliation uses: the registry, falling back to ``/proc`` by executable when
-    the registry cannot be read, so a missing registry does not read as "nothing running".
-    Liveness is pid *and* start time, so a recycled pid is not taken for the worker.
+    The path form's session guard, for a worktree with no session rows to ask.
+
+    **Two observations, both always taken.** The session registry is read first, because
+    it is what names the session. But an empty registry scan is ambiguous — the directory
+    may be missing or unlistable, or every file refused on its version after a worker
+    upgrade — and ``sessions.scan`` alone would read each of those as "nothing running"
+    (issue #44's trap, found by review on this very function). So ``/proc`` is enumerated
+    by the worker's executable as well, classified by working directory, exactly as
+    reconciliation's degraded path does. That is a direct observation of processes, not a
+    cache of one, so it does not share the registry's blind spots. Taken unconditionally
+    rather than only when the registry looks unusable: this is a manual command about to
+    delete a directory, one ``/proc`` walk is cheap, and a condition for when to look is
+    one more thing to get wrong.
+
+    Only the worker's own executable counts — a shell left ``cd``'d in there is not a worker,
+    and git's dirty-tree refusal covers what it may have written. Liveness is pid *and*
+    start time, so a recycled pid is not taken for the worker.
     """
-    scan = sessions.scan(registry_dir=registry_dir, proc_root=proc_root)
-    for entry in scan.entries:
-        if sessions.under_root(entry.cwd, path) and entry.alive(proc_root=proc_root):
-            return {"pid": entry.pid, "session_id": entry.session_id, "cwd": entry.cwd}
+    registry = sessions.scan(registry_dir=registry_dir, proc_root=proc_root)
+    processes = sessions.scan_via_proc((Path(worker_binary).name,), proc_root=proc_root)
+    for seen_by, scan in (("the session registry", registry), ("/proc", processes)):
+        for entry in scan.entries:
+            if sessions.under_root(entry.cwd, path) and entry.alive(proc_root=proc_root):
+                return {
+                    "pid": entry.pid,
+                    "session_id": entry.session_id or None,
+                    "cwd": entry.cwd,
+                    "seen_by": seen_by,
+                }
     return None
 
 

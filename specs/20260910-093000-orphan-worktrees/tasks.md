@@ -57,7 +57,7 @@ outcome.
 - [X] T005 [P] [US1] In `tests/unit/test_purge_worktrees.py`, add a `DeletingVcs(SimulatedVersionControl)` whose `remove_worktree` really removes the `tmp_path` directory (and can be told to refuse one path), then test: both questions asked with paths/branches listed; `y`,`y` removes and purges, with each `worktree.remove` record (`detail.by == "purge-simulated"`) before the purge's delete; `y`,`n` purges and leaves directories, output naming `robot-army worktree remove <path>` per survivor; `n` asks nothing more and changes nothing
 - [X] T006 [P] [US1] In `tests/unit/test_purge_worktrees.py`, test the flag matrix (research R10): `--yes` alone never asks and never removes; `--yes --remove-worktrees` removes without asking; `--remove-worktrees` alone asks only the row question; a row whose directory does not exist is not offered and nothing is reported as removed
 - [X] T007 [P] [US1] In `tests/unit/test_purge_worktrees.py`, test the refusal and interruption paths: git refuses one (dirty) → others removed, rows purged, refused path named with reason, exit 1; an open session with a real pid refuses that one (`live_session`) while a simulation-hosted open session does not; plain `SimulatedVersionControl` over a real directory reports it left (`directory_survived`), never removed; a purge "killed" after the first removal (simulate by removing one via the core and not deleting rows) re-runs offering only the survivor; abandoning the second question (EOF / Ctrl-C) removes and deletes nothing and records the abandonment on `purge.simulated`
-- [ ] T008 [P] [US1] Update `tests/unit/test_prompt_abandonment.py` and, if it enumerates the same set, `tests/unit/test_cli_exit_codes.py`, so the prompting-operation set includes the new `worktree_remove_path` (added in US3; do this with T021 if US3 lands separately)
+- [X] T008 [P] [US1] Update `tests/unit/test_prompt_abandonment.py` and, if it enumerates the same set, `tests/unit/test_cli_exit_codes.py`, so the prompting-operation set includes the new `worktree_remove_path` (added in US3; do this with T021 if US3 lands separately)
 
 ### Implementation for User Story 1
 
@@ -104,15 +104,15 @@ removes it and its branch, audited by path.
 
 ### Tests for User Story 3
 
-- [ ] T019 [P] [US3] In `tests/unit/test_orphan_worktrees.py`, with a `ListingVcs` that lists the orphan and really deletes it, test the path form: success removes worktree and branch, `worktree.remove` pair with `entity_type == "worktree"` and `detail.by == "path"`; each refusal in contract order with its `refused_by` and exit code (`outside_root`, `claimed` naming the id, `not_a_directory`, `not_a_worktree`, `live_worker` via a stubbed scan/`proc_root`); git's dirty refusal; `--force` asks for the directory name and a wrong answer aborts; a detached-HEAD worktree removes only the directory; `directory_survived` when plain `SimulatedVersionControl` claims success
-- [ ] T020 [P] [US3] In `tests/unit/test_orphan_worktrees.py`, test `worktree_list`: orphans appear after claimed rows with `—` item and `unclaimed` condition; JSON has `claimed` on every entry and `item_id: null` for orphans; with only orphans it does not print "no worktrees recorded"; orphans are shown with and without `--include-simulated`
-- [ ] T021 [P] [US3] CLI tests in `tests/unit/test_orphan_worktrees.py` (or `tests/unit/test_cli_exit_codes.py` if that is where parser tests live): `worktree remove 42` still dispatches to the id form; `worktree remove /some/path` and `worktree remove ./42` dispatch to the path form
+- [X] T019 [P] [US3] In `tests/unit/test_worktree_remove_path.py`, with a `ListingVcs` that lists the orphan and really deletes it, test the path form: success removes worktree and branch, `worktree.remove` pair with `entity_type == "worktree"` and `detail.by == "path"`; each refusal in contract order with its `refused_by` and exit code (`outside_root`, `claimed` naming the id, `not_a_directory`, `not_a_worktree`, `live_worker` via a stubbed scan/`proc_root`); git's dirty refusal; `--force` asks for the directory name and a wrong answer aborts; a detached-HEAD worktree removes only the directory; `directory_survived` when plain `SimulatedVersionControl` claims success
+- [X] T020 [P] [US3] In `tests/unit/test_worktree_remove_path.py`, test `worktree_list`: orphans appear after claimed rows with `—` item and `unclaimed` condition; JSON has `claimed` on every entry and `item_id: null` for orphans; with only orphans it does not print "no worktrees recorded"; orphans are shown with and without `--include-simulated`
+- [X] T021 [P] [US3] CLI tests in `tests/unit/test_worktree_remove_path.py` (or `tests/unit/test_cli_exit_codes.py` if that is where parser tests live): `worktree remove 42` still dispatches to the id form; `worktree remove /some/path` and `worktree remove ./42` dispatch to the path form
 
 ### Implementation for User Story 3
 
-- [ ] T022 [US3] Add `@_guards_its_prompt worktree_remove_path(ctx, path, *, force=False, confirm=_ask, registry_dir=None, proc_root=None)` in `src/robot_army/operations.py` per contracts/cli.md and research R9, using `worktree.locate`, `sessions.scan` + `RegistryEntry.alive` + `sessions.under_root` for the live-worker guard, and `_remove_checkout`
-- [ ] T023 [US3] Extend `worktree_list` in `src/robot_army/operations.py` with orphan rows (`worktree.orphans`, `worktree.locate` for branch, `directory_size`) and the `claimed` key
-- [ ] T024 [US3] Change `worktree remove`'s positional to `target` (metavar `ITEM_ID|PATH`) and dispatch digits to `worktree_remove`, anything else to `worktree_remove_path`, in `src/robot_army/cli.py`
+- [X] T022 [US3] Add `@_guards_its_prompt worktree_remove_path(ctx, path, *, force=False, confirm=_ask, registry_dir=None, proc_root=None)` in `src/robot_army/operations.py` per contracts/cli.md and research R9, using `worktree.locate`, `sessions.scan` + `RegistryEntry.alive` + `sessions.under_root` for the live-worker guard, and `_remove_checkout`
+- [X] T023 [US3] Extend `worktree_list` in `src/robot_army/operations.py` with orphan rows (`worktree.orphans`, `worktree.locate` for branch, `directory_size`) and the `claimed` key
+- [X] T024 [US3] Change `worktree remove`'s positional to `target` (metavar `ITEM_ID|PATH`) and dispatch digits to `worktree_remove`, anything else to `worktree_remove_path`, in `src/robot_army/cli.py`
 
 **Checkpoint**: `uv run pytest tests/unit/test_orphan_worktrees.py` green.
 
@@ -120,13 +120,13 @@ removes it and its branch, audited by path.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T025 [P] Update `docs/guide/5-outcome.md` "Cleaning up": purge offers to remove its worktrees (and `--remove-worktrees`), `worktree remove <path>`, orphans in `worktree list`, and the `directory_survived` rule
-- [ ] T026 [P] Update `docs/guide/operating.md`: `orphan_worktree` in the anomalies worth understanding, and "four kinds now clear themselves"
-- [ ] T027 [P] Update `docs/guide/audit-log.md`: `worktree.remove` by path and from a purge, the new `refused_by` values, `purge.simulated`'s new detail/outcome keys, and `anomaly.resolved` for `orphan_worktree`
-- [ ] T028 [P] Update `docs/guide/state.md` anomalies section: the fourth self-resolving kind and why its retraction is a positive observation
-- [ ] T029 Check `docs/guide/1-setup.md` and `README.md` for wording that promises purge never touches disk; correct if so (README stays under 150 lines)
-- [ ] T030 Run `uv run pytest` (whole suite) and `uv run ruff check` if configured; fix anything red
-- [ ] T031 Mark every task above `[X]` as it completes
+- [X] T025 [P] Update `docs/guide/5-outcome.md` "Cleaning up": purge offers to remove its worktrees (and `--remove-worktrees`), `worktree remove <path>`, orphans in `worktree list`, and the `directory_survived` rule
+- [X] T026 [P] Update `docs/guide/operating.md`: `orphan_worktree` in the anomalies worth understanding, and "four kinds now clear themselves"
+- [X] T027 [P] Update `docs/guide/audit-log.md`: `worktree.remove` by path and from a purge, the new `refused_by` values, `purge.simulated`'s new detail/outcome keys, and `anomaly.resolved` for `orphan_worktree`
+- [X] T028 [P] Update `docs/guide/state.md` anomalies section: the fourth self-resolving kind and why its retraction is a positive observation
+- [X] T029 Check `docs/guide/1-setup.md` and `README.md` for wording that promises purge never touches disk; correct if so (README stays under 150 lines)
+- [X] T030 Run `uv run pytest` (whole suite) and `uv run ruff check` if configured; fix anything red
+- [X] T031 Mark every task above `[X]` as it completes
 
 ---
 

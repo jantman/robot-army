@@ -47,6 +47,7 @@ reported removal is a refusal). Otherwise → the path form:
 | inside `worktree_root` | `outside_root` | 3 (`EXIT_PRECONDITION`) |
 | no work item claims it | `claimed` — "use `robot-army worktree remove <id>`" | 3 |
 | is a directory | `not_a_directory` — "if git still records it, `robot-army worktree prune`" | 1 |
+| every clone that might list it can be read | `listing_failed` | 1 |
 | an onboarded clone lists it | `not_a_worktree` | 3 |
 | no live worker inside it (unless `--force`) | `live_worker` | 3 |
 | git removes it (unless `--force`) | `git` | 1 |

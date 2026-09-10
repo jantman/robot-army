@@ -128,14 +128,16 @@ The first two are separate columns because they are separate facts, and `--all` 
 able to tell them apart: "this stopped being true" and "somebody dismissed it" say very
 different things about whether the underlying problem was dealt with.
 
-**Three kinds resolve themselves**, and only three, because only these conditions can be
+**Four kinds resolve themselves**, and only four, because only these conditions can be
 positively re-established as *false*. `orphan_session` records the pid *and* the process
 start time, so a recycled pid answers correctly rather than reading as still-alive.
 `card_create_failing` names a card, and `linked` is terminal and written in the same
 transaction that records the issue — so a linked card *is* the failed creation, negated.
 `registry_unobservable` says a pass could not read the session registry, and the pass that
-retracts it has already read it — the most direct of the three, since the retracting
-observation is the retraction. An anomaly whose detail carries no pid, or whose card is no
+retracts it has already read it — the most direct of these, since the retracting
+observation is the retraction. `orphan_worktree` (issue #59) names a directory by its path,
+and both ways it stops being true — the directory is gone, or a work item now claims it — are
+read from the disk and this database, never from git. An anomaly whose detail carries no pid, or whose card is no
 longer in the database, is left alone permanently: "I could not check" must never be stored
 as "it is fine".
 

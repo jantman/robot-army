@@ -286,10 +286,38 @@ on_issue_close = false      # true: reclaim a finished item's worktree and branc
 ```bash
 uv run robot-army worktree list             # size, branch, condition, cleanup state
 uv run robot-army worktree remove <id>      # refuses if a session is live, or if dirty
+uv run robot-army worktree remove <path>    # a worktree no item claims (see below)
 uv run robot-army worktree prune
 uv run robot-army cleanup                   # every eligible item, under the same guards
 uv run robot-army cleanup <id>              # one item, reconsidering a retained decision
 ```
+
+**Worktrees no row claims** (issue #59). `worktree remove <id>` and `cleanup` both start from
+a work item, so a worktree whose row is gone is beyond both. `purge-simulated` was how that
+happened: it deleted a rehearsal's rows, left their worktrees on disk, and pointed at `worktree
+remove <id>` for rows it had just deleted. Now it names the worktrees those rows own — path,
+branch, size — and asks, *separately* and defaulting to no, whether to remove them too, before
+anything is deleted. `--yes` still answers only the rows question, so a script already passing
+it does not start deleting directories; `--remove-worktrees` answers the other. Removal is the
+same two steps under the same guards as `worktree remove`, never forced, with one difference: a
+session row carrying the simulated host's signature (`pid 0`, no start time) does not refuse
+it, because at `local` every row has one and nothing ever closes it.
+
+Whatever survives is named with `worktree remove <path>`, which removes a worktree no item
+claims — worktree and branch — provided it is inside the worktree root, an onboarded clone
+lists it as a worktree, and no live worker is in it. With no session rows to ask, that last
+guard asks the registry and `/proc`, by pid *and* start time. Git's dirty-tree refusal stands
+unless `--force`, which asks me to type the directory's name. A claimed path is refused with
+the item id to use instead, so the path form is never a way round the session guard.
+Reconciliation reports these directories as `orphan_worktree` (see
+[anomalies](operating.md)) and `worktree list` shows them as `unclaimed`, so "no worktrees
+recorded" is never printed over disk robot-army made.
+
+**A removal is reported only if the directory is gone.** The simulated version-control
+boundary answers every removal with success and touches nothing — right for a worktree it also
+only pretended to create, wrong for a real one a `local` round left behind. So a directory still
+there after a reported removal is a refusal (`directory_survived`), the branch is left alone,
+and an item keeps its recorded path.
 
 With `on_issue_close = true`, an item whose issue has closed has its worktree and branch
 reclaimed on the next reconciliation pass — provided nothing in either exists only there.

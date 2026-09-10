@@ -446,14 +446,54 @@ exception and nothing else, under an intent that had already named the path.
 
 ## Noticing it has died
 
-A dead daemon cannot report its own death, so the checker is a separate process and the
+A process cannot report its own death, so the checker is a separate process and the
 **timer**, not the daemon, is the dead-man's switch.
 
 ```bash
 cp systemd/robot-army-health.* ~/.config/systemd/user/
+cp -r systemd/robot-army.service.d ~/.config/systemd/user/
+systemctl --user daemon-reload
 systemctl --user enable --now robot-army-health.timer
 uv run robot-army health          # exits 0 if healthy, 4 for every other verdict
 ```
+
+The second copy is not garnish: without it systemd never gives up on a daemon that cannot
+start, and the failure the rest of this section is about cannot happen at all.
+
+### What it catches is not "the daemon crashed"
+
+The daemon runs from a user unit carrying `Restart=on-failure` and `RestartSec=10`, so a
+daemon that merely dies is back ten seconds later — inside `max_age_seconds`, and usually
+inside one five-minute timer interval. `kill -9` the daemon and the check goes on saying
+`ok`, correctly: nothing is wrong ten seconds later. **Automatic restart is the right
+behaviour**; the switch is the backstop for when it stops working, and the failures it is a
+backstop for are every way the daemon stays dead:
+
+| The failure | What the check says |
+|---|---|
+| systemd exhausts the start limit and gives up | `DIED`, from the lock, on the next timer run |
+| the daemon is alive but wedged | `HUNG` — the lock held, the heartbeat stopped |
+| `graphical-session.target` goes away, taking a unit bound to it | `DIED`; the health timer is bound to `timers.target` and outlives the graphical session |
+| stopped by hand, or never started after a login | `DIED`, `NEVER STARTED` |
+
+The first is the one worth installing a switch for, and **with systemd's defaults it cannot
+happen**: `StartLimitBurst=5` counts starts inside `StartLimitIntervalSec=10s`, and a restart
+every ten seconds never puts two starts in one window. A daemon that cannot start — a config
+file it will not load, a database it cannot open — is retried every ten seconds forever, and
+nothing ever reports it dead, because the lock keeps being retaken.
+`systemd/robot-army.service.d/start-limit.conf` widens the window to five minutes and leaves
+the burst at five: five failures inside five minutes is a daemon that cannot start rather
+than one that crashed once. Then systemd stops, the unit goes to `failed`, the lock stays
+released, and the next timer run says `DIED`. Starting it again afterwards needs
+`systemctl --user reset-failed robot-army.service` first — until the counter is cleared,
+systemd refuses.
+
+The failure nothing here covers is the machine, or the user manager, wedging: the timer does
+not fire either, and the only symptom is silence. No switch on this machine can do better.
+The one thing that could is an outside observer, and
+[research.md R15](https://github.com/jantman/robot-army/blob/main/specs/001-minimum-daemon/research.md)
+rejected that deliberately — an always-on network dependency for core observability is a
+worse trade than a blind spot this size.
 
 ### It reads two things, and they catch different failures
 

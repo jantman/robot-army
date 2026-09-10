@@ -17,8 +17,11 @@ Two things must be true that are easy to overlook:
 1. **kitty must be running with a control socket.** `kitty.conf` needs `listen_on unix:/tmp/mykitty`
    and `allow_remote_control yes`. Kitty appends its PID, so the actual socket is
    `/tmp/mykitty-<pid>` — configure the **glob**, never a fixed path.
-2. **The daemon is started by hand after graphical login** (planning §8). Not at boot, deliberately:
-   a daemon started before login has no display environment and no kitty to launch into.
+2. **The daemon starts after graphical login** (planning §8). Not at boot, deliberately: a daemon
+   started before login has no display environment and no kitty to launch into. By hand, or — which
+   is what this machine ended up doing — from a user unit bound to `graphical-session.target`, which
+   is the same rule enforced by systemd rather than by memory. Scenario 7 assumes that unit, named
+   `robot-army.service`, and the drop-in this repository ships for it.
 
 ```bash
 # Verify kitty's socket answers before anything else
@@ -232,24 +235,96 @@ approval. Then change them at the base branch tip and attempt a dispatch.
 a repository whose trust dialog has never been accepted fails at dispatch with a clear message
 rather than launching a session that hangs on an invisible modal (M0 E1.5).
 
-## Scenario 7 — Notice the daemon dying
+## Scenario 7 — Notice the daemon staying dead
 
 **Validates**: FR-063, FR-064, US6, SC-011.
 
-```bash
-uv run robot-army health && echo "healthy"
-kill -9 <daemon-pid>
-sleep 200
-uv run robot-army health; echo "exit=$?"      # expect 4
-```
-
-Install the dead-man's switch — note that the **timer**, not the daemon, is the switch, because a
-dead daemon cannot report its own death:
+Install the switch. The **timer**, not the daemon, is the switch, because a process cannot report
+its own death. The start-limit drop-in is part of installing it rather than an optional extra:
+without it systemd never gives up on a daemon that cannot start, and the failure in 7a cannot
+happen at all (R15, issue #53).
 
 ```bash
+cp systemd/robot-army-health.* ~/.config/systemd/user/
+cp -r systemd/robot-army.service.d ~/.config/systemd/user/
+systemctl --user daemon-reload
 systemctl --user enable --now robot-army-health.timer
 systemctl --user list-timers robot-army-health.timer
 ```
+
+**`kill -9` is not the test**, and until issue #53 this scenario said it was. The daemon's unit
+carries `Restart=on-failure` with `RestartSec=10`, so a killed daemon is back ten seconds later —
+inside `[health] max_age_seconds` and inside the timer's five-minute cadence. `health` exits 0, and
+is right to: nothing is wrong ten seconds later. Reaching a stale heartbeat by stopping the unit and
+killing a daemon started by hand, which is what the first run of this scenario ended up doing, tests
+the checker against a failure this deployment does not have. The two below are failures it does.
+
+### 7a — systemd gives up, and the daemon stays dead
+
+Make every start fail, and let the unit exhaust its start limit:
+
+```bash
+mkdir -p ~/.config/systemd/user/robot-army.service.d
+cat > ~/.config/systemd/user/robot-army.service.d/99-break.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/bin/false
+EOF
+systemctl --user daemon-reload
+systemctl --user restart robot-army.service
+sleep 60
+systemctl --user is-active robot-army.service     # expect: failed
+systemctl --user status robot-army.service        # expect: "start request repeated too quickly"
+uv run robot-army health; echo "exit=$?"          # expect: DIED, exit=4
+```
+
+**Expected**: `/bin/false` stands in for every way a daemon fails to start — a config file it will
+not load, a database it cannot open, a venv that is no longer there. Breaking the *unit* rather than
+the installation is deliberate: a config the daemon cannot load is also a config `health` cannot
+load, and the checker exits **3** for that, which is a precondition failure and not a verdict about
+the daemon at all. It would also mark the timer's own unit failed, since `SuccessExitStatus=0 4`
+forgives 4 and nothing else. Keep the breakage inside the unit and the checker keeps working.
+
+Five starts fit inside the drop-in's five-minute window in under a minute at `RestartSec=10`, the
+sixth is refused, and systemd stops trying. The lock is released and stays released, so `health`
+says **`DIED`** from the lock alone rather than waiting out `max_age_seconds`. Confirm the timer's
+own run agrees, and that a failing check leaves the timer running:
+
+```bash
+systemctl --user start robot-army-health.service
+journalctl --user -u robot-army-health.service -n 20 --no-pager
+systemctl --user is-failed robot-army-health.service   # expect: inactive — never failed
+```
+
+Then put it back:
+
+```bash
+rm ~/.config/systemd/user/robot-army.service.d/99-break.conf
+systemctl --user daemon-reload
+systemctl --user reset-failed robot-army.service
+systemctl --user start robot-army.service
+```
+
+`reset-failed` is required rather than tidiness: until the start-limit counter is cleared systemd
+refuses to start the unit at all, which is the same behaviour that made the daemon stay dead.
+
+### 7b — alive but wedged
+
+The other failure the switch is for, and the only one the heartbeat can see that the lock cannot:
+
+```bash
+uv run robot-army health && echo "healthy"
+kill -STOP <daemon-pid>                       # the process is still there, still holding the lock
+sleep 200                                     # past [health] max_age_seconds
+uv run robot-army health; echo "exit=$?"      # expect: HUNG, exit=4
+kill -CONT <daemon-pid>
+```
+
+**Expected**: `HUNG`, not `DIED`, and the distinction is the point — `DIED` says restart it, `HUNG`
+says look at the process **first**, because restarting destroys the evidence of why it wedged.
+`SIGSTOP` is not a failure, so systemd does not restart the unit and nothing heals this one. It is
+also the one verdict where `max_age_seconds` is the whole detection time: a held lock says nothing
+is wrong until the heartbeat has been silent long enough to argue otherwise.
 
 ## Scenario 8 — Reconstruct history from the log alone
 

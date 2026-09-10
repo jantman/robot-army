@@ -219,8 +219,12 @@ problem this size.
   The runtime directory avoids the whole question, because nobody else can write there at all.
   Not `unix:@mykitty` either: an abstract socket carries no filesystem permissions, so any
   local process can connect to it.
-- **Start the daemon by hand after graphical login**, not at boot. A daemon started before
-  login has no display environment and no kitty to launch into.
+- **Start the daemon after graphical login**, not at boot. A daemon started before login has
+  no display environment and no kitty to launch into. By hand works; a user unit bound to
+  `graphical-session.target` is the same rule enforced by systemd rather than by memory, and
+  is what this machine runs. If you take the unit, take
+  [the start-limit drop-in](operating.md#what-it-catches-is-not-the-daemon-crashed) with it —
+  without it the dead-man's switch has nothing left to catch.
 - **A launch is visible in the process table.** The composed prompt and every `[repos.*] env`
   value are passed to kitty as command arguments, so any local process can read them from
   `/proc/<pid>/cmdline` while the session starts. Do not put a credential in `env`.

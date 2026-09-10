@@ -489,13 +489,50 @@ sqlite3 -header -column ~/.local/state/robot-army/state.db \
   'SELECT id, state, pull_requests, pull_requests_at FROM work_items WHERE pull_requests IS NOT NULL'
 ```
 
+### `poll_state.etag_request` — which request an ETag answered
+
+A GitHub poll's ETag is only good for the request that earned it. The request is
+label-filtered, so for a while `poll_state` held one ETag per repository and nothing about
+which query it came from. Changing `[github] label` then sent every repository's old ETag
+against a *different* query. GitHub answered `304`, the poll read that as "unchanged", and
+discovery went blind across every repository at once. `status`, `doctor`, `health` and the
+web all reported normal (issue #60).
+
+`etag_request` holds the whole request line: the path, then every query parameter sorted by
+key.
+
+```
+/repos/jantman/robot-army/issues?direction=desc&labels=robot-army&per_page=100&sort=updated&state=open
+```
+
+The stored ETag is sent only when that line is **identical** to the request about to go out.
+Otherwise it is dropped, the request goes out unconditionally, and the `github.poll` record
+says why ([audit log](audit-log.md#the-issue-60-record)). The ETag and its line are written in
+one statement, so a kill leaves either the old pair or the new one, never a mix. A failed poll
+writes the stored pair back unchanged.
+
+It is text rather than a hash so the row explains itself. It never includes a header, so it
+never holds the token.
+
+**`NULL` means never recorded, and it does not match.** That covers every row from before
+migration 015, and the Trello board row. Nothing was backfilled, deliberately. On the machine
+that found this, nobody can say which label those ETags answered, and writing today's request
+into the column would claim they all answer it. That claim is exactly the one that caused the
+blindness. So each repository makes one unconditional request after the upgrade, and nothing
+needs editing by hand.
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db \
+  "SELECT repo_key, etag, etag_request FROM poll_state WHERE repo_key NOT LIKE 'trello:%'"
+```
+
 ### The board's poll bookkeeping lives in `poll_state`
 
 Under the synthetic key `trello:board:<board_id>`. `poll_state` has no foreign key and no
 consumer that renders its rows as repositories, so a non-repository key is safe and a second
 identically shaped table would have been a table added to satisfy a naming preference.
 
-The `etag` column stays `NULL` for that row. Trello offers no usable conditional request on
+The `etag` and `etag_request` columns stay `NULL` for that row. Trello offers no usable conditional request on
 the endpoint the board poll needs, so the ETag economy that makes a 60-second GitHub poll free
 does not exist here — which argues for a longer interval rather than a cleverer mechanism.
 The board poll defaults to **300 seconds** against GitHub's 60.

@@ -251,6 +251,10 @@ def monkey_token() -> None:
 # -- fake boundaries --------------------------------------------------------
 
 
+#: What ``FakeIssueReader`` reports as the request its listings answered.
+FAKE_POLL_REQUEST = "/repos/demo/issues?labels=robot-army&state=open"
+
+
 class FakeIssueReader:
     """A reader whose answers the test controls. There is no *simulated* reader in the
     product — reads are always real — so tests supply their own fake instead."""
@@ -264,7 +268,10 @@ class FakeIssueReader:
         #: requests, and the empty list means "GitHub answered, and there are none" — the
         #: state a test must be able to set apart from ``raise_on_remote``.
         self.pull_requests: dict[tuple[str, str], list[Any]] = {}
-        self.poll_calls: list[tuple[str, str | None]] = []
+        #: The request line this fake answers, returned as ``PollResult.request``. A test
+        #: changes it to stand for a change to ``[github] label`` (issue #60).
+        self.request = FAKE_POLL_REQUEST
+        self.poll_calls: list[tuple[str, str | None, str | None]] = []
         self.closed_calls: list[tuple[str, int]] = []
         self.pr_calls: list[tuple[str, int, str]] = []
         self.raise_on_poll: Exception | None = None
@@ -293,13 +300,19 @@ class FakeIssueReader:
         self.missing_repos: set[str] = set()
         self.repo_owners: dict[str, str] = {}
 
-    def poll(self, repo_key: str, etag: str | None) -> PollResult:
-        self.poll_calls.append((repo_key, etag))
+    def poll(
+        self, repo_key: str, etag: str | None, *, etag_request: str | None
+    ) -> PollResult:
+        self.poll_calls.append((repo_key, etag, etag_request))
         if self.raise_on_poll is not None:
             raise self.raise_on_poll
-        if etag is not None and etag == self.etag:
-            return PollResult(items=(), etag=etag, status=304)
-        return PollResult(items=tuple(self.issues), etag=self.etag, status=self.status)
+        # Mirrors the real boundary: an ETag earns a 304 only against the request it answered,
+        # so poll-level tests exercise the binding rather than a fake that ignores it.
+        if etag is not None and etag == self.etag and etag_request == self.request:
+            return PollResult(items=(), etag=etag, status=304, request=self.request)
+        return PollResult(
+            items=tuple(self.issues), etag=self.etag, status=self.status, request=self.request
+        )
 
     def get_issue(self, repo_key: str, number: int) -> Issue | None:
         self.get_issue_calls.append((repo_key, number))

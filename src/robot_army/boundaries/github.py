@@ -17,7 +17,7 @@ import random
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -443,32 +443,62 @@ class GitHubReader:
 
     # -- reads --------------------------------------------------------------
 
-    def poll(self, repo_key: str, etag: str | None) -> PollResult:
-        """List open labelled issues, conditionally.
+    def _issues_request(self, repo_key: str) -> tuple[str, dict[str, Any]]:
+        """The poll's path and query, built in exactly one place.
 
-        A ``304`` returns ``items=()`` with ``status=304``. That is the healthy steady
-        state, not an error and not "nothing found".
+        ``poll`` sends these and records the line built from these, so the request sent and
+        the request an ETag is filed under cannot drift apart (issue #60, FR-004). Anything
+        added here is covered by the ETag binding without anyone having to remember to extend
+        it — which is the point, because the defect was a parameter nobody remembered.
+
+        Client-wide headers (``Accept``, the API version) are not part of it: they are
+        constants of ``_http()``, not configurable, and change only with the code. If one ever
+        becomes a config value it belongs here.
         """
-        gh = self._config.github
-        headers = {"If-None-Match": etag} if etag else {}
-        response = self._request(
-            "GET",
+        return (
             f"/repos/{self._repo_path(repo_key)}/issues",
-            headers=headers,
-            params={
-                "labels": gh.label,
+            {
+                "labels": self._config.github.label,
                 "state": "open",
                 "per_page": 100,
                 "sort": "updated",
                 "direction": "desc",
             },
         )
+
+    def poll(
+        self, repo_key: str, etag: str | None, *, etag_request: str | None
+    ) -> PollResult:
+        """List open labelled issues, conditionally.
+
+        A ``304`` returns ``items=()`` with ``status=304``. That is the healthy steady
+        state, not an error and not "nothing found" — **but only against the request the
+        ETag was captured under**, and nothing used to enforce that (issue #60). Changing
+        ``[github] label`` left every repository offering an ETag from a different query;
+        GitHub answered 304 and discovery was blind, silently, for as long as each repository
+        stayed quiet.
+
+        So the ETag is offered only when ``etag_request`` is identical to the request about
+        to be sent. Otherwise it is discarded, the request goes out unconditionally, and the
+        ``github.poll`` record says which of the two reasons applied — ``request_changed`` or
+        ``request_unrecorded`` (a row written before the request was recorded). The first
+        poll after a change then costs one full listing, and is explained by the log rather
+        than looking like an unexplained cache miss.
+        """
+        path, params = self._issues_request(repo_key)
+        line = _request_line(path, params)
+        discarded: str | None = None
+        if etag is not None and etag_request != line:
+            discarded = "request_unrecorded" if etag_request is None else "request_changed"
+        sent = etag if discarded is None else None
+        headers = {"If-None-Match": sent} if sent else {}
+        response = self._request("GET", path, headers=headers, params=params)
         remaining = _int_header(response, "X-RateLimit-Remaining")
         reset = _int_header(response, "X-RateLimit-Reset")
 
         if response.status_code == 304:
             result = PollResult(
-                items=(), etag=etag, status=304,
+                items=(), etag=sent, status=304, request=line,
                 rate_limit_remaining=remaining, rate_limit_reset=reset,
             )
         else:
@@ -480,25 +510,37 @@ class GitHubReader:
             )
             result = PollResult(
                 items=issues,
-                etag=response.headers.get("ETag", etag),
+                # The response's own validator or none. Carrying the old one forward would
+                # pair it with a request whose response did not supply it (issue #60).
+                etag=response.headers.get("ETag"),
                 status=response.status_code,
+                request=line,
                 rate_limit_remaining=remaining,
                 rate_limit_reset=reset,
             )
 
         # One aggregate record per repository per poll, which is the Principle III gap
         # the plan enumerates and justifies. Every failure and retry is still individual.
+        detail: dict[str, Any] = {
+            "status": result.status,
+            "etag_hit": result.unchanged,
+            "items": len(result.items),
+            "rate_limit_remaining": remaining,
+            "etag_sent": bool(headers),
+            "etag_discarded": discarded,
+        }
+        if discarded is not None:
+            # Both lines, so "what changed?" is answerable from the log alone. Neither can
+            # hold a credential: they are built by `_request_line`, which sees no headers.
+            detail["request"] = line
+            if etag_request is not None:
+                detail["etag_request"] = etag_request
         self._audit.record(
             "github.poll",
             outcome="ok",
             entity_type="repo",
             entity_id=repo_key,
-            detail={
-                "status": result.status,
-                "etag_hit": result.unchanged,
-                "items": len(result.items),
-                "rate_limit_remaining": remaining,
-            },
+            detail=detail,
         )
         return result
 
@@ -1186,6 +1228,16 @@ class SimulatedIssueWriter:
             author="robot-army-simulated",
             state="open",
         )
+
+
+def _request_line(path: str, params: dict[str, Any]) -> str:
+    """The request as a line of text: path, then query parameters sorted by key.
+
+    What ``poll_state.etag_request`` stores and what a stored ETag is compared against
+    (issue #60). Sorted so the line does not depend on dict order. Path and query only —
+    never a header, and so never the token, which is why it is safe to persist.
+    """
+    return f"{path}?{urlencode(sorted((key, str(value)) for key, value in params.items()))}"
 
 
 def _int_header(response: httpx.Response, name: str) -> int | None:

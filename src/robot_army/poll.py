@@ -4,7 +4,11 @@ Two things here carry more weight than their size suggests.
 
 **ETags.** ``poll_state.etag`` is what makes a 60-second poll sustainable: an unchanged
 listing returns ``304`` and costs *nothing* against the rate limit (R4). ``304`` is the
-healthy steady state, not an error and not "nothing found".
+healthy steady state, not an error and not "nothing found" — **provided the ETag is offered
+against the request it was captured under.** It is stored with ``etag_request``, the request
+its response answered, and the two are passed, returned and saved as a pair. Keyed by
+repository alone, a change to ``[github] label`` replayed every ETag against a different
+query and GitHub's 304 blinded discovery silently (issue #60).
 
 **The author check is a security boundary** (FR-007). There is deliberately no "any
 author" value and no way to disable it: the label is a trigger anyone with write access
@@ -136,7 +140,9 @@ def poll_repo(
         )
 
     try:
-        result: PollResult = boundaries.issue_reader.poll(repo_key, state.etag)
+        result: PollResult = boundaries.issue_reader.poll(
+            repo_key, state.etag, etag_request=state.etag_request
+        )
     except TransportError as exc:
         failures = state.consecutive_failures + 1
         backoff = min(2**failures, MAX_BACKOFF_SECONDS)
@@ -145,7 +151,10 @@ def poll_repo(
                 conn,
                 PollState(
                     repo_key=repo_key,
+                    # The stored pair, kept together: a failure proves nothing about which
+                    # request the ETag answered, so it must not separate the two (FR-006).
                     etag=state.etag,
+                    etag_request=state.etag_request,
                     last_polled_at=utcnow(),
                     last_status=0,
                     consecutive_failures=failures,
@@ -251,7 +260,10 @@ def poll_repo(
             conn,
             PollState(
                 repo_key=repo_key,
+                # What the boundary actually sent and what answered it, never a request
+                # reconstructed here — so the stored pair is the pair that was true.
                 etag=result.etag,
+                etag_request=result.request,
                 last_polled_at=utcnow(),
                 last_status=result.status,
                 consecutive_failures=0,

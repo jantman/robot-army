@@ -335,11 +335,17 @@ class Anomaly:
 
 @dataclass(frozen=True, slots=True)
 class PollState:
-    """Per-repository polling bookkeeping. High churn, kept out of ``repos``."""
+    """Per-repository polling bookkeeping. High churn, kept out of ``repos``.
+
+    ``etag`` and ``etag_request`` are one fact (issue #60): an ETag validates the request
+    whose response supplied it and nothing else, so it is only ever replayed against an
+    identical ``etag_request``. ``None`` there means *never recorded*, and does not match.
+    """
 
     repo_key: str
     consecutive_failures: int = 0
     etag: str | None = None
+    etag_request: str | None = None
     last_polled_at: str | None = None
     last_status: int | None = None
     backoff_until: str | None = None

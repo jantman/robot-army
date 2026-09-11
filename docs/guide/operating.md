@@ -307,16 +307,18 @@ names. Anything about the machine, the filesystem or the network is real whateve
 level — board *reads* included, since only writes are simulated — so those stay visible
 always. See [the anomalies table](state.md#anomalies--two-different-ways-a-row-leaves-the-list-and-whether-it-was-a-rehearsal).
 
-**Three kinds now clear themselves.** Every other kind waits for `--acknowledge`, because
-these three are the only ones whose truth can be positively re-established as *false*:
+**Four kinds now clear themselves.** Every other kind waits for `--acknowledge`, because
+these four are the only ones whose truth can be positively re-established as *false*:
 
 - **`orphan_session`** — the pid and start time it recorded no longer name a live process.
 - **`card_create_failing`** — the card it named has since reached `linked`, so the creation
   it reported as failing has succeeded. Re-checked by reconciliation, which needs no network,
   so the retraction does not wait on Trello being reachable.
 - **`registry_unobservable`** — a later pass read the session registry successfully. The most
-  direct of the three: the observation that retracts it is the one the retracting pass has
+  direct of these: the observation that retracts it is the one the retracting pass has
   already taken.
+- **`orphan_worktree`** — the directory it named is gone, or a work item now claims it. Both
+  are read from the disk and the database, never from git.
 
 A resolved anomaly leaves the default listing and shows under `--all` marked `resolved`
 rather than `acknowledged`, which are different facts: one is the system re-checking, the
@@ -336,6 +338,14 @@ Anomalies worth understanding rather than dismissing:
   worker before this sweep sees it. Seeing this anomaly for a `done` item now means
   retirement *tried and could not* — the process survived the termination, so the row stays
   open and the slot stays honestly subscribed.
+- **`orphan_worktree`** — a directory shaped like one robot-army made (`issue-<n>` under an
+  onboarded repository's folder in the worktree root) that no work item claims — the mirror
+  of `prunable_worktree`, which is a claim with no directory. `worktree remove <id>` and
+  `cleanup` cannot reach it, because both start from a row. The detail names the clone and
+  branch git lists it under and the command that removes it, `robot-army worktree remove
+  <path>`; if no onboarded clone lists it, it says robot-army will not remove it, and why.
+  Only that shape is looked at, so my own checkouts under the root are never reported, and
+  nothing is ever removed automatically. See [cleaning up](5-outcome.md#cleaning-up).
 - **`no_transcript`** — the session ran and left nothing resumable. Raised by
   reconciliation five minutes after the session was confirmed, not at dispatch: the worker
   writes its transcript when it starts processing, so asking any earlier reports every
@@ -413,7 +423,8 @@ Four commands stop and ask before doing something I cannot undo:
 | `onboard` | approve this repository for dispatch, recording its fingerprint |
 | `worktree remove --force` | type the item id, to discard the tree's uncommitted work |
 | `cancel` | stop this session |
-| `purge-simulated` | delete these rehearsal rows |
+| `worktree remove <path> --force` | type the directory name, to discard the tree's uncommitted work |
+| `purge-simulated` | delete these rehearsal rows; then, if they own worktrees still on disk, whether to remove those too (default no) |
 
 Pressing Ctrl-C at any of them, or running one where there is no stdin to read — a
 pipeline, a cron entry, `< /dev/null` — stops the command. **Nothing it was about to do

@@ -2409,6 +2409,38 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
                 "cleanup_state": item.cleanup_state,
                 "cleanup_reason": item.cleanup_reason,
                 "cleaned_at": item.cleaned_at,
+                "claimed": True,
+            }
+        )
+    # Directories robot-army made that no row claims (issue #59). Listed whatever
+    # `--include-simulated` says: with no row they are neither real nor rehearsed, and
+    # "no worktrees recorded" printed over them is how the issue was found.
+    orphan_paths = worktree.orphans(ctx.conn, ctx.config)
+    listings: dict[str, Any] = {}
+    for path in orphan_paths:
+        try:
+            found = worktree.locate(
+                ctx.boundaries.version_control, ctx.conn, ctx.config, path, listings=listings
+            )
+        except BoundaryError:
+            found = None
+        branch = found.branch if found is not None else None
+        size = worktree.directory_size(path)
+        rows.append(["—", str(path), branch or "—", "unclaimed", worktree.human_size(size), "—"])
+        payload.append(
+            {
+                "item_id": None,
+                "path": str(path),
+                "branch": branch,
+                "condition": "unclaimed",
+                "dirty": None,
+                "commits_ahead": None,
+                "size_bytes": size,
+                "simulated": None,
+                "cleanup_state": None,
+                "cleanup_reason": None,
+                "cleaned_at": None,
+                "claimed": False,
             }
         )
     result.data = {
@@ -2425,6 +2457,12 @@ def worktree_list(ctx: Context, *, include_simulated: bool = False) -> Result:
         return result.say("no worktrees recorded")
     for line in _table(rows, ["item", "path", "branch", "condition", "size", "cleanup"]):
         result.say(line)
+    if orphan_paths:
+        result.say()
+        result.say(
+            f"{len(orphan_paths)} worktree(s) claimed by no work item; "
+            "remove one with: robot-army worktree remove <path>"
+        )
     if withheld:
         result.say()
         result.say(_withheld_note(withheld))
@@ -2569,7 +2607,6 @@ def worktree_remove(
     if not item.worktree_path:
         return Result(code=EXIT_FAILED, lines=[f"work item {item_id} has no worktree"])
     result.data = {"item_id": item_id}
-    vcs = ctx.boundaries.version_control
     with ctx.audit.action(
         "worktree.remove",
         entity_type="work_item",
@@ -2660,51 +2697,316 @@ def worktree_remove(
                 outcome["forced_over_live_session"] = True
                 result.data["forced_over_live_session"] = True
 
-        removal = vcs.remove_worktree(
-            item.worktree_path, force=force, clone_path=str(repo.path)
+        if not _remove_checkout(
+            ctx,
+            path=item.worktree_path,
+            branch=item.branch,
+            clone=str(repo.path),
+            force=force,
+            outcome=outcome,
+            result=result,
+        ):
+            return result
+        with db.transaction(ctx.conn):
+            db.update_work_item_columns(ctx.conn, item_id, worktree_path=None)
+        return result
+
+
+def _remove_checkout(
+    ctx: Context,
+    *,
+    path: str,
+    branch: str | None,
+    clone: str,
+    force: bool,
+    outcome: dict[str, Any],
+    result: Result,
+) -> bool:
+    """Remove a worktree, then its branch, and say "removed" only if the disk agrees.
+
+    The half of removal that is the same whoever asked (issue #59): ``worktree remove
+    <id>``, ``worktree remove <path>`` and ``purge-simulated`` all come through here, each
+    having applied its *own* guard first — they have different evidence about what might be
+    running in there, so the guards are theirs and this is not. Three copies of the step
+    that has already been got wrong once (the branch half, FR-016) is how one of them drifts.
+
+    **The report follows the disk.** ``SimulatedVersionControl.remove_worktree`` answers
+    success without touching anything, which is right for a worktree the simulation also
+    only pretended to create — and wrong for a real directory a ``local`` or ``no-remote``
+    round left behind and something is now removing below that level. Believing it would
+    say "removed worktree" over a directory still on disk, and let the caller forget the
+    path: the very way issue #59's orphans came to be, arrived at by a different route. So a
+    reported removal with the directory still present is a refusal, and the branch — the
+    other half of the only record of that work — is left alone.
+
+    Returns whether the worktree is gone. Fills ``outcome`` (the open ``worktree.remove``
+    action) and ``result`` in place; a surviving branch is a ``WARNING`` and a non-zero
+    exit, but still ``True``, because the directory is gone and the caller's record of it
+    should go with it.
+    """
+    vcs = ctx.boundaries.version_control
+    removal = vcs.remove_worktree(path, force=force, clone_path=clone)
+    removed = removal.worktree_removed
+    refused_by = None if removed else "git"
+    reason = removal.refused_reason
+    if removed and Path(path).is_dir():
+        removed = False
+        refused_by = "directory_survived"
+        reason = (
+            "the worktree was reported removed, but the directory is still there — "
+            "version control is simulated here, so nothing on disk was touched"
         )
-        branch_deleted = False
-        if removal.worktree_removed and item.branch:
-            branch_deleted = vcs.delete_branch(str(repo.path), item.branch, force=force)
 
-        outcome["worktree_removed"] = removal.worktree_removed
-        outcome["branch_deleted"] = branch_deleted
+    branch_deleted = False
+    if removed and branch:
+        branch_deleted = vcs.delete_branch(clone, branch, force=force)
 
-        result.data.update(
-            {
-                "item_id": item_id,
-                "worktree_removed": removal.worktree_removed,
-                "branch_deleted": branch_deleted,
-                "refused_reason": removal.refused_reason,
-            }
-        )
+    outcome["worktree_removed"] = removed
+    outcome["branch_deleted"] = branch_deleted
+    result.data.update(
+        {
+            "worktree_removed": removed,
+            "branch_deleted": branch_deleted,
+            "refused_reason": reason,
+        }
+    )
 
-        if not removal.worktree_removed:
-            outcome["refused"] = True
-            outcome["refused_by"] = "git"
-            outcome["reason"] = removal.refused_reason
-            result.data["refused_by"] = "git"
-            result.code = EXIT_FAILED
-            result.say(f"refused to remove {item.worktree_path}:")
-            result.say(f"  {removal.refused_reason}")
+    if not removed:
+        outcome["refused"] = True
+        outcome["refused_by"] = refused_by
+        outcome["reason"] = reason
+        result.data["refused_by"] = refused_by
+        result.code = EXIT_FAILED
+        result.say(f"refused to remove {path}:")
+        result.say(f"  {reason}")
+        if refused_by == "git":
             result.say(
                 "  Git refuses to remove a worktree with uncommitted or untracked changes. "
                 "That refusal is the guard; --force overrides it."
             )
+        else:
+            result.say("  Nothing was removed, and the branch was left alone.")
+        return False
+
+    result.say(f"removed worktree {path}")
+    if branch and branch_deleted:
+        result.say(f"deleted branch {branch}")
+    elif branch:
+        result.code = EXIT_FAILED
+        result.say(
+            f"WARNING: removed the worktree but branch {branch} still exists. "
+            "Removal is two steps; skipping the second accumulates robot-army/* branches"
+        )
+    return True
+
+
+@_guards_its_prompt
+def worktree_remove_path(
+    ctx: Context,
+    path: str,
+    *,
+    force: bool = False,
+    confirm: Any = _ask,
+    registry_dir: Path | None = None,
+    proc_root: Path | None = None,
+) -> Result:
+    """Remove a worktree **no work item claims**, and its branch, found by path (issue #59).
+
+    The id form starts from a row, and so does ``cleanup``; a worktree whose row is gone —
+    ``purge-simulated`` deleted it, or anything else did — was reachable only by ``git
+    worktree remove`` by hand, which leaves the branch behind unless someone remembers it.
+    This is the id form's removal (the same core, record and refusals) without the row.
+
+    Five refusals come first, in this order, none of them a question:
+
+    1. **Outside the worktree root.** robot-army removes worktrees it made; this is not a
+       general-purpose ``rm``.
+    2. **Claimed by a work item.** Then the id form is the command, and it names it. A path
+       form that accepted a claimed worktree would be a way round #79's session guard.
+    3. **Not a directory.** Nothing to remove; git's leftover record is ``worktree
+       prune``'s business.
+    4. **No onboarded clone lists it as a worktree.** Only git removes a worktree, and git
+       has to know it. A half-created directory is reported by the ``orphan_worktree``
+       sweep, but deleting a directory nobody can vouch for is the maintainer's call.
+    5. **A live worker is in there**, unless ``--force``. There are no session rows to ask,
+       so this asks what reconciliation asks: the session registry and ``/proc``, with
+       liveness by pid *and* start time.
+
+    ``--force`` then asks for the directory's name to be typed, which is what the item id
+    is to the id form: proof the maintainer read which one.
+    """
+    target = worktree.resolved(path)
+    result = Result(data={"path": str(target)})
+    with ctx.audit.action(
+        "worktree.remove",
+        entity_type="worktree",
+        entity_id=str(target),
+        target=str(target),
+        detail={"force": force, "by": "path"},
+    ) as outcome:
+        outcome["refused"] = False
+        outcome["worktree_removed"] = False
+        outcome["branch_deleted"] = False
+        outcome["forced_over_live_worker"] = False
+        result.data.update(worktree_removed=False, branch_deleted=False)
+
+        def refuse(by: str, code: int, reason: str, *more: str, **extra: Any) -> Result:
+            outcome.update(refused=True, refused_by=by, reason=reason, **extra)
+            result.data.update(refused_by=by, refused_reason=reason, **extra)
+            result.code = code
+            result.say(f"refused to remove {target}:")
+            for line in (reason, *more):
+                result.say(f"  {line}")
             return result
 
-        result.say(f"removed worktree {item.worktree_path}")
-        if item.branch and branch_deleted:
-            result.say(f"deleted branch {item.branch}")
-        elif item.branch:
-            result.code = EXIT_FAILED
-            result.say(
-                f"WARNING: removed the worktree but branch {item.branch} still exists. "
-                "Removal is two steps; skipping the second accumulates robot-army/* branches"
+        root = worktree.resolved(ctx.config.worktree_root)
+        if target == root or not target.is_relative_to(root):
+            return refuse(
+                "outside_root",
+                EXIT_PRECONDITION,
+                f"it is not inside the worktree root ({root})",
+                "robot-army only removes worktrees it made",
             )
-        with db.transaction(ctx.conn):
-            db.update_work_item_columns(ctx.conn, item_id, worktree_path=None)
+        owner = next(
+            (
+                item
+                for item in db.list_work_items(ctx.conn, include_simulated=True)
+                if item.worktree_path and worktree.resolved(item.worktree_path) == target
+            ),
+            None,
+        )
+        if owner is not None:
+            return refuse(
+                "claimed",
+                EXIT_PRECONDITION,
+                f"work item {owner.id} claims it",
+                f"use: robot-army worktree remove {owner.id}  "
+                "(which also checks that item's sessions)",
+                claimed_by_item=owner.id,
+            )
+        if not target.is_dir():
+            return refuse(
+                "not_a_directory",
+                EXIT_FAILED,
+                "there is no directory there",
+                "if git still records a worktree at that path, "
+                "`robot-army worktree prune` clears it",
+            )
+        try:
+            found = worktree.locate(
+                ctx.boundaries.version_control, ctx.conn, ctx.config, target
+            )
+        except BoundaryError as exc:
+            return refuse(
+                "listing_failed", EXIT_FAILED, f"could not ask git which clone owns it: {exc}"
+            )
+        if found is None:
+            return refuse(
+                "not_a_worktree",
+                EXIT_PRECONDITION,
+                "no onboarded clone lists it as a worktree",
+                "robot-army removes worktrees through git and will not delete an arbitrary "
+                "directory; look inside, and remove it by hand if that is safe",
+            )
+        outcome["repo_key"] = found.repo_key
+        outcome["branch"] = found.branch
+        result.data.update(repo_key=found.repo_key, branch=found.branch)
+
+        worker = _live_worker_inside(
+            target,
+            worker_binary=ctx.config.worker.binary,
+            registry_dir=registry_dir,
+            proc_root=proc_root,
+        )
+        if worker is not None:
+            outcome["live_worker"] = worker
+            result.data["live_worker"] = worker
+            if not force:
+                return refuse(
+                    "live_worker",
+                    EXIT_PRECONDITION,
+                    f"a worker is running in there — pid {worker['pid']}"
+                    + (f", session {worker['session_id']}" if worker["session_id"] else "")
+                    + f" (seen in {worker['seen_by']})",
+                    "removing it now leaves that worker in a deleted directory, and this "
+                    "command deletes the branch too",
+                    f"remove anyway: robot-army worktree remove {target} --force",
+                )
+
+        if force:
+            prompt = (
+                f"Type the directory name ({target.name}) to force-remove {target} "
+                "and discard its uncommitted work: "
+            )
+            if worker is not None:
+                prompt = (
+                    f"pid {worker['pid']} is running in {target}. Forcing leaves it in a "
+                    "deleted directory. "
+                ) + prompt
+            answer = _answer_or_give_up(
+                prompt,
+                confirm=confirm,
+                record=lambda cause: outcome.update(abandoned=True, cause=cause),
+                data=result.data,
+            )
+            if str(answer).strip() != target.name:
+                outcome["aborted"] = True
+                return Result(code=EXIT_FAILED, lines=["aborted"])
+            if worker is not None:
+                outcome["forced_over_live_worker"] = True
+                result.data["forced_over_live_worker"] = True
+
+        _remove_checkout(
+            ctx,
+            path=str(target),
+            branch=found.branch,
+            clone=found.clone,
+            force=force,
+            outcome=outcome,
+            result=result,
+        )
         return result
+
+
+def _live_worker_inside(
+    path: Path,
+    *,
+    worker_binary: str,
+    registry_dir: Path | None,
+    proc_root: Path | None,
+) -> dict[str, Any] | None:
+    """A worker process whose working directory is inside ``path``, if one can be seen.
+
+    The path form's session guard, for a worktree with no session rows to ask.
+
+    **Two observations, both always taken.** The session registry is read first, because
+    it is what names the session. But an empty registry scan is ambiguous — the directory
+    may be missing or unlistable, or every file refused on its version after a worker
+    upgrade — and ``sessions.scan`` alone would read each of those as "nothing running"
+    (issue #44's trap, found by review on this very function). So ``/proc`` is enumerated
+    by the worker's executable as well, classified by working directory, exactly as
+    reconciliation's degraded path does. That is a direct observation of processes, not a
+    cache of one, so it does not share the registry's blind spots. Taken unconditionally
+    rather than only when the registry looks unusable: this is a manual command about to
+    delete a directory, one ``/proc`` walk is cheap, and a condition for when to look is
+    one more thing to get wrong.
+
+    Only the worker's own executable counts — a shell left ``cd``'d in there is not a worker,
+    and git's dirty-tree refusal covers what it may have written. Liveness is pid *and*
+    start time, so a recycled pid is not taken for the worker.
+    """
+    registry = sessions.scan(registry_dir=registry_dir, proc_root=proc_root)
+    processes = sessions.scan_via_proc((Path(worker_binary).name,), proc_root=proc_root)
+    for seen_by, scan in (("the session registry", registry), ("/proc", processes)):
+        for entry in scan.entries:
+            if sessions.under_root(entry.cwd, path) and entry.alive(proc_root=proc_root):
+                return {
+                    "pid": entry.pid,
+                    "session_id": entry.session_id or None,
+                    "cwd": entry.cwd,
+                    "seen_by": seen_by,
+                }
+    return None
 
 
 def worktree_prune(ctx: Context) -> Result:
@@ -2785,9 +3087,7 @@ def cancel(ctx: Context, item_id: int, *, force: bool = False, confirm: Any = _a
     #
     # This is the only place in the system that picks an implementation from stored state.
     # A test asserts that it stays the only one.
-    hosted_by_simulation = (
-        session.dry_run and session.pid == 0 and session.proc_start is None
-    )
+    hosted_by_simulation = session.hosted_by_simulation
     host = (
         ctx.boundaries.simulated_session_host
         if hosted_by_simulation
@@ -4018,42 +4318,201 @@ def drain_spool(ctx: Context) -> Result:
 
 
 @_guards_its_prompt
-def purge_simulated(ctx: Context, *, assume_yes: bool = False, confirm: Any = _ask) -> Result:
-    """Remove ``dry_run`` rows and their sessions (FR-058). Never touches live rows.
+def purge_simulated(
+    ctx: Context,
+    *,
+    assume_yes: bool = False,
+    remove_worktrees: bool = False,
+    confirm: Any = _ask,
+) -> Result:
+    """Remove ``dry_run`` rows and their sessions (FR-058), and — only when asked — the
+    worktrees those rows own. Never touches live rows.
 
-    Does not remove worktrees those rows created — those are real directories on disk,
-    and removing them is ``worktree remove``'s job.
+    **Why the worktrees are this command's business now (issue #59).** A purge deletes the
+    rows that are robot-army's only route to a worktree: ``worktree remove <id>`` and
+    ``cleanup`` both start from a row. It used to delete them and then advise ``worktree
+    remove``, which could no longer find them, so a round's worktrees were left on disk
+    where nothing in robot-army could reach them. This is the last moment anything knows
+    which directory belonged to which row and which branch, so the offer is made here.
+
+    **Two questions, not one.** Deleting rehearsal rows is cheap to be wrong about;
+    deleting directories is not. So removal is asked separately, defaulting to no, and
+    ``--yes`` keeps meaning what it meant — rows only — so no script that already passes it
+    starts deleting directories. ``--remove-worktrees`` is the explicit answer to the second
+    question. Both are asked before anything is done, so giving up at either removes nothing.
+
+    **Removals before the delete, each under ``worktree remove``'s own record and
+    removal core**, so the rows still exist while their disk is being dealt with: a purge
+    killed half-way leaves rows whose removed worktrees have had their paths cleared, and
+    re-running it offers only what is still on disk. Whatever is left is named with a
+    command that works without a row.
     """
     counts = db.count_simulated(ctx.conn)
     if not any(counts.values()):
         return Result(lines=["no simulated rows to purge"], data={"purged": counts})
+    offered = _simulated_worktrees(ctx)
+    paths = [str(item.worktree_path) for item in offered]
+
+    def abandoned(cause: str) -> None:
+        # The counts and paths go into the record as well as into the question, so the log
+        # says what was nearly deleted rather than that something was (issue #23). The
+        # action below is not open yet — it wraps the work, not the asking.
+        ctx.audit.record(
+            "purge.simulated",
+            outcome="error",
+            detail={**counts, "worktrees": paths, "abandoned": True, "cause": cause},
+        )
+
     if not assume_yes:
-        # The counts go into the record as well as into the question, so the log says
-        # what was nearly deleted rather than that something was (issue #23). The action
-        # below is not open yet — it wraps the delete, not the asking.
-        answer = _answer_or_give_up(
+        question = (
             f"Delete {counts['work_items']} simulated work item(s), "
             f"{counts['sessions']} simulated session(s) and "
-            f"{counts['cards']} simulated card(s)? [y/N] ",
-            confirm=confirm,
-            record=lambda cause: ctx.audit.record(
-                "purge.simulated",
-                outcome="error",
-                detail={**counts, "abandoned": True, "cause": cause},
-            ),
+            f"{counts['cards']} simulated card(s)?"
         )
+        if offered:
+            question += f"\n  these rows own {len(offered)} worktree(s) still on disk:"
+            for item in offered:
+                size = worktree.human_size(worktree.directory_size(str(item.worktree_path)))
+                question += f"\n    {item.worktree_path}  {item.branch or '—'}  {size}"
+            question += "\n"
+        answer = _answer_or_give_up(question + " [y/N] ", confirm=confirm, record=abandoned)
         if str(answer).strip().lower() not in ("y", "yes"):
             return Result(code=EXIT_FAILED, lines=["aborted"])
-    with ctx.audit.action("purge.simulated", detail=counts), db.transaction(ctx.conn):
-        purged = db.purge_simulated(ctx.conn)
-    return Result(
-        lines=[
-            f"purged {purged['work_items']} work item(s), {purged['sessions']} session(s) "
-            f"and {purged['cards']} card(s)",
-            "worktrees those rows created were NOT removed — use `worktree remove`",
-        ],
-        data={"purged": purged},
+        if offered and not remove_worktrees:
+            answer = _answer_or_give_up(
+                f"Also remove those {len(offered)} worktree(s) and their branches? [y/N] ",
+                confirm=confirm,
+                record=abandoned,
+            )
+            remove_worktrees = str(answer).strip().lower() in ("y", "yes")
+    remove_worktrees = bool(offered) and remove_worktrees
+
+    result = Result()
+    with ctx.audit.action(
+        "purge.simulated",
+        detail={**counts, "worktrees": paths, "remove_worktrees": remove_worktrees},
+    ) as outcome:
+        removed: list[str] = []
+        if remove_worktrees:
+            for item in offered:
+                if _purge_one_worktree(ctx, item, result):
+                    removed.append(str(item.worktree_path))
+        with db.transaction(ctx.conn):
+            purged = db.purge_simulated(ctx.conn)
+        # Asked of the disk rather than worked out from what was attempted, so every way a
+        # directory can survive — declined, refused, simulated — is reported the same way.
+        left = [path for path in paths if Path(path).is_dir()]
+        outcome["worktrees_removed"] = removed
+        outcome["worktrees_left"] = left
+
+    result.say(
+        f"purged {purged['work_items']} work item(s), {purged['sessions']} session(s) "
+        f"and {purged['cards']} card(s)"
     )
+    for path in left:
+        result.say(f"left on disk: {path}")
+        result.say(f"  remove it with: robot-army worktree remove {path}")
+    if remove_worktrees and left:
+        # The rows are gone, which is what was asked; the disk that was also asked for is
+        # not all back, and a script that asked for it should be able to tell.
+        result.code = EXIT_FAILED
+    result.data = {
+        "purged": purged,
+        "remove_worktrees": remove_worktrees,
+        "worktrees_offered": paths,
+        "worktrees_removed": removed,
+        "worktrees_left": left,
+    }
+    return result
+
+
+def _simulated_worktrees(ctx: Context) -> list[WorkItem]:
+    """Simulated work items whose recorded worktree is a directory on disk right now.
+
+    Filtered in Python over the one listing function rather than restated in SQL, for the
+    reason ``worktree_list`` gives: whether a worktree counts is decided partly by the disk,
+    and only this side of the database can ask it. A row whose directory is already gone
+    has nothing to offer, and offering it would report a removal nobody made.
+    """
+    return [
+        item
+        for item in db.list_work_items(ctx.conn, include_simulated=True)
+        if item.dry_run and item.worktree_path and Path(item.worktree_path).is_dir()
+    ]
+
+
+def _purge_one_worktree(ctx: Context, item: WorkItem, result: Result) -> bool:
+    """Remove one simulated item's worktree and branch, as ``worktree remove <id>`` would.
+
+    The same record (``worktree.remove``, marked ``by: purge-simulated``) and the same
+    removal core; only the session guard differs, and by exactly one thing. A session row
+    carrying the simulated host's signature is not treated as a possible worker, because it
+    positively never had a process — and at ``local`` every row has it and nothing ever
+    closes one, so honouring it would refuse every worktree a purge exists to remove. Any
+    other open row refuses, as in #79: at ``no-remote`` it is a real pid.
+
+    Never forces. A dirty tree stays, and is named afterwards with the command that can
+    force it.
+    """
+    path = str(item.worktree_path)
+    live = [
+        session
+        for session in cleanup_mod.live_sessions(ctx.conn, item.id)
+        if not session.hosted_by_simulation
+    ]
+    with ctx.audit.action(
+        "worktree.remove",
+        entity_type="work_item",
+        entity_id=item.id,
+        target=path,
+        detail={"force": False, "by": "purge-simulated"},
+        dry_run=bool(item.dry_run),
+    ) as outcome:
+        outcome["refused"] = False
+        outcome["worktree_removed"] = False
+        outcome["branch_deleted"] = False
+
+        repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
+        if repo is None:
+            outcome["refused"] = True
+            outcome["refused_by"] = "unresolved_repo"
+            result.say(
+                f"refused to remove {path}: repository {item.repo_key!r} does not "
+                "resolve to a clone any more"
+            )
+            return False
+        if live:
+            described = _describe_live_session(live[0])
+            reason = (
+                f"session {described.session_id} (attempt {described.attempt}) is "
+                f"{described.state} — {described.process}"
+            )
+            outcome["refused"] = True
+            outcome["refused_by"] = "live_session"
+            outcome["reason"] = reason
+            outcome["live_session"] = asdict(described)
+            result.say(f"refused to remove {path}:")
+            result.say(f"  {reason}")
+            return False
+
+        removal = Result()
+        gone = _remove_checkout(
+            ctx,
+            path=path,
+            branch=item.branch,
+            clone=str(repo.path),
+            force=False,
+            outcome=outcome,
+            result=removal,
+        )
+        for line in removal.lines:
+            result.say(line)
+        if removal.code != EXIT_OK:
+            result.code = EXIT_FAILED
+        if gone:
+            with db.transaction(ctx.conn):
+                db.update_work_item_columns(ctx.conn, item.id, worktree_path=None)
+        return gone
 
 
 # -- cards (milestone 003) --------------------------------------------------

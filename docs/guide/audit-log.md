@@ -692,6 +692,23 @@ a pid of `1` through the termination guard in #69.
 
 Nothing this feature added goes unlogged, and no Principle III exception is claimed.
 
+## The issue #59 records
+
+No new action. `worktree.remove` gains two callers — the path form and `purge-simulated` — and
+`purge.simulated` gains the worktrees it offered. A purge used to leave its rows' worktrees on
+disk beyond the reach of any command, and nothing in this log said which directories those
+were.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `worktree.remove` | `worktree remove <path>` — a worktree no work item claims | `entity_type: worktree`, `entity_id` and `target` the resolved path, `detail.by: path`. Refusals before git is reached: `refused_by` is `outside_root`, `claimed` (with `claimed_by_item`), `not_a_directory`, `listing_failed`, `not_a_worktree` or `live_worker` (with the worker's `pid`, `cwd`, the `session_id` when the registry named it, and `seen_by` — the session registry or `/proc`, which is always enumerated too, so a missing or version-refused registry cannot read as "nothing running"). After git: `git` or `directory_survived`. `forced_over_live_worker` is this form's `forced_over_live_session` |
+| `worktree.remove` | `purge-simulated` removing a rehearsal row's worktree | As the id form — `entity_type: work_item` — with `detail.by: purge-simulated`, each pair inside the purge's own and before its rows are deleted. A session with the simulated host's signature does not refuse it; any other open session does, as `live_session` |
+| `worktree.remove` | Any form, when a removal is reported and the directory is still there | `refused_by: directory_survived`, and no `git.delete_branch` follows. The simulated version-control boundary reports success over a real directory; the record says what happened to the disk |
+| `purge.simulated` | As before | The intent gains `worktrees` (the paths offered) and `remove_worktrees`; the outcome gains `worktrees_removed` and `worktrees_left`. An abandoned prompt carries `worktrees` too, so the log says which directories were nearly removed |
+| `anomaly.resolved` | An `orphan_worktree` whose directory is gone or now claimed | `reason` is `directory_gone`, or `claimed_by_item` with the item id |
+| `reconcile.list_worktrees` | As before, now also from the orphan sweep | Once per distinct failure per pass. The orphan is still reported, with `listing_failed: true` — a clone that cannot be listed must not hide disk |
+| `reconcile.pass` | **Changed** | Gains `orphan_worktrees`: `orphan_worktree` anomalies newly raised this pass |
+
 ## The `example_config.write` action
 
 `robot-army example-config` renders the commented example configuration. It records **only

@@ -227,7 +227,14 @@ def test_every_operation_that_prompts_wears_the_decorator():
         and "confirm" in inspect.signature(func).parameters
     }
 
-    assert set(prompting) == {"onboard", "cancel", "purge_simulated", "worktree_remove"}
+    assert set(prompting) == {
+        "onboard",
+        "cancel",
+        "purge_simulated",
+        "worktree_remove",
+        # Issue #59: the path form asks for the directory name before forcing.
+        "worktree_remove_path",
+    }
     for name, func in prompting.items():
         assert getattr(func, "__wrapped__", None) is not None, (
             f"{name} asks a question and does not wear @_guards_its_prompt"

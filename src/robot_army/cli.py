@@ -155,7 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
     remove = worktree_sub.add_parser(
         "remove", help="remove BOTH the worktree and its branch (FR-016)"
     )
-    remove.add_argument("item_id", type=int)
+    # Digits are an item id, exactly as before; anything else is a path — the form that can
+    # still reach a worktree whose row is gone (issue #59). robot-army never makes a
+    # directory named with digits alone, and `./42` still reaches one if it exists.
+    remove.add_argument(
+        "target",
+        metavar="ITEM_ID|PATH",
+        help="a work item id, or the path of a worktree no work item claims",
+    )
     remove.add_argument(
         "--force",
         action="store_true",
@@ -182,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     log.add_argument("--limit", type=int, default=None, help="show only the last N records")
     log.add_argument("--follow", action="store_true", help="tail the current day's file")
 
-    # Not "conditions detected but not resolvable" any more. Two kinds re-check themselves and
+    # Not "conditions detected but not resolvable" any more. Some kinds re-check themselves and
     # are retracted when they stop being true — `orphan_session` since issue #138 and
     # `card_create_failing` since #21 — so that framing is now wrong in the first place a
     # reader looks, about the very kinds most likely to be sitting in their list.
@@ -266,7 +273,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     purge = sub.add_parser("purge-simulated", help="remove dry-run rows (FR-058)")
-    purge.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    purge.add_argument(
+        "--yes", action="store_true", help="skip the confirmation prompt (rows only)"
+    )
+    purge.add_argument(
+        "--remove-worktrees",
+        action="store_true",
+        help="also remove the worktrees those rows own, and their branches; "
+        "never forced, and --yes alone does not imply it",
+    )
 
     example = sub.add_parser(
         "example-config",
@@ -614,7 +629,9 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
             # where the lines reach `main` and `render(as_json=True)` drops them.
             out=None if bool(getattr(args, "json", False)) else sys.stdout,
         ),
-        "purge-simulated": lambda: operations.purge_simulated(ctx, assume_yes=args.yes),
+        "purge-simulated": lambda: operations.purge_simulated(
+            ctx, assume_yes=args.yes, remove_worktrees=args.remove_worktrees
+        ),
         "pause": lambda: operations.pause_dispatch(ctx, by="cli"),
         "unpause": lambda: operations.unpause_dispatch(ctx, by="cli"),
         "hold": lambda: _hold(args, ctx, holding=True),
@@ -677,7 +694,9 @@ def _worktree(args: argparse.Namespace, ctx: Context) -> Result:
             ctx, include_simulated=bool(getattr(args, "include_simulated", False))
         )
     if args.worktree_command == "remove":
-        return operations.worktree_remove(ctx, args.item_id, force=args.force)
+        if args.target.isdigit():
+            return operations.worktree_remove(ctx, int(args.target), force=args.force)
+        return operations.worktree_remove_path(ctx, args.target, force=args.force)
     if args.worktree_command == "prune":
         return operations.worktree_prune(ctx)
     return Result(code=EXIT_USAGE, lines=["usage: robot-army worktree {list,remove,prune}"])

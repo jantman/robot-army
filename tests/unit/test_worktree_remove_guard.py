@@ -727,3 +727,43 @@ def test_an_absent_answer_is_not_the_item_id(conn, audit, config, layout):
     assert declined.lines == ["aborted"] and declined.code == EXIT_FAILED
     assert given_up.lines != ["aborted"], "an unanswered question is not a decline"
     assert given_up.code == EXIT_CHECK_FAILED
+
+
+# -- the report follows the disk (issue #59, research R3) --------------------
+
+
+def test_a_removal_claimed_while_the_directory_survives_is_a_refusal(
+    conn, audit, config, layout, tmp_path
+):
+    """``SimulatedVersionControl`` reports every removal as done and touches nothing.
+
+    That is right for a worktree the simulation also only pretended to create, and wrong for
+    a real one a ``local`` round left behind. Believed, it printed "removed worktree" over a
+    directory still on disk and cleared the row's path — leaving a directory no row claims,
+    which is issue #59's orphan reached by another route. So the disk is asked, and a
+    survivor is a refusal: no "removed", no branch half, and the row keeps its path so the
+    directory stays reachable through this very command.
+    """
+    item_id = seed_item(conn, state=str(WorkItemState.DONE))
+    survivor = tmp_path / "worktrees" / "demo" / "issue-42"
+    survivor.mkdir(parents=True)
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn, item_id, worktree_path=str(survivor), branch=BRANCH
+        )
+
+    result = operations.worktree_remove(make_context(conn, audit, config), item_id)
+
+    assert result.code == EXIT_FAILED
+    assert result.data["refused_by"] == "directory_survived"
+    assert result.data["worktree_removed"] is False
+    assert result.data["branch_deleted"] is False
+    assert not any(line.startswith("removed worktree") for line in result.lines)
+    assert survivor.is_dir()
+    assert git_touched(layout) == ["git.remove_worktree"], "the branch half was not attempted"
+    assert db.get_work_item(conn, item_id).worktree_path == str(survivor)
+
+    outcome = records(layout, "worktree.remove")[-1]
+    assert outcome["kind"] == "outcome"
+    assert outcome["detail"]["refused"] is True
+    assert outcome["detail"]["refused_by"] == "directory_survived"

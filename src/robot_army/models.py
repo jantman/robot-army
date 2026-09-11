@@ -232,6 +232,24 @@ class Session:
     def argv(self) -> list[str]:
         return json.loads(self.launch_argv) if self.launch_argv else []
 
+    @property
+    def hosted_by_simulation(self) -> bool:
+        """Was this session "launched" by the simulated host, so no process ever existed?
+
+        The signature is the one ``SimulatedSessionHost.confirm_session`` writes and nothing
+        else can: ``pid = 0`` and no start time, on a rehearsal row. ``dry_run`` alone is
+        not it — rows created at ``no-remote`` are ``dry_run`` too, with a real worker behind
+        a real pid (issue #34's trap, from the other side). A real session at any level
+        records a real pid.
+
+        Two readers. ``operations.cancel`` routes such a row to the simulated host rather
+        than signalling ``getpgid(0)``, and ``purge-simulated`` does not let such a row stop
+        it removing a worktree (issue #59): at ``local`` every session row has this
+        signature and nothing ever closes it, so treating it as a possible worker would
+        refuse every worktree a purge exists to remove.
+        """
+        return bool(self.dry_run) and self.pid == 0 and self.proc_start is None
+
 
 @dataclass(frozen=True, slots=True)
 class Card:
@@ -472,6 +490,12 @@ ANOMALY_KINDS: tuple[str, ...] = (
     # rather than that the world moved (FR-028, US5).
     "clone_path_missing",
     "clone_origin_changed",
+    # Issue #59. A directory shaped like one robot-army made — ``issue-<n>`` under an
+    # onboarded repository's folder in the worktree root — that no work item claims. The
+    # mirror of ``prunable_worktree``, which is a claim with no directory; this is a
+    # directory with no claim, which neither ``worktree remove <id>`` nor ``cleanup`` can
+    # reach because both start from a row. Reported, never removed; retracts itself.
+    "orphan_worktree",
 )
 
 

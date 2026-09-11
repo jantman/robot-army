@@ -47,6 +47,29 @@ sessions of my own is my ordinary working state, so the default of 2 gives the d
 slots and it never dispatches. The cap has to be my usual session count *plus* however many
 robots I actually want; 3–4 is the realistic starting point.
 
+**The breakdown adds up to the total.** `capacity` lists four terms under the running count,
+and they always sum to it:
+
+```text
+capacity     : 6 of 7 sessions running
+  ours       : 0
+  others     : 2 (started outside this system)
+  simulated  : 3 (rehearsal sessions — no process, and none will ever register)
+  in flight  : 1 (dispatched, no registry entry yet — launching, or ended and not yet reconciled)
+```
+
+`ours` and `others` come from Claude's session registry. The last two are sessions robot-army
+dispatched that the registry has not seen, and they are counted because assuming they are free
+is how two dispatches end up sharing one slot. They clear in very different ways. **In flight**
+is a real launch the worker has not registered yet, which takes seconds, or a session that has
+ended and which the next reconciliation pass closes. **Simulated** rows come from a `local`
+rehearsal: no process ever existed, so nothing will ever register them, and they hold their
+slots until they are closed or purged. A capacity that stays full with a large `simulated`
+count is rehearsal rows left behind, not work in progress. `status`, the web chrome and a
+`global_cap` hold's reason show the same terms on one line, leaving out `simulated` and
+`in flight` when they are zero. Until issue #61 they were counted and never shown, so `6 of 7`
+could be explained as `0 ours, 2 other`.
+
 Four things worth knowing:
 
 - **One session per repository by default.** Two sessions in one clone share its ports, its

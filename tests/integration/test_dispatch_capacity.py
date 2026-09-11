@@ -308,6 +308,12 @@ def test_an_unchanging_hold_is_recorded_once_rather_than_once_per_pass(
     assert len(held) == 1, held
     assert held[0]["detail"]["others"] == 1
     assert held[0]["detail"]["cap"] == 1
+    # Issue #61: the record's breakdown sums to its own count, as the screen's does.
+    detail = held[0]["detail"]
+    assert (
+        detail["ours"] + detail["others"] + detail["simulated"] + detail["in_flight"]
+        == detail["live_sessions"]
+    )
 
 
 def test_a_hold_that_ends_is_recorded_with_its_duration_and_extent(

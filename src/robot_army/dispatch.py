@@ -1828,6 +1828,10 @@ def _note_hold(audit: AuditLog, entry: Any, snap: Any) -> None:
             "cap": snap.global_cap,
             "ours": len(snap.ours),
             "others": snap.others,
+            # With these, the four counts sum to ``live_sessions``: a hold read back from
+            # the log explains itself as fully as the screen does (issue #61).
+            "simulated": snap.simulated,
+            "in_flight": snap.in_flight,
             "degraded": snap.degraded,
             "held_in_ready": entry.item.id,
         },

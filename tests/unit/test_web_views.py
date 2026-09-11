@@ -429,6 +429,16 @@ def test_a_held_items_reason_is_visible_on_the_page_itself(web, conn):
     assert "ours" in text and "other" in text
 
 
+def test_the_capacity_pill_names_the_simulated_sessions_it_counts(web, conn):
+    """Issue #61, on the surface every page carries: a simulated row holds a slot, so the
+    pill counts it — and must say so, or its breakdown does not sum to its total."""
+    rehearsal = seed_item(conn, issue_number=9, state="active", dry_run=True)
+    seed_session(conn, rehearsal, state="running", dry_run=True, pid=0)
+
+    text = web.get("/queue").text
+    assert "1/" in text and "sessions (0 ours, 0 other, 1 simulated)" in text
+
+
 def test_the_queue_renders_the_wait_for_merge_hold(web, conn):
     """FR-012's single-source claim, proved on the surface that does not share the
     terminal's rendering code: both read ``ordering.plan``, so a reason that appears in one

@@ -521,6 +521,9 @@ def capacity(
         "cap_disagreement": snap.cap_disagreement,
         "ours": len(snap.ours),
         "others": snap.others,
+        # With these two, the four counts sum to ``total`` (issue #61).
+        "simulated": snap.simulated,
+        "in_flight": snap.in_flight,
         # Unchanged in key and in meaning: the live-session count per repository. Anything
         # reading it today keeps reading exactly what it read before (milestone 047).
         "per_repo": dict(sorted(snap.per_repo.items())),
@@ -549,9 +552,19 @@ def capacity(
     result.say(f"capacity     : {snap.total} of {snap.global_cap} sessions running")
     say_cap_disagreement()
     # FR-003. The split is the actionable half: "two of these are mine" tells the author to
-    # close one of their own, and "two are the daemon's" tells them to wait.
+    # close one of their own, and "two are the daemon's" tells them to wait. All four lines
+    # always, because this is the screen that has to explain the total, and the four sum to
+    # it (issue #61) — the last two are the rows the registry has not seen.
     result.say(f"  ours       : {len(snap.ours)}")
     result.say(f"  others     : {snap.others} (started outside this system)")
+    result.say(
+        f"  simulated  : {snap.simulated} (rehearsal sessions — no process, and none will "
+        "ever register)"
+    )
+    result.say(
+        f"  in flight  : {snap.in_flight} (dispatched, no registry entry yet — launching, "
+        "or ended and not yet reconciled)"
+    )
     result.say(f"observable   : yes{' (degraded — counted via /proc)' if snap.degraded else ''}")
     if snap.degraded:
         result.say(
@@ -770,6 +783,11 @@ def _capacity_dict(snap: Any, order: str) -> dict[str, Any]:
         "cap_disagreement": snap.cap_disagreement,
         "ours": len(snap.ours),
         "others": snap.others,
+        "simulated": snap.simulated,
+        "in_flight": snap.in_flight,
+        # The rendered phrase, so the web pill prints the snapshot's own wording rather than
+        # re-deciding from the counts which terms to show (issue #61).
+        "breakdown": snap.breakdown,
         "per_repo": dict(sorted(snap.per_repo.items())),
         "order": order,
         "reason": snap.reason,

@@ -86,6 +86,16 @@ class CapacitySnapshot:
     #: enforced cap could be learned. Its presence *is* the disagreement, so no consumer
     #: compares two integers and no two consumers can disagree about the answer.
     configured_cap: int | None = None
+    #: Session rows with no registry entry that the simulated host "launched": no process
+    #: ever existed and none will ever register. Counted in ``total`` because a rehearsal
+    #: must spend the same quota the real thing would; broken out because, unlike a launch
+    #: in flight, they do not clear on their own (issue #61 — and #28 for how long they can
+    #: linger). A count of our own rows, so FR-006 is untouched.
+    simulated: int = 0
+    #: Every other session row with no registry entry: a real launch whose worker has not
+    #: registered yet (R3), or a session that has ended and not yet been reconciled. Expected
+    #: to clear within seconds, or within one reconciliation pass.
+    in_flight: int = 0
     #: ``repo_key`` → live sessions in that repository. Only repositories the system
     #: started something in appear: an out-of-band session is not attributable to a
     #: repository, because the author's own clone is not under the worktree root.
@@ -96,6 +106,34 @@ class CapacitySnapshot:
     @property
     def at_capacity(self) -> bool:
         return self.total >= self.global_cap
+
+    @property
+    def components(self) -> tuple[tuple[str, int], ...]:
+        """``total``, broken down as ``(label, count)`` pairs that sum to it (issue #61).
+
+        The breakdown used to be ``ours`` and ``other`` alone, both drawn from the registry,
+        while the total also counted rows the registry has not seen — so ``6 of 7`` could be
+        explained as ``0 ours, 2 other`` and four sessions went nowhere. ``ours`` and
+        ``other`` stay unconditional because every surface has always shown them; the two
+        registry-blind populations appear only when present, so an ordinary machine's line
+        reads exactly as it did.
+        """
+        parts = [("ours", len(self.ours)), ("other", self.others)]
+        if self.simulated:
+            parts.append(("simulated", self.simulated))
+        if self.in_flight:
+            parts.append(("in flight", self.in_flight))
+        return tuple(parts)
+
+    @property
+    def breakdown(self) -> str:
+        """``components`` as the one phrase every one-line surface prints.
+
+        Built here, once, for the reason ``cap_disagreement`` is: the status line, the web
+        pill and a hold's detail each composing it would soon disagree about which terms to
+        show.
+        """
+        return ", ".join(f"{count} {label}" for label, count in self.components)
 
     @property
     def cap_disagreement(self) -> str | None:
@@ -136,11 +174,7 @@ class CapacitySnapshot:
                 if self.cap_disagreement
                 else unobservable
             )
-        parts = [
-            f"{self.total}/{self.global_cap} sessions",
-            f"{len(self.ours)} ours",
-            f"{self.others} other",
-        ]
+        parts = [f"{self.total}/{self.global_cap} sessions", self.breakdown]
         if self.degraded:
             parts.append("degraded (/proc)")
         line = ", ".join(parts)
@@ -252,6 +286,12 @@ def snapshot(
         states=[SessionState.STARTING, SessionState.RUNNING],
     )
     unmatched = [row for row in live_rows if row.session_id not in known]
+    # The unmatched rows are a third of the total, so they are a third of the breakdown
+    # (issue #61) — split by cause, because the causes have opposite prognoses. A launch in
+    # flight registers within seconds; a simulated row never will. On the ``/proc`` path no
+    # entry carries a session id, so every open row lands here and ``others`` holds our own
+    # processes too: the terms still sum, and "ceiling rather than a fact" is already said.
+    simulated = sum(1 for row in unmatched if row.hosted_by_simulation)
 
     total = len(scan.entries) + len(unmatched)
     others = max(len(scan.entries) - len(ours), 0)
@@ -262,6 +302,8 @@ def snapshot(
         total=total,
         ours=ours,
         others=others,
+        simulated=simulated,
+        in_flight=len(unmatched) - simulated,
         global_cap=cap,
         configured_cap=configured_cap,
         per_repo=_per_repo(conn, live_rows),

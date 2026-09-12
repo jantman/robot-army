@@ -30,7 +30,12 @@ from tests.conftest import (
 )
 
 from robot_army import db
-from robot_army.daemon import Daemon, check_preconditions, warn_about_environment
+from robot_army.daemon import (
+    Daemon,
+    check_preconditions,
+    warn_about_environment,
+    warn_about_label,
+)
 from robot_army.effects import EffectLevel
 from robot_army.states import WorkItemState
 
@@ -152,6 +157,51 @@ def test_a_dangerous_environment_variable_is_named_at_startup(audit, config, mon
 def test_a_clean_environment_produces_no_warning(audit, config, monkeypatch):
     monkeypatch.delenv("CLAUDE_CODE_CHILD_SESSION", raising=False)
     assert warn_about_environment(audit, config) == []
+
+
+def label_warnings(layout, audit) -> list[dict]:
+    audit.close()
+    text = "\n".join(p.read_text(encoding="utf-8") for p in layout.log_dir.glob("*.jsonl"))
+    return [
+        json.loads(line) for line in text.splitlines() if '"daemon.label_warning"' in line
+    ]
+
+
+def test_queued_work_the_label_no_longer_covers_is_named_once_at_startup(
+    conn, audit, config, layout, tmp_path
+):
+    """Issue #62, US3. The moment the author can still act on a label change is when the
+    daemon starts with it."""
+    (tmp_path / "registry").mkdir()
+    (tmp_path / "proc").mkdir()
+    first = seed_item(conn, issue_number=1, state=str(WorkItemState.READY))
+    second = seed_item(conn, issue_number=2, state=str(WorkItemState.READY))
+    carrying = seed_item(conn, issue_number=3, state=str(WorkItemState.READY))
+    seed_item(conn, issue_number=4, state=str(WorkItemState.ACTIVE))
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, carrying, labels='["scratch"]')
+    scratch = replace(config, github=replace(config.github, label="scratch"))
+    daemon = make_daemon(conn, audit, scratch, layout, tmp_path)
+    daemon._jobs = daemon._build_jobs()
+
+    daemon.startup()
+
+    warnings = label_warnings(layout, audit)
+    assert len(warnings) == 1, warnings
+    detail = warnings[0]["detail"]
+    assert detail["label"] == "scratch"
+    assert detail["count"] == 2
+    assert detail["item_ids"] == [first, second], "ready work only, and only the uncovered"
+    assert "2 ready items" in detail["warning"]
+
+
+def test_no_label_warning_when_every_queued_item_carries_the_label(
+    conn, audit, config, layout
+):
+    seed_item(conn, issue_number=1, state=str(WorkItemState.READY))
+
+    assert warn_about_label(conn, audit, config) is None
+    assert label_warnings(layout, audit) == []
 
 
 # -- preconditions ----------------------------------------------------------

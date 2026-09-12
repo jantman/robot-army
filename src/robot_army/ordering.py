@@ -56,6 +56,16 @@ class HoldReason(StrEnum):
       that reason's justification is that the cap *numbers* are untrustworthy, and ``held``
       is not a number and is not derived from the observation — a held item is held whether
       or not ``/proc`` could be read.
+    * ``not_labelled`` sits directly below ``held`` and above every capacity reason (issue
+      #62). The item's issue, as last read, does not carry ``[github] label``: the author's
+      own configuration now says *not this*. Below ``held`` because a hold names this item
+      specifically and is the more deliberate statement. Above the caps because of how it
+      was found: nine items queued under an old label, and nothing in the queue suggesting
+      any of them was out of scope, so the author raised the cap and four of them started.
+      A queue that reported ``global_cap`` against them would have invited exactly that. It
+      is deliberately **not** one of :func:`launch_holds`' reasons — it governs entry into a
+      first session, and ``resume`` and ``restart`` of work already begun are left alone —
+      so ``_hold_for`` splices it in between ``held`` and the rest.
     * ``capacity_unobservable`` outranks both caps because when it applies the cap numbers
       are not trustworthy, and showing an untrustworthy number is worse than showing none.
     * ``global_cap`` outranks ``repo_cap`` because the machine-wide limit binds before any
@@ -81,6 +91,7 @@ class HoldReason(StrEnum):
 
     PAUSED = "paused"
     HELD = "held"
+    NOT_LABELLED = "not_labelled"
     CAPACITY_UNOBSERVABLE = "capacity_unobservable"
     GLOBAL_CAP = "global_cap"
     REPO_CAP = "repo_cap"
@@ -305,7 +316,9 @@ def launch_holds(
     """Every reason this item may not *launch* right now, in precedence order (issue #120).
 
     The five reasons that are conditions of the machine and of the author's own policy,
-    separated from the four that are conditions of the queue. ``_hold_for`` calls this and
+    separated from those that decide whether a queued item may start at all — the four
+    conditions of the queue, and whether its issue still carries the configured label
+    (issue #62). ``_hold_for`` calls this and
     then continues; ``dispatch.check_launch_gate`` calls it and stops here. That is the
     whole of the fix for RA-05: ``resume`` and ``restart`` reached the launch without
     passing any of these, so the cap that exists to protect one subscription, the pause,
@@ -410,9 +423,11 @@ def _hold_for(
     Written as a straight sequence of returns rather than as a table, because the order is
     the content: reading it top to bottom is reading the precedence.
 
-    The first five reasons now live in :func:`launch_holds`, because ``dispatch`` needs
+    The five launch reasons live in :func:`launch_holds`, because ``dispatch`` needs
     exactly those five and needs them in exactly this order (issue #120). Reading top to
-    bottom still reads the precedence; the first stanza of it is one call away.
+    bottom still reads the precedence; the first stanza of it is one call away, and
+    ``not_labelled`` is spliced into the middle of it here, for the reason its place in
+    ``HoldReason`` records.
     """
     launch = launch_holds(
         item,
@@ -422,6 +437,15 @@ def _hold_for(
         item_holds=item_holds,
         repo_holds=repo_holds,
     )
+    if launch and launch[0][0] in (HoldReason.PAUSED, HoldReason.HELD):
+        return launch[0]
+
+    # Issue #62. Above the capacity reasons, so a full machine does not present the cap as
+    # the thing to raise for work the configuration no longer asks for.
+    unlabelled = label_hold(item, config.github.label)
+    if unlabelled is not None:
+        return HoldReason.NOT_LABELLED, unlabelled
+
     if launch:
         return launch[0]
 
@@ -506,6 +530,39 @@ def _hold_for(
         return HoldReason.PREPARATION_FAILED, residue
 
     return None, ""
+
+
+def label_hold(item: WorkItem, label: str) -> str | None:
+    """Why this item's issue no longer counts as labelled work, or ``None`` (issue #62).
+
+    ``poll.evaluate`` refuses an issue without ``[github] label``, but only while deciding
+    whether a row should exist. Once a row was ``ready`` nothing asked again, so changing
+    the label stopped *discovery* under the old one and left everything already queued
+    under it free to dispatch.
+
+    Judged from the labels stored on the row rather than from GitHub, and that is the
+    point rather than a shortcut: ``plan`` runs on every web page render, and a request
+    per queued item per render is not a price anything here justifies. The stored labels
+    are what the issue carried when it was last read — at discovery, by ``retry``, or by a
+    poll that listed it again — and the comparison is ``poll.evaluate``'s own ``in``, so an
+    item is held exactly when discovery would now refuse it.
+
+    Labels that cannot be read hold the item rather than release it. The check exists to
+    stop dispatch the configuration no longer asks for, and failing open would dispatch
+    exactly that.
+    """
+    labels = item.readable_labels
+    if labels is None:
+        return (
+            "the stored labels could not be read, so the issue is treated as not carrying "
+            f"the {label!r} label"
+        )
+    if label in labels:
+        return None
+    return (
+        f"issue does not carry the {label!r} label (has: {', '.join(labels) or 'none'}) "
+        "— label the issue, or change [github] label back"
+    )
 
 
 def _held_detail(

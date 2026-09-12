@@ -138,6 +138,22 @@ class WorkItem:
         return json.loads(self.labels)
 
     @property
+    def readable_labels(self) -> list[str] | None:
+        """``label_list``, or ``None`` when the column is not a JSON list of strings.
+
+        For the dispatch-time label check (issue #62), which has to fail closed on a value
+        it cannot read. Raising instead would take ``ordering.plan`` down with it, and with
+        it the queue view and every dispatch pass.
+        """
+        try:
+            labels = json.loads(self.labels)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
+            return None
+        return labels
+
+    @property
     def pull_request_list(self) -> list[dict[str, Any]]:
         """The stored pull requests, or ``[]``.
 

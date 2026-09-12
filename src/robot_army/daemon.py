@@ -41,6 +41,7 @@ from robot_army import (
     health,
     intake,
     notifications,
+    ordering,
     poll,
     reconcile,
     spool,
@@ -50,6 +51,7 @@ from robot_army.boundaries.kitty import describe_refusals
 from robot_army.effects import Boundaries, EffectLevel
 from robot_army.health import LockReading, LockState
 from robot_army.migrations import SCHEMA_VERSION
+from robot_army.states import WorkItemState
 
 if TYPE_CHECKING:
     from robot_army.config import Config
@@ -306,6 +308,43 @@ def warn_about_environment(audit: AuditLog, config: Config) -> list[str]:
                 detail={"variable": name, "why": why},
             )
     return warnings
+
+
+def warn_about_label(
+    conn: sqlite3.Connection, audit: AuditLog, config: Config
+) -> str | None:
+    """Name the queued work ``[github] label`` no longer covers (issue #62).
+
+    The queue already holds such an item rather than dispatching it, so this prevents
+    nothing. It exists because startup is the moment a label change takes effect, and so
+    the moment the author can still act on its consequences, before a pass has been
+    stalled by them.
+
+    ``ordering.label_hold`` decides, so this and the queue cannot disagree about which items
+    are affected. Simulated rows are counted too, because the queue plans them as well.
+    """
+    label = config.github.label
+    uncovered = [
+        item.id
+        for item in db.list_work_items(
+            conn, include_simulated=True, states=[WorkItemState.READY]
+        )
+        if ordering.label_hold(item, label) is not None
+    ]
+    if not uncovered:
+        return None
+    count = len(uncovered)
+    message = (
+        f"{count} ready item{'s' if count != 1 else ''} "
+        f"{'do' if count != 1 else 'does'} not carry the {label!r} label and "
+        f"{'are' if count != 1 else 'is'} held: {', '.join(map(str, uncovered))}"
+    )
+    audit.record(
+        "daemon.label_warning",
+        outcome="error",
+        detail={"label": label, "count": count, "item_ids": uncovered, "warning": message},
+    )
+    return message
 
 
 # -- the loop ---------------------------------------------------------------
@@ -571,6 +610,7 @@ class Daemon:
                 "daemon.config_warning", outcome="error", detail={"warning": warning}
             )
         warn_about_environment(self.audit, self.config)
+        warn_about_label(self.conn, self.audit, self.config)
 
         # The board preconditions, before any board work and after the effect level has
         # been announced. Their failure disables **ingestion only**: the rest of this

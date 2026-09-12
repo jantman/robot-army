@@ -545,7 +545,7 @@ the log knows what its silence means:
 
 | Gap | Why |
 |---|---|
-| Individual **successful, read-only** GitHub GETs — one aggregate record per repository per poll instead | They change no state outside the process, and at a 60-second poll the individual records would be pure volume. Every **failure** and every **retry** is still logged individually |
+| Individual **successful, read-only** GitHub GETs — one aggregate record per repository per poll instead | They change no state outside the process, and at a 60-second poll the individual records would be pure volume. Every **failure** and every **retry** is still logged individually. The exemption is for reads a poll's aggregate stands in for: onboarding's repository lookup has no such aggregate and is recorded as `github.get_repo` (see the issue #64 section below) |
 | Individual SQLite statements — the **transition** they effect is logged instead | The transition is the meaningful unit for reconstruction, and the database is directly inspectable |
 | Heartbeat writes, every 5 seconds | ~17,000 records a day of noise. The heartbeat file *is* the record, and its staleness is the signal |
 | Individual `/proc` and registry reads during reconciliation — one aggregate per pass | Same disproportion. The *conclusions* — sessions found, orphans detected, states changed — are each logged individually |
@@ -907,6 +907,41 @@ released it.
 | `poll.labels_refreshed` | A poll lists the issue of a `ready` item whose stored labels are a different **set** | `old` and `new` label lists, `target` the `owner/name#N`. `old` is `null` when the stored value could not be read. The same labels in another order write nothing, so the steady-state poll stays silent |
 | `daemon.label_warning` | Startup, before any dispatch, when one or more `ready` items do not carry the configured label | `outcome: error`, like `daemon.config_warning`. `label`, `count`, `item_ids`, and the one-line `warning`. At most one per start |
 | `dispatch.at_capacity` | Unchanged | `reason` may now be `not_labelled`, with `detail` naming the label. It is recorded when a pass dispatches nothing, the same as any other per-item hold |
+
+## The issue #64 record
+
+`onboard` asks GitHub one question: does `owner/name` exist, and who owns it. That one request
+is what SC-009 promises, one lookup and never a walk over every repository the author owns.
+Until issue #64 it left no record. The only way to confirm the promise was to read the source,
+and a later change to enumerate would not have shown in the log.
+
+Each lookup now writes exactly one `github.get_repo` record, whatever the result:
+
+| `outcome` | When | Detail |
+|---|---|---|
+| `ok` | GitHub answered 200 | `method`, `path`, `status: 200`, `exists: true` |
+| `ok` | GitHub answered 404 | the same, with `status: 404` and `exists: false`. A missing repository is an answer, not a failure. The refusal it leads to is the `repo.onboard` record that follows, with `cause: no_such_repository` |
+| `error` | the lookup failed: any other error status, or no connection after the retries | `method`, `path`, `status` (`null` when no response arrived), `error_type`, `error`. `github.retry` and `github.request` are still written for the attempts, and `repo.onboard` follows with `cause: source_unreachable` |
+
+The record is per lookup, not per HTTP attempt: a lookup that is retried and then succeeds writes
+its `github.retry` records and a single `github.get_repo`. `path` is the path alone, built from
+the repository key. It carries no host, no query string and no header, so it cannot hold a
+token.
+
+The check from the 005 quickstart now works as written, one line per onboarding attempt that
+reached GitHub:
+
+```bash
+robot-army log --since 10m | grep -c 'github.*"/repos/'
+```
+
+```
+… github.get_repo [ok] repo:jantman/typoed-nmae  {"method": "GET", "path": "/repos/jantman/typoed-nmae", "status": 404, "exists": false}
+… repo.onboard [error] repo:jantman/typoed-nmae  {"refused": true, "cause": "no_such_repository", …}
+```
+
+A path other than `/repos/<the key you typed>` in that output would mean onboarding had started
+enumerating.
 
 ## Reconstructing an item's history
 

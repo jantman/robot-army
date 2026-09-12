@@ -359,7 +359,8 @@ class GitHubReader:
                 )
                 raise TransportError(
                     f"{method} {url} failed with HTTP {response.status_code}: "
-                    f"{response.text[:400]}"
+                    f"{response.text[:400]}",
+                    status=response.status_code,
                 )
             return response
 
@@ -1068,9 +1069,51 @@ class GitHubReader:
         regardless of how many repositories the author owns, and the same response carries
         the canonical name — which matters because a case-mismatched name would otherwise
         surface as a missing directory rather than as the typo it is.
+
+        **Every lookup writes one ``github.get_repo`` record**, whatever its result (issue
+        #64). SC-009 — one lookup, never an enumeration — is verified from the audit log,
+        and before this the lookup left nothing there, so the check counted zero whatever
+        onboarding did. The exemption for successful GETs does not cover this read: it
+        exists because one ``github.poll`` aggregate stands in for a poll's reads, and
+        nothing stands in for this one. The record carries the path this method built, never
+        a host, query string or header, so it cannot hold a credential.
+
+        A 404 is ``ok`` with ``exists: false``: a missing repository is the answer, and
+        the refusal it leads to is ``repo.onboard``'s to record.
         """
-        response = self._request(
-            "GET", f"/repos/{self._repo_path(repo_key)}", allow_404=True
+        path = f"/repos/{self._repo_path(repo_key)}"
+        detail: dict[str, Any] = {"method": "GET", "path": path}
+        try:
+            response = self._request("GET", path, allow_404=True)
+        except TransportError as exc:
+            # Recorded here as well as by `_request`'s own records, because those describe
+            # HTTP attempts and this one the lookup: without it the lookups that failed are
+            # the ones missing from a count of lookups, and `github.request` carries its
+            # path in `target`, which `robot-army log` does not print. Re-raised unchanged,
+            # so onboarding's `source_unreachable` refusal is exactly what it was.
+            self._audit.record(
+                "github.get_repo",
+                outcome="error",
+                entity_type="repo",
+                entity_id=repo_key,
+                detail={
+                    **detail,
+                    "status": exc.status,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:400],
+                },
+            )
+            raise
+        self._audit.record(
+            "github.get_repo",
+            outcome="ok",
+            entity_type="repo",
+            entity_id=repo_key,
+            detail={
+                **detail,
+                "status": response.status_code,
+                "exists": response.status_code != 404,
+            },
         )
         if response.status_code == 404:
             return RepoInfo(exists=False)

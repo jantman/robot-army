@@ -15,6 +15,11 @@ used to send the old ETag anyway, and GitHub's `304` hid every new issue without
 The `github.poll` record now says when this happens
 ([audit log](audit-log.md#the-issue-60-record)).
 
+Work already queued under the old label does **not** start. Each queued item's issue is
+checked against the label that is configured *now*. One that no longer carries it is held
+until I label the issue or change the label back
+([when the label changes](3-selection.md#when-the-label-changes)).
+
 Two things are checked and neither can be turned off:
 
 - **The author.** Only issues written by `[github] author` are ever dispatched. There is

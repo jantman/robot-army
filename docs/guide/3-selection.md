@@ -1,12 +1,13 @@
 # ② What runs next
 
-An eligible item does not necessarily start. Five things decide, and each has a different
+An eligible item does not necessarily start. Six things decide, and each has a different
 answer to "why is nothing happening?":
 
 | Reason | Scope | Lifted by |
 |---|---|---|
 | Dispatch is paused | everything | `unpause` |
 | The item or its repository is held | named work | `unhold` |
+| The issue does not carry the configured label | one item | [labelling the issue, or changing the label back](#when-the-label-changes) |
 | The machine or the repository is at its session cap | one repository, or all | a session ending, or a higher cap |
 | `wait_for_merge` and the previous item has not landed | one repository | merging the pull request |
 | The board has the card parked elsewhere | one item | moving the card back |
@@ -300,6 +301,37 @@ everything held, each with its own hold or release control. Both halves matter. 
 first there is nothing on the page that can *place* a repository hold; without the second, a
 hold that currently matches no queued item is invisible — and a hold holding nothing looks
 exactly like no hold at all, right up until it silently suppresses the next issue I file.
+
+## When the label changes
+
+`[github] label` is the label that means *dispatch this*, so it is checked again whenever the
+queue is worked out, not only when an issue is first found. A queued item whose issue does not
+carry the configured label stays in the queue, is reported `not_labelled` with the label named,
+and does not start.
+
+This is how I found out it was needed. Nine items were queued under `robot-army`. I changed the
+label to a throwaway one to scope a verification round to test issues, raised the cap, and four
+of the nine started — real branches in repositories I had not meant to touch. Changing the label
+had stopped finding new work under the old label and left the old queue untouched.
+
+- **It is a hold, not an abandonment.** Nothing changes state on a configuration edit, so
+  changing the label back releases every item at once.
+- **Labelling the issue also releases it.** When a poll lists a queued item's issue, the item's
+  stored labels are updated, so the new label is seen on the next pass
+  (`poll.labels_refreshed` in the [audit log](audit-log.md#the-issue-62-records)).
+- **It ranks directly below `held`, above the session caps.** On a full machine the queue says
+  `not_labelled` rather than `global_cap`, because raising the cap is the wrong fix, and it is
+  the one I reached for.
+- **It skips one item and leaves the rest moving**, like the repository cap.
+- **Work already begun is not affected.** `resume` and `restart` are not refused on the label;
+  `retry` re-reads the issue and applies the whole eligibility check, label included.
+- **The daemon says so at startup.** If any queued item does not carry the configured label,
+  one `daemon.label_warning` record names how many and which.
+
+The labels checked are the ones stored when the issue was last read, not fetched on every pass.
+So taking the label *off* an issue on GitHub, without changing the configuration, is not seen
+here: the issue drops out of the label-filtered listing, and nothing updates its row. To stop
+one issue, `hold` it or `abandon` it.
 
 ---
 

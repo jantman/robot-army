@@ -370,7 +370,7 @@ def launch_holds(
     if capacity.total >= capacity.global_cap:
         detail = (
             f"{capacity.total} of {capacity.global_cap} sessions running "
-            f"({len(capacity.ours)} ours, {capacity.others} other)"
+            f"({capacity.breakdown})"
         )
         if capacity.degraded:
             detail += " — counted via /proc, so this is a ceiling rather than a fact"

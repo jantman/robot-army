@@ -119,6 +119,20 @@ def test_a_full_machine_holds_every_item_on_the_global_cap(conn, config):
     assert "2 other" in entries[0].detail
 
 
+def test_a_full_machine_names_the_sessions_the_registry_has_not_seen(conn, config):
+    """Issue #61: a hold's detail is read to explain the hold, so it must sum to the total
+    it quotes — including rows the registry has not seen."""
+    ready(conn, 1)
+    entries = ordering.plan(
+        conn,
+        config=config,
+        capacity=snapshot(total=6, global_cap=6, others=2, simulated=3, in_flight=1),
+    )
+    assert entries[0].detail == (
+        "6 of 6 sessions running (0 ours, 2 other, 3 simulated, 1 in flight)"
+    )
+
+
 def test_an_unobservable_capacity_outranks_the_caps(conn, config):
     """When it applies, the cap numbers are not trustworthy, and showing an untrustworthy
     number is worse than showing none."""

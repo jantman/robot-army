@@ -299,10 +299,13 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
         else:
             total = int(capacity.get("total") or 0)
             cap = int(capacity.get("global_cap") or 0)
-            label = (
-                f"{total}/{cap} sessions "
-                f"({capacity.get('ours', 0)} ours, {capacity.get('others', 0)} other)"
+            # The snapshot's own phrase, which names the registry-blind terms when present
+            # so the pill sums to its total (issue #61). The fallback is the older shape, for
+            # a chrome dict built without it.
+            breakdown = capacity.get("breakdown") or (
+                f"{capacity.get('ours', 0)} ours, {capacity.get('others', 0)} other"
             )
+            label = f"{total}/{cap} sessions ({breakdown})"
             if capacity.get("degraded"):
                 label += " — degraded"
             pills.append(

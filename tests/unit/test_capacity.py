@@ -173,6 +173,96 @@ def test_a_simulated_session_counts_toward_both_caps(conn, config, registry, pro
     assert snap.per_repo == {"demo": 1}
 
 
+# -- the breakdown sums to the total (issue #61) ----------------------------
+
+
+def assert_sums(snap) -> None:
+    """The invariant the issue asks for: every session in the total is in some term."""
+    assert sum(count for _, count in snap.components) == snap.total, snap.components
+    assert len(snap.ours) + snap.others + snap.simulated + snap.in_flight == snap.total
+
+
+def simulated_row(conn, *, issue_number: int, session_id: str) -> None:
+    """The simulated host's signature: a rehearsal row with pid 0 and no start time."""
+    item = seed_item(conn, issue_number=issue_number, dry_run=True)
+    seed_session(
+        conn, item, state=str(SessionState.RUNNING), session_id=session_id, dry_run=True, pid=0
+    )
+
+
+def test_the_issues_machine_accounts_for_every_session(conn, config, registry, proc, tmp_path):
+    """The screen from issue #61: six running, none ours, two other — and four that went
+    nowhere. They are three simulated rows and one real launch not yet registered."""
+    add_live_session(registry, proc, pid=101, session_id="s-a", cwd=str(tmp_path / "GIT" / "a"))
+    add_live_session(registry, proc, pid=102, session_id="s-b", cwd=str(tmp_path / "GIT" / "b"))
+    for n in (1, 2, 3):
+        simulated_row(conn, issue_number=n, session_id=f"s-sim-{n}")
+    launching = seed_item(conn, issue_number=4)
+    seed_session(conn, launching, state=str(SessionState.STARTING), session_id="s-launching")
+
+    snap = take(conn, config, registry, proc)
+
+    assert (snap.total, len(snap.ours), snap.others) == (6, 0, 2)
+    assert (snap.simulated, snap.in_flight) == (3, 1)
+    assert_sums(snap)
+    assert snap.describe() == (
+        f"6/{snap.global_cap} sessions, 0 ours, 2 other, 3 simulated, 1 in flight"
+    )
+
+
+def test_a_registered_session_of_ours_is_ours_and_not_in_flight(
+    conn, config, registry, proc, tmp_path
+):
+    """The union's other half: a row the registry *does* know is counted once, as ours."""
+    worktree = tmp_path / WORKTREES / "demo-1"
+    worktree.mkdir(parents=True)
+    add_live_session(registry, proc, pid=101, session_id="s-ours", cwd=str(worktree))
+    item = seed_item(conn, issue_number=1)
+    seed_session(conn, item, state=str(SessionState.RUNNING), session_id="s-ours")
+
+    snap = take(conn, config, registry, proc)
+
+    assert (snap.total, snap.ours, snap.simulated, snap.in_flight) == (1, ("s-ours",), 0, 0)
+    assert_sums(snap)
+
+
+def test_a_real_dry_run_row_is_in_flight_not_simulated(conn, config, registry, proc):
+    """``dry_run`` alone is not the simulated signature: a ``no-remote`` row is ``dry_run``
+    with a real worker behind a real pid, and it will register like any other."""
+    item = seed_item(conn, issue_number=1, dry_run=True)
+    seed_session(conn, item, state=str(SessionState.RUNNING), session_id="s-nr", dry_run=True)
+
+    snap = take(conn, config, registry, proc)
+
+    assert (snap.simulated, snap.in_flight) == (0, 1)
+    assert_sums(snap)
+
+
+def test_a_simulated_row_not_yet_confirmed_is_in_flight(conn, config, registry, proc):
+    """Before the simulated host confirms it there is no pid, so nothing distinguishes it
+    from a real launch — and for those seconds it *is* a launch in flight."""
+    item = seed_item(conn, issue_number=1, dry_run=True)
+    seed_session(
+        conn, item, state=str(SessionState.STARTING), session_id="s-new", dry_run=True, pid=None
+    )
+
+    snap = take(conn, config, registry, proc)
+
+    assert (snap.simulated, snap.in_flight) == (0, 1)
+    assert_sums(snap)
+
+
+def test_an_ordinary_machine_reads_exactly_as_it_did(conn, config, registry, proc, tmp_path):
+    """Zero terms stay out of the one-line forms, so the common case gains no noise."""
+    add_live_session(registry, proc, pid=102, session_id="s-theirs", cwd=str(tmp_path / "GIT"))
+
+    snap = take(conn, config, registry, proc)
+
+    assert snap.components == (("ours", 0), ("other", 1))
+    assert snap.describe() == f"1/{snap.global_cap} sessions, 0 ours, 1 other"
+    assert_sums(snap)
+
+
 # -- per-repository counting ------------------------------------------------
 
 
@@ -236,6 +326,10 @@ def test_the_degraded_path_cannot_name_our_sessions_so_it_over_counts_upward(
     assert snap.degraded is True
     assert snap.ours == ()
     assert snap.total == 2, "one process plus one unmatchable row — never fewer than truth"
+    # Issue #61: the double count is at least a visible one. The process is "other" and
+    # the row is "in flight", and the terms still sum to the ceiling they explain.
+    assert (snap.others, snap.in_flight) == (1, 1)
+    assert_sums(snap)
 
 
 def test_an_unrecognised_registry_version_degrades_rather_than_reading_as_empty(

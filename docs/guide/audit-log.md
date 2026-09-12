@@ -219,7 +219,7 @@ asked long after the fact: *why did nothing dispatch for twenty minutes?* and *w
 
 | Action | When | Notable detail |
 |---|---|---|
-| `dispatch.at_capacity` | **Changed** — when a hold's signature changes, not every pass | The counts, the cap, the ours/others split, and which item is at the head |
+| `dispatch.at_capacity` | **Changed** — when a hold's signature changes, not every pass | The counts, the cap, the ours/others split, and which item is at the head. Since issue #61 also `simulated` and `in_flight`, the sessions robot-army dispatched that the registry has not seen, so `ours + others + simulated + in_flight` equals `live_sessions` |
 | `dispatch.hold_ended` | A capacity hold clears | How long it lasted, how many passes it spanned, and what freed it |
 | `capacity.unobservable` | The registry and `/proc` both failed | Which failed, and that dispatch is being withheld as a result. Also raises a de-duplicated anomaly of the same kind |
 | `cleanup.considered` | An item is evaluated for cleanup | The decision and the guard that made it — including "not eligible", so an item that was looked at and passed over is distinguishable from one nobody looked at |

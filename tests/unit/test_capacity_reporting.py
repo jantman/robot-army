@@ -111,6 +111,47 @@ def test_the_terminal_rendering_carries_both_limits_and_both_sources(ctx, conn, 
     assert "wait-merge   : off globally" in text
 
 
+def test_the_terminal_breakdown_sums_to_the_total_it_reports(ctx, conn, repo_clone):
+    """Issue #61: the number that decides dispatch must be explainable from the screen
+    that reports it. Parsed back from the rendered text, because the text is the claim."""
+    onboard_repo(conn, "demo", repo_clone)
+    rehearsal = seed_item(
+        conn, repo_key="demo", issue_number=1, dry_run=True, state=str(WorkItemState.ACTIVE)
+    )
+    seed_session(
+        conn, rehearsal, state=str(SessionState.RUNNING), session_id="s-sim", dry_run=True, pid=0
+    )
+    launching = seed_item(conn, repo_key="demo", issue_number=2, state=str(WorkItemState.ACTIVE))
+    seed_session(conn, launching, state=str(SessionState.STARTING), session_id="s-launching")
+
+    lines = operations.capacity(ctx).render(as_json=False).splitlines()
+    total = int(next(line for line in lines if line.startswith("capacity")).split()[2])
+    terms = {
+        line.split(":")[0].strip(): int(line.split(":")[1].split()[0])
+        for line in lines
+        if line.startswith(("  ours", "  others", "  simulated", "  in flight"))
+    }
+
+    assert set(terms) == {"ours", "others", "simulated", "in flight"}
+    assert (terms["simulated"], terms["in flight"]) == (1, 1)
+    assert sum(terms.values()) == total
+
+
+def test_the_json_breakdown_sums_to_its_total(ctx, conn, repo_clone):
+    onboard_repo(conn, "demo", repo_clone)
+    rehearsal = seed_item(
+        conn, repo_key="demo", issue_number=1, dry_run=True, state=str(WorkItemState.ACTIVE)
+    )
+    seed_session(
+        conn, rehearsal, state=str(SessionState.RUNNING), session_id="s-sim", dry_run=True, pid=0
+    )
+
+    data = payload(ctx)
+
+    assert data["simulated"] == 1
+    assert data["ours"] + data["others"] + data["simulated"] + data["in_flight"] == data["total"]
+
+
 def test_per_repo_keeps_its_existing_key_and_meaning(ctx, conn, repo_clone):
     """Nothing reading the live-session count today changes meaning: the new facts arrived
     beside it under their own key rather than by redefining this one."""

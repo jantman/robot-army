@@ -132,8 +132,11 @@ report the trust failure as the current blocker and the missing clone as the rec
   `retry` still re-reads the issue before returning it to the queue.
 - **FR-006**: When the check cannot be completed, `show` MUST say the current blocker could not be
   determined and why, and MUST NOT present the stored reason as current.
-- **FR-007**: Computing the verdict for `show` MUST NOT write anything: no anomaly, no work-item
-  column, no audit record. It MUST make no network request.
+- **FR-007**: Computing the verdict for `show` MUST NOT change any state: no anomaly, no work-item
+  column, and no audit record of its own. It MUST make no network request. (The local `git`
+  commands the check runs are recorded by the version-control boundary as every `git` command
+  is, including the ones `show` already runs for its resume signals; that record is of a
+  command executed, not of a state change.)
 - **FR-008**: `retry`'s behaviour — its checks, its refusals, its audit records, and the anomalies
   its gate raises — MUST be unchanged.
 - **FR-009**: The `show --json` payload MUST carry the current verdict as a field distinct from the
@@ -157,8 +160,9 @@ report the trust failure as the current blocker and the missing clone as the rec
   workspace untrusted — ends with `show` and `retry` naming the same blocker, word for word.
 - **SC-002**: In every case where the recorded blocker no longer holds, `show` tells the
   maintainer so without them having to run `retry` to find out.
-- **SC-003**: Opening an item page or running `show` any number of times leaves the database and
-  the audit log exactly as they were.
+- **SC-003**: Opening an item page or running `show` any number of times leaves the database
+  exactly as it was, and adds nothing to the audit log beyond the command records of the `git`
+  calls it made.
 - **SC-004**: Every existing `retry` test passes unmodified.
 
 ## Assumptions

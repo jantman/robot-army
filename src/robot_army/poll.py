@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 from robot_army import db, repos
 from robot_army.boundaries import Issue, PollResult, TransportError
-from robot_army.models import PollState, RepoProject
+from robot_army.models import PollState, RepoProject, WorkItem
 from robot_army.states import WorkItemState, dumps_labels, transition_work_item, utcnow
 
 if TYPE_CHECKING:
@@ -113,6 +113,48 @@ def _in_backoff(state: PollState) -> bool:
     return bool(state.backoff_until and state.backoff_until > utcnow())
 
 
+def _refresh_labels(
+    conn: sqlite3.Connection,
+    audit: AuditLog,
+    item: WorkItem,
+    issue: Issue,
+    source_id: str,
+    *,
+    dry_run: bool,
+) -> None:
+    """Bring a queued row's stored labels up to date with the listing (issue #62).
+
+    The queue holds a ``ready`` item whose stored labels lack ``[github] label``, and
+    without this the only way to release one would be to change the label back: labelling
+    the issue would reach the existing-row branch and be skipped, so the stored labels —
+    and the hold — would never move. With it, labelling an issue does what labelling an
+    issue has always meant.
+
+    **Only ``ready``**, because that is the one state whose labels are consulted again.
+    ``discovered`` is re-evaluated in full by the branch above, ``retry`` refreshes a
+    ``failed`` row from a live read, and nothing past dispatch looks at its labels.
+
+    **Compared as sets**, so the order GitHub happens to list labels in does not become a
+    write and an audit record per poll: the steady state stays as quiet as it was. Labels
+    that cannot be read always count as different, which is how a corrupted column heals.
+    """
+    listed = list(issue.labels)
+    stored = item.readable_labels
+    if stored is not None and set(stored) == set(listed):
+        return
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, item.id, labels=dumps_labels(listed))
+        audit.record(
+            "poll.labels_refreshed",
+            outcome="ok",
+            entity_type="work_item",
+            entity_id=item.id,
+            target=source_id,
+            detail={"old": stored, "new": listed},
+            dry_run=dry_run,
+        )
+
+
 def poll_repo(
     conn: sqlite3.Connection,
     *,
@@ -190,6 +232,8 @@ def poll_repo(
             if existing.state == WorkItemState.DISCOVERED:
                 _settle(conn, audit, existing.id, verdict, dry_run=dry_run)
                 rejected += 0 if verdict.eligible else 1
+            elif existing.state == WorkItemState.READY:
+                _refresh_labels(conn, audit, existing, issue, source_id, dry_run=dry_run)
             continue
 
         if not verdict.eligible and not verdict.persist:

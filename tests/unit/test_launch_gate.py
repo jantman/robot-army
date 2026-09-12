@@ -346,6 +346,17 @@ def test_hold_for_still_reports_only_the_first_reason(conn, config):
     assert isinstance(entries[0].detail, str)
 
 
+def test_a_missing_label_is_not_a_launch_hold(conn, config):
+    """Issue #62 holds *queued* work whose issue lacks the configured label. ``resume`` and
+    ``restart`` reach the launch through this list, and work already begun is left alone
+    (FR-010): refusing an interrupted session because the configuration changed would be a
+    surprise of its own."""
+    work_item = item(conn, state="interrupted")
+    scratch = replace(config, github=replace(config.github, label="scratch"))
+
+    assert holds(work_item, config=scratch) == []
+
+
 # -- check_launch_gate: the reading half ------------------------------------
 
 

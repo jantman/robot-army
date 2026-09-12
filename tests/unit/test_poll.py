@@ -157,6 +157,111 @@ def test_repolling_the_same_issue_is_a_no_op(conn, audit, config):
     assert len(db.list_work_items(conn)) == 1
 
 
+# -- a queued row's labels follow the listing (issue #62) --------------------
+
+
+def label_records(layout, audit) -> list[dict]:
+    import json
+
+    audit.close()
+    out = []
+    for path in sorted(layout.log_dir.glob("audit-*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record["action"] == "poll.labels_refreshed":
+                out.append(record)
+    return out
+
+
+def poll_twice(conn, audit, config, first, second):
+    """Discover ``first``, then list the same issue again as ``second``, unconditionally."""
+    onboard(conn)
+    reader = FakeIssueReader([first])
+    boundaries = make_boundaries(audit, reader=reader)
+    poll.poll_repo(
+        conn, boundaries=boundaries, audit=audit, config=config, repo_key="demo", dry_run=False
+    )
+    reader.issues = [second]
+    reader.etag = None
+    return boundaries
+
+
+def repoll(conn, audit, config, boundaries):
+    poll.poll_repo(
+        conn, boundaries=boundaries, audit=audit, config=config, repo_key="demo", dry_run=False
+    )
+
+
+def test_labelling_a_queued_issue_refreshes_its_row_and_releases_its_hold(
+    conn, audit, config, layout
+):
+    """Without the refresh, labelling the issue under a new ``[github] label`` would reach
+    the existing-row branch and be skipped, and the item would stay held for good."""
+    from dataclasses import replace
+
+    from tests.unit.test_ordering import snapshot
+
+    from robot_army import ordering
+
+    scratch = replace(config, github=replace(config.github, label="scratch"))
+    boundaries = poll_twice(
+        conn, audit, config, make_issue(), make_issue(labels=("robot-army", "scratch"))
+    )
+    assert ordering.plan(conn, config=scratch, capacity=snapshot())[0].hold is (
+        ordering.HoldReason.NOT_LABELLED
+    )
+
+    repoll(conn, audit, scratch, boundaries)
+
+    item = db.list_work_items(conn)[0]
+    assert item.label_list == ["robot-army", "scratch"]
+    assert ordering.plan(conn, config=scratch, capacity=snapshot())[0].hold is None
+    refreshed = label_records(layout, audit)
+    assert len(refreshed) == 1
+    assert refreshed[0]["entity_id"] == item.id
+    assert refreshed[0]["detail"] == {"old": ["robot-army"], "new": ["robot-army", "scratch"]}
+
+
+def test_the_same_labels_in_another_order_write_and_record_nothing(conn, audit, config, layout):
+    """The steady-state poll must stay as quiet as it was."""
+    boundaries = poll_twice(
+        conn,
+        audit,
+        config,
+        make_issue(labels=("bug", "robot-army")),
+        make_issue(labels=("robot-army", "bug")),
+    )
+    before = dict(conn.execute("SELECT labels, updated_at FROM work_items").fetchone())
+
+    repoll(conn, audit, config, boundaries)
+
+    assert dict(conn.execute("SELECT labels, updated_at FROM work_items").fetchone()) == before
+    assert label_records(layout, audit) == []
+
+
+def test_a_row_past_ready_is_not_refreshed(conn, audit, config, layout):
+    """Only ``ready`` consults its labels again; nothing past dispatch looks at them."""
+    boundaries = poll_twice(
+        conn, audit, config, make_issue(), make_issue(labels=("robot-army", "scratch"))
+    )
+    conn.execute("UPDATE work_items SET state = ?", (str(WorkItemState.ACTIVE),))
+
+    repoll(conn, audit, config, boundaries)
+
+    assert db.list_work_items(conn)[0].label_list == ["robot-army"]
+    assert label_records(layout, audit) == []
+
+
+def test_unreadable_stored_labels_heal_on_the_next_listing(conn, audit, config, layout):
+    boundaries = poll_twice(conn, audit, config, make_issue(), make_issue())
+    conn.execute("UPDATE work_items SET labels = 'not json'")
+
+    repoll(conn, audit, config, boundaries)
+
+    assert db.list_work_items(conn)[0].label_list == ["robot-army"]
+    assert label_records(layout, audit)[0]["detail"]["old"] is None
+
+
 def test_the_etag_is_persisted_and_replayed(conn, audit, config):
     """304 is the healthy steady state — it costs nothing against the rate limit (R4)."""
     onboard(conn)

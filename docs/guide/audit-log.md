@@ -895,6 +895,19 @@ state stays a short line. Neither can hold a credential: they are built from the
 query only, never from headers. What the column holds and why it has no backfill is covered
 under [state](state.md#poll_stateetag_request--which-request-an-etag-answered).
 
+## The issue #62 records
+
+A queued item whose issue does not carry `[github] label` is held rather than dispatched
+([when the label changes](3-selection.md#when-the-label-changes)). Working out the hold writes
+nothing, as with every hold reason. These records show where the hold came from and what
+released it.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `poll.labels_refreshed` | A poll lists the issue of a `ready` item whose stored labels are a different **set** | `old` and `new` label lists, `target` the `owner/name#N`. `old` is `null` when the stored value could not be read. The same labels in another order write nothing, so the steady-state poll stays silent |
+| `daemon.label_warning` | Startup, before any dispatch, when one or more `ready` items do not carry the configured label | `outcome: error`, like `daemon.config_warning`. `label`, `count`, `item_ids`, and the one-line `warning`. At most one per start |
+| `dispatch.at_capacity` | Unchanged | `reason` may now be `not_labelled`, with `detail` naming the label. It is recorded when a pass dispatches nothing, the same as any other per-item hold |
+
 ## Reconstructing an item's history
 
 ```bash

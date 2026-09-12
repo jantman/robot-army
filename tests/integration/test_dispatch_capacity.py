@@ -440,6 +440,48 @@ def test_a_pass_stopped_by_a_per_item_hold_is_recorded(
     assert "#41" in held[0]["detail"]["detail"]
 
 
+# -- work the configured label no longer covers (issue #62) -----------------
+
+
+def scoped_to(config, label: str = "scratch"):
+    return replace(config, github=replace(config.github, label=label))
+
+
+def test_a_de_scoped_item_is_skipped_and_the_one_behind_it_dispatches(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """SC-001 and US1 AS5. The incident: items queued under the old label, the label
+    changed, room on the machine — and dispatch started work nobody meant to run."""
+    config = scoped_to(capped_at(config, 4, per_repo=4))
+    first = ready_item(conn, config, issue_number=1)
+    second = ready_item(conn, config, issue_number=2)
+    third = ready_item(conn, config, issue_number=3)
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, second, labels='["robot-army","scratch"]')
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 1
+
+    assert db.get_work_item(conn, first).state is WorkItemState.READY
+    assert db.get_work_item(conn, third).state is WorkItemState.READY
+    assert db.get_work_item(conn, second).state is not WorkItemState.READY
+
+
+def test_a_pass_with_only_de_scoped_items_dispatches_nothing_and_says_why(
+    conn, audit, config, layout, tmp_path, machine
+):
+    """FR-009: recorded the way any other stalled pass is, by the existing recorder."""
+    config = scoped_to(capped_at(config, 4, per_repo=4))
+    ready_item(conn, config, issue_number=1)
+    ready_item(conn, config, issue_number=2)
+
+    assert run(conn, audit, config, layout, tmp_path, machine) == 0
+
+    held = records(layout, audit, "dispatch.at_capacity")
+    assert len(held) == 1, held
+    assert held[0]["detail"]["reason"] == "not_labelled"
+    assert "'scratch'" in held[0]["detail"]["detail"]
+
+
 def test_an_unchanging_per_item_hold_is_recorded_once(
     conn, audit, two_repos, layout, tmp_path, machine
 ):

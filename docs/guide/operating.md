@@ -387,6 +387,27 @@ uv run robot-army cancel <id>     # stop that session's process tree and no othe
 uv run robot-army abandon <id>    # give up; the worktree is left alone
 ```
 
+**For a failed item, `show`'s `blocked` line is checked now, and `failure` is history.**
+`failure` is the sentence recorded when the item failed, and it never changes. `blocked` is
+the verdict of the checks `retry` makes before it re-reads the issue, run when the item is
+shown: the repository resolves to a clone, the approved clone is still where it was approved
+and still that repository, the workspace is trusted, and the committed settings match. So
+`show` and `retry` name the same blocker in the same words. The item page's `blocked`
+entry says the same thing. Four readings:
+
+- `… (checked now)` — this is what `retry` would refuse for.
+- `… (checked now; not the reason recorded when it failed)` — what I fixed is fixed, and
+  this is what is left.
+- `nothing on this machine blocks it now` — `retry` will get as far as reading the issue.
+  A reason only the issue can settle, such as the author or the label, is still checked
+  there, and `show` cannot confirm or clear it without a request.
+- `could not be checked now: …` — the check itself failed. The stored sentence is not
+  offered in its place.
+
+Looking writes nothing. A moved clone found by `show` raises no anomaly; the next dispatch
+or `retry` that meets it does, as before. Items in any other state are not checked, and a
+reason stored on one is marked `(recorded, not re-checked)`.
+
 **`resume` and `restart` pass the same gate the dispatcher does**, and did not until issue
 #120. If the machine is at `max_concurrent_sessions`, if the repository is at its own limit,
 if dispatch is paused, or if the item or its repository is held, they refuse — exit `3`, the

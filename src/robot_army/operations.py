@@ -1042,6 +1042,86 @@ def _reattach_lines(ctx: Context, session: Any) -> list[str]:
     return [command]
 
 
+def current_blocker(ctx: Context, item: WorkItem) -> dict[str, Any]:
+    """What blocks this item *now*, for ``show`` and the web item page (issue #63).
+
+    ``blocked_reason`` is written at the moment of failure and never again, which is right
+    for history and wrong for the present tense the ``blocked`` line reads in. So for a
+    failed item this runs ``retry``'s own local checks — :func:`_local_blocker`, the same
+    call ``retry`` makes — and reports that. The stored columns are left alone and still
+    shown; they are what happened, and this is what is true.
+
+    Only ``failed`` items are checked. ``retry`` applies to nothing else, and a queued
+    item's holds are already computed live by ``ordering.plan``. Anything else carrying a
+    stored reason is shown as recorded, and says so.
+
+    ``summary`` is the sentence both surfaces print, computed here once so the terminal and
+    the web page cannot word the same verdict two ways.
+
+    ``BoundaryError`` and ``OSError`` are caught because this is a read-only inspection and
+    must not become a traceback on the machine that is already misbehaving — the same
+    reasoning ``_reattach_lines`` gives for its probe. They are *reported*, never replaced
+    by the stored sentence: falling back to it would be the original defect with a
+    subprocess timeout as its trigger. Anything wider is a bug and propagates.
+    """
+    verdict: dict[str, Any] = {
+        "status": "not_checked",
+        "reason": None,
+        "error": None,
+        "differs_from_recorded": False,
+        "summary": (
+            f"{item.blocked_reason} (recorded, not re-checked)" if item.blocked_reason else None
+        ),
+    }
+    if item.state is not WorkItemState.FAILED:
+        return verdict
+    try:
+        found = _local_blocker(ctx, item, raise_anomalies=False)
+    except (BoundaryError, OSError) as exc:
+        return {
+            **verdict,
+            "status": "unknown",
+            "error": str(exc),
+            "summary": f"could not be checked now: {exc}",
+        }
+    if found.reason is None:
+        return {
+            **verdict,
+            "status": "clear",
+            "summary": (
+                "nothing on this machine blocks it now (checked now) — "
+                f"`robot-army retry {item.id}` re-reads the issue before returning it to "
+                "the queue"
+            ),
+        }
+    differs = bool(item.blocked_reason) and item.blocked_reason != found.reason
+    suffix = "checked now; not the reason recorded when it failed" if differs else "checked now"
+    return {
+        **verdict,
+        "status": "blocked",
+        "reason": found.reason,
+        "differs_from_recorded": differs,
+        "summary": f"{found.reason} ({suffix})",
+    }
+
+
+def _blocker_lines(item: WorkItem, blocker: dict[str, Any]) -> list[str]:
+    """The ``blocked`` line, and the stored reason when it has not been said already.
+
+    The stored sentence is history now, and it gets a ``recorded`` line only when the
+    ``failure`` line above has not already said it word for word — which, with today's
+    three writers always storing the pair together, is almost never.
+    """
+    lines = [f"  blocked    : {blocker['summary']}"] if blocker["summary"] else []
+    if (
+        blocker["status"] != "not_checked"
+        and item.blocked_reason
+        and item.blocked_reason != item.failure_reason
+    ):
+        lines.append(f"  recorded   : {item.blocked_reason}")
+    return lines
+
+
 def show(ctx: Context, item_id: int) -> Result:
     """Everything about one work item, including the FR-048 resume-decision signals."""
     result = Result()
@@ -1051,6 +1131,7 @@ def show(ctx: Context, item_id: int) -> Result:
 
     attempts = db.list_sessions_for_item(ctx.conn, item_id)
     signals = resume_signals(ctx, item)
+    blocker = current_blocker(ctx, item)
 
     card = _card_for_item(ctx, item)
     result.data = {
@@ -1058,6 +1139,9 @@ def show(ctx: Context, item_id: int) -> Result:
         "history": _history(item),
         "sessions": [_session_dict(s) for s in attempts],
         "resume_signals": signals,
+        # Beside ``item.blocked_reason`` rather than instead of it: that key keeps meaning
+        # what is stored, and this one is what is true now (issue #63).
+        "current_blocker": blocker,
         # FR-017 and FR-048: where a work item's issue came from a card, the card is shown
         # beside the issue wherever the issue is shown. ``None`` when it did not.
         "card": card,
@@ -1075,8 +1159,8 @@ def show(ctx: Context, item_id: int) -> Result:
     result.say(f"  pull req.  : {_pull_request_line(item)}")
     if item.failure_reason:
         result.say(f"  failure    : {item.failure_reason}")
-    if item.blocked_reason:
-        result.say(f"  blocked    : {item.blocked_reason}")
+    for line in _blocker_lines(item, blocker):
+        result.say(line)
     # A retained worktree or branch is visible here rather than only in the log, which is
     # what makes "why is this 499 MB still here?" answerable without reading anything.
     if item.cleanup_state:
@@ -3516,6 +3600,58 @@ def abandon(
     return Result(lines=lines, data={"item_id": item_id})
 
 
+@dataclass(frozen=True, slots=True)
+class LocalBlocker:
+    """What ``retry``'s local checks say about one item (issue #63).
+
+    ``reason`` is ``None`` when nothing on this machine blocks the item. ``unresolved`` says
+    the repository did not resolve to a clone, so the gates never ran — ``retry`` words
+    that refusal differently from a gate's, and must go on doing so.
+    """
+
+    reason: str | None
+    unresolved: bool = False
+
+
+def _local_blocker(
+    ctx: Context,
+    item: WorkItem,
+    *,
+    trust_file: Path | None = None,
+    raise_anomalies: bool = True,
+) -> LocalBlocker:
+    """Every check ``retry`` makes before it spends a request on the issue (issue #63).
+
+    One function with two callers, and the second caller is the reason it exists. ``show``
+    used to print the ``blocked_reason`` stored at the moment of failure, which goes stale
+    the moment the maintainer fixes what it names — so ``show`` went on sending them to
+    restore a clone already restored while ``retry``, asked at the same moment, refused for
+    the real reason. Both now ask this, so the two cannot disagree about the same item.
+
+    Local only: the database, the filesystem, and ``git`` against the clone. ``show`` passes
+    ``raise_anomalies=False`` because it only asks; see ``dispatch.check_gates``.
+    """
+    repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
+    if repo is None:
+        return LocalBlocker(
+            f"repository {item.repo_key!r} does not resolve to a clone any more — "
+            f"run `robot-army onboard {item.repo_key} --reapprove`",
+            unresolved=True,
+        )
+    try:
+        dispatch.check_gates(
+            ctx.conn,
+            boundaries=ctx.boundaries,
+            config=ctx.config,
+            repo=repo,
+            trust_file=trust_file,
+            raise_anomalies=raise_anomalies,
+        )
+    except dispatch.DispatchBlocked as exc:
+        return LocalBlocker(str(exc))
+    return LocalBlocker(None)
+
+
 def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Result:
     """Move a ``failed`` item back to ``ready``, refusing if anything still blocks it.
 
@@ -3547,31 +3683,8 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
             lines=[f"work item {item_id} is {item.state}; retry applies to failed items"],
         )
     source_id = f"{item.repo_key}#{item.issue_number}"
-    repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
-    if repo is None:
-        reason = (
-            f"repository {item.repo_key!r} does not resolve to a clone any more — "
-            f"run `robot-army onboard {item.repo_key} --reapprove`"
-        )
-        ctx.audit.record(
-            "retry.blocked",
-            outcome="error",
-            entity_type="work_item",
-            entity_id=item_id,
-            target=source_id,
-            detail={"repo_key": item.repo_key, "blocked": reason},
-            dry_run=item.dry_run,
-        )
-        return Result(code=EXIT_PRECONDITION, lines=[reason])
-    try:
-        dispatch.check_gates(
-            ctx.conn,
-            boundaries=ctx.boundaries,
-            config=ctx.config,
-            repo=repo,
-            trust_file=trust_file,
-        )
-    except dispatch.DispatchBlocked as exc:
+    blocker = _local_blocker(ctx, item, trust_file=trust_file)
+    if blocker.reason is not None:
         # Refused before the read, so no rate limit is spent on an item that could not
         # dispatch whatever the issue says (research R4). ``retry.blocked`` rather than
         # ``retry.evaluate`` is how the log distinguishes "we never asked GitHub" from
@@ -3582,16 +3695,18 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
             entity_type="work_item",
             entity_id=item_id,
             target=source_id,
-            detail={"repo_key": item.repo_key, "blocked": str(exc)},
+            detail={"repo_key": item.repo_key, "blocked": blocker.reason},
             dry_run=item.dry_run,
         )
+        if blocker.unresolved:
+            return Result(code=EXIT_PRECONDITION, lines=[blocker.reason])
         return Result(
             code=EXIT_PRECONDITION,
             lines=[
                 f"refusing to retry item {item_id}: the blocking condition still holds.",
-                f"  {exc}",
+                f"  {blocker.reason}",
             ],
-            data={"item_id": item_id, "blocked": str(exc)},
+            data={"item_id": item_id, "blocked": blocker.reason},
         )
 
     # -- the read (FR-001) -------------------------------------------------

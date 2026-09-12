@@ -9,6 +9,7 @@ visible until someone types one.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from tests.conftest import seed_item
@@ -180,9 +181,20 @@ def test_the_deliberately_absent_controls_are_absent(web, conn):
     ):
         assert web.post(path).status == 404, path
 
+    # What the page offers to *act on*: every link and form target, and every action label.
+    # Not the prose. Since issue #63 a failed item's page states what blocks it now, in the
+    # gate's own words, and those words are advice like "run `robot-army onboard demo
+    # --reapprove`" — naming the terminal command is how a terminal-only control is meant
+    # to be pointed at, and a substring search over the whole page could not tell the two
+    # apart.
     rendered = web.get(f"/item/{item_id}").text
-    for absent in ("onboard", "purge", "remove worktree", "max_concurrent"):
-        assert absent not in rendered.lower(), absent
+    controls = re.findall(r'(?:href|action)="([^"]*)"', rendered) + re.findall(
+        r'class="action[^"]*">([^<]*)<', rendered
+    )
+    assert controls, "the page offered no controls at all, so this proves nothing"
+    for absent in ("onboard", "purge", "remove worktree", "worktree/remove", "max_concurrent"):
+        for control in controls:
+            assert absent not in control.lower(), (absent, control)
 
 
 def test_a_body_larger_than_the_cap_is_refused_rather_than_read():

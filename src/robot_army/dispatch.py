@@ -329,6 +329,7 @@ def check_gates(
     config: Config,
     repo: RepoConfig,
     trust_file: Path | None = None,
+    raise_anomalies: bool = True,
 ) -> None:
     """Raise ``DispatchBlocked`` unless onboarding, location, trust, and fingerprint pass.
 
@@ -343,6 +344,13 @@ def check_gates(
     by the caller, and every existing precondition of the same kind is already here. Three
     local reads, no fetch, and it runs before anything is created — so a failure creates
     nothing anywhere, which is the entire point (FR-029, SC-004).
+
+    ``raise_anomalies=False`` is for a caller that only *asks* (issue #63): ``show`` runs
+    these checks to say what blocks a failed item now, and the web item page renders
+    ``show`` on every request. The verdict and its wording are identical either way; what
+    is withheld is the anomaly a moved or replaced clone raises. That report belongs to
+    dispatch and ``retry``, which still raise it, and an inspection that wrote to the
+    database each time somebody looked would be a read with side effects.
     """
     record = db.get_repo(conn, repo.key)
     if record is None:
@@ -351,7 +359,12 @@ def check_gates(
         )
 
     _check_recorded_location(
-        conn, boundaries=boundaries, config=config, repo=repo, record=record
+        conn,
+        boundaries=boundaries,
+        config=config,
+        repo=repo,
+        record=record,
+        raise_anomalies=raise_anomalies,
     )
 
     trusted, explanation = is_trusted(repo.path, trust_file=trust_file)
@@ -386,6 +399,7 @@ def _check_recorded_location(
     config: Config,
     repo: RepoConfig,
     record: Repo,
+    raise_anomalies: bool = True,
 ) -> None:
     """The fourth precondition (contracts/onboarding.md). Raises, or returns silently.
 
@@ -420,6 +434,7 @@ def _check_recorded_location(
         _raise_location_anomaly(
             conn,
             repo.key,
+            record_anomaly=raise_anomalies,
             kind="clone_path_missing",
             detail={"recorded_path": record.clone_path},
             message=(
@@ -460,6 +475,7 @@ def _check_recorded_location(
         _raise_location_anomaly(
             conn,
             repo.key,
+            record_anomaly=raise_anomalies,
             kind="clone_origin_changed",
             detail={
                 "recorded_path": record.clone_path,
@@ -482,6 +498,7 @@ def _raise_location_anomaly(
     kind: str,
     detail: dict[str, Any],
     message: str,
+    record_anomaly: bool = True,
 ) -> None:
     """Raise an anomaly **and** ``DispatchBlocked``, in that order.
 
@@ -489,15 +506,19 @@ def _raise_location_anomaly(
     under an approval*, not that a precondition was never met. An un-trusted clone is a
     setup step the author has not done yet; a clone that moved is a fact about the world
     that the author probably does not know, and an anomaly is how this system says so.
+
+    ``record_anomaly=False`` raises the same refusal without the row; see ``check_gates``
+    for the one caller that asks for it and why.
     """
-    with db.transaction(conn):
-        db.raise_anomaly(
-            conn,
-            kind=kind,
-            entity_type="repo",
-            entity_id=repo_key,
-            detail=detail,
-        )
+    if record_anomaly:
+        with db.transaction(conn):
+            db.raise_anomaly(
+                conn,
+                kind=kind,
+                entity_type="repo",
+                entity_id=repo_key,
+                detail=detail,
+            )
     raise DispatchBlocked(message)
 
 

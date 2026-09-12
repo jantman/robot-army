@@ -1806,8 +1806,11 @@ def item_view(
                         tag("dd", _pull_requests_cell(item)),
                         tag("dt", "failure"),
                         tag("dd", item["failure_reason"] or "—"),
+                        # What blocks it *now*, in the sentence ``show`` prints — not the
+                        # stored reason, which is history and sits under "failure" above
+                        # (issue #63).
                         tag("dt", "blocked"),
-                        tag("dd", item["blocked_reason"] or "—"),
+                        tag("dd", payload["current_blocker"]["summary"] or "—"),
                         # A retained worktree or branch, with the guard that kept it. The
                         # question this answers is asked long after the fact — "why is this
                         # 499 MB still here?" — so it belongs beside the path, not in a log.

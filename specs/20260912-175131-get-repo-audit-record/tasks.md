@@ -14,8 +14,8 @@ None. No dependency, module, table or config key is added.
 
 ## Phase 2: Foundational (blocks US2)
 
-- [ ] T001 Give `TransportError` in `src/robot_army/boundaries/__init__.py` an `__init__(self, message: str, *, status: int | None = None)` that stores `self.status`, with a docstring line saying why (research R4: a caller that records a failure needs the HTTP status without parsing the message; `None` means no response arrived).
-- [ ] T002 In `GitHubReader._request` in `src/robot_army/boundaries/github.py`, pass `status=response.status_code` to the `TransportError` raised for an HTTP failure (the `>= 400 and != 304` branch). Leave the exhausted-retries raise without it.
+- [X] T001 Give `TransportError` in `src/robot_army/boundaries/__init__.py` an `__init__(self, message: str, *, status: int | None = None)` that stores `self.status`, with a docstring line saying why (research R4: a caller that records a failure needs the HTTP status without parsing the message; `None` means no response arrived).
+- [X] T002 In `GitHubReader._request` in `src/robot_army/boundaries/github.py`, pass `status=response.status_code` to the `TransportError` raised for an HTTP failure (the `>= 400 and != 304` branch). Leave the exhausted-retries raise without it.
 
 ## Phase 3: User Story 1 — every onboarding lookup is in the log (P1) 🎯 MVP
 
@@ -23,9 +23,9 @@ None. No dependency, module, table or config key is added.
 
 **Independent Test**: onboard one unowned repository and one missing one through a real `GitHubReader`; `read_log`'s lines matching `github.*"/repos/` number 2.
 
-- [ ] T003 [US1] In `GitHubReader.get_repo` in `src/robot_army/boundaries/github.py`, build `path = f"/repos/{self._repo_path(repo_key)}"` once, send it, and after the response write `self._audit.record("github.get_repo", outcome="ok", entity_type="repo", entity_id=repo_key, detail={"method": "GET", "path": path, "status": response.status_code, "exists": response.status_code != 404})`. Extend the docstring: why the record exists (issue #64: SC-009 is verified from the log, and the poll exemption does not cover this read) and that it is path only.
-- [ ] T004 [P] [US1] Tests in `tests/unit/test_github_boundary.py`: 200 writes one `ok` record with method, path, status 200, `exists: true`, entity `repo:jantman/demo`; 404 writes one `ok` record with status 404 and `exists: false`; 503-then-200 writes one `github.get_repo` and one `github.retry`; no record contains the bearer token, a `?` or `https://`. Read the records back from `audit.path.parent` / the `layout.log_dir` via `robot_army.audit.read_records`.
-- [ ] T005 [P] [US1] Test in `tests/integration/test_onboard.py`: with `make_boundaries(audit, reader=GitHubReader(config, audit, client=<MockTransport client>, sleep=...))` answering 200 (owner `someoneelse`) and 404 (`jantman/typoed-nmae`), two refused `onboard` attempts, then `operations.read_log(ctx, since="10m")`: exactly 2 lines match `re.search(r'github.*"/repos/', line)`, each naming its own path, and each is followed by that attempt's `repo.onboard` record.
+- [X] T003 [US1] In `GitHubReader.get_repo` in `src/robot_army/boundaries/github.py`, build `path = f"/repos/{self._repo_path(repo_key)}"` once, send it, and after the response write `self._audit.record("github.get_repo", outcome="ok", entity_type="repo", entity_id=repo_key, detail={"method": "GET", "path": path, "status": response.status_code, "exists": response.status_code != 404})`. Extend the docstring: why the record exists (issue #64: SC-009 is verified from the log, and the poll exemption does not cover this read) and that it is path only.
+- [X] T004 [P] [US1] Tests in `tests/unit/test_github_boundary.py`: 200 writes one `ok` record with method, path, status 200, `exists: true`, entity `repo:jantman/demo`; 404 writes one `ok` record with status 404 and `exists: false`; 503-then-200 writes one `github.get_repo` and one `github.retry`; no record contains the bearer token, a `?` or `https://`. Read the records back from `audit.path.parent` / the `layout.log_dir` via `robot_army.audit.read_records`.
+- [X] T005 [P] [US1] Test in `tests/integration/test_onboard.py`: with `make_boundaries(audit, reader=GitHubReader(config, audit, client=<MockTransport client>, sleep=...))` answering 200 (owner `someoneelse`) and 404 (`jantman/typoed-nmae`), two refused `onboard` attempts, then `operations.read_log(ctx, since="10m")`: exactly 2 lines match `re.search(r'github.*"/repos/', line)`, each naming its own path, and each is followed by that attempt's `repo.onboard` record.
 
 **Checkpoint**: the quickstart's check counts one per attempt that reached GitHub.
 
@@ -35,14 +35,14 @@ None. No dependency, module, table or config key is added.
 
 **Independent Test**: a 401 for the lookup gives one `error` record with status 401, and `onboard` still refuses with `source_unreachable`.
 
-- [ ] T006 [US2] In `get_repo` in `src/robot_army/boundaries/github.py`, wrap the `_request` call in `except TransportError as exc:`, record `github.get_repo` with `outcome="error"` and detail `method`, `path`, `status: exc.status`, `error_type: type(exc).__name__`, `error: str(exc)[:400]`, then bare `raise`. Comment on why it is recorded here, not only in `_request` (research R3: failures would otherwise be missing from the count, and `github.request` prints no path).
-- [ ] T007 [P] [US2] Tests in `tests/unit/test_github_boundary.py`: 401 → one `error` record with status 401, and the same `TransportError` (with `.status == 401`) propagates; connection error on every attempt (`httpx.ConnectError` from the handler) → one `error` record with `status: None` after `max_retries + 1` `github.retry` records; 503 on every attempt → one `error` record with status 503.
-- [ ] T008 [P] [US2] Test in `tests/integration/test_onboard.py`: the real reader answering 401 → `onboard` exits `EXIT_PRECONDITION` with `source_unreachable` on its `repo.onboard` record, and one `github.get_repo` record with outcome `error` and status 401 precedes it.
+- [X] T006 [US2] In `get_repo` in `src/robot_army/boundaries/github.py`, wrap the `_request` call in `except TransportError as exc:`, record `github.get_repo` with `outcome="error"` and detail `method`, `path`, `status: exc.status`, `error_type: type(exc).__name__`, `error: str(exc)[:400]`, then bare `raise`. Comment on why it is recorded here, not only in `_request` (research R3: failures would otherwise be missing from the count, and `github.request` prints no path).
+- [X] T007 [P] [US2] Tests in `tests/unit/test_github_boundary.py`: 401 → one `error` record with status 401, and the same `TransportError` (with `.status == 401`) propagates; connection error on every attempt (`httpx.ConnectError` from the handler) → one `error` record with `status: None` after `max_retries + 1` `github.retry` records; 503 on every attempt → one `error` record with status 503.
+- [X] T008 [P] [US2] Test in `tests/integration/test_onboard.py`: the real reader answering 401 → `onboard` exits `EXIT_PRECONDITION` with `source_unreachable` on its `repo.onboard` record, and one `github.get_repo` record with outcome `error` and status 401 precedes it.
 
 ## Phase 5: Polish
 
-- [ ] T009 [P] Add "The issue #64 record" section to `docs/guide/audit-log.md` (the action, its fields, `ok` for 404, `error` on failure, path only, and the quickstart's check), and add a sentence to the "deliberately not logged" successful-GETs row saying the exemption covers reads inside a poll and that onboarding's lookup is recorded.
-- [ ] T010 Run `uv run pytest` (whole suite) and `uv run ruff check` if configured; fix anything red.
+- [X] T009 [P] Add "The issue #64 record" section to `docs/guide/audit-log.md` (the action, its fields, `ok` for 404, `error` on failure, path only, and the quickstart's check), and add a sentence to the "deliberately not logged" successful-GETs row saying the exemption covers reads inside a poll and that onboarding's lookup is recorded.
+- [X] T010 Run `uv run pytest` (whole suite) and `uv run ruff check` if configured; fix anything red.
 
 ## Dependencies
 

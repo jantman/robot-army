@@ -27,5 +27,6 @@ payload):
 | `reason` | `str \| None` | Set when `status` is `blocked`. |
 | `error` | `str \| None` | Set when `status` is `unknown`. |
 | `differs_from_recorded` | `bool` | `status` is `blocked`, a `blocked_reason` is stored, and the two are different. |
+| `summary` | `str \| None` | The sentence both surfaces print (contracts/show-output.md), computed once so the terminal and the web page cannot word one verdict two ways. `None` only for a non-failed item with nothing stored. |
 
 `result.data["item"]["blocked_reason"]` keeps its stored value and meaning.

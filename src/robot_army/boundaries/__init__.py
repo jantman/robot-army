@@ -433,7 +433,17 @@ class BoundaryError(Exception):
 
 
 class TransportError(BoundaryError):
-    """A network call failed. Never converted into an empty result."""
+    """A network call failed. Never converted into an empty result.
+
+    ``status`` is the HTTP status when a response arrived and was a failure, and ``None``
+    when none did — a connection that never completed, or a raise site with no response to
+    speak of. It exists so a caller that records the failure under its own action (issue
+    #64's ``github.get_repo``) can say what GitHub answered without parsing the message.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 # -- protocols --------------------------------------------------------------

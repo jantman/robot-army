@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import subprocess
 from pathlib import Path
 
+import httpx
 import pytest
 from tests.conftest import (
     FakeIssueReader,
@@ -30,6 +32,7 @@ from tests.conftest import (
 )
 
 from robot_army import db, operations, poll, repos
+from robot_army.boundaries.github import GitHubReader
 from robot_army.config import parse
 from robot_army.effects import EffectLevel
 from robot_army.operations import EXIT_CHECK_FAILED, EXIT_OK, EXIT_PRECONDITION
@@ -843,6 +846,100 @@ def test_reapprove_shows_the_diff_against_the_blank_approval(
 
 
 # -- what may be onboarded at all (User Story 6, T063, T064) ----------------
+
+
+def github_reader(config, audit, answers: dict[str, httpx.Response]) -> GitHubReader:
+    """A real ``GitHubReader`` over a mock transport, answering by request path.
+
+    The fake reader the rest of this file uses has no audit log, so it cannot show what the
+    real lookup records — which is the whole subject of issue #64.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return answers[request.url.path]
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.com",
+        headers={"Authorization": "Bearer x"},
+    )
+    return GitHubReader(config, audit, client=client, sleep=lambda _: None)
+
+
+def test_the_quickstart_counts_one_lookup_per_onboarding_attempt(
+    conn, audit, layout, tmp_path, repo_root
+):
+    """005 quickstart scenario 9, run as written: `log | grep -c 'github.*"/repos/'`.
+
+    Before issue #64 the lookup wrote nothing and this printed 0 whatever onboarding did —
+    a check that could not fail, and so could not pass. Each attempt's lookup must be in the
+    log, under its own path, before the ``repo.onboard`` result it produced.
+    """
+    config = build_config(repo_root, layout, tmp_path)
+    reader = github_reader(
+        config,
+        audit,
+        {
+            "/repos/someoneelse/theirs": httpx.Response(
+                200,
+                json={
+                    "name": "theirs",
+                    "full_name": "someoneelse/theirs",
+                    "owner": {"login": "someoneelse"},
+                    "default_branch": "main",
+                },
+            ),
+            "/repos/jantman/typoed-nmae": httpx.Response(404, json={"message": "Not Found"}),
+        },
+    )
+    ctx = context(config, conn, audit, make_boundaries(audit, reader=reader))
+
+    for key in ("someoneelse/theirs", "jantman/typoed-nmae"):
+        result, _ = refusal(ctx, key, tmp_path)
+        assert result.code == EXIT_PRECONDITION
+
+    lines = operations.read_log(ctx, since="10m").lines
+    matching = [line for line in lines if re.search(r'github.*"/repos/', line)]
+    assert len(matching) == 2
+    assert any('"/repos/someoneelse/theirs"' in line for line in matching)
+    assert any('"/repos/jantman/typoed-nmae"' in line for line in matching)
+
+    sequence = [
+        (r["action"], r.get("entity_id"))
+        for r in audit_records(layout)
+        if r["action"] in ("github.get_repo", "repo.onboard")
+    ]
+    assert sequence == [
+        ("github.get_repo", "someoneelse/theirs"),
+        ("repo.onboard", "someoneelse/theirs"),
+        ("github.get_repo", "jantman/typoed-nmae"),
+        ("repo.onboard", "jantman/typoed-nmae"),
+    ]
+
+
+def test_a_failed_lookup_is_recorded_and_onboarding_still_refuses_as_unreachable(
+    conn, audit, layout, tmp_path, repo_root
+):
+    config = build_config(repo_root, layout, tmp_path)
+    reader = github_reader(
+        config,
+        audit,
+        {"/repos/jantman/demo": httpx.Response(401, json={"message": "Bad credentials"})},
+    )
+    ctx = context(config, conn, audit, make_boundaries(audit, reader=reader))
+
+    result, text = refusal(ctx, "jantman/demo", tmp_path)
+
+    assert result.code == EXIT_PRECONDITION
+    assert "could not ask" in text
+    relevant = [
+        r for r in audit_records(layout) if r["action"] in ("github.get_repo", "repo.onboard")
+    ]
+    assert [r["action"] for r in relevant] == ["github.get_repo", "repo.onboard"]
+    lookup, onboard = relevant
+    assert lookup["outcome"] == "error"
+    assert lookup["detail"]["status"] == 401
+    assert onboard["detail"]["cause"] == "source_unreachable"
 
 
 def reader_with(**kwargs):

@@ -77,9 +77,11 @@ Take the scenario 2 card's issue through dispatch to close.
 **Expected**: the card is in `In Progress` exactly while the session runs, and in `Done` once the
 issue closes, with an outcome comment.
 
-Then, with a second card mid-dispatch, abandon its work item. **Expected**: the card returns to the
-list it came from with a comment naming the reason — it does not sit in `In Progress` claiming to be
-busy (FR-029).
+Then, with a second card mid-dispatch, `cancel` its work item and then `abandon` it. `abandon` alone
+refuses an `active` item and says to cancel first: it stops nothing, so abandoning under a running
+worker would leave that process unaccounted for (issue #76). **Expected**: after the `abandon`, the
+card returns to the list it came from with a comment naming the reason — it does not sit in
+`In Progress` claiming to be busy (FR-029).
 
 Finally, move a card out of `In Progress` by hand and then close its issue. **Expected**: the card is
 **not** moved; a comment records what would have been done (FR-030).

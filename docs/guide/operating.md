@@ -399,6 +399,11 @@ uv run robot-army cancel <id>     # stop that session's process tree and no othe
 uv run robot-army abandon <id>    # give up; the worktree is left alone
 ```
 
+**`abandon` refuses an item that is still `active`, and says to `cancel` first.** It stops
+nothing, so abandoning under a running worker would leave that process unaccounted for.
+`cancel` stops the session and leaves the item `interrupted`, which `abandon` accepts — as
+it does `ready`, `awaiting_review` and `failed`.
+
 **For a failed item, `show`'s `blocked` line is checked now, and `failure` is history.**
 `failure` is the sentence recorded when the item failed, and it never changes. `blocked` is
 the verdict of the checks `retry` makes before it re-reads the issue, run when the item is

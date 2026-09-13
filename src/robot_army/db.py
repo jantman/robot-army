@@ -1026,6 +1026,58 @@ def resolve_anomaly(conn: sqlite3.Connection, anomaly_id: int) -> bool:
     return bool(cursor.rowcount)
 
 
+def open_anomaly(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    entity_type: str | None,
+    entity_id: str | None,
+    dry_run: bool = False,
+) -> Anomaly | None:
+    """The one open row ``idx_anomalies_open`` allows for this identity, or ``None``.
+
+    Matched exactly as the index matches — ``COALESCE`` on the entity columns, ``dry_run``
+    included — so "is there an open row?" and "would ``raise_anomaly`` be absorbed?" are the
+    same question rather than two that usually agree. It exists for the one kind whose text
+    has to follow its condition instead of recording its first sighting (issue #73).
+    """
+    row = conn.execute(
+        """
+        SELECT * FROM anomalies
+        WHERE kind = ? AND COALESCE(entity_type, '') = ? AND COALESCE(entity_id, '') = ?
+          AND dry_run = ? AND acknowledged_at IS NULL AND resolved_at IS NULL
+        """,
+        (kind, entity_type or "", entity_id or "", int(dry_run)),
+    ).fetchone()
+    return from_row(Anomaly, row) if row else None
+
+
+def restate_anomaly(conn: sqlite3.Connection, anomaly_id: int, detail: dict[str, Any]) -> bool:
+    """Replace an open anomaly's detail and move its detection time to now (issue #73).
+
+    ``True`` if this call changed anything. For almost every kind the first detail is
+    evidence — a pid, a path, a card — and ``raise_anomaly``'s ``INSERT OR IGNORE`` is right
+    to keep it. A board precondition is different: its detail is the *reason* ingestion is
+    off, and a reason that has since changed is not evidence but a wrong answer on the
+    surface an operator reads first.
+
+    ``detected_at`` moves because every surface orders and windows by it. Left alone, a
+    reason that changed a minute ago would be missing from ``anomalies --since 10m`` and
+    sorted beneath older rows. The time it replaces is the caller's to record in the log.
+
+    The open guard is in the statement rather than trusted to the caller's lookup, so a row
+    acknowledged in between is left exactly as the maintainer saw it.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE anomalies SET detail = ?, detected_at = ?
+        WHERE id = ? AND acknowledged_at IS NULL AND resolved_at IS NULL
+        """,
+        (json.dumps(detail, default=str), utcnow(), anomaly_id),
+    )
+    return bool(cursor.rowcount)
+
+
 # -- poll state -------------------------------------------------------------
 
 

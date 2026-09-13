@@ -657,3 +657,128 @@ def test_an_acknowledged_registry_anomaly_is_not_re_resolved(conn, audit):
     )
     assert stored.acknowledged_at is not None
     assert stored.resolved_at is None
+
+
+# -- issue #73: finding the open row, and restating it -------------------------
+#
+# Not resolution, but its neighbour: the one kind whose text must follow its condition
+# while the row stays open. The guard in ``restate_anomaly`` is the part worth testing
+# hardest, because a restated *acknowledged* row would rewrite what a maintainer read and
+# dismissed, and nothing downstream would notice.
+
+OLD_STAMP = "2026-08-31T14:02:11Z"
+PUBLIC = {"failed_checks": [{"name": "board is private", "detail": "board is public"}]}
+RENAMED = {"failed_checks": [{"name": "tag exists", "detail": "'AI-task' is not a label"}]}
+
+
+def raise_board(conn, *, entity_id: str = "board-1", dry_run: bool = False) -> int:
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn,
+            kind="board_precondition",
+            entity_type="board",
+            entity_id=entity_id,
+            detail=PUBLIC,
+            dry_run=dry_run,
+        )
+        conn.execute("UPDATE anomalies SET detected_at = ?", (OLD_STAMP,))
+    return conn.execute("SELECT max(id) FROM anomalies").fetchone()[0]
+
+
+def open_board(conn, *, entity_id: str = "board-1", dry_run: bool = False):
+    return db.open_anomaly(
+        conn,
+        kind="board_precondition",
+        entity_type="board",
+        entity_id=entity_id,
+        dry_run=dry_run,
+    )
+
+
+def stored_row(conn, anomaly_id: int):
+    return next(
+        a for a in db.list_anomalies(conn, unacknowledged_only=False, include_simulated=True)
+        if a.id == anomaly_id
+    )
+
+
+def close(conn, anomaly_id: int, how: str) -> None:
+    with db.transaction(conn):
+        if how == "acknowledged":
+            db.acknowledge_anomaly(conn, anomaly_id)
+        else:
+            db.resolve_anomaly(conn, anomaly_id)
+
+
+def test_open_anomaly_finds_the_open_row(conn):
+    anomaly_id = raise_board(conn)
+    found = open_board(conn)
+    assert found is not None
+    assert found.id == anomaly_id
+
+
+@pytest.mark.parametrize("how", ["acknowledged", "resolved"])
+def test_open_anomaly_does_not_return_a_closed_row(conn, how):
+    close(conn, raise_board(conn), how)
+    assert open_board(conn) is None
+
+
+def test_open_anomaly_keeps_rehearsals_and_other_entities_apart(conn):
+    """The same identity the index uses, ``dry_run`` included: a rehearsal's row is not the
+    real run's, and another board's row is not this board's."""
+    raise_board(conn, dry_run=True)
+    raise_board(conn, entity_id="board-2")
+
+    assert open_board(conn) is None
+    assert open_board(conn, dry_run=True) is not None
+    assert open_board(conn, entity_id="board-2").entity_id == "board-2"
+
+
+def test_open_anomaly_matches_a_missing_entity_the_way_the_index_does(conn):
+    """``COALESCE`` in the lookup, as in the index: two NULLs never compare equal in SQL, so
+    a bare ``entity_id = ?`` would never find a kind that names no entity."""
+    with db.transaction(conn):
+        db.raise_anomaly(conn, kind="registry_unobservable", detail={})
+    assert (
+        db.open_anomaly(conn, kind="registry_unobservable", entity_type=None, entity_id=None)
+        is not None
+    )
+
+
+def test_restate_anomaly_rewrites_the_text_and_the_detection_time_in_place(conn):
+    anomaly_id = raise_board(conn)
+    with db.transaction(conn):
+        assert db.restate_anomaly(conn, anomaly_id, RENAMED) is True
+
+    stored = stored_row(conn, anomaly_id)
+    assert stored.detail_obj == RENAMED
+    assert stored.detected_at != OLD_STAMP
+    assert stored.acknowledged_at is None
+    assert len(db.list_anomalies(conn)) == 1
+
+
+@pytest.mark.parametrize("how", ["acknowledged", "resolved"])
+def test_restate_anomaly_never_touches_a_closed_row(conn, how):
+    """The lost race: the row was closed between the caller's lookup and this update. What
+    the maintainer read and dismissed must still be what the row says."""
+    anomaly_id = raise_board(conn)
+    close(conn, anomaly_id, how)
+    with db.transaction(conn):
+        assert db.restate_anomaly(conn, anomaly_id, RENAMED) is False
+
+    stored = stored_row(conn, anomaly_id)
+    assert stored.detail_obj == PUBLIC
+    assert stored.detected_at == OLD_STAMP
+
+
+def test_an_interrupted_restatement_leaves_the_previous_text(conn):
+    """Killed after the update and before the commit: the old text survives, and the next
+    board check restates it. Text and time are one write, never half of it."""
+    anomaly_id = raise_board(conn)
+    with pytest.raises(RuntimeError), db.transaction(conn):
+        db.restate_anomaly(conn, anomaly_id, RENAMED)
+        raise RuntimeError("killed mid-restatement")
+
+    stored = stored_row(conn, anomaly_id)
+    assert stored.detail_obj == PUBLIC
+    assert stored.detected_at == OLD_STAMP

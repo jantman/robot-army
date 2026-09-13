@@ -17,6 +17,7 @@ The order of operations in here is the milestone's whole invariant (§11, R6, R7
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from robot_army.audit import AuditLog
     from robot_army.config import Config, RepoConfig, TrelloConfig
     from robot_army.effects import Boundaries
+    from robot_army.models import Anomaly
 
 
 # -- board preconditions (R10, R11, contracts/config.md) --------------------
@@ -278,6 +280,13 @@ def board_disabled_anomaly(
 
     The anomaly is what makes this visible without reading the log; the log line is what
     makes it reconstructable. Neither alone is enough at 2am.
+
+    One open anomaly per board, and it always names the checks failing *now* (issue #73).
+    ``raise_anomaly`` alone would keep the first failure's text for as long as nobody
+    acknowledged it: a board made public, made private again, and then stripped of its
+    label went on being reported as public, while the live cause was absorbed by the
+    open-row index. So an open row whose text differs is restated in place, and an
+    unchanged failure writes nothing — a board public for a week is still one row.
     """
     trello: TrelloConfig | None = config.trello
     board_id = trello.board_id if trello else "(unconfigured)"
@@ -291,19 +300,73 @@ def board_disabled_anomaly(
         ),
     }
     with db.transaction(conn):
-        db.raise_anomaly(
-            conn,
-            kind="board_precondition",
-            entity_type="board",
-            entity_id=board_id,
-            detail=detail,
+        existing = db.open_anomaly(
+            conn, kind="board_precondition", entity_type="board", entity_id=board_id
         )
+        if existing is None:
+            db.raise_anomaly(
+                conn,
+                kind="board_precondition",
+                entity_type="board",
+                entity_id=board_id,
+                detail=detail,
+            )
+        else:
+            _restate_board_anomaly(conn, audit, existing, detail)
     audit.record(
         "trello.board.check",
         outcome="error",
         entity_type="board",
         entity_id=board_id,
         detail=detail,
+    )
+
+
+def _restate_board_anomaly(
+    conn: sqlite3.Connection, audit: AuditLog, anomaly: Anomaly, detail: dict[str, Any]
+) -> None:
+    """Bring an open board anomaly's text up to date, or leave it alone if it already is.
+
+    Compared as JSON, the way it is stored, so a detail that round-trips unchanged is
+    "unchanged" and writes nothing. The whole detail is compared rather than the failed
+    check names alone: a "tag exists" failure quotes the labels the board *does* have, and
+    that quotation going stale is the same defect in a smaller font.
+
+    The record is what keeps this reconstructable. The update overwrites the database's only
+    copy of the previous reason, so the log carries it, along with when it was detected. A
+    stored detail that cannot be read is restated too — the new text is right whatever the
+    old one said — and the record says it was unreadable rather than inventing it.
+    """
+    try:
+        previous = anomaly.detail_obj
+    except (ValueError, TypeError):
+        previous = None
+    readable = isinstance(previous, dict) and isinstance(previous.get("failed_checks"), list)
+    if readable and previous == json.loads(json.dumps(detail, default=str)):
+        return
+    if not db.restate_anomaly(conn, anomaly.id, detail):
+        # Closed between the lookup and the update. It stays as the maintainer saw it, and
+        # the next failure raises a fresh row, so there is nothing here to record.
+        return
+    record: dict[str, Any] = {
+        "kind": anomaly.kind,
+        "anomaly_entity_id": anomaly.entity_id,
+        "previous_failed_checks": previous["failed_checks"] if readable else None,
+        "failed_checks": detail["failed_checks"],
+        "previous_detected_at": anomaly.detected_at,
+        "reason": (
+            "the board is failing different checks from the ones this anomaly named, so its "
+            "text was replaced rather than left describing a failure that may no longer hold"
+        ),
+    }
+    if not readable:
+        record["previous_detail_unreadable"] = True
+    audit.record(
+        "anomaly.restated",
+        outcome="ok",
+        entity_type="anomaly",
+        entity_id=str(anomaly.id),
+        detail=record,
     )
 
 

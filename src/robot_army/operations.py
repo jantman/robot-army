@@ -64,6 +64,7 @@ from robot_army.states import (
     SessionState,
     WorkItemState,
     dumps_labels,
+    is_legal_work_item_transition,
     transition_session,
     transition_work_item,
 )
@@ -3580,6 +3581,18 @@ def abandon(
     item = db.get_work_item(ctx.conn, item_id)
     if item is None:
         return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
+    # Asked here, in words, rather than left to the gate: the gate's refusal is written for
+    # a programmer and names no remedy, and the commonest refusal — an `active` item — has
+    # one (issue #76). The gate still decides anything that races this check. `abandoned`
+    # passes because the gate treats re-asserting a held state as a no-op, not a refusal.
+    if item.state is not WorkItemState.ABANDONED and not is_legal_work_item_transition(
+        item.state, WorkItemState.ABANDONED
+    ):
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=[_abandon_refusal(item_id, item.state)],
+            data={"item_id": item_id, "state": str(item.state)},
+        )
     session = db.latest_session_for_item(ctx.conn, item_id)
     settled = "left"
     try:
@@ -3648,6 +3661,35 @@ def abandon(
             "the first pass that can read the registry"
         )
     return Result(lines=lines, data={"item_id": item_id})
+
+
+def _abandon_refusal(item_id: int, state: WorkItemState) -> str:
+    """Why ``abandon`` refused, in the shape ``resume``'s refusal already has (issue #76).
+
+    The accepted states are read from the transition table, not restated, so this sentence
+    cannot drift from the rule it explains.
+    """
+    accepted = [
+        f"'{s}'" for s in WorkItemState
+        if is_legal_work_item_transition(s, WorkItemState.ABANDONED)
+    ]
+    required = f"{', '.join(accepted[:-1])} or {accepted[-1]}"
+    sentence = f"work item {item_id} is {state}; abandon requires {required}"
+    if state is WorkItemState.ACTIVE:
+        # `abandon` stops nothing, so abandoning under a running worker would leave the
+        # process unaccounted for (#28, #69). `cancel` is the verb that stops it.
+        return (
+            f"{sentence}. Its session is still running: `robot-army cancel {item_id}` stops "
+            "it and leaves the item interrupted, then abandon it"
+        )
+    if state is WorkItemState.DISPATCHING:
+        return (
+            f"{sentence}. Its session is being started: once it is active, "
+            f"`robot-army cancel {item_id}` stops it, then abandon it"
+        )
+    if state is WorkItemState.DONE:
+        return f"{sentence}. It is already finished; there is nothing to abandon"
+    return sentence
 
 
 @dataclass(frozen=True, slots=True)

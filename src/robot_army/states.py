@@ -114,11 +114,16 @@ class IllegalTransition(Exception):
     This is a programming error, not an operational condition, and it is deliberately
     loud: silently ignoring it would let state drift, which is exactly what the single
     gate exists to prevent.
+
+    The message is plain state names, not ``repr``s, because it does reach people: the web
+    renders it when a concurrent command wins a race (``web/server.py``), and any verb
+    without a pre-check of its own prints it. ``<WorkItemState.ACTIVE: 'active'>`` is the
+    enum talking to itself (issue #76).
     """
 
     def __init__(self, entity: str, entity_id: object, source: str, target: str) -> None:
         super().__init__(
-            f"illegal {entity} transition for {entity_id}: {source!r} -> {target!r}"
+            f"illegal {entity} transition for {entity_id}: '{source}' -> '{target}'"
         )
         self.entity = entity
         self.entity_id = entity_id

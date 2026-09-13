@@ -621,6 +621,12 @@ class CardSourceWriter(Protocol):
 
 @runtime_checkable
 class VersionControl(Protocol):
+    #: Whether this boundary only pretends. Constant for the object's life, and the source
+    #: the removal verbs word their reports from (issue #70): the boundary is what stamps
+    #: ``[simulated]`` on its own audit records, so it is the one component that cannot be
+    #: wrong about it — asking the effect level instead would be a second source of truth.
+    simulated: bool
+
     def fetch(self, clone_path: str, remote: str, ref: str) -> None: ...
 
     def add_worktree(

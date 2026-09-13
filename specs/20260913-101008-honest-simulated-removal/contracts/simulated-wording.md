@@ -43,4 +43,4 @@ Summary when any decision is simulated:
 For `cancel`, `worktree remove`, `worktree prune` and `cleanup` under simulated boundaries: the
 output contains "simulated", and every line containing any of `removed worktree`, `deleted branch`,
 `worktree removed`, `branch removed`, `nothing to prune`, `had their worktree removed`,
-`stopped session` also contains "simulated".
+`stopped session` also contains "simulated" or "would".

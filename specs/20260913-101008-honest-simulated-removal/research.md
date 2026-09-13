@@ -78,12 +78,15 @@ surviving directory would be wrong either way.
 `cleanup` at `plan`, asserting that the output mentions "simulated", and that every line containing
 one of the real path's completed phrasings — `removed worktree`, `deleted branch`, `worktree
 removed`, `branch removed`, `nothing to prune`, `had their worktree removed`, `stopped session` —
-also contains "simulated".
+also contains "simulated" or "would".
 
 **Rationale**: the phrase list is exactly the real path's vocabulary, so a verb reworded later
 fails the test the moment it copies the real sentence into the simulated branch. "Also contains
 simulated in the same line" is what lets `cancel`'s "stopped session … via a simulated stop" pass
-without rewording it (FR-010).
+without rewording it (FR-010). "Or would" was found necessary in implementation: cleanup's
+summary, "would have their worktree removed", is honest and contains `worktree removed`. A
+companion test asserts the real path's output does match the list, so the rule cannot go
+vacuous if the real wording drifts.
 
 ## R6 — Machine-readable output and the record
 

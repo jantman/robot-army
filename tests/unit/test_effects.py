@@ -24,7 +24,7 @@ from robot_army.boundaries import (
     SessionHost,
     VersionControl,
 )
-from robot_army.effects import REAL_AT, Boundaries, EffectLevel, is_real, wire
+from robot_army.effects import REAL_AT, Boundaries, EffectLevel, is_real, real_from, wire
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "robot_army"
 
@@ -180,6 +180,30 @@ def test_every_wired_implementation_satisfies_its_protocol(level, board_config, 
     assert isinstance(wired.hook_runner, HookRunner)
     assert isinstance(wired.session_host, SessionHost)
     assert isinstance(wired.display, Display)
+
+
+def test_real_from_names_the_lowest_level_each_boundary_is_real_at():
+    """Issue #70's message says "version control is real from `local`"; that word comes
+    from here, so it has to be the table's answer and not merely one level it is real at."""
+    ladder = list(EffectLevel)
+    assert real_from("version_control") is EffectLevel.LOCAL
+    for boundary, levels in REAL_AT.items():
+        first = real_from(boundary)
+        assert first in levels, boundary
+        assert not any(level in levels for level in ladder[: ladder.index(first)]), boundary
+
+
+def test_real_from_refuses_an_unknown_boundary():
+    with pytest.raises(KeyError, match="unknown boundary"):
+        real_from("teleporter")
+
+
+@pytest.mark.parametrize("level", list(EffectLevel), ids=lambda level: level.value)
+def test_the_wired_version_control_says_whether_it_is_simulated(level, config, audit, conn):
+    """The removal verbs word their reports from this flag (issue #70), so it must agree
+    with the table that selected the implementation, at every level."""
+    wired = wire(level, config, audit, conn)
+    assert wired.version_control.simulated is (not is_real("version_control", level))
 
 
 def test_real_and_simulated_pairs_have_the_same_method_surface(board_config, audit, conn):

@@ -757,6 +757,8 @@ SUBJECT_VERDICTS: dict[str, str] = {
     # Mixed subjects, deliberately left as-if — see the docstrings on each.
     "rev_parse": "mixed: a real ref for one caller, the pretended branch for another",
     "list_worktrees": "mixed: the real clone, but used to judge a worktree never created",
+    # Not a question about git at all: the boundary's answer about itself (issue #70).
+    "simulated": "about the boundary itself; True by construction, and callers word from it",
 }
 
 

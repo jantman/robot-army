@@ -86,6 +86,9 @@ class DeletingVcs(SimulatedVersionControl):
     dirty tree.
     """
 
+    #: It really removes, so it reports as real would (issue #70).
+    simulated = False
+
     def __init__(self, audit: Any, *, refuse: set[str] | None = None) -> None:
         super().__init__(audit)
         self.refuse = refuse or set()

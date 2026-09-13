@@ -487,12 +487,20 @@ def test_below_local_the_removals_are_simulated_and_nothing_leaves_the_disk(
     conn, audit, config, published, boundaries
 ):
     """Cleanup follows worktree *creation*'s effect rule, not the board's: simulated at
-    ``plan``, real at ``local`` and above. The simulated ``VersionControl`` logs both calls
-    with their full arguments, so the intent is fully recorded either way."""
-    _, path, branch = finished_item(conn, audit, config, boundaries, issue_number=13)
+    ``plan``, real at ``local`` and above. The simulated ``VersionControl`` logs the intended
+    removal with its full arguments, so the intent is fully recorded either way.
+
+    This worktree is real — prepared at ``local`` — so at ``plan`` it survives the simulated
+    removal, and since issue #70 that is ``retained`` rather than ``done``: ``done`` is never
+    revisited, and it would be recorded over a directory nothing removed. The branch half is
+    not attempted, as ``worktree remove`` has not attempted it since #59."""
+    item_id, path, branch = finished_item(conn, audit, config, boundaries, issue_number=13)
 
     decisions = sweep(conn, audit, config, wired_at(EffectLevel.PLAN, config, audit, conn))
-    assert [d.state for d in decisions] == [cleanup.DONE]
+    assert [d.state for d in decisions] == [cleanup.RETAINED]
+    assert decisions[0].reason == cleanup.SURVIVED_REASON
+    assert decisions[0].simulated is True
+    assert db.get_work_item(conn, item_id).cleanup_state == cleanup.RETAINED
     assert path.exists(), "at plan level nothing may leave the disk"
     assert branch in branches(published)
 

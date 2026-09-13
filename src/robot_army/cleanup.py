@@ -34,7 +34,8 @@ not determine" and satisfies no test (R11).
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from robot_army import db, repos
@@ -43,6 +44,7 @@ from robot_army.states import SessionState, WorkItemState
 
 if TYPE_CHECKING:
     from robot_army.audit import AuditLog
+    from robot_army.boundaries import VersionControl
     from robot_army.config import Config
     from robot_army.effects import Boundaries
 
@@ -53,6 +55,14 @@ DONE = "done"
 BRANCH_RETAINED = "branch_retained"
 RETAINED = "retained"
 SKIPPED = "skipped"
+
+#: Why a removal the boundary reported is not believed: the directory is still there. One
+#: sentence for both guards that apply it — this module's and ``worktree remove``'s — so they
+#: cannot word the same refusal two ways (issues #59, #70).
+SURVIVED_REASON = (
+    "the worktree was reported removed, but the directory is still there — "
+    "version control is simulated here, so nothing on disk was touched"
+)
 
 #: The session states that mean a worker may still be running in the worktree.
 #:
@@ -75,6 +85,9 @@ class Decision:
     reason: str
     worktree_removed: bool = False
     branch_deleted: bool = False
+    #: Reached through a version-control boundary that only pretends, so ``worktree_removed``
+    #: means "would have been" (issue #70). ``False`` for a decision that never reached it.
+    simulated: bool = False
 
     @property
     def reclaimed(self) -> bool:
@@ -189,22 +202,54 @@ def clean_item(
         detail={"decision": "eligible", "worktree": item.worktree_path, "branch": item.branch},
         dry_run=item.dry_run,
     )
+    vcs = boundaries.version_control
+    # Stamped once, here, rather than at each outcome below: every one of them was reached
+    # through this boundary, so whether it pretended is one fact about all of them.
+    return replace(
+        _remove_then_decide(conn, audit=audit, config=config, vcs=vcs, item=item, clone=repo.path),
+        simulated=bool(vcs.simulated),
+    )
 
+
+def _remove_then_decide(
+    conn: sqlite3.Connection,
+    *,
+    audit: AuditLog,
+    config: Config,
+    vcs: VersionControl,
+    item: WorkItem,
+    clone: Path,
+) -> Decision:
+    """Both guards, in order, for an item already found eligible and a clone to act in.
+
+    Split from :func:`clean_item` only so that its caller can say, once, whether the
+    boundary these decisions came through was simulated (issue #70).
+    """
     # -- guard 1: the worktree, taking git's own refusal as the answer -----
     #
     # ``force`` is never passed. ``git worktree remove`` refuses on a dirty tree —
     # *including merely untracked files* — and ``boundaries/git.py`` already returns that
     # refusal as a RemovalResult rather than raising, because it is an expected and useful
     # outcome. FR-025 is satisfied by keeping that exactly as it is.
-    vcs = boundaries.version_control
     try:
         removal = vcs.remove_worktree(
-            item.worktree_path or "", force=False, clone_path=str(repo.path)
+            item.worktree_path or "", force=False, clone_path=str(clone)
         )
     except Exception as exc:  # noqa: BLE001 - any boundary failure keeps what it was unsure about
         return _retain(conn, audit, item, RETAINED, f"worktree removal failed: {exc}")
 
-    reclaimed_note = "worktree removed"
+    # Below ``local`` the boundary answers "removed" and touches nothing. The decision that
+    # leads to is the real path's, which is the point of simulating; the *words* are not,
+    # because this reason is what ``cleanup`` prints and what ``show`` displays for as long
+    # as the row exists (issue #70).
+    reclaimed_note = "worktree removal simulated" if vcs.simulated else "worktree removed"
+    if removal.worktree_removed and item.worktree_path and Path(item.worktree_path).is_dir():
+        # Reported removed, still on disk: the simulated boundary over a real directory a
+        # ``local`` round left behind. ``done`` is a decision the automatic pass never
+        # revisits, and it would be recorded over a directory nothing removed — so it is
+        # retained, the branch is not attempted, and ``cleanup <id>`` at a real level
+        # reconsiders it. The rule, and the sentence, ``worktree remove`` has had since #59.
+        return _retain(conn, audit, item, RETAINED, SURVIVED_REASON)
     if not removal.worktree_removed:
         if vcs.worktree_exists(item.worktree_path or ""):
             # The branch half is deliberately not attempted. A dirty worktree means the
@@ -232,7 +277,7 @@ def clean_item(
             worktree_removed=True,
         )
 
-    if not _branch_exists(vcs, clone=str(repo.path), branch=item.branch):
+    if not _branch_exists(vcs, clone=str(clone), branch=item.branch):
         # Nothing to retain and nothing to delete. This is the second kill point in the
         # interruption table — killed after both removals, before the row was written — and
         # the re-attempt is supposed to resolve it to ``done`` rather than leaving it
@@ -249,9 +294,9 @@ def clean_item(
 
     # Resolved from the clone (issue #150): a branch is judged contained against the branch
     # it was actually cut from, and in a ``master`` repository that is not ``main``.
-    base = repos.base_ref(config, item.repo_key, vcs, repo.path).ref
+    base = repos.base_ref(config, item.repo_key, vcs, clone).ref
     contained, evidence = _branch_is_contained(
-        vcs, clone=str(repo.path), branch=item.branch, base=base
+        vcs, clone=str(clone), branch=item.branch, base=base
     )
     if not contained:
         return _retain(
@@ -271,7 +316,7 @@ def clean_item(
     # checked out and the robot branch has no upstream, so ``-d`` refuses every time and
     # ``robot-army/*`` branches accumulate in every repository forever.
     try:
-        deleted = vcs.delete_branch(str(repo.path), item.branch, force=True)
+        deleted = vcs.delete_branch(str(clone), item.branch, force=True)
     except Exception as exc:  # noqa: BLE001 - a delete that failed is a branch that stayed
         return _retain(
             conn, audit, item, BRANCH_RETAINED,
@@ -282,8 +327,9 @@ def clean_item(
             conn, audit, item, BRANCH_RETAINED,
             f"{reclaimed_note}; git declined to delete the branch", worktree_removed=True,
         )
+    branch_note = "branch deletion simulated" if vcs.simulated else "branch removed"
     return _record(
-        conn, audit, item, DONE, f"{reclaimed_note}; branch removed — {evidence}",
+        conn, audit, item, DONE, f"{reclaimed_note}; {branch_note} — {evidence}",
         worktree_removed=True, branch_deleted=True,
     )
 

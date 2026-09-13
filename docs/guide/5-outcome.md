@@ -319,6 +319,17 @@ only pretended to create, wrong for a real one a `local` round left behind. So a
 there after a reported removal is a refusal (`directory_survived`), the branch is left alone,
 and an item keeps its recorded path.
 
+**Below `local` the removal verbs say "would"** (issue #70). Where there is no directory to
+survive — a simulated item whose worktree was itself only simulated — the removal is the
+simulation's and is accepted, but `worktree remove` reports it as `would remove worktree …` and
+`would delete branch …`, then a line naming the effect level and the level version control is
+real from. It used to print `removed worktree` over a disk it had not touched. `worktree prune`
+says each repository was not checked, rather than "nothing to prune". `cleanup` records the reason
+as `worktree removal simulated; branch deletion simulated — …`, counts items that *would* have
+their worktree removed, and applies the survivor rule too: a real directory still on disk after a
+reported removal is `retained`, never `done`, so `cleanup <id>` at a real level still reaches it.
+`--json` and the `worktree.remove` record carry `simulated`.
+
 With `on_issue_close = true`, an item whose issue has closed has its worktree and branch
 reclaimed on the next reconciliation pass — provided nothing in either exists only there.
 `robot-army cleanup` runs the identical function under the identical guards whether or not

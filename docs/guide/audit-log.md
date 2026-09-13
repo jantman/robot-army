@@ -723,6 +723,20 @@ were.
 | `reconcile.list_worktrees` | As before, now also from the orphan sweep | Once per distinct failure per pass. The orphan is still reported, with `listing_failed: true` — a clone that cannot be listed must not hide disk |
 | `reconcile.pass` | **Changed** | Gains `orphan_worktrees`: `orphan_worktree` anomalies newly raised this pass |
 
+## The issue #70 records
+
+No new action. Below `local` the removal verbs reported a simulated removal in the past tense,
+while the `git.*` records beneath them said `[simulated]`. The record that names the work item now
+says it as well.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `worktree.remove` | Any form, once git is reached | The outcome gains `simulated`: `true` when the version-control boundary only pretends. `worktree_removed: true, simulated: true` reads "the boundary reported the removal, and it was simulated". A refusal before git carries no `simulated`, because there was no git step to describe |
+| `cleanup.retained` | Cleanup, when a reported removal leaves the directory on disk | `state: retained`, and `reason` is the same sentence `worktree remove`'s `directory_survived` refusal uses. No `git.delete_branch` follows. This used to be recorded `done` |
+
+An item's `cleanup_reason` reads `worktree removal simulated; …` when the decision came through a
+simulated boundary.
+
 ## The `example_config.write` action
 
 `robot-army example-config` renders the commented example configuration. It records **only

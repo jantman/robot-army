@@ -416,8 +416,13 @@ def test_every_refusal_writes_an_audit_outcome_naming_its_cause(
     ("key", "origin", "expect_named"),
     [
         # A different owner — the ZoneMinder/zoneminder shape, and the most common of the
-        # five real cases: the author's clone is of upstream, not of their fork.
-        ("jantman/zoneminder", "git@github.com:ZoneMinder/zoneminder.git", "zoneminder/zoneminder"),
+        # five real cases: the author's clone is of upstream, not of their fork. Named as
+        # the remote spells it, not folded (issue #65): the comparison is case-insensitive,
+        # the message is for matching by eye against the remote and the GitHub page.
+        ("jantman/zoneminder", "git@github.com:ZoneMinder/zoneminder.git", "ZoneMinder/zoneminder"),
+        # The same, where the casing is most of what a reader has to match.
+        ("jantman/Trello-Desktop-MCP", "git@github.com:agrath/Trello-Desktop-MCP.git",
+         "agrath/Trello-Desktop-MCP"),
         # A different name under the same owner.
         ("jantman/troposphere", "git@github.com:jantman/troposphere-fork.git", "jantman/troposphere-fork"),
         # An unrelated upstream entirely.

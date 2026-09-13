@@ -74,7 +74,7 @@ repository. They are refused, by name:
 
 ```
 $ robot-army onboard jantman/zoneminder
-refusing: the clone at /home/jantman/GIT/zoneminder is zoneminder/zoneminder,
+refusing: the clone at /home/jantman/GIT/zoneminder is ZoneMinder/zoneminder,
           not jantman/zoneminder.
           The path was derived from [paths] repo_root. If your clone of
           jantman/zoneminder is elsewhere, set it explicitly:

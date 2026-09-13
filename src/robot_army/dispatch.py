@@ -485,7 +485,8 @@ def _check_recorded_location(
             },
             message=(
                 f"the clone at {record.clone_path} is "
-                f"{found or 'no longer readable as a repository'}, not {repo.key}. "
+                f"{found.display() if found else 'no longer readable as a repository'}, "
+                f"not {repo.key}. "
                 f"Run `robot-army onboard {repo.key} --reapprove` once it is right"
             ),
         )

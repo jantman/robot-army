@@ -56,7 +56,7 @@ from robot_army.audit import AuditLog
 from robot_army.boundaries import BoundaryError, HostHandle, TransportError
 from robot_army.cardstates import NEVER_PARKED, CardState
 from robot_army.config import Config
-from robot_army.effects import Boundaries, EffectLevel, wire
+from robot_army.effects import Boundaries, EffectLevel, real_from, wire
 from robot_army.migrations import SCHEMA_VERSION
 from robot_army.models import ANOMALY_KINDS, WorkItem
 from robot_army.states import (
@@ -2433,6 +2433,7 @@ def cleanup_now(ctx: Context, item_id: int | None = None) -> Result:
                 "reason": d.reason,
                 "worktree_removed": d.worktree_removed,
                 "branch_deleted": d.branch_deleted,
+                "simulated": d.simulated,
             }
             for d in decisions
         ],
@@ -2446,7 +2447,18 @@ def cleanup_now(ctx: Context, item_id: int | None = None) -> Result:
         result.say(f"item {decision.item_id}: {decision.state} — {decision.reason}")
     reclaimed = sum(1 for d in decisions if d.reclaimed)
     result.say()
-    result.say(f"{reclaimed} of {len(decisions)} considered item(s) had their worktree removed")
+    if any(d.simulated for d in decisions):
+        # Counting simulated removals as removals is the lie issue #70 is about, in the
+        # one line most likely to be read on its own.
+        result.say(
+            f"{reclaimed} of {len(decisions)} considered item(s) would have their "
+            "worktree removed"
+        )
+        result.say(_simulated_note(ctx))
+    else:
+        result.say(
+            f"{reclaimed} of {len(decisions)} considered item(s) had their worktree removed"
+        )
     return result
 
 
@@ -2814,6 +2826,20 @@ def worktree_remove(
         return result
 
 
+def _simulated_note(ctx: Context) -> str:
+    """The line that says why a destructive verb did nothing (issue #70).
+
+    ``cancel`` says "via a simulated stop" inside its own sentence. The removal verbs print
+    "would …" instead of the past tense and then this, once, naming the level that would make
+    it real — which is what the operator has to act on, and what "(simulated)" alone does not
+    say.
+    """
+    return (
+        f"  (simulated: effect level is `{ctx.effect_level}`; version control is real from "
+        f"`{real_from('version_control')}`, so nothing on disk was touched)"
+    )
+
+
 def _remove_checkout(
     ctx: Context,
     *,
@@ -2841,12 +2867,18 @@ def _remove_checkout(
     reported removal with the directory still present is a refusal, and the branch — the
     other half of the only record of that work — is left alone.
 
+    **The words follow the boundary** (issue #70). Where there is no directory to survive —
+    a simulated item whose worktree was itself only simulated — the removal is the
+    simulation's, and it is accepted as one; but it is reported as "would remove", with the
+    level that would make it real, and never as "removed worktree" / "deleted branch".
+
     Returns whether the worktree is gone. Fills ``outcome`` (the open ``worktree.remove``
     action) and ``result`` in place; a surviving branch is a ``WARNING`` and a non-zero
     exit, but still ``True``, because the directory is gone and the caller's record of it
     should go with it.
     """
     vcs = ctx.boundaries.version_control
+    simulated = bool(vcs.simulated)
     removal = vcs.remove_worktree(path, force=force, clone_path=clone)
     removed = removal.worktree_removed
     refused_by = None if removed else "git"
@@ -2854,10 +2886,7 @@ def _remove_checkout(
     if removed and Path(path).is_dir():
         removed = False
         refused_by = "directory_survived"
-        reason = (
-            "the worktree was reported removed, but the directory is still there — "
-            "version control is simulated here, so nothing on disk was touched"
-        )
+        reason = cleanup_mod.SURVIVED_REASON
 
     branch_deleted = False
     if removed and branch:
@@ -2865,11 +2894,13 @@ def _remove_checkout(
 
     outcome["worktree_removed"] = removed
     outcome["branch_deleted"] = branch_deleted
+    outcome["simulated"] = simulated
     result.data.update(
         {
             "worktree_removed": removed,
             "branch_deleted": branch_deleted,
             "refused_reason": reason,
+            "simulated": simulated,
         }
     )
 
@@ -2890,15 +2921,22 @@ def _remove_checkout(
             result.say("  Nothing was removed, and the branch was left alone.")
         return False
 
-    result.say(f"removed worktree {path}")
+    removed_as, deleted_as = (
+        ("would remove worktree", "would delete branch")
+        if simulated
+        else ("removed worktree", "deleted branch")
+    )
+    result.say(f"{removed_as} {path}")
     if branch and branch_deleted:
-        result.say(f"deleted branch {branch}")
+        result.say(f"{deleted_as} {branch}")
     elif branch:
         result.code = EXIT_FAILED
         result.say(
             f"WARNING: removed the worktree but branch {branch} still exists. "
             "Removal is two steps; skipping the second accumulates robot-army/* branches"
         )
+    if simulated:
+        result.say(_simulated_note(ctx))
     return True
 
 
@@ -3112,18 +3150,30 @@ def _live_worker_inside(
 
 
 def worktree_prune(ctx: Context) -> Result:
-    """Clear git's record of worktrees whose directories are gone."""
+    """Clear git's record of worktrees whose directories are gone.
+
+    Below ``local`` the boundary prunes nothing and answers ``""``, which the real path
+    prints as "nothing to prune" — a claim about git's records that nothing checked (issue
+    #70). The simulated case says it did not look.
+    """
     result = Result()
+    vcs = ctx.boundaries.version_control
+    simulated = bool(vcs.simulated)
     outputs: dict[str, str] = {}
     for key, repo in sorted(repos_mod.resolved_all(ctx.conn, ctx.config).items()):
         try:
-            outputs[key] = ctx.boundaries.version_control.prune_worktrees(str(repo.path))
+            outputs[key] = vcs.prune_worktrees(str(repo.path))
         except BoundaryError as exc:
             outputs[key] = f"error: {exc}"
             result.code = EXIT_FAILED
-    result.data = {"pruned": outputs}
+    result.data = {"pruned": outputs, "simulated": simulated}
     for key, output in outputs.items():
-        result.say(f"{key}: {output.strip() or 'nothing to prune'}")
+        if simulated:
+            result.say(f"{key}: not checked — pruning is simulated")
+        else:
+            result.say(f"{key}: {output.strip() or 'nothing to prune'}")
+    if simulated and outputs:
+        result.say(_simulated_note(ctx))
     return result
 
 

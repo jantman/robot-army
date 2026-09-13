@@ -53,6 +53,7 @@ suite by name.
 | `remote_branch_head` | a branch never pushed | as-if forty zeroes | the same answer `rev_parse` gives, so cleanup reaches the real path's decision |
 | `rev_parse` | **mixed** — see below | as-if forty zeroes | one caller asks about a real ref, another about the pretended branch |
 | `list_worktrees` | **mixed** — see below | as-if `[]` | asked about the real clone, but used to judge a worktree the simulation did not create |
+| `simulated` | the boundary itself | `True` | not a question about git: the removal verbs word their reports from it, so a simulated removal says "would" rather than "removed" (issue #70) |
 
 ## The two mixed subjects
 

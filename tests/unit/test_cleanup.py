@@ -43,7 +43,11 @@ class FakeVcs:
         remote_head: str | None = None,
         remote_raises: bool = False,
         head_is_local: bool = True,
+        simulated: bool = False,
     ) -> None:
+        #: Whether cleanup should word its decisions as simulated (issue #70). Real by
+        #: default, like every other answer this fake gives unless told otherwise.
+        self.simulated = simulated
         self.removal = removal or RemovalResult(worktree_removed=True, branch_deleted=False)
         self.worktree_present = worktree_present
         self.ahead = ahead or {}
@@ -558,3 +562,75 @@ def test_every_consideration_is_recorded_even_when_nothing_is_removed(
     ]
     actions = [r["action"] for r in records]
     assert "cleanup.considered" in actions
+
+
+# -- issue #70: a simulated removal is worded as one, and a survivor is not "done" ----
+
+
+def test_a_directory_still_on_disk_after_a_reported_removal_is_retained(
+    conn, config, audit, tmp_path
+):
+    """The simulated boundary answers "removed" over a real directory a ``local`` round left
+    behind. Believed, it was recorded ``done`` — a decision the automatic pass never
+    revisits — over a directory nothing removed. ``worktree remove`` has refused this since
+    #59; cleanup now does too, with the same sentence, and leaves the branch alone."""
+    item = finished(conn)
+    survivor = tmp_path / "issue-42"
+    survivor.mkdir()
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, item.id, worktree_path=str(survivor))
+    item = db.get_work_item(conn, item.id)
+    vcs = FakeVcs(ahead={"origin/main": 0}, simulated=True)
+
+    decision = run(conn, audit, config, vcs, item)
+
+    assert decision.state == cleanup.RETAINED
+    assert decision.reason == cleanup.SURVIVED_REASON
+    assert decision.worktree_removed is False and decision.branch_deleted is False
+    assert vcs.deletes == [] and vcs.fetches == [], "the branch half was not attempted"
+    assert db.get_work_item(conn, item.id).cleanup_state == cleanup.RETAINED
+    assert survivor.is_dir()
+
+
+def test_a_simulated_removal_says_so_in_the_recorded_reason(conn, config, audit):
+    """The reason is what ``cleanup`` prints and what ``show`` displays for as long as the
+    row exists, so fixing only the printed summary would leave the claim in the record."""
+    item = finished(conn)
+
+    decision = run(conn, audit, config, FakeVcs(ahead={"origin/main": 0}, simulated=True), item)
+
+    assert decision.state == cleanup.DONE
+    assert decision.simulated is True
+    assert decision.reason.startswith("worktree removal simulated; branch deletion simulated — ")
+    assert "worktree removed" not in decision.reason
+    assert "branch removed" not in decision.reason
+    assert db.get_work_item(conn, item.id).cleanup_reason == decision.reason
+
+
+def test_a_simulated_removal_with_no_branch_on_record(conn, config, audit):
+    item = finished(conn)
+    with db.transaction(conn):
+        db.update_work_item_columns(conn, item.id, branch=None)
+    item = db.get_work_item(conn, item.id)
+
+    decision = run(conn, audit, config, FakeVcs(simulated=True), item)
+
+    assert decision.reason == "worktree removal simulated; no branch on record"
+    assert decision.simulated is True
+
+
+def test_a_decision_that_never_reached_the_boundary_is_not_simulated(conn, config, audit):
+    """Ineligible is a judgement about the row, made before git is asked anything."""
+    item_id = seed_item(conn, state=str(WorkItemState.ACTIVE))
+
+    decision = run(conn, audit, config, FakeVcs(simulated=True), db.get_work_item(conn, item_id))
+
+    assert decision.state == "ineligible"
+    assert decision.simulated is False
+
+
+def test_a_real_removal_keeps_its_wording(conn, config, audit):
+    decision = run(conn, audit, config, FakeVcs(ahead={"origin/main": 0}), finished(conn))
+
+    assert decision.simulated is False
+    assert decision.reason.startswith("worktree removed; branch removed — ")

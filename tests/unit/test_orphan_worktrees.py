@@ -30,6 +30,10 @@ DIRTY = "fatal: '...' contains modified or untracked files, use --force to delet
 class ListingVcs(SimulatedVersionControl):
     """Git that lists the worktrees it is given (path → branch) and really removes them."""
 
+    #: It really removes, so it reports as real would (issue #70); only the audit records
+    #: are borrowed from the simulated class.
+    simulated = False
+
     def __init__(
         self,
         audit: Any,

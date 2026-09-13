@@ -161,6 +161,21 @@ def is_real(boundary: str, level: EffectLevel) -> bool:
         raise KeyError(f"unknown boundary {boundary!r}") from None
 
 
+def real_from(boundary: str) -> EffectLevel:
+    """The lowest effect level at which ``boundary`` is real.
+
+    For a message that tells the operator which level would make a simulated action happen
+    (issue #70). Derived from :data:`REAL_AT` for the reason :func:`consequences` is: a
+    hand-written ``local`` in a sentence drifts the day the table changes. ``EffectLevel`` is
+    declared in ascending order, which the ladder already relies on.
+    """
+    try:
+        real = REAL_AT[boundary]
+    except KeyError:
+        raise KeyError(f"unknown boundary {boundary!r}") from None
+    return next(level for level in EffectLevel if level in real)
+
+
 @dataclass(frozen=True, slots=True)
 class Boundaries:
     """The wired set. Everything downstream takes this and never asks about the level."""

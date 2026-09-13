@@ -36,6 +36,8 @@ QUICK_TIMEOUT = 30.0
 
 
 class GitVersionControl:
+    simulated = False
+
     def __init__(self, audit: AuditLog, *, binary: str = "git") -> None:
         self._audit = audit
         self._git = binary
@@ -529,7 +531,15 @@ class SimulatedVersionControl:
     An as-if answer is still not free invention: it must be the answer that leads the caller
     to the decision the real path would reach. ``commits_ahead`` returning ``0`` rather than
     ``None`` is that rule in one line.
+
+    **Callers are told, through** ``simulated``. Reaching the real path's decision is not the
+    same as reaching its *report*: ``worktree remove`` believed this class's "removed" and
+    printed "removed worktree" and "deleted branch" at ``plan``, over nothing (issue #70). The
+    as-if answers stay as they are, so the decisions still match; the verbs that describe
+    destruction read this flag and say "would".
     """
+
+    simulated = True
 
     def __init__(self, audit: AuditLog) -> None:
         self._audit = audit

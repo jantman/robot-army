@@ -457,6 +457,17 @@ delay recovery once they had.
 stored; the scope *names* appear in `doctor` output when a check fails, which is the whole
 point of that check, and scope names are not secrets.
 
+## The issue #73 action
+
+A `board_precondition` anomaly is the one kind whose text follows its condition while it is
+open: when the board fails for a different reason, the open row is rewritten rather than left
+naming a failure that may have been fixed. That overwrites the database's only copy of the
+previous reason, so the log keeps it.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `anomaly.restated` | **New** — when a failed board check differs from what the open `board_precondition` anomaly says. Written in the same transaction as the rewrite | The anomaly id (as the entity), `kind`, `anomaly_entity_id` (the board), `previous_failed_checks`, `failed_checks`, `previous_detected_at` — when the overwritten reason had been detected — and `reason`. A stored detail that could not be read gives `previous_failed_checks: null` and `previous_detail_unreadable: true` rather than a guess. An **unchanged** failure writes none: the `trello.board.check` error record already says the board failed again, and nothing about the anomaly changed |
+
 ## The issue #138 actions
 
 A worker never ends itself, so the successful path used to terminate in an `orphan_session`

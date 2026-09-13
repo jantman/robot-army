@@ -105,6 +105,25 @@ counts them (`{"tagged": 140, "ignored": 100, ...}`) and logs one line when a ca
 and one when it is released — not one per card per cycle, which on a full icebox would be the
 majority of the log saying nothing happened.
 
+**Whether a card is parked is the running daemon's call**, not the listing's. The daemon is
+what excludes the card, so both listings judge it against the ignore list the daemon
+publishes on its heartbeat, and fall back to their own configuration only when no daemon is
+running. That matters because `robot-army web` reads its configuration once: before #74, a web
+interface started before `Icebox` was ignored counted every card in it under *awaiting
+clarification*, offered it a rescan, and never said it was parked. On `/cards` a parked card
+is left out of that count and has no rescan button — moving it out of the column is what
+brings it back.
+
+When the two lists differ, both listings say so in one line:
+
+```
+IGNORE LIST MISMATCH: the running daemon is parking cards in ['Icebox'], and this process is
+configured for []. …
+```
+
+It does not say which process is behind, because either can be — a web interface started
+before the edit, or a daemon nobody restarted after it. Restart whichever that is.
+
 ## When a card doesn't say enough
 
 A card that names no onboarded repository, or names two, is **held** rather than guessed at.

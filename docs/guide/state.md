@@ -49,6 +49,22 @@ A heartbeat written before this field existed has no key for it, and readers tre
 *not published* rather than as a cap of zero — as they do any value that could not have come
 from the loader.
 
+**It also carries the ignore list the daemon is parking cards from**, as `ignore_lists`, for
+the same reason: the daemon is what parks cards, and a web interface reads its own
+configuration exactly once. One started before a column was added to `ignore_lists` used to
+count every card in that column as awaiting clarification (#74). Both `robot-army cards` and
+`/cards` now judge "parked" against this list whenever the daemon holding the lock wrote the
+heartbeat, and against their own configuration otherwise — see
+[parking a card](2-intake.md#parking-a-card).
+
+```bash
+jq .ignore_lists ~/.local/state/robot-army/heartbeat.json
+```
+
+`null` means the daemon has no `[trello]` section, and — like a heartbeat from before the
+field existed, or a value that is not a list of column names — it is *not published*, so the
+reader keeps its own list. `[]` is believed: that daemon is parking nothing.
+
 **The lock file survives but the lock does not.** `flock` is released by the kernel when
 the holding process dies by any means, including `SIGKILL`. A stale `daemon.lock` file
 containing an old PID is normal and harmless.

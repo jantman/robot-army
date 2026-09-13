@@ -4701,25 +4701,86 @@ def _purge_one_worktree(ctx: Context, item: WorkItem, result: Result) -> bool:
 # -- cards (milestone 003) --------------------------------------------------
 
 
-def card_is_parked(card: Any, config: Any) -> bool:
+def card_is_parked(card: Any, ignore_lists: tuple[str, ...]) -> bool:
     """Is this tracked card sitting in a column the author excluded? (data-model.md)
 
     **Derived, never stored.** A stored flag would go stale the moment ``ignore_lists`` is
     edited, and FR-011 requires that edit to take effect on the next poll with nothing else
     done — a derivation cannot be stale.
 
-    Compared by *name*, against the configuration, so this makes **no board request** and
-    keeps working with the board unreachable. That constraint is why the poll stores the
-    column's name beside its id.
+    Compared by *name*, so this makes **no board request** and keeps working with the board
+    unreachable. That constraint is why the poll stores the column's name beside its id.
+
+    ``ignore_lists`` is the list **in force** from :func:`resolve_ignore_lists` — the running
+    daemon's when it can be learned — and not this process's configuration. It was the
+    configuration until issue #74: a web interface started before ``Icebox`` was ignored
+    judged every card in it against an empty list, and counted them as outstanding.
 
     A ``NULL`` name — a row tracked before milestone 006's migration and not yet re-polled
     — is not parked, which is milestone 003's behaviour and the safe direction for a value
     we do not have.
     """
-    trello = getattr(config, "trello", None)
-    if trello is None or not trello.ignore_lists or card.state in NEVER_PARKED:
+    if not ignore_lists or card.state in NEVER_PARKED:
         return False
-    return bool(card.current_list_name) and card.current_list_name in trello.ignore_lists
+    return bool(card.current_list_name) and card.current_list_name in ignore_lists
+
+
+#: ``cards``' default for ``published_ignore_lists``: take a reading of the daemon here. A
+#: sentinel rather than ``None`` because ``None`` is a real answer the web passes on from its
+#: own reading — "no daemon published one" — and must not trigger a second reading.
+OWN_READING: Any = object()
+
+
+def resolve_ignore_lists(
+    config: Any, published: tuple[str, ...] | None
+) -> tuple[tuple[str, ...], tuple[str, ...] | None]:
+    """The ignore list to judge parkedness by, and this process's own when it differs.
+
+    Issue #74's counterpart to ``capacity._resolve_cap``, and one place for the same reason:
+    so that "is there a disagreement?" is decided once. Compared as **sets** — the order of
+    ``ignore_lists`` means nothing and ``config`` already treats a repeated name as one.
+    """
+    own = tuple(config.trello.ignore_lists) if config.trello is not None else ()
+    if published is None or set(published) == set(own):
+        return own, None
+    return published, own
+
+
+def ignore_list_disagreement(
+    in_force: tuple[str, ...], configured: tuple[str, ...] | None
+) -> str | None:
+    """The one sentence about a stale ignore list, or ``None`` (issue #74).
+
+    Built once and printed verbatim by both listings, like the session cap's. Like that
+    one, it does not say which process is behind: an interface started before the edit and
+    a daemon nobody restarted after it are both reachable, and their remedies are opposite.
+    """
+    if configured is None:
+        return None
+    return (
+        f"IGNORE LIST MISMATCH: the running daemon is parking cards in {sorted(in_force)!r}, "
+        f"and this process is configured for {sorted(configured)!r}. Parked cards are shown "
+        "as the daemon decides, because the daemon is what parks them. One of the two has "
+        "been running since before the configuration changed — restart that one and they "
+        "will agree."
+    )
+
+
+def _published_ignore_lists(ctx: Context) -> tuple[str, ...] | None:
+    """The running daemon's ignore list, for a process that is not the daemon (issue #74).
+
+    Takes its own reading, as ``_enforced_cap`` does and for the same callers: short-lived
+    commands with nothing to share. ``web.handle`` passes its single request-wide reading to
+    ``cards`` instead, so the two halves of one page cannot answer differently.
+    """
+    report = health.check(
+        ctx.layout.heartbeat_path, max_age_seconds=ctx.config.health.max_age_seconds
+    )
+    return health.published_ignore_lists(
+        report,
+        running=daemon_mod.is_locked(ctx.layout.lock_path),
+        lock_holder=daemon_mod.read_lock_holder(ctx.layout.lock_path),
+    )
 
 
 def _card_dict(
@@ -4801,8 +4862,11 @@ def _card_for_item(ctx: Context, item: Any) -> dict[str, Any] | None:
         return None
     # Always False in practice — a card attached to a work item is `linked`, and a linked
     # card is never parked (FR-013). Derived rather than hardcoded so the two paths cannot
-    # disagree if that ever stops being true.
-    return _card_dict(card, work_item_id=item.id, parked=card_is_parked(card, ctx.config))
+    # disagree if that ever stops being true — which is also why it is judged against the
+    # same list in force as the listing, from its own reading rather than one threaded
+    # through ``show`` for a value that cannot change the output.
+    in_force, _ = resolve_ignore_lists(ctx.config, _published_ignore_lists(ctx))
+    return _card_dict(card, work_item_id=item.id, parked=card_is_parked(card, in_force))
 
 
 def cards(
@@ -4810,8 +4874,13 @@ def cards(
     *,
     state: str | None = None,
     include_simulated: bool = False,
+    published_ignore_lists: Any = OWN_READING,
 ) -> Result:
     """List tracked cards with their state, resolved issue, and reason (FR-026, FR-047).
+
+    Parkedness is judged against the running daemon's ignore list when it published one
+    (issue #74). ``published_ignore_lists`` is the web's request-wide reading of it, ``None``
+    included; left at ``OWN_READING``, as the terminal leaves it, this takes its own.
 
     Exits ``3`` when no board is configured, with a message saying so, rather than printing
     an empty table: an empty table would misrepresent "not configured" as "nothing to do",
@@ -4834,11 +4903,15 @@ def cards(
     rows = db.list_cards(ctx.conn, include_simulated=include_simulated, states=states)
     withheld = 0 if include_simulated else db.count_simulated_cards(ctx.conn, states=states)
     links = _card_work_items(ctx, rows)
+    if published_ignore_lists is OWN_READING:
+        published_ignore_lists = _published_ignore_lists(ctx)
+    in_force, configured = resolve_ignore_lists(ctx.config, published_ignore_lists)
+    disagreement = ignore_list_disagreement(in_force, configured)
     payload = [
         _card_dict(
             card,
             work_item_id=links.get(card.id),
-            parked=card_is_parked(card, ctx.config),
+            parked=card_is_parked(card, in_force),
         )
         for card in rows
     ]
@@ -4854,6 +4927,11 @@ def cards(
             # removed from ``status``'s payload and left standing in this one. The web
             # interface reads it; so does ``cards --json``.
             "withheld_simulated": withheld,
+            # Issue #74. The list every row's ``parked`` was judged against, and this
+            # process's own only when it differs — the shape ``configured_cap`` has.
+            "ignore_lists": list(in_force),
+            "configured_ignore_lists": list(configured) if configured is not None else None,
+            "ignore_list_disagreement": disagreement,
         }
     )
     if not payload:
@@ -4863,6 +4941,11 @@ def cards(
             result.say(f"no cards visible ({_withheld_note(withheld)})")
         else:
             result.say("no cards tracked yet")
+        # Here too, not only under a table: the web page renders its banner above its own
+        # empty state, and the two surfaces must not disagree about disagreeing.
+        if disagreement:
+            result.say()
+            result.say(disagreement)
         return result
 
     table_rows = [
@@ -4887,6 +4970,9 @@ def cards(
     if withheld:
         result.say()
         result.say(_withheld_note(withheld))
+    if disagreement:
+        result.say()
+        result.say(disagreement)
     return result
 
 

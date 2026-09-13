@@ -897,3 +897,73 @@ def test_a_heartbeat_with_no_pid_publishes_nothing():
 def test_the_lock_holders_trailing_newline_is_not_a_mismatch():
     """``read_lock_holder`` returns the file's line; the lock is written with a newline."""
     assert cap_of(report_with(max_concurrent_sessions=7), lock_holder=f"{HOLDER}\n") == 7
+
+
+# -- the ignore list the daemon publishes (issue #74) -----------------------
+
+
+def test_the_heartbeat_carries_the_ignore_list_the_daemon_is_parking_from(tmp_path):
+    """H1. The file alone answers "which columns is the daemon parking?"."""
+    path = tmp_path / "heartbeat.json"
+    health.write_heartbeat(
+        path, effect_level="live", activity="idle", cycles=1, ignore_lists=("Icebox",)
+    )
+    assert json.loads(path.read_text(encoding="utf-8"))["ignore_lists"] == ["Icebox"]
+
+
+def test_a_heartbeat_written_without_an_ignore_list_still_parses(tmp_path):
+    """H2. ``null``, never ``[]``: "said nothing" and "parks nothing" are different facts."""
+    path = tmp_path / "heartbeat.json"
+    health.write_heartbeat(path, effect_level="live", activity="idle", cycles=1)
+    assert json.loads(path.read_text(encoding="utf-8"))["ignore_lists"] is None
+    assert health.check(path, max_age_seconds=180).healthy is True
+
+
+def ignore_lists_of(report, *, running=True, lock_holder=str(HOLDER)):
+    """``published_ignore_lists`` with the ordinary case's arguments."""
+    return health.published_ignore_lists(report, running=running, lock_holder=lock_holder)
+
+
+def test_no_daemon_running_publishes_no_ignore_list():
+    """B1. A heartbeat left by a dead daemon does not decide what is parked."""
+    assert ignore_lists_of(report_with(ignore_lists=["Icebox"]), running=False) is None
+
+
+def test_a_running_daemons_ignore_list_is_taken_from_its_heartbeat():
+    """B2."""
+    assert ignore_lists_of(report_with(ignore_lists=["Icebox", "Later"])) == ("Icebox", "Later")
+
+
+def test_an_empty_published_ignore_list_is_believed():
+    """B3. That daemon parks nothing, which is an answer — unlike a field it never wrote."""
+    assert ignore_lists_of(report_with(ignore_lists=[])) == ()
+
+
+def test_a_stale_heartbeat_still_names_the_ignore_list_in_force(tmp_path):
+    """B4. A daemon's configuration cannot change while it runs, as for the cap."""
+    path = tmp_path / "heartbeat.json"
+    write_at(path, age_seconds=3600, ignore_lists=["Icebox"], pid=HOLDER)
+    report = health.check(path, max_age_seconds=180)
+    assert report.healthy is False, "the report really is stale"
+    assert ignore_lists_of(report) == ("Icebox",)
+
+
+def test_an_ignore_list_from_a_process_that_is_not_the_lock_holder_is_not_believed():
+    """B5. The restart window: the lock is the new daemon's, the file the old one's."""
+    report = report_with(ignore_lists=["Icebox"], pid=111)
+    assert ignore_lists_of(report, lock_holder="222") is None
+    assert ignore_lists_of(report_with(ignore_lists=["Icebox"]), lock_holder=None) is None
+
+
+@pytest.mark.parametrize(
+    "value", [None, "Icebox", [""], [1], ["Icebox", None], {"Icebox": 1}, True, 0]
+)
+def test_an_unusable_ignore_list_is_not_published_rather_than_believed(value):
+    """B6. Only a list of non-empty strings could have come from the loader; anything else
+    falls back to the reader's own configuration rather than to "nothing is parked"."""
+    assert ignore_lists_of(report_with(ignore_lists=value)) is None
+
+
+def test_a_heartbeat_with_no_ignore_list_field_publishes_nothing():
+    """B6, the older-build case: the key is simply absent."""
+    assert ignore_lists_of(report_with(effect_level="live")) is None

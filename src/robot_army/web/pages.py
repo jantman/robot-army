@@ -1464,13 +1464,24 @@ CARD_STATE_HELP: dict[str, str] = {
 }
 
 
-def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> View:
+def cards_view(
+    ctx: operations.Context,
+    *,
+    include_simulated: bool = False,
+    published_ignore_lists: Any = operations.OWN_READING,
+) -> View:
     """The card listing, mirroring ``robot-army cards`` (FR-026).
 
     Assembled from ``operations.cards`` rather than from ``db`` directly, which is
     milestone 002's FR-047 rule and the reason the two front ends cannot drift.
+
+    ``published_ignore_lists`` is the request's reading of the daemon's ignore list (issue
+    #74), handed through so the page judges parkedness by what the daemon is parking rather
+    than by what this process read at startup.
     """
-    result = operations.cards(ctx, include_simulated=include_simulated)
+    result = operations.cards(
+        ctx, include_simulated=include_simulated, published_ignore_lists=published_ignore_lists
+    )
     payload = result.data
     if not payload.get("configured"):
         return View(
@@ -1493,7 +1504,8 @@ def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
     # awaiting clarification *and* sitting in a column the author excluded. `held` is the
     # state's own word, already used in CARD_STATE_HELP above; `parked` is milestone 006's.
     # A parked card is deliberately **not** counted as outstanding: it is not waiting on
-    # the author, it is where the author put it (FR-006, FR-009).
+    # the author, it is where the author put it (FR-006, FR-009). *Which* cards are parked
+    # is the running daemon's decision, not this process's configuration (issue #74).
     held = [
         row
         for row in rows
@@ -1503,6 +1515,11 @@ def cards_view(ctx: operations.Context, *, include_simulated: bool = False) -> V
     body = join(
         [
             h(1, f"cards ({len(rows)})"),
+            # A warning rather than an error, like the session cap's: nothing on the page is
+            # wrong — it follows the daemon — but it disagrees with this process's file.
+            div(payload["ignore_list_disagreement"], class_="banner warn")
+            if payload.get("ignore_list_disagreement")
+            else Markup(""),
             p(
                 "Cards on the intake board and what became of them. A card in "
                 "needs_info is waiting for you to say which repository it is for — edit "

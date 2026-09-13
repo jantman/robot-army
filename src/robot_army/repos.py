@@ -28,7 +28,7 @@ replacing or supplementing it.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -49,14 +49,27 @@ class RepoIdentity:
     Lowercased, and free of any ``userinfo@`` component by construction — normalisation
     strips credentials before anything else, so an instance of this class can never carry
     a secret into a record, a message, or a terminal (FR-032).
+
+    ``spelled`` is ``owner/name`` as the remote wrote it, and is deliberately outside
+    equality, hashing and ``str()``: the source system treats names case-insensitively, so
+    what is compared and recorded stays folded. It exists only for :meth:`display`, because
+    a refusal's job is to let the author recognise the repository they have, and a folded
+    ``agrath/trello-desktop-mcp`` matches neither the remote, the directory, nor the GitHub
+    page (issue #65).
     """
 
     host: str
     owner: str
     name: str
+    spelled: str = field(default="", compare=False)
 
     def __str__(self) -> str:
         return f"{self.host}/{self.owner}/{self.name}"
+
+    def display(self, *, host: bool = True) -> str:
+        """For a human to read: owner and name as spelled, never for a comparison."""
+        owner_name = self.spelled or f"{self.owner}/{self.name}"
+        return f"{self.host}/{owner_name}" if host else owner_name
 
 
 def normalise_remote(url: str) -> RepoIdentity | None:
@@ -101,7 +114,9 @@ def normalise_remote(url: str) -> RepoIdentity | None:
         name = name[: -len(".git")]
     if not owner or not name:
         return None
-    return RepoIdentity(host=host.lower(), owner=owner.lower(), name=name.lower())
+    return RepoIdentity(
+        host=host.lower(), owner=owner.lower(), name=name.lower(), spelled=f"{owner}/{name}"
+    )
 
 
 def identity_for_key(repo_key: str, api_base: str) -> RepoIdentity | None:
@@ -120,7 +135,9 @@ def identity_for_key(repo_key: str, api_base: str) -> RepoIdentity | None:
         host = host[len("api.") :]
     if not host:
         return None
-    return RepoIdentity(host=host.lower(), owner=owner.lower(), name=name.lower())
+    return RepoIdentity(
+        host=host.lower(), owner=owner.lower(), name=name.lower(), spelled=f"{owner}/{name}"
+    )
 
 
 # -- location ---------------------------------------------------------------
@@ -357,9 +374,7 @@ def _describe(identity: RepoIdentity, expected: RepoIdentity) -> str:
     fastest — and the full ``host/owner/name`` when it does not, because "a different
     forge" is otherwise indistinguishable from "the same repository".
     """
-    if identity.host == expected.host:
-        return f"{identity.owner}/{identity.name}"
-    return str(identity)
+    return identity.display(host=identity.host != expected.host)
 
 
 def verify(config: Config, repo_key: str, vcs: VersionControl) -> Verification:

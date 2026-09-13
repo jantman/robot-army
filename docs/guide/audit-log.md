@@ -389,8 +389,11 @@ not know.
 
 A git remote URL may embed credentials, and milestone 005 is the first time this codebase
 reads one at all. Normalisation strips the `userinfo@` component before anything else, and
-what is recorded, compared, and printed is the normalised triple — which cannot carry a
-secret because it is three lowercase strings with no room for one. The refusal path is held
+what is recorded and compared is the normalised triple — which cannot carry a secret
+because it is three lowercase strings with no room for one. What is printed is the same
+triple with owner and name as the remote spelled them, so a refusal names
+`ZoneMinder/zoneminder` rather than a folded name nobody would recognise; it is taken from
+the same parse, after the credential is gone. The refusal path is held
 to the same rule, including the unparseable-URL refusal, which deliberately does **not** echo
 the URL back even though that is the case where doing so would feel most helpful.
 

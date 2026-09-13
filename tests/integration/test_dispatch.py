@@ -756,12 +756,16 @@ def test_a_different_repository_at_the_recorded_path_is_refused_naming_both(
     import shutil
 
     shutil.rmtree(clone)
-    make_repo(clone, origin="git@github.com:someoneelse/other.git")
+    make_repo(clone, origin="git@github.com:SomeoneElse/Other.git")
 
     with pytest.raises(dispatch.DispatchBlocked) as caught:
         gates(conn, audit, config, config.repos["demo"], trust_file(tmp_path, clone))
 
-    assert "someoneelse/other" in str(caught.value), "the identity found"
+    assert "SomeoneElse/Other" in str(caught.value), "the identity found, as spelled"
+    detail = next(
+        a.detail for a in _db.list_anomalies(conn) if a.kind == "clone_origin_changed"
+    )
+    assert "github.com/someoneelse/other" in str(detail), "but recorded normalised"
     assert "demo" in str(caught.value), "and the one approved"
     assert "clone_origin_changed" in [a.kind for a in _db.list_anomalies(conn)]
     assert not (config.worktree_root.exists() and any(config.worktree_root.iterdir()))

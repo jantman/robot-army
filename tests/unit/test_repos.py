@@ -46,6 +46,27 @@ def test_case_differences_compare_equal():
     )
 
 
+def test_the_remotes_own_spelling_is_kept_for_display_only():
+    """Issue #65. Folding is for comparison and for what is recorded; a message meant to
+    be matched by eye against the remote names the repository the way the remote does."""
+    identity = repos.normalise_remote("git@GitHub.com:agrath/Trello-Desktop-MCP.git")
+
+    assert str(identity) == "github.com/agrath/trello-desktop-mcp", "recorded folded"
+    assert identity.display() == "github.com/agrath/Trello-Desktop-MCP"
+    assert identity.display(host=False) == "agrath/Trello-Desktop-MCP"
+    assert identity == repos.normalise_remote("https://github.com/AGRATH/trello-desktop-mcp")
+    assert hash(identity) == hash(
+        repos.normalise_remote("https://github.com/agrath/trello-desktop-mcp")
+    )
+
+
+def test_the_spelling_kept_for_display_carries_no_credential():
+    identity = repos.normalise_remote("https://jantman:ghp_secretvalue@github.com/Jantman/Demo.git")
+
+    assert identity.display() == "github.com/Jantman/Demo"
+    assert "ghp_secretvalue" not in repr(identity)
+
+
 @pytest.mark.parametrize(
     "url",
     [

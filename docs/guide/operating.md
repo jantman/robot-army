@@ -374,6 +374,18 @@ Anomalies worth understanding rather than dismissing:
   with `registry_version_unknown` beside it. `robot-army doctor` shows the path being read.
   Fix the cause and the next pass retracts this and reaches the conclusions it declined —
   there is nothing to acknowledge and nothing to resume by hand.
+- **`board_precondition`** — the board failed a startup check, so board ingestion is off;
+  dispatch of issues I wrote myself is not. It names which checks failed, and **it always
+  names the ones failing now**. If the board breaks for a different reason while the
+  anomaly is still open, the same anomaly — same id — is rewritten with the new checks, and
+  its detection time moves to when the new reason was found, so it sorts to the top and
+  shows under `--since`. The same failure on every restart writes nothing. What it said
+  before is in the log as `anomaly.restated`.
+
+  This is issue #73: the board was made public, then private again, then its label was
+  renamed, and the list went on saying the board was public — while hiding the missing
+  label — until someone acknowledged the stale row. It still does not clear itself when the
+  board passes; acknowledge it once ingestion is running.
 
 ## Recovering
 

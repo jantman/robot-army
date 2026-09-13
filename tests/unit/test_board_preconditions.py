@@ -179,13 +179,238 @@ def test_a_failure_raises_an_anomaly_naming_which_check_failed(board_config, aud
     assert "dispatch" in detail["consequence"]
 
 
-def test_a_repeated_failure_does_not_accumulate_anomaly_rows(board_config, audit, conn):
+def test_a_repeated_failure_does_not_accumulate_anomaly_rows(board_config, audit, conn, layout):
     """The partial unique index on open anomalies, doing its job: a daemon restarting in a
-    loop against a public board must not produce one row per start."""
-    status = check(board_config, audit, permission_level="public")
+    loop against a public board must not produce one row per start.
+
+    Since issue #73 an open board anomaly *can* be rewritten, so "one row" is no longer the
+    whole claim: an unchanged failure must not touch that row either, neither its text nor
+    its detection time, and must leave no restatement in the log (SC-002).
+    """
+    anomaly_id = raise_for(board_config, audit, conn, permission_level="public")
+    backdate(conn, anomaly_id)
+    before = board_anomalies(conn)[0]
+
     for _ in range(5):
-        intake.board_disabled_anomaly(conn, audit, config=board_config, status=status)
+        raise_for(board_config, audit, conn, permission_level="public")
+
     assert len(db.list_anomalies(conn)) == 1
+    after = board_anomalies(conn)[0]
+    assert (after.id, after.detail, after.detected_at) == (
+        before.id,
+        before.detail,
+        before.detected_at,
+    )
+    assert restated(layout) == []
+
+
+# -- issue #73: the open anomaly names the board's current failure ------------
+#
+# Found in the issue #1 verification round: the board was made public (one anomaly, "board
+# is private"), made private again, and then its label was renamed. Ingestion stopped for
+# the new reason, and `robot-army anomalies` went on saying the board was public until the
+# old row was acknowledged. Contract: specs/20260913-090239-board-anomaly-restate/contracts/.
+
+OLD_STAMP = "2026-08-31T14:02:11Z"
+RENAMED = {"labels": {"AI-task-RENAMED": "label-renamed"}}
+
+
+def raise_for(board_config, audit, conn, **overrides) -> int:
+    status = check(board_config, audit, **overrides)
+    assert not status.ok
+    intake.board_disabled_anomaly(conn, audit, config=board_config, status=status)
+    return board_anomalies(conn)[0].id
+
+
+def board_anomalies(conn):
+    return [a for a in db.list_anomalies(conn) if a.kind == "board_precondition"]
+
+
+def failed_names(anomaly) -> list[str]:
+    return [c["name"] for c in anomaly.detail_obj["failed_checks"]]
+
+
+def restated(layout) -> list[dict]:
+    from robot_army.audit import read_records
+
+    return [
+        r for r, _ in read_records(layout.log_dir) if r and r["action"] == "anomaly.restated"
+    ]
+
+
+def backdate(conn, anomaly_id: int) -> None:
+    with db.transaction(conn):
+        conn.execute(
+            "UPDATE anomalies SET detected_at = ? WHERE id = ?", (OLD_STAMP, anomaly_id)
+        )
+
+
+def test_a_different_failure_restates_the_open_anomaly(board_config, audit, conn):
+    """C3, the issue itself: one row, the same row, naming only what is failing now."""
+    anomaly_id = raise_for(board_config, audit, conn, permission_level="public")
+    backdate(conn, anomaly_id)
+
+    raise_for(board_config, audit, conn, **RENAMED)
+
+    [anomaly] = board_anomalies(conn)
+    assert anomaly.id == anomaly_id
+    assert failed_names(anomaly) == ["tag exists"]
+    assert "AI-task-RENAMED" in anomaly.detail_obj["failed_checks"][0]["detail"]
+    assert "board is private" not in anomaly.detail
+    # The current reason was detected now, not when the board first broke.
+    assert anomaly.detected_at != OLD_STAMP
+
+
+def test_a_restatement_can_name_more_than_one_failure(board_config, audit, conn):
+    raise_for(board_config, audit, conn, permission_level="public")
+    raise_for(board_config, audit, conn, permission_level="public", **RENAMED)
+
+    [anomaly] = board_anomalies(conn)
+    assert set(failed_names(anomaly)) == {"board is private", "tag exists"}
+
+
+def test_the_same_check_with_a_different_detail_is_restated(board_config, audit, conn, layout):
+    """C4. "tag exists" quotes the labels the board does have; if that list changed, the
+    quotation is stale, which is this defect in a smaller font."""
+    raise_for(board_config, audit, conn, labels={"Something": "label-1"})
+    raise_for(board_config, audit, conn, labels={"Else": "label-2"})
+
+    [anomaly] = board_anomalies(conn)
+    assert "Else" in anomaly.detail_obj["failed_checks"][0]["detail"]
+    assert len(restated(layout)) == 1
+
+
+@pytest.mark.parametrize("stored", ["not json", "{}", "[]", '{"failed_checks": "x"}'])
+def test_an_unreadable_stored_detail_is_restated_and_says_so(
+    board_config, audit, conn, layout, stored
+):
+    """C5. The new text is right whatever the old one said, and the log must not invent
+    the previous reason it could not read."""
+    anomaly_id = raise_for(board_config, audit, conn, permission_level="public")
+    with db.transaction(conn):
+        conn.execute("UPDATE anomalies SET detail = ? WHERE id = ?", (stored, anomaly_id))
+
+    raise_for(board_config, audit, conn, permission_level="public")
+
+    [anomaly] = board_anomalies(conn)
+    assert failed_names(anomaly) == ["board is private"]
+    [record] = restated(layout)
+    assert record["detail"]["previous_failed_checks"] is None
+    assert record["detail"]["previous_detail_unreadable"] is True
+
+
+def test_an_acknowledged_anomaly_is_left_alone_and_a_new_one_raised(
+    board_config, audit, conn, layout
+):
+    """C6, unchanged behaviour: a dismissal stands as the maintainer saw it."""
+    anomaly_id = raise_for(board_config, audit, conn, permission_level="public")
+    with db.transaction(conn):
+        db.acknowledge_anomaly(conn, anomaly_id)
+
+    raise_for(board_config, audit, conn, **RENAMED)
+
+    everything = db.list_anomalies(conn, unacknowledged_only=False)
+    acknowledged = next(a for a in everything if a.id == anomaly_id)
+    assert failed_names(acknowledged) == ["board is private"]
+    [open_one] = board_anomalies(conn)
+    assert open_one.id != anomaly_id
+    assert failed_names(open_one) == ["tag exists"]
+    assert restated(layout) == []
+
+
+def test_another_boards_anomaly_is_never_touched(board_config, audit, conn):
+    """C7. The lookup is by board, so only this board's row can be rewritten."""
+    other = {"failed_checks": [{"name": "board is private", "detail": "elsewhere"}]}
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn,
+            kind="board_precondition",
+            entity_type="board",
+            entity_id="another-board",
+            detail=other,
+        )
+
+    raise_for(board_config, audit, conn, permission_level="public")
+    raise_for(board_config, audit, conn, **RENAMED)
+
+    by_board = {a.entity_id: a for a in board_anomalies(conn)}
+    assert by_board["another-board"].detail_obj == other
+    assert failed_names(by_board[board_config.trello.board_id]) == ["tag exists"]
+
+
+def test_successive_restatements_still_leave_one_row(board_config, audit, conn, layout):
+    raise_for(board_config, audit, conn, permission_level="public")
+    raise_for(board_config, audit, conn, **RENAMED)
+    raise_for(board_config, audit, conn, permission_level="public")
+
+    [anomaly] = board_anomalies(conn)
+    assert failed_names(anomaly) == ["board is private"]
+    assert len(restated(layout)) == 2
+
+
+def test_a_restatement_records_what_it_overwrote(board_config, audit, conn, layout):
+    """US3 and SC-003: the update destroys the database's only copy of the old reason, so
+    the log must hold it — and when that reason had been detected."""
+    anomaly_id = raise_for(board_config, audit, conn, permission_level="public")
+    backdate(conn, anomaly_id)
+    previous = board_anomalies(conn)[0].detail_obj["failed_checks"]
+
+    raise_for(board_config, audit, conn, **RENAMED)
+
+    [record] = restated(layout)
+    assert record["outcome"] == "ok"
+    assert record["entity_type"] == "anomaly"
+    assert record["entity_id"] == str(anomaly_id)
+    detail = record["detail"]
+    assert detail["kind"] == "board_precondition"
+    assert detail["anomaly_entity_id"] == board_config.trello.board_id
+    assert detail["previous_failed_checks"] == previous
+    assert detail["failed_checks"] == board_anomalies(conn)[0].detail_obj["failed_checks"]
+    assert detail["previous_detected_at"] == OLD_STAMP
+    assert "previous_detail_unreadable" not in detail
+
+
+def test_a_restated_anomaly_is_inside_a_recent_window(board_config, audit, conn):
+    """`anomalies --since 10m` must show a reason that changed a minute ago. Had the
+    detection time stayed at the board's first failure, the window would miss it."""
+    from datetime import UTC, datetime, timedelta
+
+    from robot_army.operations import _within_window
+
+    cutoff = datetime.now(UTC) - timedelta(minutes=10)
+    anomaly_id = raise_for(board_config, audit, conn, permission_level="public")
+    backdate(conn, anomaly_id)
+    assert not _within_window(board_anomalies(conn)[0].detected_at, cutoff)
+
+    raise_for(board_config, audit, conn, **RENAMED)
+
+    assert _within_window(board_anomalies(conn)[0].detected_at, cutoff)
+
+
+def test_the_issues_sequence_through_the_daemon(board_config, audit, conn, layout):
+    """SC-001, replayed through the startup seam the daemon really uses: public, then the
+    label renamed with nothing acknowledged in between. One anomaly, naming the label."""
+    from robot_army.daemon import Daemon
+    from robot_army.effects import EffectLevel
+
+    def start(**overrides) -> Daemon:
+        daemon = Daemon(
+            config=board_config,
+            layout=layout,
+            boundaries=make_board_boundaries(audit, board=board(**overrides)),
+            audit=audit,
+            conn=conn,
+            effect_level=EffectLevel.LIVE,
+        )
+        daemon._check_board()
+        return daemon
+
+    start(permission_level="public")
+    daemon = start(**RENAMED)
+
+    assert daemon.ingesting is False
+    [anomaly] = board_anomalies(conn)
+    assert failed_names(anomaly) == ["tag exists"]
 
 
 def test_a_board_failure_disables_ingestion_without_disabling_dispatch(

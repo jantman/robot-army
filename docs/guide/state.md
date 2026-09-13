@@ -141,6 +141,15 @@ read from the disk and this database, never from git. An anomaly whose detail ca
 longer in the database, is left alone permanently: "I could not check" must never be stored
 as "it is fine".
 
+**One kind is restated rather than kept** (issue #73). For every other kind the first
+`detail` is evidence — a pid, a path, a card — and `INSERT OR IGNORE` is right to keep it
+however often the condition is seen again. A `board_precondition` row's `detail` is instead
+the *reason* board ingestion is off, so while the row is open, a board check that fails
+differently rewrites its `detail` and moves its `detected_at` to that check. `detected_at` on
+such a row therefore means "when the reason it names was found", not "when the board first
+broke"; the earlier time is kept in the `anomaly.restated` record. An acknowledged or
+resolved row is never rewritten — the guard is in the `UPDATE` itself.
+
 **`dry_run` is a property of the run, not of the entity named** (added by migration 14,
 issue #21). Deriving it from `entity_id` looks like one join and is six — work item,
 session, card, repo, board, and none — is undefined for the four kinds that name no entity,

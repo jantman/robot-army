@@ -839,6 +839,24 @@ def test_the_terminal_says_nothing_extra_when_the_daemon_agrees(
     assert "IGNORE LIST MISMATCH" not in "\n".join(result.lines)
 
 
+def test_both_surfaces_announce_a_mismatch_with_no_cards_to_list(
+    web, board_config, audit, conn, layout, running_daemon
+):
+    """L7. An empty listing is still a listing judged against a list, and the web page
+    puts its banner above its own empty state — so the terminal must say it too, or the
+    two surfaces disagree in exactly the case this exists to keep in step."""
+    from tests.conftest import beat
+
+    beat(layout, ignore_lists=["Icebox"])
+
+    result = operations.cards(listing_context(with_ignore_lists(board_config), conn, audit))
+    assert result.data["cards"] == []
+    assert "IGNORE LIST MISMATCH" in "\n".join(result.lines)
+
+    cards_web(web, board_config)
+    assert "IGNORE LIST MISMATCH" in web.get("/cards").text
+
+
 # -- the record set and the derivation set must agree ----------------------
 
 

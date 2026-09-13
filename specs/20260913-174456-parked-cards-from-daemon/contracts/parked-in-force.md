@@ -46,6 +46,7 @@ Board: `card-1` `needs_info` in `Icebox`; `card-2` `needs_info` in `Inbox`.
 | L4 | `robot-army cards` | `()` | `("Icebox",)` | `card-1`'s line reads `parked in 'Icebox'`; mismatch sentence printed after the table; payload carries `configured_ignore_lists == []` |
 | L5 | `robot-army cards` | `("Icebox",)` | `("Icebox",)` | output identical to today's; `ignore_list_disagreement` is `null` |
 | L6 | web request | — | — | the view is handed the request's single reading; `cards` takes no reading of its own when one is passed |
+| L7 | both, **no cards to list** | `()` | `("Icebox",)` | both still carry the mismatch sentence: the web renders it above its empty state, and the terminal prints it after "no cards tracked yet" (review on #173) |
 
 ## The mismatch sentence
 

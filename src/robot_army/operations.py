@@ -4941,6 +4941,11 @@ def cards(
             result.say(f"no cards visible ({_withheld_note(withheld)})")
         else:
             result.say("no cards tracked yet")
+        # Here too, not only under a table: the web page renders its banner above its own
+        # empty state, and the two surfaces must not disagree about disagreeing.
+        if disagreement:
+            result.say()
+            result.say(disagreement)
         return result
 
     table_rows = [

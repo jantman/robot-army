@@ -601,6 +601,244 @@ def test_the_web_page_still_counts_an_unparked_needs_info_card_as_outstanding(
     assert view.data["parked"] == 0
 
 
+# -- the daemon's ignore list decides, not the listing process's (issue #74) --
+
+
+def two_held_cards(conn, audit):
+    """Issue #74's board: two ``needs_info`` cards, one parked in ``Icebox``.
+
+    The column *name* is what parkedness is judged by, so it is set explicitly rather than
+    left to a poll this fixture does not run.
+    """
+    track(
+        conn,
+        audit,
+        make_card("card-1", list_id="list-ice"),
+        state=CardState.NEEDS_INFO,
+        current_list_name="Icebox",
+    )
+    track(
+        conn,
+        audit,
+        make_card("card-2", list_id="list-inbox"),
+        state=CardState.NEEDS_INFO,
+        current_list_name="Inbox",
+    )
+
+
+def cards_web(web, board_config, *names):
+    """The web harness, reading a board with its *own* ignore list set to ``names``.
+
+    The harness is built on the board-less ``config``; only ``[trello]`` is swapped in, so
+    the layout and database the test seeds are the ones the page reads.
+    """
+    from dataclasses import replace
+
+    web.app.config = replace(web.app.config, trello=with_ignore_lists(board_config, *names).trello)
+    return web
+
+
+def test_the_daemon_publishes_the_ignore_list_it_parks_from(board_config, audit, conn, layout):
+    """H3. What intake excludes is what the heartbeat names."""
+    import json
+
+    from robot_army.daemon import Daemon
+
+    daemon = Daemon(
+        config=with_ignore_lists(board_config, "Icebox"),
+        layout=layout,
+        boundaries=make_board_boundaries(audit),
+        audit=audit,
+        conn=conn,
+        effect_level=EffectLevel.LIVE,
+    )
+    daemon._jobs = daemon._build_jobs()
+    daemon._heartbeat()
+
+    beat = json.loads(layout.heartbeat_path.read_text(encoding="utf-8"))
+    assert beat["ignore_lists"] == ["Icebox"]
+
+
+def test_a_daemon_with_no_board_publishes_no_ignore_list(config, audit, conn, layout):
+    """H4. ``null``, not ``[]``: with no board this daemon is not deciding parkedness at
+    all, and a reader with a board of its own must keep its own list."""
+    import json
+
+    from robot_army.daemon import Daemon
+
+    daemon = Daemon(
+        config=config,
+        layout=layout,
+        boundaries=make_boundaries(audit),
+        audit=audit,
+        conn=conn,
+        effect_level=EffectLevel.LIVE,
+    )
+    daemon._jobs = daemon._build_jobs()
+    daemon._heartbeat()
+
+    assert json.loads(layout.heartbeat_path.read_text(encoding="utf-8"))["ignore_lists"] is None
+
+
+@pytest.mark.parametrize(
+    ("own", "published", "in_force", "configured"),
+    [
+        (("Icebox",), None, ("Icebox",), None),  # R1: nothing published — our own
+        ((), ("Icebox",), ("Icebox",), ()),  # R2: issue #74 itself
+        (("Icebox", "Later"), ("Later", "Icebox"), ("Icebox", "Later"), None),  # R3: sets
+    ],
+)
+def test_the_ignore_list_in_force(board_config, own, published, in_force, configured):
+    config = with_ignore_lists(board_config, *own)
+    assert operations.resolve_ignore_lists(config, published) == (in_force, configured)
+
+
+def test_a_process_with_no_board_defers_to_the_daemons_ignore_list(config):
+    """R4. With no ``[trello]`` of our own, our list is empty — and so it differs."""
+    assert operations.resolve_ignore_lists(config, ("Icebox",)) == (("Icebox",), ())
+
+
+def test_the_mismatch_sentence_names_both_lists_sorted():
+    sentence = operations.ignore_list_disagreement(("Later", "Icebox"), ())
+    assert sentence.startswith("IGNORE LIST MISMATCH")
+    assert "['Icebox', 'Later']" in sentence and "configured for []" in sentence
+    assert operations.ignore_list_disagreement(("Icebox",), None) is None
+
+
+def test_the_web_page_follows_the_daemon_when_it_started_before_the_column_was_ignored(
+    web, board_config, audit, conn, layout, running_daemon
+):
+    """L1: issue #74's reproduction. The web read no ignore list at startup; the daemon,
+    restarted since, parks ``Icebox``. The page must count one card, not two."""
+    from tests.conftest import beat
+
+    cards_web(web, board_config)  # this process: no ignore list
+    beat(layout, ignore_lists=["Icebox"])  # the daemon: Icebox
+    two_held_cards(conn, audit)
+
+    text = web.get("/cards").text
+    payload = web.get_json("/cards").json()
+
+    assert payload["needs_info"] == 1
+    assert payload["parked"] == 1
+    assert "awaiting clarification (1)" in text
+    parked = {row["card_id"]: row for row in payload["cards"]}["card-1"]
+    assert parked["parked"] is True and parked["parked_list"] == "Icebox"
+    assert "parked in" in text
+    # Rescan is offered only to the card that is waiting on the author.
+    assert text.count("/confirm/rescan") == 1
+    assert "/card/card-2/confirm/rescan" in text
+    # And the page says why it disagrees with its own configuration.
+    assert payload["configured_ignore_lists"] == []
+    banner = [line for line in text.splitlines() if "IGNORE LIST MISMATCH" in line]
+    assert banner and 'class="banner warn"' in banner[0], banner
+
+
+def test_the_web_page_uses_its_own_list_when_no_daemon_is_running(
+    web, board_config, audit, conn, layout
+):
+    """L2. A heartbeat left by a dead daemon is no authority; nothing to disagree with."""
+    from tests.conftest import beat
+
+    cards_web(web, board_config, "Icebox")
+    beat(layout, ignore_lists=[])
+    two_held_cards(conn, audit)
+
+    text = web.get("/cards").text
+    payload = web.get_json("/cards").json()
+
+    assert (payload["needs_info"], payload["parked"]) == (1, 1)
+    assert payload["ignore_list_disagreement"] is None
+    assert "IGNORE LIST MISMATCH" not in text
+
+
+def test_the_web_page_shows_no_banner_when_the_daemon_agrees(
+    web, board_config, audit, conn, layout, running_daemon
+):
+    """L2, agreeing: the page is exactly what it was before issue #74."""
+    from tests.conftest import beat
+
+    cards_web(web, board_config, "Icebox")
+    beat(layout, ignore_lists=["Icebox"])
+    two_held_cards(conn, audit)
+
+    payload = web.get_json("/cards").json()
+    assert (payload["needs_info"], payload["parked"]) == (1, 1)
+    assert "IGNORE LIST MISMATCH" not in web.get("/cards").text
+
+
+def test_the_web_page_unparks_when_the_daemon_parks_nothing(
+    web, board_config, audit, conn, layout, running_daemon
+):
+    """L3. The other direction: the daemon is evaluating ``Icebox`` cards, so they are
+    outstanding whatever this process's file says."""
+    from tests.conftest import beat
+
+    cards_web(web, board_config, "Icebox")
+    beat(layout, ignore_lists=[])
+    two_held_cards(conn, audit)
+
+    payload = web.get_json("/cards").json()
+    assert (payload["needs_info"], payload["parked"]) == (2, 0)
+    assert "IGNORE LIST MISMATCH" in web.get("/cards").text
+
+
+def test_the_web_page_uses_the_requests_one_reading(
+    web, board_config, audit, conn, layout, running_daemon, monkeypatch
+):
+    """L6. The request already read the daemon for the effect level and the cap; a second
+    reading here could answer differently across a restart (issue #52)."""
+    from tests.conftest import beat
+
+    def second_reading(ctx):
+        raise AssertionError("the cards page took its own reading of the daemon")
+
+    monkeypatch.setattr(operations, "_published_ignore_lists", second_reading)
+    cards_web(web, board_config)
+    beat(layout, ignore_lists=["Icebox"])
+    two_held_cards(conn, audit)
+
+    assert web.get_json("/cards").json()["parked"] == 1
+
+
+def test_the_terminal_follows_the_daemon_when_the_file_is_newer(
+    board_config, audit, conn, layout, running_daemon
+):
+    """L4. The file no longer ignores ``Icebox`` but the daemon, not yet restarted, still
+    parks it — so the card is parked, and the terminal says why it disagrees with the file."""
+    from tests.conftest import beat
+
+    beat(layout, ignore_lists=["Icebox"])
+    two_held_cards(conn, audit)
+
+    result = operations.cards(listing_context(with_ignore_lists(board_config), conn, audit))
+    text = "\n".join(result.lines)
+
+    rows = {row["card_id"]: row for row in result.data["cards"]}
+    assert rows["card-1"]["parked"] is True
+    assert rows["card-2"]["parked"] is False
+    assert "parked in 'Icebox'" in text
+    assert "IGNORE LIST MISMATCH" in text
+    assert result.data["ignore_lists"] == ["Icebox"]
+    assert result.data["configured_ignore_lists"] == []
+
+
+def test_the_terminal_says_nothing_extra_when_the_daemon_agrees(
+    board_config, audit, conn, layout, running_daemon
+):
+    """L5."""
+    from tests.conftest import beat
+
+    beat(layout, ignore_lists=["Icebox"])
+    two_held_cards(conn, audit)
+
+    result = operations.cards(listing_context(with_ignore_lists(board_config, "Icebox"), conn, audit))
+
+    assert result.data["ignore_list_disagreement"] is None
+    assert result.data["configured_ignore_lists"] is None
+    assert "IGNORE LIST MISMATCH" not in "\n".join(result.lines)
+
+
 # -- the record set and the derivation set must agree ----------------------
 
 

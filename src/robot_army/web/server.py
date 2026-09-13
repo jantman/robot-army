@@ -979,7 +979,11 @@ def view_interrupted(app: WebApp, ctx: Context, request: Request, params: dict[s
 
 
 def view_cards(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> View:
-    return pages.cards_view(ctx, include_simulated=params["include_simulated"])
+    return pages.cards_view(
+        ctx,
+        include_simulated=params["include_simulated"],
+        published_ignore_lists=params.get("published_ignore_lists"),
+    )
 
 
 def view_card_confirm(
@@ -1600,6 +1604,13 @@ def handle(app: WebApp, request: Request) -> Response:
                 lock_holder=lock.holder,
             ),
         )
+        # The same argument again, for the ignore list (issue #74): this process read its own
+        # once at startup, and a page judging cards against it counted every card in a
+        # column ignored since then as awaiting clarification. From this request's one
+        # reading, so it cannot disagree with the effect level or the cap above.
+        published_ignore_lists = health.published_ignore_lists(
+            report, running=running, lock_holder=lock.holder
+        )
         chrome = pages.chrome(
             ctx,
             capacity=capacity,
@@ -1628,6 +1639,7 @@ def handle(app: WebApp, request: Request) -> Response:
                     **params,
                     "chrome": chrome,
                     "capacity": capacity,
+                    "published_ignore_lists": published_ignore_lists,
                     "include_simulated": include_simulated,
                 },
             )

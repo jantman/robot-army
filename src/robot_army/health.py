@@ -156,6 +156,13 @@ class Heartbeat:
     #: surface that reports a fraction against anything else is guessing at what the process
     #: doing the enforcing believes. Defaults to ``None``, so an older heartbeat parses.
     max_concurrent_sessions: int | None = None
+    #: The ignore list this daemon is parking cards from (issue #74), or ``None`` with no
+    #: ``[trello]`` section. Here for the reason the cap is: **the daemon is the process that
+    #: parks cards**, it reads the list once at startup, and a web interface started before a
+    #: column was ignored — which reads its own configuration exactly once — reported every
+    #: card in it as awaiting clarification. Defaults to ``None``, so an older heartbeat
+    #: parses, and ``None`` is *not published* rather than *parking nothing*.
+    ignore_lists: list[str] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
@@ -173,6 +180,7 @@ def write_heartbeat(
     dispatch_paused: bool = False,
     board: dict[str, Any] | None = None,
     max_concurrent_sessions: int | None = None,
+    ignore_lists: list[str] | tuple[str, ...] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> Heartbeat:
     """Write the heartbeat atomically.
@@ -192,6 +200,8 @@ def write_heartbeat(
         dispatch_paused=dispatch_paused,
         board=board,
         max_concurrent_sessions=max_concurrent_sessions,
+        # A list because the file is JSON; ``None`` kept as ``None``, never as ``[]``.
+        ignore_lists=list(ignore_lists) if ignore_lists is not None else None,
         extra=extra or {},
     )
     atomic_write(Path(path), beat.to_json(), mode=0o644)
@@ -482,6 +492,50 @@ def published_cap(
     published* rather than *a cap of zero*, because replacing a stale number with a
     nonsensical one is not an improvement.
     """
+    beat = _holders_heartbeat(report, running=running, lock_holder=lock_holder)
+    if beat is None:
+        return None
+    raw = beat.get("max_concurrent_sessions")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        return None
+    return raw
+
+
+def published_ignore_lists(
+    report: HealthReport, *, running: bool, lock_holder: str | None
+) -> tuple[str, ...] | None:
+    """The ignore list the *running* daemon says it is parking from, or ``None`` (issue #74).
+
+    Issue #74 is the web ``/cards`` page counting a card in ``Icebox`` as awaiting
+    clarification while ``robot-army cards`` said it was parked. The page had the logic; it
+    judged the card against the list *its own* process read at startup, before ``Icebox``
+    was ignored. The daemon is the process that parks cards, so its list is the answer, and
+    it travels on the heartbeat for exactly the reasons :func:`published_cap` gives — which
+    is why the two share one test of whether the heartbeat is the running daemon's.
+
+    Believed only as a JSON list of non-empty strings, the only shape ``config`` can load.
+    An **empty** list is believed: that daemon is parking nothing. Anything else — a missing
+    key from an older build, ``null`` from a daemon with no board — is *not published*, so
+    the caller falls back to its own configuration rather than to "nothing is parked".
+    """
+    beat = _holders_heartbeat(report, running=running, lock_holder=lock_holder)
+    if beat is None:
+        return None
+    raw = beat.get("ignore_lists")
+    if not isinstance(raw, list) or not all(isinstance(name, str) and name for name in raw):
+        return None
+    return tuple(raw)
+
+
+def _holders_heartbeat(
+    report: HealthReport, *, running: bool, lock_holder: str | None
+) -> dict[str, Any] | None:
+    """The heartbeat, if it is the running lock holder's own; ``None`` for every doubt.
+
+    The rule :func:`published_cap`'s docstring argues for — no daemon, no heartbeat, or a
+    heartbeat another process wrote (the restart window) — in one place, so a second value
+    published on the heartbeat cannot be believed on a looser test than the first.
+    """
     if not running:
         return None
     beat = report.heartbeat
@@ -493,10 +547,7 @@ def published_cap(
     holder = (lock_holder or "").strip()
     if not holder or str(beat.get("pid")) != holder:
         return None
-    raw = beat.get("max_concurrent_sessions")
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
-        return None
-    return raw
+    return beat
 
 
 def post_json(

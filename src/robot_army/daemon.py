@@ -746,6 +746,12 @@ class Daemon:
             # cap is fixed when this process loads its configuration and there is no path
             # that rereads it, so even a heartbeat written an hour ago names the right one.
             max_concurrent_sessions=self.config.daemon.max_concurrent_sessions,
+            # Issue #74: the columns this daemon parks cards from, on the same argument. It
+            # is what intake excludes, so it is what every listing must call parked — not a
+            # list some other process read from the file at some other time.
+            ignore_lists=(
+                self.config.trello.ignore_lists if self.config.trello is not None else None
+            ),
             extra={"config": str(self.config.path)},
         )
 

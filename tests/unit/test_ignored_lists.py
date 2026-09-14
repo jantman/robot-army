@@ -18,6 +18,8 @@ reordering breaks exactly one of them and nothing else notices.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from tests.conftest import (
     make_board_boundaries,
@@ -934,3 +936,81 @@ def test_a_parked_card_carrying_a_declaration_is_still_parked(board_config, audi
     assert boundaries.issue_writer.created == []
     assert boundaries.card_writer.comments == []
     assert db.list_cards(conn) == []
+
+
+# -- FR-030 still explains itself for a parked linked card (issue #82) ------
+
+
+def _in_flight_then_dragged(config, audit, conn, to_list):
+    """A card filed, its session running, and then dragged by the author to ``to_list``.
+
+    One poll cycle runs after the drag, as the daemon's would, so any parking logic has
+    had its chance to act before the lifecycle hook is reached.
+    """
+    card = make_card("card-1", list_id="list-inbox", body="in https://github.com/jantman/demo")
+    boundaries = make_board_boundaries(audit, cards=[card], board=board())
+
+    def cycle():
+        status = intake.check_board(boundaries=boundaries, audit=audit, config=config)
+        intake.run_cycle(
+            conn, boundaries=boundaries, audit=audit, config=config, status=status,
+            dry_run=False,
+        )
+
+    cycle()
+    row = card_row(conn)
+    assert row is not None and row.state is CardState.LINKED
+    intake.on_session_active(
+        conn, boundaries=boundaries, audit=audit, config=config,
+        repo_key=row.repo_key, issue_number=row.issue_number, dry_run=False,
+    )
+    boundaries.card_reader.cards[0] = dataclasses.replace(card, list_id=to_list)
+    cycle()
+    boundaries.card_writer.comments.clear()
+    boundaries.card_writer.moves.clear()
+    return boundaries, row
+
+
+def _closed(config, audit, conn, boundaries, row):
+    return intake.on_issue_closed(
+        conn, boundaries=boundaries, audit=audit, config=config,
+        repo_key=row.repo_key, issue_number=row.issue_number, dry_run=False,
+    )
+
+
+def _abandoned(config, audit, conn, boundaries, row):
+    return intake.on_work_abandoned(
+        conn, boundaries=boundaries, audit=audit, config=config,
+        repo_key=row.repo_key, issue_number=row.issue_number,
+        reason="the work item was abandoned", dry_run=False,
+    )
+
+
+@pytest.mark.parametrize("ignored", [("Icebox",), ()], ids=["icebox-ignored", "not-ignored"])
+@pytest.mark.parametrize(
+    ("hook", "would_have"), [(_closed, "Done"), (_abandoned, "Inbox")], ids=["closed", "abandoned"]
+)
+def test_a_linked_card_dragged_into_an_ignored_column_still_gets_the_refusal_comment(
+    board_config, audit, conn, hook, would_have, ignored
+):
+    """Issue #82. Dragging a card with work in flight into the icebox is the most natural
+    way to say "stop", so it is the likelier FR-030 path, not the exotic one — and the
+    author must be told the card was left where they put it.
+
+    006's "nothing written" (FR-004) is about intake. A linked card is past intake, and
+    FR-014 keeps its lifecycle comments; the refusal is one of them. Nothing may move it.
+
+    Run with the column ignored and not, against the same drag: the asymmetry #82
+    described is asserted absent, so nothing outside the process ever has to tell "we told
+    you" from "we said nothing because the column is ignored"."""
+    config = with_ignore_lists(board_config, *ignored)
+    boundaries, row = _in_flight_then_dragged(config, audit, conn, "list-ice")
+
+    verdict = hook(config, audit, conn, boundaries, row)
+
+    assert verdict.action == "move_refused"
+    assert boundaries.card_writer.moves == [], "a card the author parked was moved"
+    bodies = [body for _, body in boundaries.card_writer.comments]
+    assert len(bodies) == 1, "the author who parked the card was told nothing"
+    assert "did **not** move this card" in bodies[0]
+    assert f"move it to the `{would_have}` list" in bodies[0]

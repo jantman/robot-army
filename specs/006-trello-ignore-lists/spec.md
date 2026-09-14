@@ -269,7 +269,10 @@ where it was, which is indistinguishable from the feature working.
   either direction: its mapping is retained, its issue is untouched, and any session for it continues.
 - **FR-014**: Board lifecycle moves and comments for a card that already has a recorded issue MUST
   happen as milestone 003 specifies, regardless of whether the source or destination column is
-  ignored.
+  ignored. This explicitly includes milestone 003's FR-030 comment: a linked card the author has
+  dragged into an ignored column is not moved, and the comment saying what would have been done
+  is still posted. FR-004's "nothing written" governs cards excluded from *intake*; it does not
+  reach a card that is already linked (issue #82).
 - **FR-015**: The system MUST accept a configuration in which the in-progress or done column is also
   listed as ignored, because the ignore list applies only to cards with no recorded issue.
 

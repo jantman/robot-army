@@ -100,6 +100,15 @@ its mapping, its session and its remaining board moves all continue — which is
 listing `in_progress_list` or `done_list` here is harmless rather than contradictory: by the
 time the daemon puts a card in either, that card is already linked.
 
+That includes the one thing a linked card most often gets when it is dragged into an ignored
+column: the *"robot-army did **not** move this card"* comment (003's FR-030). Dragging a card
+with work in flight into the icebox is the natural way to say *stop*, so the daemon still
+declines to drag it on to Done or back to where it came from — and still says so on the card,
+exactly as it would for any other column. Parking stops a card from *becoming* work; it does
+not stop the daemon explaining a decision about work that already exists. #82 reported this
+comment as missing; the daemon's log from that run shows it posted, and
+`test_ignored_lists.py` now pins it.
+
 A parked card shows as `parked in 'Icebox'` in `robot-army cards` and on `/cards`, *alongside*
 whatever else it is rather than instead of it: a card can be awaiting clarification and parked
 at once, which is exactly what writing a vague card and shelving it produces. The poll record

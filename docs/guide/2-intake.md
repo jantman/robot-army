@@ -42,7 +42,9 @@ I put a card on a private Trello board from my phone, tag it, and it becomes a G
 in the repository the card names. That issue is **unlabelled**, so nothing runs: labelling it
 is still the human gate, and the board cannot reach past it. The card then follows its issue —
 into the in-progress list while a session runs, into the done list when the issue closes, and
-back where it came from if the work is abandoned.
+back where it came from if the work is abandoned. If I have moved the card by hand since it
+was last placed, it stays where I put it, and gets a comment naming — by the column's name —
+the list it would have gone to and why.
 
 ```toml
 [trello]

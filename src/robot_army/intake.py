@@ -2193,6 +2193,27 @@ def _list_id(config: Config, boundaries: Boundaries, which: str) -> str | None:
         return None
 
 
+def _board_list_name(boundaries: Boundaries, list_id: str) -> str:
+    """A list id as the author would recognise it on their own board.
+
+    A comment on a card is read in Trello, where every column is known by its name and the
+    24-hex id appears nowhere in the interface — so an id in a comment is the one part of
+    it the reader cannot act on. The reader memoises ``board_info``, so this is normally no
+    request at all.
+
+    Falls back to the id rather than failing: a list deleted between the poll and the
+    comment, or a board read that fails now, should cost the comment its readability and
+    nothing else. The move decision has already been made and recorded by then.
+    """
+    reader = boundaries.card_reader
+    if reader is None:
+        return list_id
+    try:
+        return reader.board_info().lists_by_id.get(list_id) or list_id
+    except TransportError:
+        return list_id
+
+
 def _card_for_issue(
     conn: sqlite3.Connection,
     *,
@@ -2431,7 +2452,8 @@ def _refuse_move(
     body = (
         "🤖 robot-army did **not** move this card: you moved it since I last placed it, "
         "and the board is yours.\n\n"
-        f"What I would have done: move it to the `{target}` list, because {reason}."
+        f"What I would have done: move it to the `{_board_list_name(boundaries, target)}` "
+        f"list, because {reason}."
     )
     with db.transaction(conn):
         db.update_card_columns(conn, card.id, pending_move_to=None)

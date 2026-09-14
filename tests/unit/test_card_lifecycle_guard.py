@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from tests.conftest import make_board_boundaries, make_card
+from tests.conftest import make_board_boundaries, make_board_info, make_card
 
 from robot_army import db, intake
 from robot_army.cardstates import CardState
@@ -70,6 +70,19 @@ def closed(conn, board_config, audit, boundaries):
         config=board_config,
         repo_key=REPO,
         issue_number=101,
+        dry_run=False,
+    )
+
+
+def abandoned(conn, board_config, audit, boundaries):
+    return intake.on_work_abandoned(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=board_config,
+        repo_key=REPO,
+        issue_number=101,
+        reason="the maintainer abandoned it",
         dry_run=False,
     )
 
@@ -139,7 +152,66 @@ def test_the_refusal_comments_with_what_it_would_have_done(conn, board_config, a
     bodies = [body for _, body in boundaries.card_writer.comments]
     assert bodies, "the refusal was silent"
     assert "did **not** move this card" in bodies[0]
-    assert DONE in bodies[0]
+    assert "move it to the `Done` list" in bodies[0]
+
+
+def test_the_refusal_names_the_list_not_its_id(conn, board_config, audit):
+    """Issue #80. The comment is read on the author's own board, where the id appears
+    nowhere — so the one actionable line in it has to name the column."""
+    boundaries = linked_card(conn, board_config, audit)
+    active(conn, board_config, audit, boundaries)
+    board_card(boundaries, list_id="list-blocked")
+    boundaries.card_writer.comments.clear()
+
+    closed(conn, board_config, audit, boundaries)
+    body = boundaries.card_writer.comments[0][1]
+    assert DONE not in body, "the refusal named the list by its raw id"
+
+
+def test_the_refusal_to_return_an_abandoned_card_names_its_origin_list(
+    conn, board_config, audit
+):
+    """The abandon path's target is the recorded origin id, not a configured name — the
+    lookup has to work for any column on the board, not only the two lifecycle lists."""
+    boundaries = linked_card(conn, board_config, audit)
+    active(conn, board_config, audit, boundaries)
+    board_card(boundaries, list_id="list-blocked")
+    boundaries.card_writer.comments.clear()
+
+    verdict = abandoned(conn, board_config, audit, boundaries)
+    assert verdict.action == "move_refused"
+    assert "move it to the `Inbox` list" in boundaries.card_writer.comments[0][1]
+
+
+def test_a_list_deleted_since_the_board_was_read_falls_back_to_its_id(
+    conn, board_config, audit
+):
+    """The name is for readability; a list that has vanished must not cost the comment."""
+    boundaries = linked_card(conn, board_config, audit)
+    active(conn, board_config, audit, boundaries)
+    board_card(boundaries, list_id="list-blocked")
+    boundaries.card_writer.comments.clear()
+    boundaries.card_reader.board = make_board_info(
+        lists_by_id={"list-doing": "In Progress", "list-inbox": "Inbox"}
+    )
+
+    assert closed(conn, board_config, audit, boundaries).action == "move_refused"
+    assert f"move it to the `{DONE}` list" in boundaries.card_writer.comments[0][1]
+
+
+def test_an_unreadable_board_still_gets_the_refusal_comment(conn, board_config, audit):
+    """A failed board read at comment time falls back to the id rather than dropping the
+    comment — the author still learns the card was not moved."""
+    from robot_army.boundaries import TransportError
+
+    boundaries = linked_card(conn, board_config, audit)
+    active(conn, board_config, audit, boundaries)
+    board_card(boundaries, list_id="list-blocked")
+    boundaries.card_writer.comments.clear()
+    boundaries.card_reader.raise_on_board = TransportError("board unreachable")
+
+    assert abandoned(conn, board_config, audit, boundaries).action == "move_refused"
+    assert f"move it to the `{INBOX}` list" in boundaries.card_writer.comments[0][1]
 
 
 def test_the_refusal_is_recorded_with_both_lists(conn, board_config, audit, layout):

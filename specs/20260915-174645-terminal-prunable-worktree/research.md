@@ -102,10 +102,16 @@ attempts the delete, as today.
 
 ## R8 — A recorded removal is refused, not repeated
 
-**Decision**: when `item.worktree_reclaimed` and the directory is absent, `worktree remove <id>`
+**Decision**: when `cleanup_state` is `done` and the directory is absent, `worktree remove <id>`
 refuses with `refused_by: already_removed`, `EXIT_PRECONDITION`, naming the recorded decision and
 its time, before the repository is resolved or any session consulted. Without it, re-running on a
 cleaned item reaches git for nothing and — before R7 — printed a false warning.
+
+**Not `branch_retained`** (amended in review of PR #178). The first draft refused on
+`worktree_reclaimed`, which includes it. But `branch_retained` is what the first run leaves when
+`-d` refuses an unmerged branch — the normal outcome for abandoned work — and a forced re-run is
+how that branch is deleted. Refusing it orphaned an abandoned item's branch outright: `cleanup`
+considers `done` items only, and `worktree remove <path>` refuses a claimed path.
 
 A directory that is present despite the record proceeds normally: the record is then wrong, and
 removing is the command's job.

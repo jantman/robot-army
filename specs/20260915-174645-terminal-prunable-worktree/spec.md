@@ -182,7 +182,8 @@ raises nothing.
 - **FR-008**: When the worktree directory was already gone, `worktree remove <id>` MUST report a
   branch that no longer exists as already gone, not as surviving.
 - **FR-009**: `worktree remove <id>` MUST refuse, touching nothing, for an item whose cleanup record
-  already says the worktree was removed, and say when and by what decision.
+  is `done` — worktree and branch both gone — and say when and by what decision. It MUST NOT
+  refuse a `branch_retained` item, whose branch a re-run (with `--force` where needed) deletes.
 - **FR-010**: The missing-worktree anomaly for a finished item MUST name the command(s) that settle
   it: `worktree remove <id>`, plus `cleanup <id>` for a `done` item.
 - **FR-011**: The recorded decision MUST be written as part of the existing `worktree.remove` audit

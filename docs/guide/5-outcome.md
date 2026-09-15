@@ -394,8 +394,11 @@ reconciliation reports as `prunable_worktree` (see [anomalies](operating.md)). A
 is already gone is not refused — once `worktree prune` has cleared git's record, git answers "is
 not a working tree", which is about its record, and there are no contents to protect — and a
 branch that is already gone is reported as gone rather than as surviving. Run it on an item
-whose record already says the worktree was removed and it refuses (`already_removed`, exit 3)
-without asking git anything.
+whose record is `done` — both halves gone — and it refuses (`already_removed`, exit 3) without
+asking git anything. A `branch_retained` item is *not* refused: that is what the first run leaves
+when git's `-d` will not delete an unmerged branch, which is the ordinary case for abandoned
+work, and re-running with `--force` is how that branch goes. For an abandoned item it is the
+only way, since `cleanup` considers `done` items only.
 
 ---
 

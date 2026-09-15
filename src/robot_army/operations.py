@@ -2739,11 +2739,18 @@ def worktree_remove(
 
         # -- a removal already on record: there is nothing left to remove (issue #113) --
         #
+        # Only ``done``, which says both halves are gone. ``branch_retained`` says the
+        # branch is still there: it is what the first run leaves when git's ``-d`` refuses
+        # an unmerged branch — the ordinary case for abandoned work — and the re-run, with
+        # ``--force``, is how that half gets finished. For an abandoned item it is the only
+        # command that can: cleanup considers ``done`` items only, and the path form refuses
+        # a path a row claims. (Found in review of PR #178.)
+        #
         # First, before the repository and the sessions: neither is the reason, and a live
         # row on a cleaned item would otherwise be what the operator is told. Only when the
         # directory is absent too — one present despite the record means the record is
         # wrong, and removing it is this command's job.
-        if item.worktree_reclaimed and not Path(item.worktree_path).is_dir():
+        if item.cleanup_state == cleanup_mod.DONE and not Path(item.worktree_path).is_dir():
             when = timefmt.local(item.cleaned_at) if item.cleaned_at else "an unrecorded time"
             reason = (
                 f"its worktree was already removed — cleanup_state {item.cleanup_state} "

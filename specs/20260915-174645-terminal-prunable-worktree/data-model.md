@@ -25,7 +25,8 @@
 `cleanup_state in ("done", "branch_retained")` — the record says the worktree was removed. Read by:
 
 - `reconcile._sweep_worktrees`: such an item is never reported missing, whatever its state.
-- `operations.worktree_remove`: such an item with no directory is refused `already_removed`.
+`operations.worktree_remove` does **not** read it: its `already_removed` refusal is for `done`
+alone, because a `branch_retained` item still has a branch for a re-run to delete.
 
 ## `prunable_worktree` anomaly
 

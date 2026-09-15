@@ -138,6 +138,40 @@ def test_a_hand_deleted_worktree_on_a_finished_item_is_settled(
     assert after.worktree_path == str(path)
 
 
+def test_an_abandoned_items_unmerged_branch_is_finished_by_forcing_the_rerun(
+    conn, audit, config, layout
+):
+    """Found in review of PR #178, against real git. Abandoned work is unmerged, so ``-d``
+    refuses and the first run records ``branch_retained``. Cleanup does not consider
+    abandoned items, so ``--force`` on the re-run is the only way that branch goes — and it
+    has to get past the check that refuses a removal already on record."""
+    item_id, path, branch = prepared_item(
+        conn, audit, config, layout, state=WorkItemState.ABANDONED
+    )
+    clone = config.repos["demo"].path
+    git(
+        path,
+        "-c", "user.name=robot-army-test",
+        "-c", "user.email=test@example.invalid",
+        "commit", "--allow-empty", "-m", "work nobody merged",
+    )
+
+    first = operations.worktree_remove(make_context(conn, audit, config), item_id)
+
+    assert first.code == EXIT_FAILED, first.lines
+    assert not path.exists()
+    assert branch in branches(clone)
+    assert db.get_work_item(conn, item_id).cleanup_state == "branch_retained"
+
+    second = operations.worktree_remove(
+        make_context(conn, audit, config), item_id, force=True, confirm=lambda _: str(item_id)
+    )
+
+    assert second.code == EXIT_OK, second.lines
+    assert branch not in branches(clone)
+    assert db.get_work_item(conn, item_id).cleanup_state == "done"
+
+
 def test_removal_refuses_on_uncommitted_changes(conn, audit, config, layout):
     item_id, path, branch = prepared_item(conn, audit, config, layout)
     (path / "README.md").write_text("modified\n", encoding="utf-8")

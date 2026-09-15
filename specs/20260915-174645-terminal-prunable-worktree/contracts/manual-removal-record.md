@@ -51,9 +51,12 @@ refusal stands (W7).
 absent: no `git.delete_branch`, `branch_already_gone: true`, the line `branch … was already gone`,
 and exit 0. An unanswerable question counts as present.
 
-**M12.** When `worktree_reclaimed` and the directory does not exist, `worktree_remove` refuses with
-`refused_by: already_removed` and `EXIT_PRECONDITION`, naming the recorded `cleanup_state`,
-`cleaned_at` and reason, before resolving the repository or consulting sessions. No git call is made.
+**M12.** When `cleanup_state` is `done` and the directory does not exist, `worktree_remove` refuses
+with `refused_by: already_removed` and `EXIT_PRECONDITION`, naming the recorded `cleanup_state`,
+`cleaned_at` and reason, before resolving the repository or consulting sessions. No git call is
+made. `branch_retained` is **not** refused: its branch is still there, and a re-run — with
+`--force` where `-d` refuses an unmerged branch — finishes that half and records `done`. For an
+abandoned item nothing else can (amended in review of PR #178).
 
 ## The `worktree.remove` outcome
 

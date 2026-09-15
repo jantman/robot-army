@@ -413,13 +413,13 @@ def test_a_branch_whose_existence_cannot_be_asked_is_still_deleted(conn, audit, 
     assert vcs.deleted == [BRANCH]
 
 
-@pytest.mark.parametrize("recorded", ["done", "branch_retained"])
 def test_a_removal_already_on_record_is_refused_before_anything_is_asked(
-    conn, audit, config, layout, recorded
+    conn, audit, config, layout
 ):
-    """M12, M15. Before the repository, before the sessions — a live row here is not the
-    reason to refuse, and must not be what the operator is told."""
-    item_id, _ = item(conn, config, present=False, cleanup_state=recorded)
+    """M12, M15. ``done`` says both halves are gone. Before the repository, before the
+    sessions — a live row here is not the reason to refuse, and must not be what the
+    operator is told."""
+    item_id, _ = item(conn, config, present=False, cleanup_state="done")
     seed_session(conn, item_id, state="running")
 
     result = operations.worktree_remove(
@@ -428,12 +428,76 @@ def test_a_removal_already_on_record_is_refused_before_anything_is_asked(
 
     assert result.code == EXIT_PRECONDITION
     assert result.data["refused_by"] == "already_removed"
-    assert recorded in "\n".join(result.lines)
+    assert "done" in "\n".join(result.lines)
     assert git_calls(layout) == []
     detail = outcome(layout)
     assert detail["refused"] is True
     assert detail["refused_by"] == "already_removed"
     assert db.get_work_item(conn, item_id).cleanup_reason == "seeded"
+
+
+@pytest.mark.parametrize("state", [WorkItemState.DONE, WorkItemState.ABANDONED])
+def test_a_retained_branch_is_finished_by_forcing_the_rerun(conn, audit, config, layout, state):
+    """Found in review of PR #178. ``branch_retained`` is what the first run leaves when
+    git's ``-d`` refuses an unmerged branch — the ordinary outcome for abandoned work — and
+    the re-run with ``--force`` is how that branch goes. Refusing it as ``already_removed``
+    left an abandoned item's branch with no command able to delete it: cleanup considers
+    ``done`` items only, and the path form refuses a path a row claims."""
+    item_id, _ = item(
+        conn, config, state=state, present=False, cleanup_state="branch_retained"
+    )
+    vcs = FakeGit(audit, refuse_absent=True)
+
+    result = operations.worktree_remove(
+        context(conn, audit, config, vcs), item_id, force=True, confirm=typed(item_id)
+    )
+
+    assert result.code == EXIT_OK, result.lines
+    assert vcs.deleted == [BRANCH]
+    [delete] = [
+        record
+        for record, _ in read_records(layout.log_dir)
+        if record is not None and record["action"] == "git.delete_branch"
+    ]
+    assert delete["detail"]["force"] is True
+    after = db.get_work_item(conn, item_id)
+    assert after.cleanup_state == "done"
+    assert after.cleanup_reason == (
+        "worktree directory was already gone (forced); branch deleted" + TAIL
+    )
+
+
+def test_a_retained_branch_git_still_refuses_stays_retained(conn, audit, config):
+    """Without ``--force`` the re-run asks ``-d`` again, and a refusal is recorded again."""
+    item_id, _ = item(
+        conn,
+        config,
+        state=WorkItemState.ABANDONED,
+        present=False,
+        cleanup_state="branch_retained",
+    )
+
+    result = operations.worktree_remove(
+        context(conn, audit, config, FakeGit(audit, refuse_absent=True, delete_ok=False)),
+        item_id,
+    )
+
+    assert result.code == EXIT_FAILED
+    assert db.get_work_item(conn, item_id).cleanup_state == "branch_retained"
+
+
+def test_a_retained_branch_deleted_since_is_recorded_done(conn, audit, config):
+    """Someone ran ``git branch -D`` by hand. The re-run says so and closes the record."""
+    item_id, _ = item(conn, config, present=False, cleanup_state="branch_retained")
+
+    result = operations.worktree_remove(
+        context(conn, audit, config, FakeGit(audit, refuse_absent=True, branch=None)), item_id
+    )
+
+    assert result.code == EXIT_OK, result.lines
+    after = db.get_work_item(conn, item_id)
+    assert after.cleanup_state == "done"
+    assert after.cleanup_reason.endswith("the branch was already gone" + TAIL)
 
 
 def test_a_directory_present_despite_the_record_is_removed(conn, audit, config):

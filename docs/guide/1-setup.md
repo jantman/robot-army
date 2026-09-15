@@ -25,6 +25,10 @@ Two values are actually yours: `[github] author` and `[paths] repo_root`. Everyt
 has a sensible default, and everything outward-facing is off. The
 [configuration page](configuration.md) explains each key.
 
+Until the first `onboard`, `doctor` fails exactly one check, `onboarded repositories`. That is
+not a false alarm: an installation that may act in no repository can do nothing at all, and the
+same check is what tells you when a lost state database has taken every onboarding with it.
+
 ## The token has to be a classic one
 
 **Use a classic personal access token with `repo` and `read:project`.** Not a fine-grained

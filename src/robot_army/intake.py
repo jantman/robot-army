@@ -699,7 +699,8 @@ class Resolution:
     its ``robot-army:`` lines disagreed carries ``"declaration"``, because "the author named
     a repository and was still held" is precisely the fact the log needs in order to explain
     itself (FR-014). It defaults to ``"scan"`` so that every construction site that predates
-    milestone 116 keeps meaning exactly what it meant.
+    milestone 116 keeps meaning exactly what it meant. ``"onboarding"`` means neither had a
+    say: nothing was onboarded to match against (issue #83).
     """
 
     repo_key: str | None
@@ -710,6 +711,25 @@ class Resolution:
     @property
     def resolvable(self) -> bool:
         return self.repo_key is not None
+
+
+#: The reason a card is held when **nothing at all** is onboarded (issue #83).
+#:
+#: Fixed text, and the comment is chosen by comparing against it. It can be fixed because it
+#: has nothing to list — the other "nothing matched" reasons end in ``onboarded: <keys>``,
+#: and here there are none — and comparing it means the comment needs no second field on
+#: ``Resolution`` or a new column, because the reason is already what is stored and passed.
+#:
+#: It exists because losing the state database un-onboards every repository, deliberately
+#: (onboarding is consent, and is not re-granted from anything recovered), and the ordinary
+#: reason then told the author of every card to edit a card that was already right. Five
+#: cards were reworded in the verification round before anyone noticed ``onboarded: none``
+#: buried mid-sentence. So this says, first, that the card is not the problem.
+NOTHING_ONBOARDED = (
+    "no repository is onboarded, so no card can be filed anywhere — nothing on this card "
+    "is wrong. Run `robot-army onboard <owner/name>` for the repository this card is for. "
+    "If the state database was lost or replaced, every repository has to be onboarded again"
+)
 
 
 def _declared_references(text: str) -> list[str]:
@@ -762,6 +782,12 @@ def resolve_repository(
     # "is this a repository we watch" and "does this path sit inside one of their
     # clones" — are answered from the same resolved view (research R8).
     onboarded = repos.resolved_all(conn, config)
+
+    # Before the declaration, not after it. With nothing onboarded a ``robot-army:`` line
+    # would be reported as "names something that is not onboarded", which blames the card in
+    # different words; nothing the card could say resolves, so what it says is irrelevant.
+    if not onboarded:
+        return Resolution(repo_key=None, reason=NOTHING_ONBOARDED, source="onboarding")
 
     declared = _resolve_declarations(_declared_references(text), onboarded)
     if declared is not None:
@@ -1150,6 +1176,7 @@ def evaluate_card(
         and not forced
         and board_card is not None
         and board_card.last_activity == card.last_activity
+        and not _onboarding_arrived(conn, card, config)
     ):
         return Verdict(card.card_id, "unchanged", reason=card.reason)
 
@@ -1576,6 +1603,23 @@ def _hold_for_info(
     return Verdict(card.card_id, "held_and_commented", reason=reason)
 
 
+def _onboarding_arrived(conn: sqlite3.Connection, card: Any, config: Config) -> bool:
+    """Whether a card held because nothing was onboarded should be looked at again.
+
+    The activity gate re-evaluates a held card only when the card changes, which is right
+    when the fix is an edit. For ``NOTHING_ONBOARDED`` the fix is ``onboard``, which changes
+    nothing on the board — so without this the card would stay held for good, and its
+    comment's promise to pick it up would be false.
+
+    The onboarded set is read only for cards carrying that reason, and only counts once it
+    is non-empty: while nothing is onboarded the gate holds as before, so an inert
+    installation does not re-resolve and re-log every held card on every poll. The next
+    evaluation either links the card or records an ordinary reason, so this lets a card
+    through once.
+    """
+    return card.reason == NOTHING_ONBOARDED and bool(repos.resolved_all(conn, config))
+
+
 def _needs_info_comment(reason: str) -> str:
     """The one comment a held card gets, per distinct reason.
 
@@ -1584,7 +1628,18 @@ def _needs_info_comment(reason: str) -> str:
     older advice, "say which repository this is for", is advice the author has already
     followed three times over. The line is the only instruction that can actually be
     obeyed there, so it is the one the card carries.
+
+    Except when nothing is onboarded (issue #83). There the card is not the problem, and the
+    line is advice that cannot work — an author following it rewords a card that was right
+    the first time — so that comment says nothing on the card needs to change.
     """
+    if reason == NOTHING_ONBOARDED:
+        return (
+            "🤖 robot-army could not file an issue for this card yet.\n\n"
+            f"{reason}\n\n"
+            "Nothing on this card needs to change: it will be picked up automatically on the "
+            "first pass after a repository is onboarded."
+        )
     return (
         "🤖 robot-army could not file an issue for this card yet.\n\n"
         f"{reason}\n\n"

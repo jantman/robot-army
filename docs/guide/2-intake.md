@@ -143,6 +143,15 @@ with its reason, and editing the card to name a repository — or adding the
 [`robot-army:` line](#saying-which-repository-outright) — resolves it on the next pass with
 no further action.
 
+One hold is never the card's fault. When **no repository is onboarded at all** — a fresh
+installation, or one whose state database was lost, which takes every onboarding with it — no
+card can resolve however well it is written. Those cards are held with a reason that says so and
+names `robot-army onboard`, their comment says nothing on the card needs to change, and `doctor`
+fails its `onboarded repositories` check. Onboarding the repository is the whole fix: a card held
+for that reason is re-evaluated on the first pass after something is onboarded, without anyone
+touching it. Until issue #83 these cards were told to edit themselves, with `onboarded: none`
+buried mid-sentence as the only clue.
+
 ```bash
 uv run robot-army cards --state needs_info
 uv run robot-army rescan <card-id>          # or --all-needs-info
@@ -195,7 +204,8 @@ Three things it deliberately does not do:
 `jantman/demo` still counts as a mention. Only a whole line counts.
 
 The audit log records which way each card was decided: `trello.evaluated` carries
-`"source": "declaration"` or `"source": "scan"`.
+`"source": "declaration"` or `"source": "scan"` — or `"source": "onboarding"` when nothing was
+onboarded to match against, and neither had a say.
 
 ## One card, one issue
 
@@ -208,6 +218,11 @@ If the database is lost entirely, each card's own comment names its issue, and t
 rebuilds the mapping from it rather than filing a second one. The one gap left open is a crash
 between creating the issue and recording it *combined with* losing the database, and it is
 written down in [state](state.md) rather than pretended away.
+
+Onboarding does not come back with it, and that is on purpose: onboarding is consent, and
+re-granting it from anything recovered would defeat the point of asking. Run `robot-army
+onboard` again for each repository. Until then nothing is dispatched, `doctor` fails, and every
+card is held [saying so](#when-a-card-doesnt-say-enough) rather than asking to be edited.
 
 Below `live` the number in that index is invented rather than GitHub's — it starts at 900001,
 high enough that no rehearsal number can be mistaken for a real issue in a log. It is allocated

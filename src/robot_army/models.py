@@ -218,6 +218,20 @@ class WorkItem:
         """
         return self.cleanup_state in (None, "skipped")
 
+    @property
+    def worktree_reclaimed(self) -> bool:
+        """Does the record say this item's worktree was removed? (issue #113)
+
+        ``done`` and ``branch_retained`` are the two outcomes in which the worktree is gone,
+        whoever decided it — cleanup, or ``worktree remove`` on a finished item. They are
+        what lets the missing-worktree sweep tell a directory something removed from one
+        somebody deleted by hand, because both keep ``worktree_path`` on the row.
+
+        ``retained`` and ``skipped`` do **not** count: both mean the worktree was looked at
+        and *kept*, so a missing directory is exactly as unexplained as with no record.
+        """
+        return self.cleanup_state in ("done", "branch_retained")
+
 
 @dataclass(frozen=True, slots=True)
 class Session:

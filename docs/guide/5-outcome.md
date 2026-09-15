@@ -381,6 +381,25 @@ Four outcomes, all visible in `robot-army show <id>` and on the item's web page:
 means "we looked and decided no". `worktree_path` and `branch` are kept on the record even
 after a successful removal, so "what was at this path?" stays answerable.
 
+**`worktree remove <id>` leaves the same record** (issue #113). On a finished item — `done` or
+`abandoned` — a manual removal writes `done` or `branch_retained` exactly as cleanup would,
+with a reason that ends by naming `robot-army worktree remove`, and keeps the path and branch. It
+used to write nothing and forget the path, so `show` could not say where the worktree went and
+reconciliation could not tell the removal from an `rm -rf`. An *unfinished* item still forgets
+the path and gets no record: `retry` can give it a fresh worktree, and a record describing the
+old one would quietly exempt the new one from the missing-worktree report and from cleanup.
+
+It is also the command that settles a finished item whose directory was deleted by hand, which
+reconciliation reports as `prunable_worktree` (see [anomalies](operating.md)). A directory that
+is already gone is not refused — once `worktree prune` has cleared git's record, git answers "is
+not a working tree", which is about its record, and there are no contents to protect — and a
+branch that is already gone is reported as gone rather than as surviving. Run it on an item
+whose record is `done` — both halves gone — and it refuses (`already_removed`, exit 3) without
+asking git anything. A `branch_retained` item is *not* refused: that is what the first run leaves
+when git's `-d` will not delete an unmerged branch, which is the ordinary case for abandoned
+work, and re-running with `--force` is how that branch goes. For an abandoned item it is the
+only way, since `cleanup` considers `done` items only.
+
 ---
 
 Next: [operating it](operating.md).

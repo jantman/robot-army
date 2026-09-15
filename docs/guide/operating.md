@@ -338,6 +338,16 @@ Anomalies worth understanding rather than dismissing:
   worker before this sweep sees it. Seeing this anomaly for a `done` item now means
   retirement *tried and could not* — the process survived the termination, so the row stays
   open and the slot stays honestly subscribed.
+- **`prunable_worktree`** — a work item's recorded worktree directory is gone. Finished
+  items are included since issue #113; they used to be skipped, so with cleanup off a `done`
+  item whose directory had been `rm -rf`'d was reported by nothing while `git worktree list`
+  said `prunable`. A missing directory is *not* reported when the item's cleanup record says
+  the worktree was removed — `done` or `branch_retained`, written by cleanup or by `worktree
+  remove <id>` — because both keep the path on the row. **Acknowledging does not settle one
+  for a finished item**: its row never changes on its own, so the next pass raises it again.
+  The note names what does — `robot-army worktree remove <id>`, which works on an absent
+  directory and records the removal, or for a `done` item `robot-army cleanup <id>`. See
+  [cleaning up](5-outcome.md#cleaning-up).
 - **`orphan_worktree`** — a directory shaped like one robot-army made (`issue-<n>` under an
   onboarded repository's folder in the worktree root) that no work item claims — the mirror
   of `prunable_worktree`, which is a claim with no directory. `worktree remove <id>` and

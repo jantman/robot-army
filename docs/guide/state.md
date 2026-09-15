@@ -406,10 +406,19 @@ axis — the same separation this project already makes between work state and s
 Adding a `cleaned` state would have made every existing query that treats `done` as terminal
 subtly wrong.
 
-**`worktree_path` and `branch` are never nulled**, not even after a successful removal. The
-record has to retain what was removed: `_sweep_worktrees` keys on the path being present, and
-"what was at this path?" is exactly the question a `branch_retained` row has to answer months
-later.
+**Two writers.** Cleanup, and — since issue #113 — `robot-army worktree remove <id>` on a
+finished item, which records `done` or `branch_retained` with a reason that ends by naming
+`robot-army worktree remove`. The disk is in the same state whoever removed it, so the
+values are the same; the reason says who.
+
+**`worktree_path` and `branch` are kept after a successful removal** of a finished item, by
+either writer. The record has to retain what was removed — "what was at this path?" is exactly
+the question a `branch_retained` row has to answer months later — and `_sweep_worktrees` tells
+a removed worktree from a hand-deleted one by `cleanup_state` alone: `done` or
+`branch_retained` accounts for a missing directory, anything else does not. The one exception
+is `worktree remove <id>` on an *unfinished* item, which clears the path and writes no record:
+such an item can still be given a fresh worktree by `retry`, and a record describing the old
+one would silently exempt the new one from the sweep and from cleanup.
 
 ```bash
 sqlite3 -header -column ~/.local/state/robot-army/state.db \
@@ -807,6 +816,8 @@ summary:
 | Mid-sweep of a finished item's terminal windows, or a restart at any point | Nothing is written, because the sweep writes no state at all. Windows already closed stay closed and are simply absent from the next listing; the rest are taken next pass. The one casualty is the in-memory set of items whose windows have been dealt with, and losing it costs exactly one extra `kitty @ ls` per outstanding item — the same trade, and the same reasoning, as the capacity hold's signature above |
 | After `git worktree remove`, before the branch half | Worktree gone, branch present, `cleanup_state` unwritten. The next pass finds the directory already absent, treats git's "not a working tree" as a refusal about its *record* rather than about the contents, completes the branch half, and records the outcome |
 | After both cleanup removals, before the row is written | Both gone, `cleanup_state` still `NULL`. The next pass re-attempts, both steps refuse harmlessly, and the row is written `done` |
+| `worktree remove <id>` on a finished item, after the worktree removal and before the branch half | Worktree gone, branch present, no record, path still on the row. The next pass reports `prunable_worktree`, and running the same command again finds the directory already gone, completes the branch half and records the outcome. Before issue #113 this left a finished item reported by nothing |
+| `worktree remove <id>` on a finished item, after both removals and before the record commits | Both gone, no record. Reported the same way; the re-run finds the branch already gone, says so rather than warning that it survived, and records `done` |
 | During the containment fetch | Nothing removed. Containment is unproven, so the branch is retained and the item is reconsidered. The failure direction is always *keep* |
 | After a state transition, before its notification | State committed and logged; no message sent. The state change is fully reconstructible; the lost message is the named gap in [the audit log](audit-log.md) |
 | Mid-notification, after the POST left | Possibly delivered, recorded as attempted with its outcome. **No retry** — a duplicate notification is noise, and a retry loop is a Principle IV violation |

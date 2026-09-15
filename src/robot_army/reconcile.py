@@ -34,6 +34,7 @@ from robot_army import (
 from robot_army.boundaries import BoundaryError, HostHandle, TransportError
 from robot_army.cardstates import CardState
 from robot_army.states import (
+    TERMINAL_WORK_ITEM_STATES,
     SessionState,
     WorkItemState,
     transition_session,
@@ -2076,12 +2077,21 @@ def _sweep_worktrees(
 
     Reported, never removed. There is no automatic removal in this milestone (FR-016), so
     the correct action here is to make the condition visible and let the maintainer decide.
+
+    **Every item with a recorded path is considered, finished or not** (issue #113). This
+    used to skip ``done`` and ``abandoned`` items, which was exactly backwards: a finished
+    item is the one whose disk gets reclaimed, and with cleanup off — the default — nothing
+    else reported one whose directory had been deleted by hand. The filter was standing in
+    for a real distinction, because cleanup keeps ``worktree_path`` after removing the
+    worktree, so a finished item's missing directory is often *expected*. What tells the two
+    apart is the record, not the state: ``worktree_reclaimed`` says something removed it —
+    cleanup, or ``worktree remove`` — and such an item is not reported, nor its clone listed.
     """
     flagged = 0
     tracked = [
         item
         for item in db.list_work_items(conn, include_simulated=True)
-        if item.worktree_path and item.state not in (WorkItemState.DONE, WorkItemState.ABANDONED)
+        if item.worktree_path and not item.worktree_reclaimed
     ]
     if not tracked:
         return 0
@@ -2119,6 +2129,19 @@ def _sweep_worktrees(
         ).is_dir()
         if not missing:
             continue
+        note = "directory is gone; `robot-army worktree prune` clears git's record"
+        if item.state in TERMINAL_WORK_ITEM_STATES:
+            # A finished item's row never changes by itself, and the open-anomaly index lets
+            # an acknowledged report back in on the next pass — so acknowledging is no way to
+            # settle this one. The note names what is (issue #113). Cleanup only for `done`:
+            # it answers "not eligible" for anything else.
+            note = (
+                "directory is gone and nothing recorded removing it; "
+                f"`robot-army worktree remove {item.id}` records the removal and deletes "
+                "the branch"
+            )
+            if item.state is WorkItemState.DONE:
+                note += f", or `robot-army cleanup {item.id}` does so under cleanup's guards"
         with db.transaction(conn):
             created = db.raise_anomaly(
                 conn,
@@ -2130,7 +2153,7 @@ def _sweep_worktrees(
                     "worktree_path": item.worktree_path,
                     "branch": item.branch,
                     "state": str(item.state),
-                    "note": "directory is gone; `robot-army worktree prune` clears git's record",
+                    "note": note,
                 },
             )
         if created:

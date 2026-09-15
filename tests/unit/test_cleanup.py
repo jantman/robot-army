@@ -85,7 +85,7 @@ class FakeVcs:
         forgot the peel pass its tests and fail against git, which is exactly what
         happened here before review caught it.
 
-        The other caller, ``_branch_exists``, asks about ``refs/heads/<branch>`` and must
+        The other caller, ``branch_exists``, asks about ``refs/heads/<branch>`` and must
         keep getting "yes", or ``clean_item`` concludes the branch was already gone and
         never reaches the containment check at all.
         """
@@ -96,6 +96,13 @@ class FakeVcs:
 
     def worktree_exists(self, worktree_path: str) -> bool:
         return self.worktree_present
+
+    def list_worktrees(self, clone_path: str) -> list[Any]:
+        """Nothing prunable. Needed since issue #113: the missing-worktree sweep in the same
+        pass now looks at a finished item whose cleanup record does not say its worktree was
+        removed, and a full ``reconcile`` using this fake reaches it. An empty list sends the
+        sweep to its own ``Path.is_dir()`` test, which is the question that matters."""
+        return []
 
     def fetch(self, clone_path: str, remote: str, ref: str) -> None:
         if self.fetch_raises:

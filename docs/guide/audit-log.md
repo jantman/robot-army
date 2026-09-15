@@ -737,6 +737,24 @@ says it as well.
 An item's `cleanup_reason` reads `worktree removal simulated; …` when the decision came through a
 simulated boundary.
 
+## The issue #113 records
+
+No new action. `worktree remove <id>` now leaves a cleanup record on a finished item, and its
+outcome says so — and says why a removal git answered with "is not a working tree" was recorded
+as one.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `worktree.remove` | A removal of a finished item's worktree | The outcome gains `cleanup_state`: `done` or `branch_retained`, the value written to the row. Absent for an unfinished item, whose path is cleared instead |
+| `worktree.remove` | The directory was already gone before git was asked | `worktree_already_gone: true`. Git's refusal once its record is pruned ("is not a working tree") is not `refused` — it is about git's record, and there were no contents to protect |
+| `worktree.remove` | The branch was already gone | `branch_already_gone: true`, and no `git.delete_branch` follows |
+| `worktree.remove` | The item's record already says the worktree was removed, and its directory is absent | `refused: true`, `refused_by: already_removed`, `reason` naming the recorded state, time and reason. No `git.*` record follows, and sessions are not consulted |
+| `reconcile.pass` | As before | `prunable_worktrees` now counts finished items too, whenever the directory is missing and the cleanup record does not account for it |
+
+A manual removal's `cleanup_reason` is the worktree's fate, then the branch's, then the command
+that did it — for example ``worktree directory was already gone; branch deleted — by `robot-army
+worktree remove` ``.
+
 ## The `example_config.write` action
 
 `robot-army example-config` renders the commented example configuration. It records **only

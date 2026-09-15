@@ -12,6 +12,7 @@ Two things are being asserted, and both are FR-016:
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -82,6 +83,59 @@ def test_a_clean_worktree_is_removed_along_with_its_branch(conn, audit, config, 
         "step accumulates robot-army/* branches in every repository forever"
     )
     assert db.get_work_item(conn, item_id).worktree_path is None
+
+
+def git(clone: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=clone, capture_output=True, text=True, check=True
+    ).stdout
+
+
+def test_a_finished_items_removal_keeps_the_path_and_leaves_cleanups_record(
+    conn, audit, config, layout
+):
+    """Issue #113: the row a manual removal leaves is the row cleanup would have left."""
+    item_id, path, branch = prepared_item(conn, audit, config, layout, state=WorkItemState.DONE)
+
+    result = operations.worktree_remove(make_context(conn, audit, config), item_id)
+
+    assert result.code == EXIT_OK, result.lines
+    assert not path.exists()
+    assert branch not in branches(config.repos["demo"].path)
+    after = db.get_work_item(conn, item_id)
+    assert after.worktree_path == str(path)
+    assert after.cleanup_state == "done"
+    assert after.cleanup_reason == (
+        "worktree removed; branch deleted — by `robot-army worktree remove`"
+    )
+
+
+@pytest.mark.parametrize("pruned", [False, True], ids=["git-still-lists-it", "already-pruned"])
+def test_a_hand_deleted_worktree_on_a_finished_item_is_settled(
+    conn, audit, config, layout, pruned
+):
+    """Issue #113, against real git. Measured on 2.55: with git's record still present,
+    ``git worktree remove`` over an absent directory exits 0; once pruned it exits 128 with
+    "is not a working tree". Either way the command a ``prunable_worktree`` names must
+    clear git's record, delete the branch and record the removal."""
+    item_id, path, branch = prepared_item(conn, audit, config, layout, state=WorkItemState.DONE)
+    clone = config.repos["demo"].path
+    shutil.rmtree(path)
+    if pruned:
+        git(clone, "worktree", "prune")
+
+    result = operations.worktree_remove(make_context(conn, audit, config), item_id)
+
+    assert result.code == EXIT_OK, result.lines
+    assert f"worktree {path} was already gone" in result.lines
+    assert branch not in branches(clone)
+    assert str(path) not in git(clone, "worktree", "list", "--porcelain")
+    after = db.get_work_item(conn, item_id)
+    assert after.cleanup_state == "done"
+    assert after.cleanup_reason == (
+        "worktree directory was already gone; branch deleted — by `robot-army worktree remove`"
+    )
+    assert after.worktree_path == str(path)
 
 
 def test_removal_refuses_on_uncommitted_changes(conn, audit, config, layout):

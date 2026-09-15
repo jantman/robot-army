@@ -245,7 +245,8 @@ def test_a_closed_session_does_not_refuse(conn, audit, config, layout, closed):
     result = operations.worktree_remove(make_context(conn, audit, config), item_id)
     assert result.code == EXIT_OK, result.lines
     assert git_touched(layout) == ["git.remove_worktree", "git.delete_branch"]
-    assert db.get_work_item(conn, item_id).worktree_path is None
+    # A finished item keeps its path and gains cleanup's record (issue #113).
+    assert db.get_work_item(conn, item_id).cleanup_state == "done"
 
 
 def test_an_item_with_no_sessions_at_all_does_not_refuse(conn, audit, config, layout):
@@ -493,7 +494,8 @@ def test_the_typed_id_removes_the_worktree_over_a_live_session(conn, audit, conf
     )
     assert result.code == EXIT_OK, result.lines
     assert git_touched(layout) == ["git.remove_worktree", "git.delete_branch"]
-    assert db.get_work_item(conn, item_id).worktree_path is None
+    # A finished item keeps its path and gains cleanup's record (issue #113).
+    assert db.get_work_item(conn, item_id).cleanup_state == "done"
 
 
 # -- US3: the record (T016, T017) -------------------------------------------

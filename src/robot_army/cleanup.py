@@ -277,7 +277,7 @@ def _remove_then_decide(
             worktree_removed=True,
         )
 
-    if not _branch_exists(vcs, clone=str(clone), branch=item.branch):
+    if not branch_exists(vcs, clone=str(clone), branch=item.branch):
         # Nothing to retain and nothing to delete. This is the second kill point in the
         # interruption table — killed after both removals, before the row was written — and
         # the re-attempt is supposed to resolve it to ``done`` rather than leaving it
@@ -334,12 +334,16 @@ def _remove_then_decide(
     )
 
 
-def _branch_exists(vcs: object, *, clone: str, branch: str) -> bool:
+def branch_exists(vcs: object, *, clone: str, branch: str) -> bool:
     """Does the branch still exist in the clone?
 
     ``True`` when the question cannot be answered, because "I could not check" must never
     read as "it is gone" — that would record a surviving branch as cleaned up, which is the
     one direction this answer is allowed to be wrong in.
+
+    Public because ``worktree remove`` asks it too (issue #113), before deleting: a branch
+    that is already gone is not one that "still exists", and saying so was a false warning
+    on exactly the re-run that settles an interrupted removal.
     """
     try:
         return vcs.rev_parse(clone, f"refs/heads/{branch}") is not None  # type: ignore[attr-defined]

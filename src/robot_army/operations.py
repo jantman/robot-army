@@ -61,6 +61,7 @@ from robot_army.migrations import SCHEMA_VERSION
 from robot_army.models import ANOMALY_KINDS, WorkItem
 from robot_army.states import (
     TERMINAL_SESSION_STATES,
+    TERMINAL_WORK_ITEM_STATES,
     SessionState,
     WorkItemState,
     dumps_labels,
@@ -2736,6 +2737,25 @@ def worktree_remove(
         outcome["forced_over_live_session"] = False
         result.data["forced_over_live_session"] = False
 
+        # -- a removal already on record: there is nothing left to remove (issue #113) --
+        #
+        # First, before the repository and the sessions: neither is the reason, and a live
+        # row on a cleaned item would otherwise be what the operator is told. Only when the
+        # directory is absent too — one present despite the record means the record is
+        # wrong, and removing it is this command's job.
+        if item.worktree_reclaimed and not Path(item.worktree_path).is_dir():
+            when = timefmt.local(item.cleaned_at) if item.cleaned_at else "an unrecorded time"
+            reason = (
+                f"its worktree was already removed — cleanup_state {item.cleanup_state} "
+                f"at {when}: {item.cleanup_reason or ''}"
+            )
+            outcome.update(refused=True, refused_by="already_removed", reason=reason)
+            result.data.update(refused_by="already_removed", refused_reason=reason)
+            result.code = EXIT_PRECONDITION
+            result.say(f"refused to remove {item.worktree_path}:")
+            result.say(f"  {reason}")
+            return result
+
         repo = repos_mod.resolve(ctx.conn, ctx.config, item.repo_key)
         if repo is None:
             outcome["refused"] = True
@@ -2822,9 +2842,54 @@ def worktree_remove(
             result=result,
         ):
             return result
-        with db.transaction(ctx.conn):
-            db.update_work_item_columns(ctx.conn, item_id, worktree_path=None)
+        if item.state in TERMINAL_WORK_ITEM_STATES:
+            # The record cleanup would have left, and the path kept, as cleanup keeps it
+            # (issue #113). Without it the missing-worktree sweep cannot tell this removal
+            # from an `rm -rf`, and `show` says nothing about where the worktree went.
+            state, reason = _removal_record(item, force=force, data=result.data)
+            with db.transaction(ctx.conn):
+                db.record_cleanup(ctx.conn, item_id, state=state, reason=reason)
+            outcome["cleanup_state"] = state
+            result.data["cleanup_state"] = state
+        else:
+            # Not finished, so it can still be given a fresh worktree — `retry` prepares one
+            # for a `failed` item. A cleanup record would outlive that and describe the new
+            # worktree as reclaimed: never reported missing, never offered to cleanup. So an
+            # unfinished item forgets the path instead, as it always has.
+            with db.transaction(ctx.conn):
+                db.update_work_item_columns(ctx.conn, item_id, worktree_path=None)
         return result
+
+
+def _removal_record(item: WorkItem, *, force: bool, data: dict[str, Any]) -> tuple[str, str]:
+    """The cleanup record a manual removal of a finished item leaves (issue #113).
+
+    The two outcomes cleanup writes when a worktree is gone, in the same shape of sentence,
+    because the disk is in the same state whoever removed it; the tail says who.
+    ``branch_retained`` is the one in which the branch is still there — git would not delete
+    it without ``--force``. No new state value: every reader of the column already knows
+    these two, and none of them decides anything on who did it.
+    """
+    simulated = bool(data.get("simulated"))
+    if data.get("worktree_already_gone"):
+        worktree_part = "worktree directory was already gone"
+    elif simulated:
+        worktree_part = "worktree removal simulated"
+    else:
+        worktree_part = "worktree removed"
+    if force:
+        worktree_part += " (forced)"
+    state = cleanup_mod.DONE
+    if not item.branch:
+        branch_part = "no branch on record"
+    elif data.get("branch_already_gone"):
+        branch_part = "the branch was already gone"
+    elif data.get("branch_deleted"):
+        branch_part = "branch deletion simulated" if simulated else "branch deleted"
+    else:
+        state = cleanup_mod.BRANCH_RETAINED
+        branch_part = "branch kept — git would not delete it"
+    return state, f"{worktree_part}; {branch_part} — by `robot-army worktree remove`"
 
 
 def _simulated_note(ctx: Context) -> str:
@@ -2873,6 +2938,17 @@ def _remove_checkout(
     simulation's, and it is accepted as one; but it is reported as "would remove", with the
     level that would make it real, and never as "removed worktree" / "deleted branch".
 
+    **Already gone is not refused** (issue #113). A directory deleted by hand is what a
+    ``prunable_worktree`` anomaly reports, and this is the command it names to settle it. Git
+    answers such a directory with success while its record lingers, and with "is not a
+    working tree" once ``worktree prune`` has cleared that record — a statement about *its
+    record*, not about contents, because there are none. Cleanup has read it that way since
+    milestone 004. Whether the directory was there is read *before* git is asked, since
+    afterwards absence is what success looks like too, and never for the simulation, which
+    has no directory to be missing. A branch already gone is likewise not a survivor: its
+    existence is asked first, with cleanup's own question, and an unanswerable one still
+    attempts the delete.
+
     Returns whether the worktree is gone. Fills ``outcome`` (the open ``worktree.remove``
     action) and ``result`` in place; a surviving branch is a ``WARNING`` and a non-zero
     exit, but still ``True``, because the directory is gone and the caller's record of it
@@ -2880,6 +2956,7 @@ def _remove_checkout(
     """
     vcs = ctx.boundaries.version_control
     simulated = bool(vcs.simulated)
+    already_gone = not simulated and not Path(path).is_dir()
     removal = vcs.remove_worktree(path, force=force, clone_path=clone)
     removed = removal.worktree_removed
     refused_by = None if removed else "git"
@@ -2888,10 +2965,18 @@ def _remove_checkout(
         removed = False
         refused_by = "directory_survived"
         reason = cleanup_mod.SURVIVED_REASON
+    elif not removed and already_gone:
+        removed = True
+        refused_by = None
+        reason = None
 
     branch_deleted = False
+    branch_already_gone = False
     if removed and branch:
-        branch_deleted = vcs.delete_branch(clone, branch, force=force)
+        if cleanup_mod.branch_exists(vcs, clone=clone, branch=branch):
+            branch_deleted = vcs.delete_branch(clone, branch, force=force)
+        else:
+            branch_already_gone = True
 
     outcome["worktree_removed"] = removed
     outcome["branch_deleted"] = branch_deleted
@@ -2904,6 +2989,13 @@ def _remove_checkout(
             "simulated": simulated,
         }
     )
+    # Present only when true, so an ordinary removal's record reads exactly as it did.
+    if removed and already_gone:
+        outcome["worktree_already_gone"] = True
+        result.data["worktree_already_gone"] = True
+    if branch_already_gone:
+        outcome["branch_already_gone"] = True
+        result.data["branch_already_gone"] = True
 
     if not removed:
         outcome["refused"] = True
@@ -2927,8 +3019,13 @@ def _remove_checkout(
         if simulated
         else ("removed worktree", "deleted branch")
     )
-    result.say(f"{removed_as} {path}")
-    if branch and branch_deleted:
+    if already_gone:
+        result.say(f"worktree {path} was already gone")
+    else:
+        result.say(f"{removed_as} {path}")
+    if branch and branch_already_gone:
+        result.say(f"branch {branch} was already gone")
+    elif branch and branch_deleted:
         result.say(f"{deleted_as} {branch}")
     elif branch:
         result.code = EXIT_FAILED

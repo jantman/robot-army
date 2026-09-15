@@ -106,8 +106,14 @@ def test_a_simulated_removal_says_would_and_names_the_level(conn, audit, config,
     outcome = records(layout, "worktree.remove")[-1]
     assert outcome["kind"] == "outcome"
     assert outcome["detail"]["simulated"] is True
-    # Within the simulation that worktree is gone; every step of it is marked simulated.
-    assert db.get_work_item(conn, item_id).worktree_path is None
+    # Within the simulation that worktree is gone; every step of it is marked simulated, and
+    # so is the record a finished item keeps of it (issue #113).
+    after = db.get_work_item(conn, item_id)
+    assert after.worktree_path == WORKTREE
+    assert after.cleanup_state == "done"
+    assert after.cleanup_reason == (
+        "worktree removal simulated; branch deletion simulated — by `robot-army worktree remove`"
+    )
 
 
 def test_a_simulated_removal_with_no_branch_prints_no_branch_line(conn, audit, config):

@@ -143,7 +143,7 @@ test.
 | Mid-migration 003 | `user_version` unadvanced | The whole migration re-runs on the next start |
 | After a card move landed, before it was recorded | `pending_move_to` set, card already there | The match between `pending_move_to` and the card's actual list identifies it as our move, not the author's (R12) |
 | Between a card write and its `last_activity` refresh | Baseline is older than the card | One redundant re-evaluation, which is idempotent and posts no comment because `commented_reason` is unchanged |
-| With the database lost entirely | No rows at all | Each card's marker comment restores its mapping on the next poll (R7); the gap is the double failure recorded in R6 |
+| With the database lost entirely | No rows at all | Each card's marker comment restores its mapping on the next poll (R7); the gap is the double failure recorded in R6. **Onboarding does not come back**, deliberately: it is consent, carrying the settings review and fingerprint approval, and recovering it would re-grant it unasked. Until `robot-army onboard` is run again for each repository nothing can be dispatched, every card is held naming that command, and `doctor` fails its `onboarded repositories` check (issue #83) |
 
 ---
 

@@ -115,8 +115,15 @@ robot-army run --once
 ```
 
 **Expected**: the card's marker comment restores the mapping, `robot-army log` shows the recovery, and
-**no second issue is created** (FR-034). Note that work items are also gone — that is expected, and
-unrelated to this invariant.
+**no second issue is created** (FR-034).
+
+Two other things are gone with the database, both expected and unrelated to this invariant: the
+work items, and **every repository's onboarding**. Onboarding is consent and is deliberately not
+recovered, so the installation is now inert: `robot-army repos` shows every repository
+`NOT ONBOARDED`, `robot-army doctor` fails its `onboarded repositories` check and exits 4, and any
+card evaluated now is held with a reason naming `robot-army onboard` — not asking for the card to
+be edited (issue #83). Run `robot-army onboard` for each repository to restore it; held cards are
+picked up on the next pass without being touched.
 
 ---
 

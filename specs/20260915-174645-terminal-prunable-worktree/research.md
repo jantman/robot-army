@@ -75,9 +75,12 @@ Measured on git 2.55.0 in a scratch repository: a worktree added, its directory 
 | still present (`prunable`) | exit 0, record cleared |
 | already pruned | exit 128, `fatal: '<path>' is not a working tree` |
 
-**Decision**: in `_remove_checkout`, a git refusal while `vcs.worktree_exists(path)` is false is
-treated as the worktree being gone (`worktree_already_gone`), and the branch half proceeds. This is
-the rule cleanup has had since milestone 004 (`cleanup.py:253-271`), reached by the same test.
+**Decision**: in `_remove_checkout`, read whether the directory is absent **before** asking git.
+When it was, the worktree is treated as gone (`worktree_already_gone`) whichever way git answers,
+and the branch half proceeds. This is the rule cleanup has had since milestone 004
+(`cleanup.py:253-271`). It is read beforehand because afterwards an absent directory is also what
+success looks like, and the record should say "was already gone" rather than "worktree removed"
+when git only cleared its own record.
 
 The rule is placed in the shared helper, so the other callers inherit it: the path form cannot
 reach it (it refuses a non-directory first), and `purge-simulated` stops reporting a refusal for a

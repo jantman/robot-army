@@ -40,9 +40,12 @@ cleanup column, as before.
 
 ## Settling
 
-**M10.** When git refuses the removal and `vcs.worktree_exists(path)` is false, the worktree is
-treated as removed: `worktree_already_gone: true`, the line `worktree … was already gone`, and the
-branch half proceeds. While the directory exists, git's refusal stands (W7).
+**M10.** Whether the directory is absent is read **before** git is asked, and never when the
+version-control boundary is simulated (which has no directory to be absent). When it was absent,
+the worktree is treated as removed whether git succeeded (its record still present) or refused
+("is not a working tree", record already pruned): `worktree_already_gone: true`, the line
+`worktree … was already gone`, and the branch half proceeds. While the directory exists, git's
+refusal stands (W7).
 
 **M11.** Before deleting, the branch's existence is asked with `cleanup.branch_exists`. When it is
 absent: no `git.delete_branch`, `branch_already_gone: true`, the line `branch … was already gone`,

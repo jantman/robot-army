@@ -5985,7 +5985,27 @@ def doctor(ctx: Context, *, trust_file: Path | None = None) -> Result:
         )
     )
 
-    for key, repo in sorted(repos_mod.resolved_all(ctx.conn, ctx.config).items()):
+    # Issue #83. An installation that may act in no repository cannot do anything at all,
+    # and before this check it passed every other one — which is how a lost database went
+    # unnoticed while five cards were reworded. The *resolved* set, because that is what
+    # card resolution matches against: a row that resolves to nothing cannot take a card, so
+    # counting it would let `doctor` pass while every card is held.
+    onboarded = repos_mod.resolved_all(ctx.conn, ctx.config)
+    checks.append(
+        (
+            "onboarded repositories",
+            bool(onboarded),
+            f"{len(onboarded)} onboarded"
+            if onboarded
+            else (
+                "none — nothing can be dispatched and every card will be held. Onboard with "
+                "`robot-army onboard <owner/name>`. Onboarding lives in "
+                f"{ctx.layout.db_path} and is not recovered if that file is lost"
+            ),
+        )
+    )
+
+    for key, repo in sorted(onboarded.items()):
         record = db.get_repo(ctx.conn, key)
         trusted, explanation = dispatch.is_trusted(repo.path, trust_file=trust_file)
         checks.append(

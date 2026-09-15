@@ -22,7 +22,7 @@ import pytest
 from tests.conftest import config_dict, make_repo, monkey_token, onboard_repo
 
 from robot_army.config import parse
-from robot_army.intake import resolve_repository
+from robot_army.intake import NOTHING_ONBOARDED, resolve_repository
 
 
 @pytest.fixture
@@ -319,7 +319,10 @@ def test_an_installation_with_nothing_onboarded_resolves_nothing(
     config = parse(raw, tmp_path / "config.toml")
     result = resolve(config, "", "https://github.com/jantman/demo")
     assert not result.resolvable
-    assert "none" in result.reason
+    # Its own reason, not "no onboarded repository could be identified from this card" with
+    # `onboarded: none` buried at the end — the card named its repository correctly (#83).
+    assert result.reason == NOTHING_ONBOARDED
+    assert result.source == "onboarding"
 
 
 # -- the `robot-army:` declaration (milestone 116) ---------------------------
@@ -558,7 +561,10 @@ def test_a_declaration_on_an_installation_with_nothing_onboarded_holds(
     config = parse(raw, tmp_path / "config.toml")
     result = resolve(config, "", "robot-army: jantman/demo")
     assert not result.resolvable
-    assert "none" in result.reason
+    # Not "the line names something that is not onboarded": that blames a line that was
+    # right. With nothing onboarded, what the card says is irrelevant (issue #83).
+    assert result.reason == NOTHING_ONBOARDED
+    assert result.source == "onboarding"
 
 
 def test_one_reference_naming_two_repositories_selects_neither(resolve, multi_config):

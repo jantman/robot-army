@@ -76,7 +76,7 @@ the MVP: it removes the hand-written `UPDATE` against `state.db` entirely.
 
 ### The shared read path
 
-- [ ] T005 [US1] Extract the middle of `retry` into `_reread_and_refresh(ctx, item, *, verb,
+- [X] T005 [US1] Extract the middle of `retry` into `_reread_and_refresh(ctx, item, *, verb,
       trust_file)` in `src/robot_army/operations.py`: the `_local_blocker` check, the live read,
       the four-column refresh, and `poll.evaluate`. It returns either a refusal `Result` or the
       verdict. Audit names take the verb — `f"{verb}.blocked"`, `f"{verb}.evaluate"`. Keep
@@ -84,76 +84,76 @@ the MVP: it removes the hand-written `UPDATE` against `state.db` entirely.
       parameterise its action name the same way. Carry `retry`'s existing docstring reasoning
       about why the poller's function is *called* and not reimplemented onto the helper — it is
       the reason the helper exists.
-- [ ] T006 [US1] Rewrite `retry` in `src/robot_army/operations.py` as: gate on `failed` → the
+- [X] T006 [US1] Rewrite `retry` in `src/robot_army/operations.py` as: gate on `failed` → the
       helper → transition to `ready`. Its observable behaviour, wording and exit codes must be
       unchanged.
-- [ ] T007 [US1] Run `uv run pytest tests/unit/test_operations_retry.py` and confirm it passes
+- [X] T007 [US1] Run `uv run pytest tests/unit/test_operations_retry.py` and confirm it passes
       untouched. If any assertion needs editing, the refactor changed behaviour and is wrong —
       fix the code, not the test.
 
 ### The command
 
-- [ ] T008 [US1] Implement `reset(ctx, item_id, *, force=False, assume_yes=False, confirm=_ask,
+- [X] T008 [US1] Implement `reset(ctx, item_id, *, force=False, assume_yes=False, confirm=_ask,
       trust_file=None)` in `src/robot_army/operations.py`, wearing `@_guards_its_prompt`, in the
       order [contracts/reset.md](contracts/reset.md) fixes: item exists → state accepted
       (`interrupted`, `awaiting_review`, `failed`) → `_reread_and_refresh` → confirmation →
       discard → transition. Open a `reset` intent/outcome pair around the whole operation, with
       the intent flushed before anything is destroyed.
-- [ ] T009 [US1] Within `reset`, call `operations.worktree_remove(ctx, item_id, force=force)`
+- [X] T009 [US1] Within `reset`, call `operations.worktree_remove(ctx, item_id, force=force)`
       whole for the discard — never `_remove_checkout` directly, which would take the disk half
       without the four guards. Skip it entirely when the item has no `worktree_path`. **Branch on
       `result.data["worktree_removed"]`, not on `result.code`** (research R3): a removal that
       leaves an unmerged branch exits non-zero with the worktree already gone, and stopping there
       would abort with the destruction done. Carry the removal's lines into reset's own output so
       a retained branch is still reported.
-- [ ] T010 [US1] Add the confirmation (research R4): without `--force` and without `assume_yes`,
+- [X] T010 [US1] Add the confirmation (research R4): without `--force` and without `assume_yes`,
       ask `[y/N]` through `_answer_or_give_up`, naming the checkout path and the branch, placed
       immediately before the discard. With `--force`, ask nothing — `worktree_remove`'s
       typed-item-id prompt is the question. Refusal messages name the remedy: `cancel` for an
       `active` item, `--force` for git's refusal, `robot-army cancel <id>` for an open session.
-- [ ] T011 [US1] Add the `reset` subparser to `src/robot_army/cli.py` with `item_id`, `--force`
+- [X] T011 [US1] Add the `reset` subparser to `src/robot_army/cli.py` with `item_id`, `--force`
       and `--yes`, and its entry in the dispatch dict. The parser's `description` is the same
       single string the web confirmation page shows, as `retry` already does — one string, two
       surfaces, so they cannot disagree.
 
 ### Tests for User Story 1
 
-- [ ] T012 [P] [US1] `tests/unit/test_operations_reset.py` — success paths: from `interrupted`,
+- [X] T012 [P] [US1] `tests/unit/test_operations_reset.py` — success paths: from `interrupted`,
       from `awaiting_review`, and from `failed`. Assert the four content columns come from the
       read, `worktree_path` is cleared, `failure_reason` and `blocked_reason` are cleared, the
       state is `ready`, and `discovered_at` is untouched.
-- [ ] T013 [P] [US1] `tests/unit/test_operations_reset.py` — **the ordering test (research R1)**:
+- [X] T013 [P] [US1] `tests/unit/test_operations_reset.py` — **the ordering test (research R1)**:
       on an ineligible verdict the checkout is **still on disk** and `worktree_path` is still
       set, while the content columns *have* been refreshed. This pins the one real design
       decision and is the test that fails if someone later reorders the steps.
-- [ ] T014 [P] [US1] `tests/unit/test_operations_reset.py` — **the retained-branch test (research
+- [X] T014 [P] [US1] `tests/unit/test_operations_reset.py` — **the retained-branch test (research
       R3)**: worktree removed, git keeps the unmerged branch, and the item still reaches `ready`
       with the warning reported in the output.
-- [ ] T015 [P] [US1] `tests/unit/test_operations_reset.py` — refusals, one test each: no such
+- [X] T015 [P] [US1] `tests/unit/test_operations_reset.py` — refusals, one test each: no such
       item; each unaccepted state (`discovered`, `ready`, `dispatching`, `active`, `done`,
       `abandoned`); unresolved repository; a dispatch gate still blocking; issue unreachable;
       issue absent; issue ineligible **because the author changed** — that case specifically,
       since it is why the read path is shared and not copied. Each asserts a non-zero exit and an
       unchanged state.
-- [ ] T016 [P] [US1] `tests/unit/test_operations_reset.py` — confirmation paths: declined `[y/N]`
+- [X] T016 [P] [US1] `tests/unit/test_operations_reset.py` — confirmation paths: declined `[y/N]`
       aborts and destroys nothing; abandoned at EOF returns the recorded refusal rather than a
       traceback; `--force` asks the typed id and a wrong answer aborts; `assume_yes=True` asks
       nothing and still never overrides git.
-- [ ] T017 [P] [US1] `tests/unit/test_operations_reset.py` — guard passthrough: an open session
+- [X] T017 [P] [US1] `tests/unit/test_operations_reset.py` — guard passthrough: an open session
       row refuses and names `cancel`; git's dirty-tree refusal refuses and names `--force`; a
       removal already on record refuses. These prove the guards are reached, not re-implemented.
-- [ ] T018 [P] [US1] `tests/unit/test_operations_reset.py` — **interruption paths**: an item
+- [X] T018 [P] [US1] `tests/unit/test_operations_reset.py` — **interruption paths**: an item
       whose worktree was already removed and `worktree_path` already cleared (a reset killed
       between the discard and the transition) is completed by a second `reset`; an item refreshed
       but not transitioned is completed by a second `reset`. Assert no state is half-written.
-- [ ] T019 [P] [US1] `tests/unit/test_operations_reset.py` — audit: a successful reset writes
+- [X] T019 [P] [US1] `tests/unit/test_operations_reset.py` — audit: a successful reset writes
       `reset` intent, `reset.evaluate`, the `worktree.remove` pair, `state.work_item` and the
       `reset` outcome, in that order; a refusal writes the intent and an outcome carrying
       `refused_by`. Assert the intent precedes the destruction.
-- [ ] T020 [P] [US1] `tests/unit/test_operations_reset.py` — simulation: below the level at which
+- [X] T020 [P] [US1] `tests/unit/test_operations_reset.py` — simulation: below the level at which
       version control is real, the removal reports "would remove", nothing on disk is touched,
       and the level that would make it real is named.
-- [ ] T021 [P] [US1] Extend `tests/unit/test_cli_exit_codes.py` (or the nearest equivalent) so
+- [X] T021 [P] [US1] Extend `tests/unit/test_cli_exit_codes.py` (or the nearest equivalent) so
       `reset` exits non-zero on refusal, and add it to `tests/unit/test_named_commands.py` if
       that test enumerates the verbs.
 

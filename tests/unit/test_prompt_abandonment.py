@@ -234,6 +234,9 @@ def test_every_operation_that_prompts_wears_the_decorator():
         "worktree_remove",
         # Issue #59: the path form asks for the directory name before forcing.
         "worktree_remove_path",
+        # Issue #179: reset asks before it discards a checkout — except under --force,
+        # where `worktree_remove`'s typed-id prompt is the one question instead.
+        "reset",
     }
     for name, func in prompting.items():
         assert getattr(func, "__wrapped__", None) is not None, (

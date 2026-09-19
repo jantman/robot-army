@@ -62,6 +62,7 @@ from robot_army.models import ANOMALY_KINDS, WorkItem
 from robot_army.states import (
     TERMINAL_SESSION_STATES,
     TERMINAL_WORK_ITEM_STATES,
+    IllegalTransition,
     SessionState,
     WorkItemState,
     dumps_labels,
@@ -4203,15 +4204,34 @@ def reset(
         else:
             result.say(f"item {item_id} had no worktree to discard")
 
-        with db.transaction(ctx.conn):
-            transition_work_item(
-                ctx.conn,
-                ctx.audit,
-                item_id=item_id,
-                target=WorkItemState.READY,
-                reason="reset by the maintainer; the work was discarded and the issue re-read",
-                extra_columns={"failure_reason": None, "blocked_reason": None},
-            )
+        try:
+            with db.transaction(ctx.conn):
+                transition_work_item(
+                    ctx.conn,
+                    ctx.audit,
+                    item_id=item_id,
+                    target=WorkItemState.READY,
+                    reason=(
+                        "reset by the maintainer; the work was discarded and the issue re-read"
+                    ),
+                    extra_columns={"failure_reason": None, "blocked_reason": None},
+                )
+        except IllegalTransition as exc:
+            # Something else moved the item while this ran — an `abandon` from the web, most
+            # likely. Caught here and nowhere else in this family of verbs because reset's
+            # window is the wide one: `retry` has a network read between its check and its
+            # transition, and reset has that *plus* a worktree removal and possibly a prompt.
+            # The state machine is still the arbiter; what this adds is that the destruction
+            # which already happened is reported rather than buried under a traceback.
+            outcome["refused_by"] = "state_changed"
+            result.code = EXIT_PRECONDITION
+            result.say(f"item {item_id} moved to another state while this reset ran: {exc}")
+            if result.data.get("worktree_removed"):
+                result.say(
+                    "  Its checkout and branch were already discarded, and it was not put "
+                    "back in the queue."
+                )
+            return result
         outcome["requeued"] = True
         result.data["requeued"] = True
         result.say(f"item {item_id} is ready again, to be worked from scratch")

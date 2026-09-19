@@ -606,3 +606,34 @@ def test_below_the_live_level_it_says_what_it_would_do(conn, config, audit, monk
     assert result.code == EXIT_OK
     assert any("would remove" in line for line in result.lines)
     assert any("simulated" in line for line in result.lines)
+
+
+# -- the race the wide window makes possible --------------------------------
+
+
+def test_a_concurrent_move_is_reported_rather_than_tracebacked(ctx, conn, config, monkeypatch):
+    """Something else abandons the item while the reset is between its steps.
+
+    Reset's window is the wide one — a network read, a worktree removal, and possibly a
+    prompt, all between the state check and the transition — so this is the verb where a
+    concurrent terminal command is actually reachable. The state machine stays the arbiter;
+    what is asserted here is that the destruction which already happened is *reported*,
+    rather than buried under a traceback where nothing says the checkout is gone.
+    """
+    item_id = resettable(conn, config)
+    real_remove = operations.worktree_remove
+
+    def remove_then_abandon(*args: Any, **kwargs: Any):
+        result = real_remove(*args, **kwargs)
+        with db.transaction(conn):
+            conn.execute("UPDATE work_items SET state = 'abandoned' WHERE id = ?", (item_id,))
+        return result
+
+    monkeypatch.setattr(operations, "worktree_remove", remove_then_abandon)
+
+    result = operations.reset(ctx, item_id, confirm=says_yes)
+
+    assert result.code == EXIT_PRECONDITION
+    assert db.get_work_item(conn, item_id).state is WorkItemState.ABANDONED
+    assert any("moved to another state" in line for line in result.lines)
+    assert any("already discarded" in line for line in result.lines)

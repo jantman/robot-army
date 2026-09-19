@@ -71,6 +71,45 @@ def test_a_few_transitions_that_must_not_exist():
     assert not is_legal_session_transition(SessionState.STARTING, SessionState.EXITED_CLEAN)
 
 
+def test_a_rested_item_can_go_back_to_the_queue():
+    """``reset``'s two routes (issue #179), which nothing else uses.
+
+    Named here rather than left to the exhaustive table check above because the table check
+    proves only that the pairs *present* are accepted — it would pass just as happily if
+    these two were removed, and removing them is what breaks ``reset``.
+    """
+    assert is_legal_work_item_transition(WorkItemState.INTERRUPTED, WorkItemState.READY)
+    assert is_legal_work_item_transition(WorkItemState.AWAITING_REVIEW, WorkItemState.READY)
+    # The third state reset accepts. It was always legal — it is ``retry``'s transition.
+    assert is_legal_work_item_transition(WorkItemState.FAILED, WorkItemState.READY)
+
+
+def test_widening_the_route_to_ready_did_not_widen_it_further():
+    """Exactly four states reach ``ready``, and no more (issue #179).
+
+    Asserted as a set rather than as four separate calls, because the failure to guard
+    against is a *fifth* entry arriving unnoticed — which individual assertions cannot see.
+    A state machine grows one convenient pair at a time, and ``ready`` is the state an item
+    gets dispatched from, so a wrong pair here starts an agent from somewhere it should not.
+    """
+    reach_ready = {s for s, t in WORK_ITEM_TRANSITIONS if t is WorkItemState.READY}
+    assert reach_ready == {
+        WorkItemState.DISCOVERED,
+        WorkItemState.FAILED,
+        WorkItemState.INTERRUPTED,
+        WorkItemState.AWAITING_REVIEW,
+    }
+    # In particular, not from anything in flight, and not from a terminal state.
+    for state in (
+        WorkItemState.READY,
+        WorkItemState.DISPATCHING,
+        WorkItemState.ACTIVE,
+        WorkItemState.DONE,
+        WorkItemState.ABANDONED,
+    ):
+        assert not is_legal_work_item_transition(state, WorkItemState.READY)
+
+
 @pytest.mark.parametrize(
     ("code", "session", "item", "signal"),
     [

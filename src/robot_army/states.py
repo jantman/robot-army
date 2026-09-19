@@ -48,6 +48,15 @@ class SessionState(StrEnum):
 
 #: Legal work item transitions, straight from data-model.md's table. Anything absent
 #: here is rejected — that is the whole point of a single gate.
+#:
+#: The two routes back to ``ready`` from a rested state are ``reset``'s, and only ``reset``'s
+#: (issue #179). Before it there was no way to start an item over: ``restart`` and ``resume``
+#: redispatch an ``interrupted`` item with the **stored** issue body, which is the stale copy
+#: a start-over exists to discard, and ``abandon`` is terminal. The only code that re-reads an
+#: issue was ``retry``, reachable from ``failed`` alone — so an item interrupted against an
+#: issue that had since changed could be re-run, or given up on, and nothing else. These two
+#: entries are what makes the third answer expressible; ``failed → ready`` below was already
+#: here, and is the same route from the one state that always had it.
 WORK_ITEM_TRANSITIONS: frozenset[tuple[WorkItemState, WorkItemState]] = frozenset(
     {
         (WorkItemState.DISCOVERED, WorkItemState.READY),
@@ -63,9 +72,11 @@ WORK_ITEM_TRANSITIONS: frozenset[tuple[WorkItemState, WorkItemState]] = frozense
         (WorkItemState.AWAITING_REVIEW, WorkItemState.DONE),
         (WorkItemState.AWAITING_REVIEW, WorkItemState.DISPATCHING),
         (WorkItemState.AWAITING_REVIEW, WorkItemState.ABANDONED),
+        (WorkItemState.AWAITING_REVIEW, WorkItemState.READY),
         (WorkItemState.INTERRUPTED, WorkItemState.DISPATCHING),
         (WorkItemState.INTERRUPTED, WorkItemState.DONE),
         (WorkItemState.INTERRUPTED, WorkItemState.ABANDONED),
+        (WorkItemState.INTERRUPTED, WorkItemState.READY),
         (WorkItemState.FAILED, WorkItemState.READY),
         (WorkItemState.FAILED, WorkItemState.ABANDONED),
     }

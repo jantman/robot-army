@@ -34,9 +34,9 @@ Single package at the repository root: `src/robot_army/`, `tests/unit/`, `tests/
 **Purpose**: confirm the ground before changing it. No project initialisation is needed — this is
 an established repository.
 
-- [ ] T001 Run `uv sync && uv run pytest` and record the suite as green, so any later failure is
+- [X] T001 Run `uv sync && uv run pytest` and record the suite as green, so any later failure is
       known to be this feature's and not inherited.
-- [ ] T002 Verify the three code facts the plan rests on, and correct the plan if any is wrong:
+- [X] T002 Verify the three code facts the plan rests on, and correct the plan if any is wrong:
       that `dispatch.dispatch_item` rebuilds a missing worktree for a `ready` item
       (`src/robot_army/dispatch.py`), that it composes the prompt from the stored `title`/`body`
       (`src/robot_army/dispatch.py`), and that `ordering.order_key` ranks on `discovered_at` and
@@ -51,11 +51,11 @@ in Phase 3 and Phase 4 depends on this.
 
 **⚠️ CRITICAL**: no user story work can begin until T003 and T004 are done.
 
-- [ ] T003 Add `(WorkItemState.INTERRUPTED, WorkItemState.READY)` and
+- [X] T003 Add `(WorkItemState.INTERRUPTED, WorkItemState.READY)` and
       `(WorkItemState.AWAITING_REVIEW, WorkItemState.READY)` to `WORK_ITEM_TRANSITIONS` in
       `src/robot_army/states.py`, with a comment saying which verb needs them and why the route
       did not exist before.
-- [ ] T004 Extend `tests/unit/test_states.py`: both new transitions are legal; `active → ready`,
+- [X] T004 Extend `tests/unit/test_states.py`: both new transitions are legal; `active → ready`,
       `done → ready`, `abandoned → ready` and `dispatching → ready` are still illegal and still
       raise `IllegalTransition`. The illegal cases are the point — the table is enumerated in
       that test so widening it cannot go unnoticed.

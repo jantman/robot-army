@@ -989,6 +989,36 @@ robot-army log --since 10m | grep -c 'github.*"/repos/'
 A path other than `/repos/<the key you typed>` in that output would mean onboarding had started
 enumerating.
 
+## The issue #179 records
+
+`reset` discards a checkout, re-reads the issue and requeues the item. Three of its four
+records already existed — the removal's own pair, and the state transition — so what is new
+is the pair around the whole verb, plus the two the shared read path writes under reset's
+name instead of retry's.
+
+| Record | When | Notable detail |
+|--------|------|----------------|
+| `reset` | An intent/outcome pair around every reset | `entity_id` is the work item, `target` is `<repo>#<issue>`. The intent carries `force` and the state the item was in, and is **flushed before anything is destroyed**, which is what the Operating Constraints require of an irreversible action. The outcome carries `worktree_removed`, `branch_deleted` and `requeued`, plus `refused_by` when it stopped |
+| `reset.blocked` | A local condition refused it **before any network read** | `blocked`, the blocker's own sentence. This record existing without a `reset.evaluate` beside it is how the log says GitHub was never asked |
+| `reset.evaluate` | After the live read | `eligible`, `reason`, `author`, and `refreshed` — the columns the read rewrote. On a read that failed: `cause`, which is `issue_unreachable` or `issue_absent`, never one value for both, because "it does not exist" and "I could not ask" are different facts |
+| `worktree.remove`, `git.remove_worktree`, `git.delete_branch` | Unchanged | A removal is what happened, and it is recorded under its own name. `reset` calls the command whole rather than reaching past it, so every refusal above is reachable from a reset and reads identically |
+| `state.work_item` | Unchanged | `from` is `interrupted`, `awaiting_review` or `failed`; `to` is `ready`. `columns` shows `failure_reason` and `blocked_reason` cleared |
+
+`reset.blocked` and `reset.evaluate` are written by the same function that writes
+`retry.blocked` and `retry.evaluate`, with the verb supplied by the caller. The records are
+otherwise identical because the question asked is identical — which is the point of sharing
+the code rather than the wording.
+
+A whole reset therefore reads, in order:
+
+```
+reset [intent]  →  reset.evaluate  →  worktree.remove [intent]  →  git.remove_worktree
+  →  git.delete_branch  →  worktree.remove [outcome]  →  state.work_item  →  reset [outcome]
+```
+
+and a refused one stops at the record naming the guard that refused, with the `reset` outcome
+carrying `refused_by`.
+
 ## Reconstructing an item's history
 
 ```bash

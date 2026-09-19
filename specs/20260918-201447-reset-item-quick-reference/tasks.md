@@ -205,38 +205,38 @@ is offered where it is, and why the web cannot force.
 what can I do from `interrupted`; what does `abandon` refuse; can I start an item over from my
 phone; what do I type when the disk is full.
 
-- [ ] T027 [US3] Move the reasoning that belongs elsewhere out of `docs/guide/operating.md`, per
+- [X] T027 [US3] Move the reasoning that belongs elsewhere out of `docs/guide/operating.md`, per
       the table in [contracts/operating-page.md](contracts/operating-page.md): live blocker
       re-checking → `docs/guide/3-selection.md`; cleanup's guards and what a retained branch
       means → `docs/guide/5-outcome.md`; reboot and interrupted-at-X behaviour →
       `docs/guide/state.md`. Move it, do not delete it, and do not duplicate it.
-- [ ] T028 [US3] Rewrite `docs/guide/operating.md` in the eight-section order the contract fixes:
+- [X] T028 [US3] Rewrite `docs/guide/operating.md` in the eight-section order the contract fixes:
       purpose · recipes · state table · command table · where things live · the web interface
       (keeping the no-authentication warning **in full** — a safety statement is not reasoning) ·
       reading the logs · where the why lives. Recipes first, because that is why the page is
       open.
-- [ ] T029 [US3] Write the state table: one row per `WorkItemState` member — state, what it
+- [X] T029 [US3] Write the state table: one row per `WorkItemState` member — state, what it
       means, which commands are legal from it, what it becomes next. `reset` appears on
       `interrupted`, `awaiting_review` and `failed`.
-- [ ] T030 [US3] Write the command table: one row per subcommand the parser defines — command,
+- [X] T030 [US3] Write the command table: one row per subcommand the parser defines — command,
       what it does, when to reach for it, what it refuses, and `Web` / `Terminal` / `Both`.
       `reset` is `Both`; `reset --force` is `Terminal`.
-- [ ] T031 [US3] Write the five recipes, a few lines each with the commands in order: an item is
+- [X] T031 [US3] Write the five recipes, a few lines each with the commands in order: an item is
       stuck · I want to start over · something is running that should not be · the daemon looks
       dead · the disk is full.
-- [ ] T032 [P] [US3] Write `tests/unit/test_operating_reference.py`: parse both tables out of the
+- [X] T032 [P] [US3] Write `tests/unit/test_operating_reference.py`: parse both tables out of the
       page and assert the state set equals `WorkItemState`'s members, the command set equals the
       parser's subcommands (read from the parser, never a hand-kept list), the `Where` column
       holds only the three permitted values, and the five recipe headings are present.
-- [ ] T033 [P] [US3] Update `docs/guide/state.md` for the two new transitions — the table, the
+- [X] T033 [P] [US3] Update `docs/guide/state.md` for the two new transitions — the table, the
       prose about what `ready` is reachable from, and the note that `retry` is no longer the only
       path that refreshes the four columns.
-- [ ] T034 [P] [US3] Add `reset`, `reset.blocked` and `reset.evaluate` to
+- [X] T034 [P] [US3] Add `reset`, `reset.blocked` and `reset.evaluate` to
       `docs/guide/audit-log.md` with their record shapes, per [data-model.md](data-model.md).
-- [ ] T035 [P] [US3] Update `docs/guide/3-selection.md` and `docs/guide/5-outcome.md` where they
+- [X] T035 [P] [US3] Update `docs/guide/3-selection.md` and `docs/guide/5-outcome.md` where they
       name `retry` as the only way back to the queue, so they name `reset` too and say how the
       two differ: `retry` re-reads without discarding, `reset` discards as well.
-- [ ] T036 [P] [US3] Check `docs/guide/index.md` and `README.md` for anything the rewrite
+- [X] T036 [P] [US3] Check `docs/guide/index.md` and `README.md` for anything the rewrite
       falsifies. `README.md` must stay under 150 lines — `tests/unit/test_docs_links.py` enforces
       it.
 

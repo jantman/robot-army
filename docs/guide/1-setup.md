@@ -227,7 +227,7 @@ problem this size.
   no display environment and no kitty to launch into. By hand works; a user unit bound to
   `graphical-session.target` is the same rule enforced by systemd rather than by memory, and
   is what this machine runs. If you take the unit, take
-  [the start-limit drop-in](operating.md#what-it-catches-is-not-the-daemon-crashed) with it —
+  [the start-limit drop-in](operating.md#is-it-alive) with it —
   without it the dead-man's switch has nothing left to catch.
 - **A launch is visible in the process table.** The composed prompt and every `[repos.*] env`
   value are passed to kitty as command arguments, so any local process can read them from

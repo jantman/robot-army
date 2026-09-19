@@ -644,7 +644,7 @@ Added by migration 011 (issue #119, RA-01). One nullable column, no table, no st
 
 | Value | Means | Written by |
 |---|---|---|
-| a login | who wrote the issue, as the last read of it reported | the poller at discovery; `retry` on every successful re-read |
+| a login | who wrote the issue, as the last read of it reported | the poller at discovery; `retry` and `reset` on every successful re-read |
 | `NULL` | **never recorded** — a row predating migration 011 | nobody; there is no backfill |
 
 **Why it exists.** The author check is the control that stops "anyone may open an issue on a
@@ -675,7 +675,10 @@ is what migration 005 refuses to do with clone paths, in the same words.
 
 `retry` refreshes `title`, `body`, `labels` and `author` together from the read it performs,
 on the refused path as well as the allowed one, so a blocked item on the queue describes the
-issue as it currently is rather than as it was at discovery.
+issue as it currently is rather than as it was at discovery. Since issue #179 `reset` does the
+same, through the same code: both verbs put an item back in the queue, both must answer the
+author question first, and one implementation of that question is the whole reason `reset` was
+written as a composition rather than as a second read of its own.
 
 **One upgrade wrinkle, worth knowing before it surprises me.** `resume` and `restart` reach
 the launch through `dispatch_item` too, so a pre-011 item sitting in `interrupted` is
@@ -818,6 +821,8 @@ summary:
 | After both cleanup removals, before the row is written | Both gone, `cleanup_state` still `NULL`. The next pass re-attempts, both steps refuse harmlessly, and the row is written `done` |
 | `worktree remove <id>` on a finished item, after the worktree removal and before the branch half | Worktree gone, branch present, no record, path still on the row. The next pass reports `prunable_worktree`, and running the same command again finds the directory already gone, completes the branch half and records the outcome. Before issue #113 this left a finished item reported by nothing |
 | `worktree remove <id>` on a finished item, after both removals and before the record commits | Both gone, no record. Reported the same way; the re-run finds the branch already gone, says so rather than warning that it survived, and records `done` |
+| `reset` after the issue was re-read, before the checkout was discarded | Content refreshed, state unchanged, checkout intact. The next `reset` re-reads and proceeds. Deliberately this way round: the read comes first so a refusal never costs the work |
+| `reset` after the checkout was discarded, before the item reached `ready` | Worktree and branch gone, `worktree_path` cleared, state unchanged. The next `reset` finds nothing to discard, re-reads, and requeues — or `restart` builds a fresh checkout against the refreshed content |
 | During the containment fetch | Nothing removed. Containment is unproven, so the branch is retained and the item is reconsidered. The failure direction is always *keep* |
 | After a state transition, before its notification | State committed and logged; no message sent. The state change is fully reconstructible; the lost message is the named gap in [the audit log](audit-log.md) |
 | Mid-notification, after the POST left | Possibly delivered, recorded as attempted with its outcome. **No retry** — a duplicate notification is noise, and a retry loop is a Principle IV violation |

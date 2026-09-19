@@ -832,3 +832,120 @@ def test_the_dispatch_guard_refuses_a_missing_item_rather_than_falling_through(
 
     assert caught.value.status == 404
     assert "999999" in caught.value.reason
+
+
+# -- reset from the browser (issue #179) ------------------------------------
+#
+# The control's legality, and the one place the two surfaces deliberately differ: the web
+# cannot pass ``--force``, so uncommitted work is refused there and only there.
+
+
+@pytest.mark.parametrize("state", ["interrupted", "awaiting_review", "failed"])
+def test_reset_is_offered_in_every_state_it_accepts(web, conn, state):
+    item_id = seed_item(conn, state=state)
+    assert "confirm/reset" in web.get(f"/item/{item_id}").text
+
+
+@pytest.mark.parametrize(
+    "state", ["discovered", "ready", "dispatching", "active", "done", "abandoned"]
+)
+def test_reset_is_not_offered_where_it_is_illegal(web, conn, state):
+    item_id = seed_item(conn, state=state)
+    assert "confirm/reset" not in web.get(f"/item/{item_id}").text
+
+
+@pytest.mark.parametrize("state", ["active", "done", "abandoned"])
+def test_posting_reset_from_an_illegal_state_is_refused(web, conn, state):
+    """FR-029 and FR-027 are one table asked twice: offered, then accepted, from
+    ``ITEM_ACTIONS``. A control that is not rendered cannot be reached by typing the URL."""
+    item_id = seed_item(conn, state=state)
+    response = web.post_json(f"/item/{item_id}/reset")
+    assert response.status == 409
+    payload = response.json()
+    assert payload["state"] == state
+    assert "reset" not in payload["legal_actions"]
+    assert state_of(conn, item_id) == state
+
+
+def test_the_reset_confirmation_says_what_it_destroys(web, conn):
+    item_id = seed_item(conn, state="interrupted")
+    page = web.get(f"/item/{item_id}/confirm/reset")
+
+    assert page.status == 200
+    assert f'action="/item/{item_id}/reset"' in page.text
+    # All four consequences FR-015 requires, from the operation's own sentence.
+    for phrase in ("deleted", "lost", "re-read", "back in the queue"):
+        assert phrase in page.text, phrase
+    # A way back that changes nothing (FR-016).
+    assert "no, go back" in page.text
+    assert f"/item/{item_id}" in page.text
+
+
+def test_the_web_never_forces_a_reset(web, conn, monkeypatch):
+    """FR-019, asserted at the call rather than inferred from the absence of a flag.
+
+    Forcing discards uncommitted work, and the browser's confirmation cannot carry the
+    weight the terminal's typed-item-id prompt carries. If a later edit adds ``force=True``
+    here to make a refusal go away, this is what stops it.
+    """
+    calls: list[dict] = []
+
+    def watch(ctx, item_id, **kwargs):
+        calls.append(kwargs)
+        return operations.Result(lines=["watched"], data={"item_id": item_id})
+
+    monkeypatch.setattr(operations, "reset", watch)
+    item_id = seed_item(conn, state="interrupted")
+
+    assert web.post_json(f"/item/{item_id}/reset").status == 303
+    assert calls == [{"assume_yes": True}]
+
+
+def test_a_refused_reset_is_reported_rather_than_redirected_as_success(web, conn, monkeypatch):
+    """A refusal the page hides is worse than no control at all: the maintainer walks away
+    believing the work was discarded and the item requeued, and neither happened."""
+    monkeypatch.setattr(
+        operations,
+        "reset",
+        lambda ctx, item_id, **kwargs: operations.Result(
+            code=operations.EXIT_FAILED,
+            lines=[
+                "refused to remove /w/demo/issue-42:",
+                "  fatal: contains modified or untracked files",
+                "  Git refuses to remove a worktree with uncommitted or untracked changes. "
+                "That refusal is the guard; --force overrides it.",
+            ],
+            data={"item_id": item_id, "refused_by": "git"},
+        ),
+    )
+    item_id = seed_item(conn, state="interrupted")
+
+    response = web.post_json(f"/item/{item_id}/reset")
+
+    assert response.status != 303
+    payload = response.json()
+    assert payload["refused_by"] == "git"
+    assert "--force overrides it" in payload["reason"]
+    assert state_of(conn, item_id) == "interrupted"
+
+
+def test_a_reset_from_the_browser_requeues_the_item(web, conn, config, layout, monkeypatch):
+    """End to end through the route, with the fake reader answering the re-read.
+
+    The trust gate and the recorded clone location are stood in for the way
+    ``test_retry_moves_a_failed_item_back_to_ready_when_it_can`` stands them in: both are
+    real preconditions of the operation, and a machine without a trusted clone would refuse
+    before the read and prove nothing about the route.
+    """
+    monkeypatch.setattr(
+        operations.dispatch, "is_trusted", lambda path, trust_file=None: (True, "trusted in test")
+    )
+    item_id = seed_item(conn, state="interrupted", clone_path=config.repos["demo"].path)
+    web.reader.issues = [make_issue(title="the title as edited")]
+
+    response = web.post_json(f"/item/{item_id}/reset")
+
+    assert response.status == 303
+    assert state_of(conn, item_id) == "ready"
+    assert db.get_work_item(conn, item_id).title == "the title as edited"
+    assert web_records(layout, action="web.reset")

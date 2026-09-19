@@ -472,6 +472,26 @@ ITEM_ACTIONS: dict[str, ActionSpec] = {
         ),
         item_states=(WorkItemState.FAILED,),
     ),
+    "reset": ActionSpec(
+        name="reset",
+        label="reset",
+        confirm=True,
+        danger=True,
+        # The operation's own sentence, not a second one written for the browser (issue
+        # #179). ``robot-army reset --help`` prints this same string: a destructive verb
+        # whose two descriptions disagree is one whose confirmation cannot be trusted, and
+        # one constant is the only way to keep them in step.
+        description=operations.RESET_DESCRIPTION,
+        item_states=(
+            WorkItemState.INTERRUPTED,
+            WorkItemState.AWAITING_REVIEW,
+            WorkItemState.FAILED,
+        ),
+        # No ``session_states``. The open-session refusal is ``worktree_remove``'s, asked of
+        # the session rows at the moment of the POST rather than of the state this page was
+        # rendered from — and a row nothing has closed refuses whether or not its process
+        # can still be seen, which a control's legality table cannot express.
+    ),
     "attach": ActionSpec(
         name="attach",
         label="attach terminal",

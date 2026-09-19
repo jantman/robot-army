@@ -171,25 +171,25 @@ mutating action already uses, and unable to override git.
 reaches a confirmation page that says what will be destroyed and links back; submitting performs
 it. `/item/<id>` for an `active` item offers nothing and a direct POST is refused `409`.
 
-- [ ] T022 [US2] Add the `reset` entry to `ITEM_ACTIONS` in `src/robot_army/web/pages.py` per
+- [X] T022 [US2] Add the `reset` entry to `ITEM_ACTIONS` in `src/robot_army/web/pages.py` per
       [contracts/web-reset.md](contracts/web-reset.md): `confirm=True`, `danger=True`,
       `needs_daemon=False`, `effect_guarded=True`, `item_states=(INTERRUPTED, AWAITING_REVIEW,
       FAILED)`, and the description that names all four consequences. No `session_states`: the
       open-session refusal belongs to `worktree_remove`, asked at the moment of the POST.
-- [ ] T023 [US2] Add `Route(POST, ("item", "<id>", "reset"), _inline_item_action("reset",
+- [X] T023 [US2] Add `Route(POST, ("item", "<id>", "reset"), _inline_item_action("reset",
       message="reset", run=lambda ctx, item_id: operations.reset(ctx, item_id,
       assume_yes=True)), terminal="reset")` to `ROUTES` in `src/robot_army/web/server.py`.
       `assume_yes=True` and **never** `force=True` — that is FR-019, satisfied by not passing a
       flag rather than by writing a check.
-- [ ] T024 [P] [US2] Extend `tests/unit/test_web_actions.py`: the control is offered in exactly
+- [X] T024 [P] [US2] Extend `tests/unit/test_web_actions.py`: the control is offered in exactly
       the three accepted states and in no others; a POST from any other state is refused `409`
       naming the state and what is currently legal; the confirmation page renders the description
       and a link back; legality is re-checked at submission against state read then.
-- [ ] T025 [P] [US2] Extend `tests/unit/test_web_actions.py`: the web never passes `force` —
+- [X] T025 [P] [US2] Extend `tests/unit/test_web_actions.py`: the web never passes `force` —
       assert it directly, by spying on the call — and an item whose checkout holds uncommitted
       work is refused on the page with git's reason and the terminal remedy, not redirected as
       though it succeeded.
-- [ ] T026 [P] [US2] Extend `tests/unit/test_web_routing.py` if it enumerates routes, so the new
+- [X] T026 [P] [US2] Extend `tests/unit/test_web_routing.py` if it enumerates routes, so the new
       one is covered by whatever that test asserts about all of them.
 
 **Checkpoint**: an interrupted item can be started over from the phone. Commit: why the control

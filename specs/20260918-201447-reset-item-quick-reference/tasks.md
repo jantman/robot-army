@@ -247,13 +247,13 @@ why the page changed shape.
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T037 Run `uv run pytest` — the whole suite, green. Nothing is complete until it is.
-- [ ] T038 Walk [quickstart.md](quickstart.md) end to end against a dry-run item, including the
+- [X] T037 Run `uv run pytest` — the whole suite, green. Nothing is complete until it is.
+- [X] T038 Walk [quickstart.md](quickstart.md) end to end against a dry-run item, including the
       browser scenarios, and correct anything it gets wrong.
-- [ ] T039 Confirm research R9 still holds: no key was added to `config.py`'s `_KNOWN_KEYS` or
+- [X] T039 Confirm research R9 still holds: no key was added to `config.py`'s `_KNOWN_KEYS` or
       `_REPO_KEYS`, so `tests/unit/test_example_config_drift.py` is green and
       `share/config.example.toml` needs no regeneration. If a key did creep in, regenerate it.
-- [ ] T040 Re-read the Constitution Check in [plan.md](plan.md) against what was actually built,
+- [X] T040 Re-read the Constitution Check in [plan.md](plan.md) against what was actually built,
       and correct the plan if the implementation diverged. The check is a gate, not a formality.
 
 ---

@@ -145,9 +145,18 @@ The full suite must pass before the work is complete.
 
 ### Post-design re-check
 
-Re-evaluated after Phase 1. **No violation, and the Complexity Tracking table stays empty.** The
-design as contracted adds one verb, one action specification entry, two transition-table entries,
-three audit action names and one test module. Nothing in `data-model.md` adds a column, a table
+Re-evaluated after Phase 1, and again against the built code. **No violation, and the
+Complexity Tracking table stays empty.** What landed is one verb, one action specification
+entry, one route, one transition-table pair, three audit action names, one redirect-banner
+entry and one test module — the banner being the only thing the design did not foresee, caught
+by an existing test that requires every redirect message to have one, which is that test doing
+its job rather than a gap in this plan.
+
+Two existing tests had to be told about the new verb, and both are of the kind worth having:
+`test_every_operation_that_prompts_wears_the_decorator` enumerates the commands that ask a
+question, so a new one is a deliberate addition rather than something that can be forgotten;
+and `test_every_redirect_message_has_a_banner_to_render` scans the routes for messages that
+would render nothing. Nothing in `data-model.md` adds a column, a table
 or a configuration key; nothing in `contracts/` introduces an abstraction with a single
 implementation. The one thing the design *removes* — 350-odd lines of prose from a guide page —
 is scope the issue asked for and is redistributed rather than deleted.

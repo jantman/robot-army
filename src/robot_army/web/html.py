@@ -177,6 +177,11 @@ BANNERS: dict[str, tuple[str, str]] = {
     "abandoned": ("ok", "Item abandoned. Its worktree was left in place."),
     "cancelled": ("ok", "Session stopped. The item is interrupted and its worktree untouched."),
     "retried": ("ok", "Item moved back to the queue."),
+    "reset": (
+        "ok",
+        "Work discarded and the item moved back to the queue. Its checkout and branch are "
+        "gone; the issue was re-read and will be worked from scratch.",
+    ),
     "attached": ("ok", "A terminal window was opened onto that session."),
     "acknowledged": ("ok", "Anomaly acknowledged."),
     "held": (

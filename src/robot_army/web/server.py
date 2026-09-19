@@ -1384,6 +1384,21 @@ ROUTES: tuple[Route, ...] = (
     ),
     Route(
         POST,
+        ("item", "<id>", "reset"),
+        _inline_item_action(
+            "reset",
+            message="reset",
+            # ``assume_yes`` because the HTTP confirmation already happened, and **never**
+            # ``force`` (issue #179, FR-019). That is the one place the two surfaces differ
+            # and it differs in the safe direction: a checkout holding uncommitted work gets
+            # git's refusal, rendered on the page with the terminal command that overrides
+            # it. Satisfied by not passing a flag rather than by writing a check.
+            run=lambda ctx, item_id: operations.reset(ctx, item_id, assume_yes=True),
+        ),
+        terminal="reset",
+    ),
+    Route(
+        POST,
         ("item", "<id>", "attach"),
         _inline_item_action(
             "attach", message="attached", run=lambda ctx, item_id: operations.attach(ctx, item_id)

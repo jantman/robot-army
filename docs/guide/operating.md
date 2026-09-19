@@ -1,237 +1,185 @@
 # Operating it
 
-The web interface, where everything lives, how to read the logs, and what to do when
-something looks wrong.
+The page to open when something is wrong and the question is *what do I type*. Tables and
+recipes; the reasoning behind any of it is on the narrative page that owns that stage, linked
+from each section.
 
-## The web interface
+- [Recipes](#recipes) · [States](#states) · [Commands](#commands) ·
+  [Where things live](#where-things-live) · [Reading the logs](#reading-the-logs) ·
+  [Anomalies](#anomalies) · [Is it alive](#is-it-alive) · [The web interface](#the-web-interface)
 
-A second front end onto the same operations, so I can see what is running and decide an
-interrupted item from my phone without opening a terminal.
+## Recipes
 
-```bash
-uv run robot-army serve        # http://127.0.0.1:8420, the shipped default
-```
+### I want to start this item over
 
-**Two processes, started by hand after graphical login, in either order.** The interface is
-deliberately separate from the daemon: it starts, stops, and survives on its own, so the
-audit log and the interrupted list stay readable during exactly the incident that makes them
-worth reading.
+Throw the work away and work the issue again from what it says now.
 
 ```bash
-uv run robot-army run &        # the daemon
-uv run robot-army serve        # the interface
+uv run robot-army show <id>                  # what is there: commits, PR, uncommitted work
+uv run robot-army cancel <id>                # only if a session is still running
+uv run robot-army reset <id>                 # discard, re-read the issue, back to the queue
 ```
 
-To reach it from the phone, name the machine's LAN address:
+`reset` deletes the checkout **and its branch**, re-reads the issue from GitHub, re-checks
+eligibility — author included — and leaves the item `ready`. The next dispatch builds a fresh
+checkout and composes the prompt from the issue as just read. It refuses if a session is still
+open, and it respects git's refusal over uncommitted or untracked work; `--force` overrides
+that second one and asks for the item id typed out first.
 
-```toml
-[web]
-bind = "127.0.0.1"      # the LAN address, or 0.0.0.0 for every interface
-port = 8420
-refresh_seconds = 10    # how often an open page re-fetches itself
-```
+Legal from `interrupted`, `awaiting_review` and `failed`. Also on the item's web page.
 
-### Read this part
+**Not what you want?** `restart` reuses the existing checkout and the stored issue text;
+`retry` re-reads the issue but keeps the checkout; `abandon` gives up without deleting
+anything.
 
-**There is no authentication, and that is deliberate.** The operating-system user stops being
-the trust boundary the moment this binds to anything but loopback — the network becomes the
-boundary instead. **Anything that can reach that port has full control of robot-army**: it can
-resume sessions, cancel them, abandon work, hold and release items and repositories, and
-pause dispatch.
-
-That is the accepted model, so the mitigations are the ones that matter:
-
-- The default is loopback. Widening it is an explicit edit to the config.
-- A **globally routable** bind address is refused outright, exit `3`. The interface will not
-  start somewhere the internet can reach it.
-- The effective address is printed at startup and written to the audit log as `web.start`, on
-  every start, with a loud warning when it is not loopback. That is the one fact about this
-  design that is never allowed to be silent.
-- **Any** request that a **browser** reports as coming from another site is refused with
-  `403` — reads as well as state changes. This is the one attack the model above does not
-  already accept: it needs no network path to the port at all, only my own browser — already
-  inside the trust boundary — having some unrelated page open while the interface is running.
-  It is not authentication; it identifies nobody, holds no state, and asks one question.
-  Clients that send neither `Origin` nor `Sec-Fetch-Site`, `curl` included, are allowed
-  through: they can reach the port directly anyway, which is the model above. So is
-  `Sec-Fetch-Site: none`, which is what a browser sends for the address bar and for a
-  bookmark — the two ways I actually open it.
-
-  Reads are checked *before* anything is done for them, which is the point: the response to
-  `fetch(..., {mode:'no-cors'})` is opaque to the page that sent it, so the attack was never
-  the reading. It was that answering cost this machine a `git` fork per card on
-  `/interrupted`, a whole audit file per `/log`, and a `/proc` walk per page. A refused read
-  now costs a string. A refused *write* still writes its audit pair first, because that pair
-  is the only way a forged action would ever be noticed; a refused read does not, because
-  writing one would open the SQLite connection and audit handle the refusal exists to avoid
-  — so the count for the run goes into `web.stop` as `refused_cross_site` instead.
-- **Reach it by address, not by name.** Any request whose `Host` is a hostname other than
-  `localhost` is refused with `403`. Comparing `Origin` to `Host` is not enough on its own,
-  because DNS rebinding lets an attacker control both: point `evil.test` at `127.0.0.1`, get
-  my browser to load `http://evil.test:8420`, and every header agrees with every other while
-  the request really lands here. Rebinding needs a *name*, so requiring an address closes it
-  — and `[web] bind` already has to be an address for the same reason.
-- **No page of it may be put in a frame.** Every response sends `X-Frame-Options: DENY` and a
-  `Content-Security-Policy` beginning `frame-ancestors 'none'`, because framing walks straight
-  past the same-origin check above: the form a baited click submits belongs to the framed page
-  itself, so the browser reports `Sec-Fetch-Site: same-origin` and a matching `Origin`, and the
-  check passes *honestly*. Nothing about the request distinguishes it, so the frame is refused
-  rather than the click. The same policy adds `default-src 'self'`, `base-uri 'none'` and
-  `form-action 'self'` — free here, because these pages load nothing external by design: no web
-  font, no CDN, no icon set, no inline script or style. Every response also sends
-  `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`, the latter so that
-  following a `github.com` or `trello.com` link out of a view does not hand it this
-  interface's address — `same-origin` and not `no-referrer`, because a refused control's
-  page builds its "back to" link from the `Referer` of my own POST.
-- **A connection cannot be held, and there cannot be many of them.** A connection that says
-  nothing for 15 seconds is closed, and at most 32 are served at once; the 33rd is hung up on,
-  with a `503` and `Connection: close` sent first where the socket takes it — delivery is
-  best-effort on purpose, because the refusal is written from the accept loop and blocking
-  there to satisfy a client that is not reading would be the denial of service itself.
-  Both numbers are constants in
-  `src/robot_army/web/server.py`, not config. This is not a rate limit and not about the
-  network — a page in a browser tab I already have open can connect here and stay silent, and
-  without the two bounds each of those connections costs a thread, a socket, a SQLite
-  connection and an audit file handle, permanently. Descriptors run out long before memory
-  does, and when they do the interface stops rendering at exactly the moment it is worth
-  having. So a `503` from this interface means "too many connections", never a failure; the
-  number of connections a run turned away is in that run's `web.stop` audit record, beside
-  `refused_cross_site`, and reaching the cap prints one line to stderr per episode.
-- **A page render is bounded work.** One reading of the machine per response, not one per
-  section — `/queue` used to take two and could report two different counts of what is
-  running on one page. One `git` observation per item per five seconds, with the age shown on
-  the card, so a reused answer says so. At most 8 MB of audit log read per `/log` page, in
-  64 KB blocks from the end of each daily file rather than whole files into memory; when a
-  request stops at that ceiling the page says so and "older records" continues from where it
-  stopped, so an empty page is never an empty history. All three numbers are constants in
-  `src/robot_army/operations.py` and `src/robot_army/web/server.py`, not config. None of this
-  is a rate limit — it is the difference between a page costing what it looks like it costs
-  and costing whatever the caller asks for.
-
-From outside the house I connect my existing VPN and use the same LAN address. Nothing is
-published, no tunnel is configured, and no port is forwarded.
-
-### How it uses the window
-
-The same pages are read on a 1920-pixel monitor and on a phone, and until issue #148 they
-were laid out for neither: one column, 60rem wide, for the whole page. That is a good line
-length for a paragraph and half a screen for a nine-column table, which is what `/active`
-is — on a full-size monitor it used the left half of the window while every title wrapped
-over five or six lines.
-
-Prose and tables now get different widths:
-
-- **Text stays at a reading measure.** Banners, notes, audit records, an item's field list —
-  they keep the width the whole page used to have, so nothing is read across a metre of
-  glass.
-- **A table takes the width its content needs**, up to the width of a full-size monitor. It
-  is not stretched to fill space it does not want: the two-column state-history table on an
-  item page stays narrow, and the `/queue` repositories table stays narrower still.
-- **A table too wide for the viewport scrolls inside its own box.** This is the phone case
-  and it is unchanged — the page itself never scrolls sideways, and the header, nav and
-  footer stay put while a table is dragged. At 390 pixels every view lays out exactly as it
-  did before, because the two new limits are maxima and a phone is already below both.
-
-### What it can do
-
-Six views — active, queue, interrupted, one item, anomalies, and the audit log — and the
-controls for the decisions I actually make away from the desk: resume, restart, abandon,
-cancel, retry, attach a terminal, acknowledge an anomaly, hold and release an item or a whole
-repository, pause and resume dispatch, and force a poll or a reconciliation. Every one of
-them has a terminal equivalent, verified by a test rather than by intention.
-
-**Where the pull request is.** A session's whole purpose is to open one, so the item page
-names every pull request the issue has — by number, with its state, linked — beside the
-branch, and `/active` carries a `PR` column so "has this one produced anything yet?" is a
-glance rather than a tap per row. On `/interrupted`, the resume-decision block shows the same
-thing, which is what the `open PR` line there used to be.
-
-Two relationships count, and they are not the same one: a pull request opened **from the
-item's branch**, and a pull request **GitHub reports as linked to the issue** — the "Closes
-#42" relationship its own interface shows. Either qualifies, both together count once, and an
-issue whose first attempt was closed and second opened has two. The listing shows the highest
-number, which is the most recent attempt, and `+1` for each older one; the item page lists
-them all.
-
-Three answers, and telling them apart is the point:
-
-| On the page | Means |
-|---|---|
-| `#144 (merged)` | that pull request, as of the confirmation time shown beside it |
-| `none` | GitHub was asked, and there is no pull request |
-| `not checked` / `?` | nobody has asked — an item never dispatched, a simulated one, or one that finished before this existed |
-
-`none` and `not checked` are never rendered the same way, deliberately. Answering "there is
-no pull request" on the strength of never having looked is the one thing this must not do.
-
-None of it costs a request while a page renders. The daemon's reconciliation pass establishes
-the answer and stores it on the work item, and every view reads what is stored — so these
-pages render with GitHub unreachable, showing the last answer and how old it is. That
-replaced a live lookup the resume-decision block used to make, which was both slower and
-free to disagree with everything else on the screen.
-
-Items stop being re-checked once nothing about them can change: every pull request they have
-is merged or closed, or — for an item that finished with none — no session of theirs is still
-running that could open one. An item that finished before this existed reads `not checked` for
-good; nothing is backfilled.
-
-A pull request opened from a **fork's** branch is not shown as this item's, even when the
-branch has exactly our name, because a branch name belongs to nobody and this repository is
-public. One linked to the issue *is* shown whoever opened it — that link was made by GitHub
-from our own issue, which is a different kind of evidence.
-
-**The session count is against the cap the daemon is enforcing, not against the config this
-process read at startup.** `serve` reads the file once and never rereads it, so after the
-documented go-live procedure — edit the file, restart `robot-army.service` — a long-running
-web service would otherwise keep counting against the old cap. It printed `6/5` once, which
-reads as *full and then some, nothing can dispatch*, when the truth was `6/7` with two slots
-free (issue #30). The cap now comes from the daemon's heartbeat, the way the effect level
-already did.
-
-When the two disagree the page says so on every view, names both numbers, and says which is
-in force:
-
-```
-SESSION CAP MISMATCH: the running daemon is enforcing a cap of 7, and this process is
-configured for 5. …
-```
-
-It is a warning, not a refusal: nothing on the page is disabled and no control is blocked on
-account of the disagreement. The cap itself is still enforced — pressing *Resume* runs a
-launch gate in this very process — but that gate measures against the daemon's cap too, so a
-button this page offers is never answered with the number the page stopped showing. The fix
-is to restart whichever of the two has been running since before the configuration changed —
-usually this one, `systemctl --user restart robot-army-web.service`, and the same restart
-picks up every other key it read at startup. The notice cannot tell you which, because
-neither process knows when the other read its configuration.
-
-With no daemon running, or with nothing readable from its heartbeat, the page falls back to
-its own configured cap and says nothing — the second of those already has a louder banner
-saying the daemon cannot be read at all.
-
-Resume and restart here obey the session cap, the pause and holds exactly as the terminal
-does, and say so on the page rather than appearing to work and then quietly doing nothing.
-There is no `--force` button: the answer to a refusal is the control that lifts the
-condition, which is one press away on the same page and leaves the queue agreeing with the
-button instead of overridden by it.
-
-Deliberately **not** there: repository onboarding and permission re-approval, removing a
-checkout or its branch, purging simulated rows, changing the concurrency limit, and anything
-that starts or stops the daemon. Each stays a terminal command.
-
-Add `.json` to any path, or send `Accept: application/json`, for the same facts as a payload:
+### This item is stuck
 
 ```bash
-curl -s localhost:8420/active.json  | jq '.items[] | {id, repo_key, state, title}'
-curl -s localhost:8420/queue.json   | jq '.counts'
-curl -s 'localhost:8420/log.json?item=42&outcome=error' | jq '.records'
+uv run robot-army show <id>       # state, history, blockers checked now, resume signals
+uv run robot-army status          # what everything else is doing
+uv run robot-army capacity        # is it waiting on a cap, a hold, or a pause
+uv run robot-army holds           # every hold in force
 ```
 
-It is not a stable API. It is versioned by the commit that produced it.
+`show`'s `blocked` line is re-checked at the moment you ask; `failure` is the sentence
+recorded when it failed and never changes. The four readings of that line are in
+[what runs next](3-selection.md#why-an-item-is-blocked-checked-now-rather-than-remembered).
 
-Nothing is fetched from a third-party host — no web font, no CDN, no icon set — so every view
-works with the machine offline. Every page renders on a phone in a single column, and works
-with scripting disabled, merely static until reloaded.
+Then: `resume` (new session, prior context), `restart` (new session, no context), `reset`
+(throw it away and start again), or `abandon` (give up, checkout left alone).
+
+### Something is running that should not be
+
+```bash
+uv run robot-army status                       # what robot-army thinks is running
+uv run robot-army capacity                     # …against what the machine says
+uv run robot-army attach <id>                  # look at it
+uv run robot-army cancel <id>                  # stop that session and no other
+uv run robot-army pause                        # stop dispatching anything new
+```
+
+`cancel` stops one item's process tree and leaves the item `interrupted` with its checkout
+untouched. It never touches another session. If `status` shows nothing but a worker is alive,
+that is an `orphan_session` anomaly — see [anomalies](#anomalies).
+
+`pause` is durable and survives a restart; `unpause` lifts it. Polling, reconciliation and the
+heartbeat all continue while paused.
+
+### The daemon looks dead
+
+```bash
+uv run robot-army health                    # exit 0 healthy, 4 for every other verdict
+systemctl --user status robot-army.service
+uv run robot-army log --since 30m           # what it was doing last
+```
+
+Read the verdict, not the silence — the table is at [is it alive](#is-it-alive). `DIED` means
+restart it. `HUNG` means look at the process **first**: restarting destroys the evidence. If
+systemd gave up, `systemctl --user reset-failed robot-army.service` before starting it again.
+
+### The disk is full
+
+```bash
+uv run robot-army worktree list              # size, branch, condition, cleanup state
+uv run robot-army cleanup                    # every eligible finished item, under its guards
+uv run robot-army worktree remove <id>       # one item's checkout and branch
+uv run robot-army worktree remove <path>     # a checkout no work item claims
+uv run robot-army worktree prune             # clear git's record of directories already gone
+uv run robot-army purge-simulated            # rehearsal rows, and optionally their worktrees
+```
+
+A prepared worktree has been measured at up to 499 MB. Automatic cleanup is off until
+configured; the guards and what they protect are in
+[what happens after](5-outcome.md#cleaning-up).
+
+### I want to know what actually happened
+
+```bash
+uv run robot-army log --item <id>            # one item's whole history
+uv run robot-army log --since 10m
+uv run robot-army log --follow
+```
+
+## States
+
+What an item can be, and what you can do from there. The machine itself, every column, and
+what survives a reboot are on the [state page](state.md).
+
+| State | Means | You can | Becomes |
+|---|---|---|---|
+| `discovered` | found by the poller, not yet evaluated | wait; `poll` to force a pass | `ready`, `failed` |
+| `ready` | eligible and queued, waiting for a slot | `hold`, `unhold`, `abandon` | `dispatching`, `abandoned` |
+| `dispatching` | claimed; worktree and session being prepared | wait — it settles or ages out | `active`, `failed` |
+| `active` | a session is running | `cancel`, `attach` | `awaiting_review`, `interrupted`, `failed`, `done` |
+| `awaiting_review` | the session ended cleanly; work is waiting on me | `resume`, `restart`, `reset`, `abandon` | `done`, `dispatching`, `ready`, `abandoned` |
+| `interrupted` | the session ended without finishing | `resume`, `restart`, `reset`, `abandon` | `dispatching`, `ready`, `done`, `abandoned` |
+| `failed` | something refused it, or the session exited badly | `retry`, `reset`, `abandon` | `ready`, `abandoned` |
+| `done` | finished — terminal | `cleanup`, `worktree remove` | — |
+| `abandoned` | given up on — terminal | `worktree remove` | — |
+
+**`resume` needs a previous session to restore**; without one only `restart` is offered.
+**Terminal is terminal**: neither `done` nor `abandoned` can be returned to the queue, and
+`reset` refuses both.
+
+## Commands
+
+Every subcommand, and whether the web interface can reach it. **Web** means there is a control
+on a page; **Terminal** means a shell on this machine is required.
+
+### Work items
+
+| Command | Does | Reach for it when | Refuses | Where |
+|---|---|---|---|---|
+| `show <id>` | one item's whole history, blockers re-checked now, resume signals | anything about one item | — | Both |
+| `resume <id>` | new session restoring the prior context | the session died and its work is worth continuing | no previous session; the launch gate — cap, pause, holds | Both |
+| `restart <id>` | new session, no prior context, same checkout | the transcript is gone or useless | not `interrupted`/`awaiting_review`; the launch gate | Both |
+| `reset <id>` | **discard the checkout and branch, re-read the issue, back to the queue** | the work went the wrong way, or the issue has changed | not `interrupted`/`awaiting_review`/`failed`; an open session; git over uncommitted work; an issue that no longer passes the poller | Both |
+| `reset <id> --force` | the same, past git's refusal | the checkout holds uncommitted work you do not want | asks for the item id typed out | Terminal |
+| `retry <id>` | re-read the issue, re-check eligibility, back to the queue — **checkout kept** | a `failed` item whose blocker you have fixed | not `failed`; the blocker still holding; an ineligible issue | Both |
+| `cancel <id>` | stop that item's session and only that one | something is running that should not be | no running session | Both |
+| `abandon <id>` | mark it abandoned; nothing is deleted | giving up on the work | an `active` item — `cancel` first | Both |
+| `attach <id>` | open a terminal window on a running session | you want to watch or type | no running session | Both |
+| `hold` / `unhold` | take one item or a whole repository out of dispatch | not now, but not never | — | Both |
+| `holds` | every hold in force, including ones holding nothing | "why is nothing dispatching?" | — | Terminal |
+| `prompt <id>` | print the prompt a dispatch would compose | before trusting a dispatch | — | Terminal |
+
+### The machine
+
+| Command | Does | Reach for it when | Refuses | Where |
+|---|---|---|---|---|
+| `run` | the daemon, in the foreground | this is the product | another daemon holds the lock | Terminal |
+| `serve` | the web interface, independently of the daemon | you want it on the phone | a globally routable bind address | Terminal |
+| `status` | counts and listings by state, plus anomalies | first thing, always | — | Both |
+| `capacity` | how full the machine is, whose sessions those are, the order in force | "why is nothing starting?" | — | Both |
+| `health` | the liveness verdict; exit 4 for anything but `ok` | the daemon looks dead | — | Both |
+| `doctor` | config, binaries, sockets, permissions, disk | something is wrong and you cannot say what | — | Terminal |
+| `pause` / `unpause` | suspend or resume dispatch, durably | you want the machine to yourself | — | Both |
+| `poll` | force an immediate poll | you just labelled an issue | — | Both |
+| `reconcile` | force a reconciliation pass | the state looks out of date | — | Both |
+| `drain` | drain the exit spool now | exits are not being applied | — | Terminal |
+| `log` | read the audit JSONL — the reconstruction path | "what actually happened?" | — | Both |
+| `anomalies` | conditions detected; most wait for `--acknowledge` | `status` says there are some | — | Both |
+
+### Repositories, disk, and the board
+
+| Command | Does | Reach for it when | Refuses | Where |
+|---|---|---|---|---|
+| `onboard <repo>` | the deliberate per-repository trust step | adding a repository, or after a fingerprint change | an unverified origin; a changed fingerprint without `--reapprove` | Terminal |
+| `repos` | onboarding, fingerprint and trust status per repository | "why is nothing happening for this repo?" | — | Both |
+| `worktree list` | every checkout with size, branch and condition | the disk is full | — | Terminal |
+| `worktree remove <id>` | one item's checkout **and** its branch | reclaiming disk, or settling a `prunable_worktree` | an open session; git over uncommitted work; a removal already on record | Terminal |
+| `worktree remove <path>` | a checkout no work item claims | an `orphan_worktree` anomaly | outside the worktree root; claimed by a row; a live worker | Terminal |
+| `worktree prune` | clear git's record of worktrees whose directories are gone | after removing one by hand | — | Terminal |
+| `cleanup [<id>]` | reclaim a finished item's checkout and branch, under the same guards | the disk is full | unfinished items; an uncontained branch | Terminal |
+| `purge-simulated` | remove dry-run rows, and optionally their worktrees | after a rehearsal | — | Terminal |
+| `cards` | tracked intake cards, their state and their reason | the board is not producing issues | — | Both |
+| `rescan` | force re-evaluation of cards awaiting clarification | you just edited a card | — | Both |
+| `example-config` | print a fully commented `config.toml` | setting up, or looking for a key | — | Terminal |
+
+**Deliberately not on the web**: onboarding and re-approval, removing a checkout or a branch,
+purging rehearsal rows, changing the concurrency limit, and anything that starts or stops the
+daemon. Each is irreversible, or needs a fingerprint reviewed, or belongs to the process
+manager.
 
 ## Where things live
 
@@ -248,9 +196,8 @@ with scripting disabled, merely static until reloaded.
 | `/run/user/<uid>/robot-army/<item>.sock` | session host sockets |
 | `~/worktrees/<repo>/issue-<n>/` | isolated checkouts |
 
-XDG variables are honoured when set. **Full detail — every table, what survives a reboot,
-the "interrupted at X → result on next start" table, and what to back up — is on the
-[state page](state.md).**
+XDG variables are honoured when set. Every table, what survives a reboot, the "interrupted at
+X → result on next start" table, and what to back up are on the [state page](state.md).
 
 ## Reading the logs
 
@@ -258,226 +205,208 @@ the "interrupted at X → result on next start" table, and what to back up — i
 uv run robot-army log --since 10m
 uv run robot-army log --item 42
 uv run robot-army log --follow
+uv run robot-army log --include-simulated      # a rehearsal's records too
 ```
 
-Every outward-facing action appears **twice**: an `intent` record before it and an
-`outcome` record after, sharing an `action_id`. An intent with no outcome is the signature
-of a process killed mid-action:
+Every outward-facing action appears **twice**: an `intent` before it and an `outcome` after,
+sharing an `action_id`. An intent with no outcome is the signature of a process killed
+mid-action:
 
 ```bash
 jq -r 'select(.action_id) | "\(.action_id) \(.kind)"' ~/.local/state/robot-army/logs/audit-*.jsonl \
   | sort | uniq -c | awk '$1 == 1'
 ```
 
-Records carry which interface produced them — `daemon`, `cli`, or `web` — and the same log is
-readable from the browser at `/log`, filtered, newest first, with GitHub links already made.
+Records carry which interface produced them — `daemon`, `cli` or `web` — and the same log is
+readable at `/log`, filtered, newest first, with GitHub links already made.
 
-**A rehearsal's records are excluded unless I ask for them.** `robot-army log` shows what
-really happened; `--include-simulated` adds the rest, still carrying the `[simulated]` marker
-they have always carried, and either way the reader says how many it withheld. The `/log`
-page does the same through the site-wide toggle, scoped to the records that page's scan
-actually read — a bounded reader cannot honestly count what it never looked at. `log --follow`
-is scoped too; it says no count, because a tail has no end to count against.
+**A rehearsal's records are withheld unless asked for**, and the reader always says how many
+it withheld, so an empty list is never mistaken for an empty history. `log --follow` is scoped
+too and says no count, because a tail has no end to count against.
 
-**Record format, every action name, the redaction rules, and how to reconstruct one item's
-whole history are on the [audit log page](audit-log.md).**
+Record format, every action name, the redaction rules, and how to reconstruct one item's whole
+history are on the [audit log page](audit-log.md).
 
-## When something looks wrong
+## Anomalies
 
 ```bash
-uv run robot-army status               # counts, listings, outstanding anomalies
-uv run robot-army show <item-id>       # one item's whole history and resume signals
-uv run robot-army anomalies            # what was detected; most wait for me, two clear themselves
-uv run robot-army anomalies --since 1h # …narrowed to a window: 30s, 10m, 2h, 1d
-uv run robot-army anomalies --include-simulated   # …including a rehearsal's
-uv run robot-army repos                # why is nothing happening for this repo
-uv run robot-army doctor               # environment and preconditions
+uv run robot-army anomalies                      # outstanding
+uv run robot-army anomalies --since 1h           # …in a window: 30s, 10m, 2h, 1d
+uv run robot-army anomalies --all                # …including resolved and acknowledged
+uv run robot-army anomalies --acknowledge <id>   # I looked
 ```
 
-**A rehearsal's anomalies are not in this list unless I ask.** Below `live` the pipeline is
-rehearsed, and anything it raises is recorded as a rehearsal's anomaly and withheld from the
-default view — with a line saying how many, so an empty list is never mistaken for an
-all-clear. The same is true of the anomaly block on `status`, the `/anomalies` page, and the
-anomaly count in the web header. This is issue #21: two `card_create_failing` anomalies for
-dry-run cards were being reported as outstanding real problems with no way to exclude them,
-because the flag was advertised on the command and did nothing.
+| Kind | Means | Settle it with |
+|---|---|---|
+| `orphan_session` | a live worker under the worktree root that no item claims | `attach`, then `cancel`; clears itself once the process is gone |
+| `prunable_worktree` | an item's recorded checkout directory is gone | `worktree remove <id>`, or `cleanup <id>` for a finished item. **Acknowledging does not settle it** — the row never changes on its own |
+| `orphan_worktree` | a checkout shaped like ours that no item claims | `worktree remove <path>`; clears itself once the directory is gone or a row claims it |
+| `no_transcript` | the session left nothing resumable | `restart` it, never `resume` it. `doctor` shows whether `CLAUDE_CODE_*` reached the session host |
+| `registry_unobservable` | the session registry could not be read, so **nothing was torn down** | fix the cause — `doctor` shows the path — and the next pass retracts it and reaches the conclusions it declined |
+| `registry_version_unknown` | the worker's registry format changed; identification fell back to `/proc` | review the version |
+| `card_create_failing` | an issue could not be created from a card | fix the cause; clears itself once the card reaches `linked` |
+| `board_precondition` | the board failed a startup check, so board ingestion is off | fix the board, then acknowledge. Dispatch of issues you wrote yourself is unaffected |
 
-Which run raised an anomaly is recorded when it is raised, not worked out from the entity it
-names. Anything about the machine, the filesystem or the network is real whatever the effect
-level — board *reads* included, since only writes are simulated — so those stay visible
-always. See [the anomalies table](state.md#anomalies--two-different-ways-a-row-leaves-the-list-and-whether-it-was-a-rehearsal).
+Four kinds clear themselves — `orphan_session`, `card_create_failing`, `registry_unobservable`
+and `orphan_worktree` — because their truth can be positively re-established as false. A
+resolved anomaly shows under `--all` marked `resolved` rather than `acknowledged`: one is the
+system re-checking, the other is me saying I looked. Everything else waits for
+`--acknowledge`, because a list that is mostly stale teaches the habit of clearing it unread.
 
-**Four kinds now clear themselves.** Every other kind waits for `--acknowledge`, because
-these four are the only ones whose truth can be positively re-established as *false*:
+**A rehearsal's anomalies are withheld** from every view — the list, `status`, `/anomalies`
+and the header count — with a line saying how many. Anything about the machine, the filesystem
+or the network is real whatever the effect level, so those stay visible always. The two ways a
+row leaves the list are on the
+[state page](state.md#anomalies--two-different-ways-a-row-leaves-the-list-and-whether-it-was-a-rehearsal).
 
-- **`orphan_session`** — the pid and start time it recorded no longer name a live process.
-- **`card_create_failing`** — the card it named has since reached `linked`, so the creation
-  it reported as failing has succeeded. Re-checked by reconciliation, which needs no network,
-  so the retraction does not wait on Trello being reachable.
-- **`registry_unobservable`** — a later pass read the session registry successfully. The most
-  direct of these: the observation that retracts it is the one the retracting pass has
-  already taken.
-- **`orphan_worktree`** — the directory it named is gone, or a work item now claims it. Both
-  are read from the disk and the database, never from git.
+## Is it alive
 
-A resolved anomaly leaves the default listing and shows under `--all` marked `resolved`
-rather than `acknowledged`, which are different facts: one is the system re-checking, the
-other is me saying I looked. This exists because the list is read as *things needing
-attention*, and a list that is mostly stale teaches the habit of clearing it unread — which
-is how the one that mattered gets dismissed with the noise.
-
-Anomalies worth understanding rather than dismissing:
-
-- **`orphan_session`** — a live worker under the worktree root that no item claims.
-  `interrupted` does *not* mean nothing is running: if the wrapper dies uncleanly the
-  worker keeps going, reparented, while dtach tears down its socket.
-
-  **It no longer fires on the ordinary successful path.** It used to, for every item:
-  merging a PR closed the issue, the item went `done`, and the worker sat at its prompt
-  forever. Retirement (see [what happens after](5-outcome.md#the-sessions-ending)) ends that
-  worker before this sweep sees it. Seeing this anomaly for a `done` item now means
-  retirement *tried and could not* — the process survived the termination, so the row stays
-  open and the slot stays honestly subscribed.
-- **`prunable_worktree`** — a work item's recorded worktree directory is gone. Finished
-  items are included since issue #113; they used to be skipped, so with cleanup off a `done`
-  item whose directory had been `rm -rf`'d was reported by nothing while `git worktree list`
-  said `prunable`. A missing directory is *not* reported when the item's cleanup record says
-  the worktree was removed — `done` or `branch_retained`, written by cleanup or by `worktree
-  remove <id>` — because both keep the path on the row. **Acknowledging does not settle one
-  for a finished item**: its row never changes on its own, so the next pass raises it again.
-  The note names what does — `robot-army worktree remove <id>`, which works on an absent
-  directory and records the removal, or for a `done` item `robot-army cleanup <id>`. See
-  [cleaning up](5-outcome.md#cleaning-up).
-- **`orphan_worktree`** — a directory shaped like one robot-army made (`issue-<n>` under an
-  onboarded repository's folder in the worktree root) that no work item claims — the mirror
-  of `prunable_worktree`, which is a claim with no directory. `worktree remove <id>` and
-  `cleanup` cannot reach it, because both start from a row. The detail names the clone and
-  branch git lists it under and the command that removes it, `robot-army worktree remove
-  <path>`; if no onboarded clone lists it, it says robot-army will not remove it, and why.
-  Only that shape is looked at, so my own checkouts under the root are never reported, and
-  nothing is ever removed automatically. See [cleaning up](5-outcome.md#cleaning-up).
-- **`no_transcript`** — the session ran and left nothing resumable. Raised by
-  reconciliation five minutes after the session was confirmed, not at dispatch: the worker
-  writes its transcript when it starts processing, so asking any earlier reports every
-  healthy session. Two causes, and the check cannot tell them apart — the worker never
-  saved one (`robot-army doctor` shows whether `CLAUDE_CODE_*` is set in the session host's
-  environment), or the session died before writing one (its exit record shows that).
-  Either way that session cannot be resumed: `restart` it, do not `resume` it. Raised at
-  most once per session.
-- **`registry_version_unknown`** — the worker's session-registry format changed. The
-  daemon degraded to scanning `/proc` rather than crashing; identification is weaker until
-  the version is reviewed.
-- **`registry_unobservable`** — reconciliation could not read the session registry, so it
-  declined to conclude that anything had died. **Nothing was torn down**: items stay
-  `active`, session rows stay open, and their capacity slots stay subscribed. The pass
-  summary says how many conclusions were withheld.
-
-  This is the one anomaly that reports work *not* done, and that is the point. Absent and
-  empty look identical at the glob, and reconciliation used to read both as "every session
-  on this machine is dead" — three running items became three `interrupted` in a single
-  pass, with nothing anywhere saying the sweep had been blind rather than informed.
-
-  Three things cause it, and the fix for each is different: the registry directory is gone
-  or unreadable (`XDG_RUNTIME_DIR` differs after a re-login, the directory has not been
-  created because the worker has not run since boot, a permission changed); the scan fell
-  back to `/proc`; or a registry file was refused by the version gate, which usually comes
-  with `registry_version_unknown` beside it. `robot-army doctor` shows the path being read.
-  Fix the cause and the next pass retracts this and reaches the conclusions it declined —
-  there is nothing to acknowledge and nothing to resume by hand.
-- **`board_precondition`** — the board failed a startup check, so board ingestion is off;
-  dispatch of issues I wrote myself is not. It names which checks failed, and **it always
-  names the ones failing now**. If the board breaks for a different reason while the
-  anomaly is still open, the same anomaly — same id — is rewritten with the new checks, and
-  its detection time moves to when the new reason was found, so it sorts to the top and
-  shows under `--since`. The same failure on every restart writes nothing. What it said
-  before is in the log as `anomaly.restated`.
-
-  This is issue #73: the board was made public, then private again, then its label was
-  renamed, and the list went on saying the board was public — while hiding the missing
-  label — until someone acknowledged the stale row. It still does not clear itself when the
-  board passes; acknowledge it once ingestion is running.
-
-## Recovering
-
-Nothing resumes automatically — resume, abandon, and cancel are always mine to decide.
+A process cannot report its own death, so the checker is a separate process and the **timer**
+is the dead-man's switch.
 
 ```bash
-uv run robot-army show <id>       # uncommitted changes? commits on the branch? PR open?
-uv run robot-army resume <id>     # new session, prior context restored
-uv run robot-army restart <id>    # new session, no prior context
-uv run robot-army cancel <id>     # stop that session's process tree and no other
-uv run robot-army abandon <id>    # give up; the worktree is left alone
+cp systemd/robot-army-health.* ~/.config/systemd/user/
+cp -r systemd/robot-army.service.d ~/.config/systemd/user/     # not garnish — see below
+systemctl --user daemon-reload
+systemctl --user enable --now robot-army-health.timer
+uv run robot-army health
 ```
 
-**`abandon` refuses an item that is still `active`, and says to `cancel` first.** It stops
-nothing, so abandoning under a running worker would leave that process unaccounted for.
-`cancel` stops the session and leaves the item `interrupted`, which `abandon` accepts — as
-it does `ready`, `awaiting_review` and `failed`.
+| It says | What happened | What to do |
+|---|---|---|
+| `ok` | the lock is held and the heartbeat is fresh | nothing |
+| `DIED` | **nothing holds the lock** — whatever the heartbeat's age | restart it |
+| `HUNG` | the lock is held and its holder's heartbeat has stopped | look at the process **first**; restarting destroys the evidence |
+| `STARTING` | the lock is held and that process has not beaten yet | look again shortly; a long one is worth investigating |
+| `NEVER STARTED` | no lock, no heartbeat | it has never run here |
+| `UNREADABLE` | the heartbeat is there and will not parse | look at the file |
+| `STALE` | past the threshold with no usable lock reading | as `HUNG` or `DIED`; the line says the lock could not be consulted |
 
-**For a failed item, `show`'s `blocked` line is checked now, and `failure` is history.**
-`failure` is the sentence recorded when the item failed, and it never changes. `blocked` is
-the verdict of the checks `retry` makes before it re-reads the issue, run when the item is
-shown: the repository resolves to a clone, the approved clone is still where it was approved
-and still that repository, the workspace is trusted, and the committed settings match. So
-`show` and `retry` name the same blocker in the same words. The item page's `blocked`
-entry says the same thing. Four readings:
+**What it catches is not "the daemon crashed".** The unit carries `Restart=on-failure` with
+`RestartSec=10`, so a daemon that merely dies is back ten seconds later and the check
+correctly goes on saying `ok`. The switch is for the ways it stays dead: systemd giving up,
+a wedged process, `graphical-session.target` going away, or nobody having started it.
 
-- `… (checked now)` — this is what `retry` would refuse for.
-- `… (checked now; not the reason recorded when it failed)` — what I fixed is fixed, and
-  this is what is left.
-- `nothing on this machine blocks it now` — `retry` will get as far as reading the issue.
-  A reason only the issue can settle, such as the author or the label, is still checked
-  there, and `show` cannot confirm or clear it without a request.
-- `could not be checked now: …` — the check itself failed. The stored sentence is not
-  offered in its place.
+`robot-army.service.d/start-limit.conf` is what makes the first of those possible to detect at
+all. With systemd's defaults a daemon that *cannot* start — a config file it will not load, a
+database it cannot open — is retried every ten seconds for ever and nothing ever reports it
+dead, because the lock keeps being retaken. Widening the window to five minutes means five
+failures inside five minutes puts the unit in `failed`, the lock stays released, and the next
+timer run says `DIED`. Starting it again then needs
+`systemctl --user reset-failed robot-army.service` first.
 
-Looking writes nothing. A moved clone found by `show` raises no anomaly; the next dispatch
-or `retry` that meets it does, as before. Items in any other state are not checked, and a
-reason stored on one is marked `(recorded, not re-checked)`.
+The failure nothing here covers is the machine, or the user manager, wedging: the timer does
+not fire either and the only symptom is silence. The one thing that could catch it is an
+outside observer, rejected deliberately — an always-on network dependency for core
+observability is a worse trade than a blind spot this size.
 
-**`resume` and `restart` pass the same gate the dispatcher does**, and did not until issue
-#120. If the machine is at `max_concurrent_sessions`, if the repository is at its own limit,
-if dispatch is paused, or if the item or its repository is held, they refuse — exit `3`, the
-reason on stderr in the same words the queue uses, and the item untouched. Lift the
-condition and press again; there is nothing to repair in between. To go past it anyway:
+## The web interface
+
+A second front end onto the same operations, so an interrupted item can be decided from a
+phone without opening a terminal.
 
 ```bash
-uv run robot-army resume <id> --force   # past the cap, the pause, and the holds
+uv run robot-army run &        # the daemon
+uv run robot-army serve        # the interface — http://127.0.0.1:8420 by default
 ```
 
-`--force` covers my own policy and nothing else. It cannot bypass the issue author check,
-workspace trust, the committed settings fingerprint, onboarding, or the state machine, and
-it has no configuration equivalent. Every condition it goes past is named in the log as
-`dispatch.forced` — written only when something actually applied, so forcing an already
-dispatchable item overrides nothing and records nothing. Note that this is a different
-`--force` from `cancel --force`, which only skips a confirmation prompt.
+**Two processes, started by hand, in either order.** The interface is deliberately separate
+from the daemon: it starts, stops and survives on its own, so the audit log and the interrupted
+list stay readable during exactly the incident that makes them worth reading.
 
-The claim on an item is atomic, so a tap on my phone and a terminal command arriving in the
-same second cannot both start a session: one wins, the other is told the item was claimed by
-another dispatcher. One worktree, one branch, one agent.
+```toml
+[web]
+bind = "127.0.0.1"      # the LAN address, or 0.0.0.0 for every interface
+port = 8420
+refresh_seconds = 10    # how often an open page re-fetches itself
+```
 
-Reattach to a running session directly:
+Six views — active, queue, interrupted, one item, anomalies, and the log — carrying the
+controls marked **Web** in the [command tables](#commands). Every one has a terminal
+equivalent, verified by a test rather than by intention. Add `.json` to any path, or send
+`Accept: application/json`, for the same facts as a payload:
 
 ```bash
-dtach -a /run/user/$(id -u)/robot-army/<item>.sock
+curl -s localhost:8420/active.json | jq '.items[] | {id, repo_key, state, title}'
 ```
+
+It is not a stable API; it is versioned by the commit that produced it. Nothing is fetched
+from a third-party host, so every view works with the machine offline, renders on a phone in
+one column, and works with scripting disabled.
+
+### Read this part
+
+**There is no authentication, and that is deliberate.** The operating-system user stops being
+the trust boundary the moment this binds to anything but loopback — the network becomes the
+boundary instead. **Anything that can reach that port has full control of robot-army**: it can
+resume sessions, cancel them, reset work, abandon it, hold and release items and repositories,
+and pause dispatch.
+
+That is the accepted model, so these are the mitigations that matter:
+
+| Mitigation | What it does |
+|---|---|
+| loopback by default | widening it is an explicit edit to the config |
+| globally routable addresses refused | exit `3`; it will not start where the internet can reach it |
+| the address is always announced | printed at startup and written as `web.start`, loudly when it is not loopback. The one fact about this design never allowed to be silent |
+| cross-site requests refused | `403` for anything a **browser** reports as coming from another site — reads included, because answering cost real work. `curl` and the address bar are allowed through: they can reach the port directly anyway, which is the model above |
+| hostnames refused | `403` for any `Host` but an address or `localhost`. DNS rebinding lets an attacker control `Origin` and `Host` together, and rebinding needs a *name* |
+| framing refused | `X-Frame-Options: DENY` and `frame-ancestors 'none'`. A baited click inside a frame passes the same-origin check *honestly*, so the frame is refused rather than the click |
+| bounded connections | a connection silent for 15 seconds is closed, and at most 32 are served at once. Without both, an open tab costs a thread, a socket, a SQLite connection and a file handle permanently — a `503` here means "too many connections", never a failure |
+| bounded renders | one reading of the machine per response, one `git` observation per item per five seconds, at most 8 MB of audit log per `/log` page. A page costs what it looks like it costs |
+
+From outside the house: connect the VPN and use the same LAN address. Nothing is published,
+no tunnel is configured, and no port is forwarded.
+
+### What the pages say about pull requests
+
+A session's whole purpose is to open one, so the item page names every pull request the issue
+has and `/active` carries a `PR` column. Two relationships qualify — a pull request opened from
+the item's branch, and one GitHub reports as linked to the issue — and both together count
+once.
+
+| On the page | Means |
+|---|---|
+| `#144 (merged)` | that pull request, as of the confirmation time shown beside it |
+| `none` | GitHub was asked, and there is no pull request |
+| `not checked` / `?` | nobody has asked — never dispatched, simulated, or finished before this existed |
+
+`none` and `not checked` are never rendered the same way. Answering "there is no pull request"
+on the strength of never having looked is the one thing this must not do. None of it costs a
+request while a page renders: reconciliation establishes the answer and stores it, so these
+pages render with GitHub unreachable, showing the last answer and how old it is.
+
+### Two things the pages will tell you about themselves
+
+**The session count is against the cap the daemon is enforcing**, not the config this process
+read at startup, because `serve` reads the file once. When the two disagree every view says so,
+names both numbers, and says which is in force. It is a warning, not a refusal — nothing is
+disabled — and the fix is to restart whichever process has been running since before the
+configuration changed. With no daemon running the page falls back to its own cap.
+
+**A refusal is shown, never hidden.** Resume, restart and reset obey the session cap, the pause
+and the holds exactly as the terminal does, and say so on the page rather than appearing to
+work and quietly doing nothing. There is no `--force` button: the answer to a refusal is the
+control that lifts the condition, one press away on the same page. Reset from the web
+therefore cannot discard uncommitted work — that needs `reset --force` from a terminal, where
+the question is answered by typing the item id.
 
 ## Walking away from a confirmation prompt
-
-Four commands stop and ask before doing something I cannot undo:
 
 | Command | The question |
 |---|---|
 | `onboard` | approve this repository for dispatch, recording its fingerprint |
-| `worktree remove --force` | type the item id, to discard the tree's uncommitted work |
 | `cancel` | stop this session |
-| `worktree remove <path> --force` | type the directory name, to discard the tree's uncommitted work |
-| `purge-simulated` | delete these rehearsal rows; then, if they own worktrees still on disk, whether to remove those too (default no) |
+| `reset` | discard this checkout and branch, and requeue the item |
+| `reset --force` | type the item id, to discard the tree's uncommitted work as well |
+| `worktree remove --force` | type the item id, to discard the tree's uncommitted work |
+| `worktree remove <path> --force` | type the directory name, for the same reason |
+| `purge-simulated` | delete these rehearsal rows; then, separately, whether to remove their worktrees |
 
-Pressing Ctrl-C at any of them, or running one where there is no stdin to read — a
-pipeline, a cron entry, `< /dev/null` — stops the command. **Nothing it was about to do
-happens**, including at the force-removal prompt, where the expected answer is a typed item
-id and an absent answer is not it. Each says which of the two it was, and exits accordingly:
+Ctrl-C at any of them, or running one where there is no stdin — a pipeline, a cron entry,
+`< /dev/null` — stops the command. **Nothing it was about to do happens**, including at a
+force prompt, where the expected answer is a typed id and an absent answer is not it. Each
+says which of the two it was and exits accordingly:
 
 ```console
 $ robot-army purge-simulated < /dev/null
@@ -492,102 +421,18 @@ interrupted
 ```
 
 Every question is asked on **stderr**, so a `--json` run that was given up on still puts one
-parseable document on stdout. And every one of them leaves a record — what was attempted,
-against what, and which way I gave up — under the command's own action name. The shapes are
-on [the audit log page](audit-log.md#the-issue-23-records).
+parseable document on stdout, and every one leaves a record under the command's own action
+name. The shapes are on [the audit log page](audit-log.md#the-issue-23-records).
 
-Until issue #23 only `onboard` did all of this, and the two halves failed differently. A
-**closed stdin** tracebacked out of the other three — that is the reproduction in the issue.
-**Ctrl-C** already printed `interrupted` and exited 1, because `main` has caught it all
-along; what it did not do was say which question had been walked away from. `cancel` and
-`purge-simulated` wrote no record at all, and `worktree remove --force` wrote one naming an
-exception and nothing else, under an intent that had already named the path.
+## Where the reasoning is
 
-## Noticing it has died
-
-A process cannot report its own death, so the checker is a separate process and the
-**timer**, not the daemon, is the dead-man's switch.
-
-```bash
-cp systemd/robot-army-health.* ~/.config/systemd/user/
-cp -r systemd/robot-army.service.d ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now robot-army-health.timer
-uv run robot-army health          # exits 0 if healthy, 4 for every other verdict
-```
-
-The second copy is not garnish: without it systemd never gives up on a daemon that cannot
-start, and the failure the rest of this section is about cannot happen at all.
-
-### What it catches is not "the daemon crashed"
-
-The daemon runs from a user unit carrying `Restart=on-failure` and `RestartSec=10`, so a
-daemon that merely dies is back ten seconds later — inside `max_age_seconds`, and usually
-inside one five-minute timer interval. `kill -9` the daemon and the check goes on saying
-`ok`, correctly: nothing is wrong ten seconds later. **Automatic restart is the right
-behaviour**; the switch is the backstop for when it stops working, and the failures it is a
-backstop for are every way the daemon stays dead:
-
-| The failure | What the check says |
+| For | Read |
 |---|---|
-| systemd exhausts the start limit and gives up | `DIED`, from the lock, on the next timer run |
-| the daemon is alive but wedged | `HUNG` — the lock held, the heartbeat stopped |
-| `graphical-session.target` goes away, taking a unit bound to it | `DIED`; the health timer is bound to `timers.target` and outlives the graphical session |
-| stopped by hand, or never started after a login | `DIED`, `NEVER STARTED` |
-
-The first is the one worth installing a switch for, and **with systemd's defaults it cannot
-happen**: `StartLimitBurst=5` counts starts inside `StartLimitIntervalSec=10s`, and a restart
-every ten seconds never puts two starts in one window. A daemon that cannot start — a config
-file it will not load, a database it cannot open — is retried every ten seconds forever, and
-nothing ever reports it dead, because the lock keeps being retaken.
-`systemd/robot-army.service.d/start-limit.conf` widens the window to five minutes and leaves
-the burst at five: five failures inside five minutes is a daemon that cannot start rather
-than one that crashed once. Then systemd stops, the unit goes to `failed`, the lock stays
-released, and the next timer run says `DIED`. Starting it again afterwards needs
-`systemctl --user reset-failed robot-army.service` first — until the counter is cleared,
-systemd refuses.
-
-The failure nothing here covers is the machine, or the user manager, wedging: the timer does
-not fire either, and the only symptom is silence. No switch on this machine can do better.
-The one thing that could is an outside observer, and
-[research.md R15](https://github.com/jantman/robot-army/blob/main/specs/001-minimum-daemon/research.md)
-rejected that deliberately — an always-on network dependency for core observability is a
-worse trade than a blind spot this size.
-
-### It reads two things, and they catch different failures
-
-The heartbeat's age can only say the daemon has **stopped beating**, and never sooner than
-`[health] max_age_seconds`. The lock says something the heartbeat never can, and says it at
-once: if no process holds it, the process is gone.
-
-Until issue #52 the check read only the heartbeat, so with the daemon genuinely dead it
-printed `ok` and exited 0 for the whole 180 seconds while the web interface — which has
-always read the lock — said `DAEMON NOT RUNNING` on the next page load. Lowering the
-threshold was never the fix: heartbeat age has to stay well above the tick interval or a busy
-daemon trips its own alarm. So both are read, and the report says which failure it found.
-
-| It says | What happened | What to do |
-|---|---|---|
-| `ok` | the lock is held and the heartbeat is fresh | nothing |
-| `DIED` | **nothing holds the lock** — whatever the heartbeat's age | restart it |
-| `HUNG` | the lock is held and its holder's heartbeat has stopped | look at the process **first**; restarting destroys the evidence of why |
-| `STARTING` | the lock is held and no beat of that process's own is on disk yet | look again shortly — this is what an ordinary restart looks like, and a long one is worth investigating |
-| `NEVER STARTED` | no lock, no heartbeat | it has never run here |
-| `UNREADABLE` | the heartbeat is there and will not parse | look at the file |
-| `STALE` | past the threshold with no usable lock reading | as `HUNG` or `DIED`, but the lock could not be consulted — the line says so |
-
-`STARTING` is a real state and not a hedge: `run_daemon` takes the lock and then wires
-boundaries, checks preconditions and runs `startup` — network work, seconds of it — before
-its first beat, and nothing unlinks the previous daemon's heartbeat. During a restart the
-lock is held while the newest heartbeat on disk still belongs to the process that exited.
-
-`robot-army status` prints the same verdict on its health line, the web chrome shows it
-beside a running daemon, and `--json` carries it as `state` beside `lock`, so nothing has to
-be parsed out of the English. A `lock` of `null` means no reading was taken; `unknown` means
-one was taken and failed, which is the only case where the check judges the heartbeat alone —
-and it says so in the sentence rather than reporting a death it did not observe.
-
-**What this did not change.** The timer still runs every five minutes, and that cadence is
-still the outer bound on how quickly anything is noticed; what went away is the up-to-180
-seconds the check itself added on top of it. `max_age_seconds` keeps its meaning and its
-default, because the heartbeat is the only way `HUNG` is visible at all.
+| install, tokens, effect levels | [setting it up](1-setup.md) |
+| the label gate, the intake board | [what gets picked up](2-intake.md) |
+| caps, ordering, holds, pause, why an item is blocked | [what runs next](3-selection.md) |
+| the composed prompt, Spec Kit, preview, attach | [what a session is told](4-session.md) |
+| issue comments, notifications, the session's ending, cleanup | [what happens after](5-outcome.md) |
+| every state, every column, reboots, backups | [state](state.md) |
+| every config key | [configuration](configuration.md) |
+| the record format and every action name | [the audit log](audit-log.md) |

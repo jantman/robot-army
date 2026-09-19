@@ -333,6 +333,36 @@ So taking the label *off* an issue on GitHub, without changing the configuration
 here: the issue drops out of the label-filtered listing, and nothing updates its row. To stop
 one issue, `hold` it or `abandon` it.
 
+## Why an item is blocked, checked now rather than remembered
+
+For a `failed` item, `show`'s `blocked` line is checked at the moment you ask, and its
+`failure` line is history. `failure` is the sentence recorded when the item failed, and it
+never changes. `blocked` is the verdict of the checks `retry` and `reset` make *before* they
+re-read the issue, run when the item is shown: the repository resolves to a clone, the
+approved clone is still where it was approved and still that repository, the workspace is
+trusted, and the committed settings match.
+
+So `show`, `retry` and `reset` name the same blocker in the same words, and the item page's
+`blocked` entry says the same thing. Before issue #63 they did not: `show` printed the
+`blocked_reason` stored at the moment of failure, which goes stale the instant the thing it
+names is fixed — so `show` went on sending me to restore a clone I had already restored,
+while `retry`, asked at the same moment, refused for the real reason.
+
+Four readings:
+
+- `… (checked now)` — this is what `retry` or `reset` would refuse for.
+- `… (checked now; not the reason recorded when it failed)` — what I fixed is fixed, and this
+  is what is left.
+- `nothing on this machine blocks it now` — the verb will get as far as reading the issue. A
+  reason only the issue can settle, such as the author or the label, is still checked there,
+  and `show` cannot confirm or clear it without a request.
+- `could not be checked now: …` — the check itself failed. The stored sentence is not offered
+  in its place.
+
+Looking writes nothing. A moved clone found by `show` raises no anomaly; the next dispatch,
+`retry` or `reset` that meets it does. Items in any other state are not checked, and a reason
+stored on one is marked `(recorded, not re-checked)`.
+
 ---
 
 Next: [what a session is told](4-session.md).

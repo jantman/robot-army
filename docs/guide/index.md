@@ -41,7 +41,7 @@ And two pages that are not a stage:
 
 | Page | What it covers |
 |---|---|
-| [Operating it](operating.md) | The web interface, the logs, where state lives, health, recovery, what to do when something looks wrong |
+| [Operating it](operating.md) | The quick reference: recipes for what to type, every state and what you can do from it, every command and what it refuses, the logs, anomalies, health, the web interface |
 | [Configuration](configuration.md) | Every section and key, and the generated example config |
 
 Two deeper references, linked from the pages above where they matter:

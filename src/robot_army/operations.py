@@ -62,6 +62,7 @@ from robot_army.models import ANOMALY_KINDS, WorkItem
 from robot_army.states import (
     TERMINAL_SESSION_STATES,
     TERMINAL_WORK_ITEM_STATES,
+    IllegalTransition,
     SessionState,
     WorkItemState,
     dumps_labels,
@@ -3848,61 +3849,74 @@ def _local_blocker(
     return LocalBlocker(None)
 
 
-def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Result:
-    """Move a ``failed`` item back to ``ready``, refusing if anything still blocks it.
+@dataclass(frozen=True, slots=True)
+class _Reread:
+    """What a live re-read of an item's issue concluded.
 
-    Six checks, in the order of contracts/retry.md. The first four are local and free; only
-    once they pass is the issue re-read from its source and put back through
-    ``poll.evaluate``.
-
-    That last step is the point of this function (issue #119, RA-01). ``check_gates`` takes
-    a ``RepoConfig``, not a work item, so it cannot see an issue and never checked its
-    author — which meant an item the poller had refused as *written by somebody else* came
-    back to the queue on one press of a button whose confirmation promised the opposite.
-    The author check is the control that stops "anyone may open an issue on a public
-    repository" becoming "anyone may run an agent in the maintainer's checkout", and this
-    was the one path around it.
-
-    ``poll.evaluate`` is **called**, not reimplemented, and nothing here reads the stored
-    ``blocked_reason`` to decide anything (research R1, R2). Matching the author check's
-    wording in a stored message would put a security boundary at the mercy of whoever next
-    edits an f-string, and would be wrong in both directions: an item whose configured
-    author has since changed would be refused for ever, and an item that reached ``failed``
-    for an unrelated reason after the old bug had already queued it would sail through.
+    Exactly one of the two fields is set. ``refusal`` is the ``Result`` the verb returns
+    when the item must not go back in the queue — unreadable issue, ineligible issue, or a
+    local condition that refused before either was asked. ``issue`` is the issue as just
+    read, and its presence means the verb may proceed.
     """
-    item = db.get_work_item(ctx.conn, item_id)
-    if item is None:
-        return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
-    if item.state is not WorkItemState.FAILED:
-        return Result(
-            code=EXIT_PRECONDITION,
-            lines=[f"work item {item_id} is {item.state}; retry applies to failed items"],
-        )
+
+    refusal: Result | None = None
+    issue: Any | None = None
+
+
+def _reread_and_refresh(
+    ctx: Context, item: WorkItem, *, verb: str, trust_file: Path | None = None
+) -> _Reread:
+    """Re-read an item's issue, store what it says, and ask whether it is still eligible.
+
+    The middle of ``retry``, extracted so ``reset`` can have it too (issue #179). Both verbs
+    put an item back in the queue and both must answer the same question first, so this is
+    one function with two callers rather than two copies of a security check.
+
+    That it is *one* copy is the whole point, and it is why ``reset`` was not written as a
+    fresh read of its own. ``poll.evaluate`` is **called**, not reimplemented (issue #119,
+    RA-01): ``check_gates`` takes a ``RepoConfig``, not a work item, so it cannot see an
+    issue and never checked its author — which meant an item the poller had refused as
+    *written by somebody else* came back to the queue on one press of a button whose
+    confirmation promised the opposite. The author check is the control that stops "anyone
+    may open an issue on a public repository" becoming "anyone may run an agent in the
+    maintainer's checkout", and a second verb with its own read would have been the second
+    path around it.
+
+    Nothing here reads the stored ``blocked_reason`` to decide anything (research R1, R2 of
+    milestone 119). Matching the author check's wording in a stored message would put a
+    security boundary at the mercy of whoever next edits an f-string.
+
+    ``verb`` names the audit actions — ``retry.blocked`` / ``retry.evaluate``,
+    ``reset.blocked`` / ``reset.evaluate`` — so the log says which command asked. The
+    records are otherwise identical, because the question asked is identical.
+    """
     source_id = f"{item.repo_key}#{item.issue_number}"
     blocker = _local_blocker(ctx, item, trust_file=trust_file)
     if blocker.reason is not None:
         # Refused before the read, so no rate limit is spent on an item that could not
-        # dispatch whatever the issue says (research R4). ``retry.blocked`` rather than
-        # ``retry.evaluate`` is how the log distinguishes "we never asked GitHub" from
+        # dispatch whatever the issue says (research R4). ``<verb>.blocked`` rather than
+        # ``<verb>.evaluate`` is how the log distinguishes "we never asked GitHub" from
         # "we asked".
         ctx.audit.record(
-            "retry.blocked",
+            f"{verb}.blocked",
             outcome="error",
             entity_type="work_item",
-            entity_id=item_id,
+            entity_id=item.id,
             target=source_id,
             detail={"repo_key": item.repo_key, "blocked": blocker.reason},
             dry_run=item.dry_run,
         )
         if blocker.unresolved:
-            return Result(code=EXIT_PRECONDITION, lines=[blocker.reason])
-        return Result(
-            code=EXIT_PRECONDITION,
-            lines=[
-                f"refusing to retry item {item_id}: the blocking condition still holds.",
-                f"  {blocker.reason}",
-            ],
-            data={"item_id": item_id, "blocked": blocker.reason},
+            return _Reread(refusal=Result(code=EXIT_PRECONDITION, lines=[blocker.reason]))
+        return _Reread(
+            refusal=Result(
+                code=EXIT_PRECONDITION,
+                lines=[
+                    f"refusing to {verb} item {item.id}: the blocking condition still holds.",
+                    f"  {blocker.reason}",
+                ],
+                data={"item_id": item.id, "blocked": blocker.reason},
+            )
         )
 
     # -- the read (FR-001) -------------------------------------------------
@@ -3914,24 +3928,29 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
     try:
         issue = ctx.boundaries.issue_reader.get_issue(item.repo_key, item.issue_number)
     except BoundaryError as exc:
-        return _retry_unread(
-            ctx, item, cause="issue_unreachable",
-            message=f"could not read {source_id}: {exc}", error=str(exc),
+        return _Reread(
+            refusal=_unread(
+                ctx, item, verb=verb, cause="issue_unreachable",
+                message=f"could not read {source_id}: {exc}", error=str(exc),
+            )
         )
     if issue is None:
-        return _retry_unread(
-            ctx, item, cause="issue_absent",
-            message=f"{source_id} does not exist, or this token cannot see it", error=None,
+        return _Reread(
+            refusal=_unread(
+                ctx, item, verb=verb, cause="issue_absent",
+                message=f"{source_id} does not exist, or this token cannot see it", error=None,
+            )
         )
 
     # -- the refresh (FR-009) ----------------------------------------------
     #
     # Before the verdict is consulted, and in its own transaction, so both outcomes get it
     # from one place rather than two call sites kept in step by hand. The order is chosen
-    # for interruption (research R5): killed between this and the transition below, the
-    # item is still ``failed`` with accurate content and its old reason, which the next
-    # retry corrects completely. The other order would leave an item *in the queue*
-    # carrying content nobody re-read, which is the thing this function exists to prevent.
+    # for interruption (research R5): killed between this and the caller's transition, the
+    # item is still in the state it was in, with accurate content and its old reason, which
+    # the next attempt corrects completely. The other order would leave an item *in the
+    # queue* carrying content nobody re-read, which is the thing this function exists to
+    # prevent.
     #
     # One dict rather than a call plus a hand-written list of what it wrote: the record's
     # ``refreshed`` field has to name exactly the columns this rewrote, and two copies would
@@ -3946,7 +3965,7 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
         "author": issue.author,
     }
     with db.transaction(ctx.conn):
-        db.update_work_item_columns(ctx.conn, item_id, **refresh)
+        db.update_work_item_columns(ctx.conn, item.id, **refresh)
 
     # -- the verdict (FR-002) ----------------------------------------------
     #
@@ -3956,10 +3975,10 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
         issue, config=ctx.config, repo_key=item.repo_key, onboarded=True
     )
     ctx.audit.record(
-        "retry.evaluate",
+        f"{verb}.evaluate",
         outcome="ok" if verdict.eligible else "error",
         entity_type="work_item",
-        entity_id=item_id,
+        entity_id=item.id,
         target=source_id,
         detail={
             "repo_key": item.repo_key,
@@ -3985,35 +4004,27 @@ def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Resu
         with db.transaction(ctx.conn):
             db.update_work_item_columns(
                 ctx.conn,
-                item_id,
+                item.id,
                 blocked_reason=verdict.reason,
                 failure_reason=verdict.reason,
             )
-        return Result(
-            code=EXIT_PRECONDITION,
-            lines=[
-                f"refusing to retry item {item_id}: the issue is not eligible.",
-                f"  {verdict.reason}",
-            ],
-            data={"item_id": item_id, "eligible": False, "reason": verdict.reason},
+        return _Reread(
+            refusal=Result(
+                code=EXIT_PRECONDITION,
+                lines=[
+                    f"refusing to {verb} item {item.id}: the issue is not eligible.",
+                    f"  {verdict.reason}",
+                ],
+                data={"item_id": item.id, "eligible": False, "reason": verdict.reason},
+            )
         )
-
-    with db.transaction(ctx.conn):
-        transition_work_item(
-            ctx.conn,
-            ctx.audit,
-            item_id=item_id,
-            target=WorkItemState.READY,
-            reason="retried by the maintainer; the issue was re-read and re-evaluated",
-            extra_columns={"failure_reason": None, "blocked_reason": None},
-        )
-    return Result(lines=[f"item {item_id} is ready again"], data={"item_id": item_id})
+    return _Reread(issue=issue)
 
 
-def _retry_unread(
-    ctx: Context, item: WorkItem, *, cause: str, message: str, error: str | None
+def _unread(
+    ctx: Context, item: WorkItem, *, verb: str, cause: str, message: str, error: str | None
 ) -> Result:
-    """A retry that could not read its issue. Refuses, and says which way it failed.
+    """A re-read that could not read its issue. Refuses, and says which way it failed.
 
     "It did not happen" and "I could not ask" are different facts, and conflating them is
     the silent failure Principle III forbids — so the two causes are separate values rather
@@ -4027,7 +4038,7 @@ def _retry_unread(
     if error is not None:
         detail["error"] = error
     ctx.audit.record(
-        "retry.evaluate",
+        f"{verb}.evaluate",
         outcome="error",
         entity_type="work_item",
         entity_id=item.id,
@@ -4037,9 +4048,244 @@ def _retry_unread(
     )
     return Result(
         code=EXIT_FAILED,
-        lines=[f"refusing to retry item {item.id}: {message}"],
+        lines=[f"refusing to {verb} item {item.id}: {message}"],
         data={"item_id": item.id, "cause": cause, "error": error},
     )
+
+
+def retry(ctx: Context, item_id: int, *, trust_file: Path | None = None) -> Result:
+    """Move a ``failed`` item back to ``ready``, refusing if anything still blocks it.
+
+    Six checks, in the order of contracts/retry.md. The first four are local and free; only
+    once they pass is the issue re-read from its source and put back through
+    ``poll.evaluate``. All of that is :func:`_reread_and_refresh`, which ``reset`` shares
+    (issue #179) — this function is the ``failed`` gate in front of it and the transition
+    behind it, and nothing else.
+
+    What it does **not** do is discard the checkout. That is the difference between the two
+    verbs and the reason both exist: ``retry`` is for a failure that was environmental, where
+    the work so far is still wanted; ``reset`` is for work that went the wrong way.
+    """
+    item = db.get_work_item(ctx.conn, item_id)
+    if item is None:
+        return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
+    if item.state is not WorkItemState.FAILED:
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=[f"work item {item_id} is {item.state}; retry applies to failed items"],
+        )
+    reread = _reread_and_refresh(ctx, item, verb="retry", trust_file=trust_file)
+    if reread.refusal is not None:
+        return reread.refusal
+
+    with db.transaction(ctx.conn):
+        transition_work_item(
+            ctx.conn,
+            ctx.audit,
+            item_id=item_id,
+            target=WorkItemState.READY,
+            reason="retried by the maintainer; the issue was re-read and re-evaluated",
+            extra_columns={"failure_reason": None, "blocked_reason": None},
+        )
+    return Result(lines=[f"item {item_id} is ready again"], data={"item_id": item_id})
+
+
+#: What ``reset`` accepts. Three states in which an item is at rest with work behind it:
+#: ``failed`` is ``retry``'s state too, and reset is the answer there when the work itself
+#: was wrong rather than the environment.
+RESETTABLE_STATES: tuple[WorkItemState, ...] = (
+    WorkItemState.INTERRUPTED,
+    WorkItemState.AWAITING_REVIEW,
+    WorkItemState.FAILED,
+)
+
+#: The one sentence describing ``reset``, shown by ``robot-army reset --help`` and on the web
+#: confirmation page. One string and two surfaces, as ``retry``'s is, because a destructive
+#: verb whose two descriptions disagree is one whose confirmation cannot be trusted.
+RESET_DESCRIPTION = (
+    "Throw the work away and start again. The checkout and its branch are deleted — "
+    "anything committed there is lost, and uncommitted work is refused unless removed from "
+    "a terminal with --force. The issue is then re-read from GitHub and its eligibility "
+    "re-checked, author included, and the item goes back in the queue to be worked from "
+    "scratch."
+)
+
+
+@_guards_its_prompt
+def reset(
+    ctx: Context,
+    item_id: int,
+    *,
+    force: bool = False,
+    assume_yes: bool = False,
+    confirm: Any = _ask,
+    trust_file: Path | None = None,
+) -> Result:
+    """Discard the work, re-read the issue, and put the item back in the queue (issue #179).
+
+    ``retry`` with the checkout thrown away in front of it, which is what someone wants when
+    an item was picked up too early or went the wrong way: the stored issue body is the copy
+    ``restart`` and ``resume`` would redispatch, and it is precisely what is being discarded.
+    Assembled from the two commands that already do each half rather than written afresh —
+    ``_reread_and_refresh`` so the author check has one implementation, and
+    ``worktree_remove`` whole so the removal keeps all four of its guards.
+
+    **The read comes before the destruction, and that ordering is the design** (research R1).
+    The occasion for a reset is an issue that has changed, and a changed issue is exactly the
+    one that may now be closed, unlabelled, or edited by somebody other than the configured
+    author. Discarding first and refusing second would leave the maintainer with neither the
+    work nor a queued item — strictly worse than the hand-work this verb replaces. The cost
+    is that a reset refused by the live-session guard or by git spends one GitHub read first,
+    since those guards live inside ``worktree_remove``; one call in five thousand an hour, on
+    a path a person runs by hand, against never destroying work for an item that cannot go
+    back in the queue.
+    """
+    item = db.get_work_item(ctx.conn, item_id)
+    if item is None:
+        return Result(code=EXIT_FAILED, lines=[f"no work item with id {item_id}"])
+    if item.state not in RESETTABLE_STATES:
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=[_reset_refusal(item_id, item.state)],
+            data={"item_id": item_id, "state": str(item.state)},
+        )
+
+    with ctx.audit.action(
+        "reset",
+        entity_type="work_item",
+        entity_id=item_id,
+        target=f"{item.repo_key}#{item.issue_number}",
+        detail={"force": force, "state": str(item.state)},
+        dry_run=bool(item.dry_run),
+    ) as outcome:
+        outcome["worktree_removed"] = False
+        outcome["branch_deleted"] = False
+        outcome["requeued"] = False
+
+        reread = _reread_and_refresh(ctx, item, verb="reset", trust_file=trust_file)
+        if reread.refusal is not None:
+            outcome["refused_by"] = "not_requeueable"
+            return reread.refusal
+
+        result = Result(data={"item_id": item_id, "eligible": True})
+
+        # Nothing to discard is not a failure. An item can reach a resettable state with no
+        # checkout — never dispatched, or one already removed by hand or by a reset killed
+        # before its transition — and in every one of those the rest of this verb is still
+        # exactly what was asked for.
+        if item.worktree_path:
+            if not _confirm_reset(
+                item, force=force, assume_yes=assume_yes, confirm=confirm, outcome=outcome
+            ):
+                outcome["refused_by"] = "declined"
+                return Result(code=EXIT_FAILED, lines=["aborted"], data=result.data)
+
+            removal = worktree_remove(ctx, item_id, force=force, confirm=confirm)
+            result.lines.extend(removal.lines)
+            # **Not** ``removal.code`` (research R3). ``_remove_checkout`` exits non-zero
+            # with the worktree already gone when git declines to delete an unmerged branch
+            # — the ordinary case for work being thrown away — and stopping on the code
+            # would abandon the reset with the destruction done and the item neither reset
+            # nor intact. The disk is the question; the surviving branch is reported, in the
+            # removal's own words, and the item still goes back in the queue.
+            if not removal.data.get("worktree_removed"):
+                outcome["refused_by"] = removal.data.get("refused_by") or "removal_refused"
+                result.code = removal.code or EXIT_FAILED
+                result.data.update(removal.data)
+                return result
+            outcome["worktree_removed"] = True
+            outcome["branch_deleted"] = bool(removal.data.get("branch_deleted"))
+            result.data.update(
+                {
+                    "worktree_removed": True,
+                    "branch_deleted": bool(removal.data.get("branch_deleted")),
+                }
+            )
+        else:
+            result.say(f"item {item_id} had no worktree to discard")
+
+        try:
+            with db.transaction(ctx.conn):
+                transition_work_item(
+                    ctx.conn,
+                    ctx.audit,
+                    item_id=item_id,
+                    target=WorkItemState.READY,
+                    reason=(
+                        "reset by the maintainer; the work was discarded and the issue re-read"
+                    ),
+                    extra_columns={"failure_reason": None, "blocked_reason": None},
+                )
+        except IllegalTransition as exc:
+            # Something else moved the item while this ran — an `abandon` from the web, most
+            # likely. Caught here and nowhere else in this family of verbs because reset's
+            # window is the wide one: `retry` has a network read between its check and its
+            # transition, and reset has that *plus* a worktree removal and possibly a prompt.
+            # The state machine is still the arbiter; what this adds is that the destruction
+            # which already happened is reported rather than buried under a traceback.
+            outcome["refused_by"] = "state_changed"
+            result.code = EXIT_PRECONDITION
+            result.say(f"item {item_id} moved to another state while this reset ran: {exc}")
+            if result.data.get("worktree_removed"):
+                result.say(
+                    "  Its checkout and branch were already discarded, and it was not put "
+                    "back in the queue."
+                )
+            return result
+        outcome["requeued"] = True
+        result.data["requeued"] = True
+        result.say(f"item {item_id} is ready again, to be worked from scratch")
+        return result
+
+
+def _reset_refusal(item_id: int, state: WorkItemState) -> str:
+    """Why this item cannot be reset, and what to reach for instead.
+
+    Worded here rather than left to the state machine's refusal for the reason ``abandon``'s
+    is (issue #76): the gate's message is written for a programmer and names no remedy, and
+    the two commonest refusals both have one.
+    """
+    sentence = (
+        f"work item {item_id} is {state}; reset applies to an item at rest with work behind it"
+    )
+    if state is WorkItemState.ACTIVE:
+        return (
+            f"{sentence}. Stop its session first with `robot-army cancel {item_id}`, "
+            f"then reset it"
+        )
+    if state in TERMINAL_WORK_ITEM_STATES:
+        return f"{sentence}. It is already finished; reset does not revive a terminal item"
+    return f"{sentence}. Wait for it to settle, or cancel it"
+
+
+def _confirm_reset(
+    item: WorkItem, *, force: bool, assume_yes: bool, confirm: Any, outcome: dict[str, Any]
+) -> bool:
+    """Ask once, immediately before the destruction, or decide that it has been asked.
+
+    One question, whichever path (research R4). With ``--force`` this asks nothing, because
+    ``worktree_remove``'s typed-item-id prompt is about to ask the harder version of the same
+    question — and a question asked twice is answered reflexively, which is the reasoning
+    already written into that prompt. Without it, git still refuses over uncommitted and
+    untracked work, so what is at risk is committed work on a throwaway branch: real loss,
+    worth a question, not worth a typed id.
+
+    ``assume_yes`` is for a caller that has already confirmed in its own medium — the web,
+    whose confirmation page is the question. It suppresses this prompt and **nothing else**;
+    it does not imply ``force`` and cannot override git, which is what keeps the browser
+    unable to discard uncommitted work.
+    """
+    if force or assume_yes:
+        return True
+    branch = f" and branch {item.branch}" if item.branch else ""
+    answer = _answer_or_give_up(
+        f"Discard {item.worktree_path}{branch} and put item {item.id} back in the queue? "
+        "[y/N] ",
+        confirm=confirm,
+        record=lambda cause: outcome.update(abandoned=True, cause=cause, refused_by="abandoned"),
+    )
+    return str(answer).strip().lower() in ("y", "yes")
+
 
 
 # -- dispatch pause (milestone 002) -----------------------------------------

@@ -67,7 +67,7 @@ looks applied. In those seven the consequence is bad enough to refuse the file.
 | `[hooks]` | preparation steps run in a new worktree | below |
 | `[terminal]` | how kitty is found and driven | [setup](1-setup.md#two-things-that-are-easy-to-overlook) |
 | `[web]` | `robot-army serve`'s address, port and refresh | [operating](operating.md#the-web-interface) |
-| `[health]` | when the heartbeat counts as stale, and the webhook URL | [operating](operating.md#noticing-it-has-died) |
+| `[health]` | when the heartbeat counts as stale, and the webhook URL | [operating](operating.md#is-it-alive) |
 | `[repos.*]` | per-repository exceptions | below |
 
 ### `[paths]`

@@ -61,7 +61,7 @@ The guide is published at **<https://jantman.github.io/robot-army/>** and its so
 | [② What runs next](docs/guide/3-selection.md) | Concurrency, serial working, board order, holds, pausing |
 | [③ What a session is told](docs/guide/4-session.md) | The prompt, Spec Kit, previewing, attaching |
 | [④ What happens after](docs/guide/5-outcome.md) | Issue comments, notifications, cleanup |
-| [Operating it](docs/guide/operating.md) | The web interface, logs, health, recovery, anomalies |
+| [Operating it](docs/guide/operating.md) | The quick reference: states, commands, recipes, logs, anomalies, health, the web interface |
 | [Configuration](docs/guide/configuration.md) | Every section and key |
 | [The audit log](docs/guide/audit-log.md) | Record shape, every action, reconstructing history |
 | [State](docs/guide/state.md) | Every path and table, and what survives a reboot |

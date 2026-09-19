@@ -261,6 +261,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retry.add_argument("item_id", type=int)
 
+    reset = sub.add_parser(
+        "reset",
+        help="discard the work, re-read the issue, and put the item back in the queue",
+        # The same sentence the web confirmation shows (issue #179), as `retry`'s is. A
+        # destructive verb whose two descriptions disagree is one whose confirmation cannot
+        # be trusted, and there is only one way to keep them in step: one string.
+        description=operations.RESET_DESCRIPTION,
+    )
+    reset.add_argument("item_id", type=int)
+    reset.add_argument(
+        "--force",
+        action="store_true",
+        help="override git's refusal over uncommitted or untracked work in the checkout",
+    )
+    reset.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the confirmation. Does not imply --force, and never overrides git",
+    )
+
     onboard = sub.add_parser("onboard", help="the deliberate per-repository trust step")
     onboard.add_argument("repo_key")
     onboard.add_argument(
@@ -612,6 +632,9 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "restart": lambda: operations.restart(ctx, args.item_id, force=args.force),
         "abandon": lambda: operations.abandon(ctx, args.item_id),
         "retry": lambda: operations.retry(ctx, args.item_id),
+        "reset": lambda: operations.reset(
+            ctx, args.item_id, force=args.force, assume_yes=args.yes
+        ),
         # `notes` is stderr so that stdout carries the prompt alone and stays diffable
         # across runs (FR-003/FR-004). Failures need nothing here: they come back with a
         # non-zero code and `main` already routes those lines to stderr.

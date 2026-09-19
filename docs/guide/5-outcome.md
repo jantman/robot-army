@@ -112,7 +112,7 @@ reach, and a test asserts it across a run that includes an authentication failur
 matters most is the one saying the daemon itself has stopped, and a channel that could not
 carry it would be the wrong half. Since issue #52 it also says *which* stopping: its body
 carries the check's verdict, so `DIED` and `HUNG` reach a phone as the different problems
-they are — [what each one means](operating.md#it-reads-two-things-and-they-catch-different-failures). Unlike the notifications above, that alert is *not* gated
+they are — [what each one means](operating.md#is-it-alive). Unlike the notifications above, that alert is *not* gated
 by the effect level and never has been: `robot-army health --notify` takes no
 `--effect-level` flag, so gating it would silently disable the dead-man's switch whenever
 I am running the daemon at `local`.
@@ -292,6 +292,15 @@ uv run robot-army cleanup                   # every eligible item, under the sam
 uv run robot-army cleanup <id>              # one item, reconsidering a retained decision
 ```
 
+**Discarding an unfinished item's checkout is `reset`, not cleanup** (issue #179). Cleanup and
+`worktree remove` are about reclaiming *disk*; `reset` is about throwing away *work* that went
+the wrong way, and it removes the checkout as one step of putting the item back in the queue
+against a freshly read issue. It uses `worktree remove`'s guards unchanged — a live session
+refuses it, and git's refusal over uncommitted work refuses it unless `--force` is given from a
+terminal — so everything below about what those guards protect applies to a reset too. What it
+adds is the two steps either side: the issue is re-read before anything is deleted, and the item
+returns to `ready` after. See [operating](operating.md).
+
 **Worktrees no row claims** (issue #59). `worktree remove <id>` and `cleanup` both start from
 a work item, so a worktree whose row is gone is beyond both. `purge-simulated` was how that
 happened: it deleted a rehearsal's rows, left their worktrees on disk, and pointed at `worktree
@@ -386,8 +395,9 @@ after a successful removal, so "what was at this path?" stays answerable.
 with a reason that ends by naming `robot-army worktree remove`, and keeps the path and branch. It
 used to write nothing and forget the path, so `show` could not say where the worktree went and
 reconciliation could not tell the removal from an `rm -rf`. An *unfinished* item still forgets
-the path and gets no record: `retry` can give it a fresh worktree, and a record describing the
-old one would quietly exempt the new one from the missing-worktree report and from cleanup.
+the path and gets no record: `retry` and `reset` can give it a fresh worktree, and a record
+describing the old one would quietly exempt the new one from the missing-worktree report and
+from cleanup.
 
 It is also the command that settles a finished item whose directory was deleted by hand, which
 reconciliation reports as `prunable_worktree` (see [anomalies](operating.md)). A directory that

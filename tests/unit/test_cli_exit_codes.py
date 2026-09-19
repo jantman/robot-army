@@ -168,7 +168,9 @@ def test_showing_a_missing_item_exits_one(config_file, capsys):
     assert "no work item with id 999" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("command", ["cancel", "resume", "restart", "abandon", "retry"])
+@pytest.mark.parametrize(
+    "command", ["cancel", "resume", "restart", "abandon", "retry", "reset"]
+)
 def test_lifecycle_verbs_on_a_missing_item_exit_one(command, config_file, capsys):
     code = run_cli([command, "999"], config_file)
     assert code == EXIT_FAILED

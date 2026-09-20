@@ -1228,7 +1228,14 @@ def _signal_row(ctx: operations.Context, item: dict[str, Any]) -> dict[str, Any]
         "pull_requests_known": signals.get("pull_requests_known"),
         "signals_age_seconds": signals.get("signals_age_seconds"),
         "local_signals_age_seconds": signals.get("local_signals_age_seconds"),
-        "worktree_missing": not signals.get("worktree_present", False),
+        # "a checkout was recorded and it is not there", not "no checkout is present".
+        # The two differ for every item refused before ``worktree.prepare`` ran, and the
+        # old reading described those as having lost something they never had — on the
+        # card *and* in this payload. Conditioning only the banner would have fixed the
+        # sentence and left the same false claim in the JSON, which is the form a reader is
+        # likelier to trust.
+        "worktree_missing": bool(item.get("worktree_path"))
+        and not signals.get("worktree_present", False),
         "worktree_error": signals.get("worktree_error"),
         "github_error": signals.get("github_error"),
     }
@@ -1315,11 +1322,32 @@ def _interrupted_card(
 ) -> Markup:
     warnings: list[Any] = []
     if row["worktree_missing"]:
+        # Only reached when a checkout path was recorded and the directory is gone; see
+        # ``_signal_row`` for why the field carries that condition rather than this line.
+        # An item refused by ``check_gates`` never gets here, because the gate runs before
+        # ``worktree.prepare`` and there is nothing to have lost.
         warnings.append(
             div(
                 "The isolated checkout is missing. Resuming will fail until it is restored; "
                 "abandoning is the usual answer.",
                 class_="banner error",
+            )
+        )
+    if row["state"] == str(WorkItemState.FAILED):
+        # ``failure_reason or blocked_reason`` is the expression ``/queue``'s blocked table
+        # already renders (:func:`_queue`), and it is reused rather than re-derived on
+        # purpose: two surfaces disagreeing about which column is *the* reason would be the
+        # next defect in this family, not a refinement of this one.
+        #
+        # This page is where the reason has to be legible, because the comment on the issue
+        # no longer carries it and the chrome pill counting failed items points here. The
+        # stated absence is not decoration either — a rebuilt database has failed rows with
+        # both columns empty, and a blank where a reason belongs reads as "no problem".
+        warnings.append(
+            div(
+                row.get("failure_reason") or row.get("blocked_reason") or
+                "no reason was recorded",
+                class_="reason",
             )
         )
     return div(

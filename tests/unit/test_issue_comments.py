@@ -12,6 +12,7 @@ lookup the reassignment wording depends on.
 
 from __future__ import annotations
 
+import inspect
 import os
 from typing import Any
 
@@ -158,16 +159,39 @@ def test_every_fact_is_its_own_labelled_line() -> None:
 # -- the failure comment ----------------------------------------------------
 
 
-def test_a_failure_comment_names_the_host_and_fences_the_reason() -> None:
-    """A failure that happens on one machine and not another is attributable by this line."""
-    text = dispatch.failure_comment_body(host="orion", reason="kitty: no such window")
+def test_a_failure_comment_names_the_host_and_the_item_and_nothing_else() -> None:
+    """Two labelled lines. Whatever went wrong, this is the whole of what GitHub is told.
+
+    The host is here because trust is granted per machine, so "it works on the other one"
+    is a real case. The item number is here because it is where the reason now lives --- an
+    address on the operator's machine, meaningless to anyone else, which is the point.
+    """
+    text = dispatch.failure_comment_body(host="orion", item_id=126)
     assert text.startswith("🤖 robot-army could not start a session for this issue.")
     assert "- Host: `orion`" in text
-    assert "```\nkitty: no such window\n```" in text
+    assert "- Work item: `126`" in text
+
+    lines = [line for line in text.splitlines() if line]
+    assert lines[0].startswith("🤖")
+    assert all(line.startswith("- ") for line in lines[1:])
+    assert len(lines[1:]) == 2
+    assert "```" not in text
+
+
+def test_a_failure_comment_cannot_be_given_a_reason() -> None:
+    """The signature is the guarantee; the assertions above are only the evidence.
+
+    A test asserting "the reason is absent" can be deleted by somebody adding it back. A
+    parameter that does not exist cannot be passed by a call site that forgot why. This is
+    the whole of why ``reason`` was removed rather than accepted and ignored.
+    """
+    parameters = inspect.signature(dispatch.failure_comment_body).parameters
+    assert "reason" not in parameters
+    assert set(parameters) == {"host", "item_id"}
 
 
 def test_a_failure_comment_never_claims_a_session() -> None:
-    text = dispatch.failure_comment_body(host="orion", reason="whatever")
+    text = dispatch.failure_comment_body(host="orion", item_id=7)
     assert "dispatched" not in text
     assert "reassigned" not in text
 

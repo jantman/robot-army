@@ -9,6 +9,7 @@ that only checks the happy path would pass against a completely broken launcher.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -1213,11 +1214,182 @@ def test_a_blocked_dispatch_says_which_machine_refused(conn, audit, config, tmp_
     body = writer.comments[-1][2]
     assert "could not start a session" in body
     assert f"- Host: `{dispatch.host_name()}`" in body
-    assert "trust check failed" in body
+    assert f"- Work item: `{item_id}`" in body
+    # The reason is what sent this feature's author looking: it named a settings file, a
+    # repository key and a local command, on somebody else's public issue. The host line
+    # stays --- trust is granted per machine --- and the reason does not.
+    assert "trust check failed" not in body
 
     item = db.get_work_item(conn, item_id)
     assert item is not None and item.state is WorkItemState.FAILED
     assert "trust check failed" in (item.blocked_reason or "")
+
+
+def test_the_settings_drift_scenario_end_to_end(conn, audit, config, tmp_path, layout, web):
+    """SC-005 --- item 126, reproduced, with both halves asserted at once.
+
+    The scenario that produced this feature: a repository onboarded, a
+    ``.claude/settings.json`` committed to its base ref afterwards, and a dispatch that the
+    fingerprint gate refuses before anything is created. What went out was a public comment
+    carrying the diff and the local re-approval command; what the author was shown was a
+    claim that an isolated checkout had gone missing and advice to abandon.
+
+    Both halves are asserted together deliberately. Either one alone can be made to pass by
+    a change that breaks the other --- suppressing the reason everywhere would satisfy the
+    comment assertions, and restating it on the issue would satisfy the card's.
+    """
+    import subprocess
+
+    from tests.conftest import onboard_repo
+
+    clone = config.repos["demo"].path
+    # Onboarded while the repository had no committed settings: the empty mapping is what
+    # ``compute_fingerprint`` returns for that clone, and is what onboarding records.
+    onboard_repo(conn, "demo", clone, settings_fingerprint={})
+
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+    settings = clone / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"permissions": {"allow": ["Bash(ls:*)"]}}\n', encoding="utf-8")
+    for argv in (["add", ".claude/settings.json"], ["commit", "-qm", "add settings"]):
+        subprocess.run(["git", *argv], cwd=clone, env=env, check=True, capture_output=True)
+
+    writer = RecordingWriter()
+    item_id = ready_item(conn, config)
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, clone),
+    )
+
+    item = db.get_work_item(conn, item_id)
+    assert item is not None and item.state is WorkItemState.FAILED
+    assert ".claude/settings.json" in (item.failure_reason or ""), "the gate we meant to hit"
+    assert item.worktree_path is None, "the gate runs before anything is created"
+
+    # Half one: what GitHub was told.
+    body = writer.comments[-1][2]
+    assert body == (
+        "🤖 robot-army could not start a session for this issue.\n\n"
+        f"- Host: `{dispatch.host_name()}`\n"
+        f"- Work item: `{item_id}`\n"
+    )
+
+    # Half two: what the author is shown. The reason is here, and the sentence that sent
+    # them to the wrong remedy is not.
+    page = web.get("/interrupted").text
+    assert ".claude/settings.json" in page
+    assert "--reapprove" in page, "the remedy the reason names"
+    assert "isolated checkout is missing" not in page
+
+
+def test_every_failure_path_posts_the_same_body(conn, audit, config, tmp_path, layout):
+    """FR-002. Two failures as far apart as this system has: a gate that refuses before
+    anything is created, and a launch that got a window and could not confirm a session.
+
+    If the bodies differ in anything but the item number, something about the cause is
+    reaching the issue --- which is the disclosure this feature exists to stop, arriving by
+    a route no test looking for a *reason* would catch.
+    """
+    writer = RecordingWriter()
+    blocked_id = ready_item(conn, config, issue_number=101)
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=blocked_id,
+        trust_file=tmp_path / "absent.json",
+    )
+
+    unconfirmed_id = ready_item(conn, config, issue_number=102)
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=make_boundaries(
+            audit,
+            writer=writer,
+            host=StubSessionHost(confirm=False),
+            hooks=SubprocessHookRunner(audit),
+        ),
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=unconfirmed_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    # Compared with the item line dropped rather than with the id substituted. The bodies
+    # carry the real hostname, item ids are small sequential integers, and a substitution
+    # over the whole body rewrites any hostname that happens to contain one of those digits
+    # --- so on a runner named `fv-az1136-2` the two sides diverge for a reason that has
+    # nothing to do with what this test checks. Dropping the line removes the collision
+    # rather than narrowing it, and lets each body be asserted to name its own item.
+    def without_item_line(body: str) -> str:
+        return "\n".join(
+            line for line in body.splitlines() if not line.startswith("- Work item:")
+        )
+
+    blocked_body, unconfirmed_body = writer.comments[0][2], writer.comments[-1][2]
+    assert without_item_line(blocked_body) == without_item_line(unconfirmed_body)
+    assert f"- Work item: `{blocked_id}`" in blocked_body
+    assert f"- Work item: `{unconfirmed_id}`" in unconfirmed_body
+
+
+def test_the_reason_leaves_the_comment_but_not_the_record(
+    conn, audit, config, tmp_path, layout, monkeypatch
+):
+    """FR-004, FR-005. The reason is not suppressed; it is moved off the public surface.
+
+    All three of the places it goes are asserted together, because the argument for the
+    quiet comment is that nothing is lost --- and an argument of that shape is only as good
+    as the test that fails when one of the three stops holding.
+    """
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        dispatch.notifications, "emit", lambda **kwargs: sent.append(kwargs) or None
+    )
+    writer = RecordingWriter()
+    boundaries = make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config)
+
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=tmp_path / "absent.json",
+    )
+
+    body = writer.comments[-1][2]
+    assert "trust check failed" not in body
+
+    item = db.get_work_item(conn, item_id)
+    assert item is not None
+    assert "trust check failed" in (item.failure_reason or "")
+
+    transitions = [
+        record
+        for record in records_of(layout, audit, "state.work_item")
+        if record["entity_id"] == item_id
+    ]
+    assert "trust check failed" in transitions[-1]["detail"]["reason"]
+
+    assert sent and "trust check failed" in sent[-1]["detail"]
 
 
 def test_a_restart_names_the_session_it_supersedes_and_says_it_kept_nothing(

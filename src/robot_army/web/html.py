@@ -696,6 +696,11 @@ h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
 .banner.warn { border-color: var(--warn); }
 .banner.error { border-color: var(--error); color: var(--error); }
 .banner .reason { color: var(--text); font-size: .9375rem; margin-top: .4rem; }
+/* The same element on a card, where there is no banner to inherit from. Set apart
+   from the signals above it and kept at body weight: this is the sentence the
+   failed item is on this page to show, not an aside. */
+.card .reason { color: var(--text); font-size: .9375rem; margin-top: .4rem;
+  border-left: 2px solid var(--error); padding-left: .6rem; }
 .card {
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
   padding: .75rem; margin: .5rem 0;

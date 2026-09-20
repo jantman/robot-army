@@ -363,6 +363,14 @@ Looking writes nothing. A moved clone found by `show` raises no anomaly; the nex
 `retry` or `reset` that meets it does. Items in any other state are not checked, and a reason
 stored on one is marked `(recorded, not re-checked)`.
 
+**A terminal item is not blocked, whatever it still has recorded.** The stored reason is never
+cleared — `abandon` does not wipe it, and neither does anything else — so a `done` or
+`abandoned` row goes on carrying the sentence that once refused it. The web queue's **blocked**
+table asks the state, not the column, and lists only items something could still be done
+about. Without that it kept an item the maintainer had already given up on, offering *no action
+is legal for this item in its current state* and so no way to make it go away. The sentence
+itself stays on `show` and on the item page, which is where history belongs.
+
 ---
 
 Next: [what a session is told](4-session.md).

@@ -99,6 +99,23 @@ def test_an_item_blocked_before_it_ever_became_ready_is_still_shown(web, conn):
     assert [row["id"] for row in payload["blocked"]] == [item_id]
 
 
+def test_a_terminal_item_keeps_its_blocked_reason_but_leaves_the_blocked_section(web, conn):
+    """``abandon`` finishes an item; the blocked table must let go of it.
+
+    ``blocked_reason`` is written at the refusal and never cleared, so keying the section
+    on the column alone kept an abandoned item listed as an obstacle for good — with no
+    action legal for it, and so no way to get rid of it.
+    """
+    for issue_number, state in enumerate(("abandoned", "done"), start=901):
+        item_id = seed_item(conn, issue_number=issue_number, state=state)
+        with db.transaction(conn):
+            db.update_work_item_columns(
+                conn, item_id, blocked_reason="issue author is not the configured author"
+            )
+        payload = web.get_json("/queue").json()
+        assert item_id not in [row["id"] for row in payload["blocked"]], state
+
+
 def test_simulated_rows_are_absent_by_default_and_marked_when_asked_for(web, conn):
     """FR-019, asserted on the representation a script sees as well as the page."""
     seed_item(conn, issue_number=1, state="ready")

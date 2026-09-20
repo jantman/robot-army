@@ -30,7 +30,12 @@ from robot_army import control, db, health, operations, timefmt
 from robot_army import daemon as daemon_mod
 from robot_army import ordering as ordering_mod
 from robot_army.cardstates import CardState
-from robot_army.states import SessionState, WorkItemState, is_legal_work_item_transition
+from robot_army.states import (
+    TERMINAL_WORK_ITEM_STATES,
+    SessionState,
+    WorkItemState,
+    is_legal_work_item_transition,
+)
 from robot_army.web import html
 from robot_army.web.html import (
     Markup,
@@ -60,6 +65,18 @@ class View:
     data: dict[str, Any]
     body: Markup
     status: int = 200
+
+
+#: Terminal states, as the strings a payload row carries. ``/queue``'s blocked section
+#: asks this so a finished item cannot be listed as an obstacle: ``blocked_reason`` is
+#: written once, at the moment of the refusal, and deliberately never cleared — ``show``
+#: prints it as "recorded, not re-checked" — so the column stays set through ``abandon``
+#: and through ``done``. Keying the section on the column alone meant an item the
+#: maintainer had already finished with sat in the blocked table for good, offering "no
+#: action is legal for this item in its current state" and no way out.
+_TERMINAL_STATE_NAMES: frozenset[str] = frozenset(
+    str(state) for state in TERMINAL_WORK_ITEM_STATES
+)
 
 
 # -- time -------------------------------------------------------------------
@@ -930,7 +947,9 @@ def queue_view(
                     "overdue": age is not None and age > max_age,
                 }
             )
-        elif state == str(WorkItemState.FAILED) or item.get("blocked_reason"):
+        elif state == str(WorkItemState.FAILED) or (
+            item.get("blocked_reason") and state not in _TERMINAL_STATE_NAMES
+        ):
             blocked.append(
                 {
                     **item,

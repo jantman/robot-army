@@ -359,8 +359,8 @@ uv run robot-army serve        # the interface — http://127.0.0.1:8420 by defa
 ```
 
 **Two processes, started by hand, in either order.** The interface is deliberately separate
-from the daemon: it starts, stops and survives on its own, so the audit log and the interrupted
-list stay readable during exactly the incident that makes them worth reading.
+from the daemon: it starts, stops and survives on its own, so the audit log and the list of
+parked work stay readable during exactly the incident that makes them worth reading.
 
 ```toml
 [web]
@@ -369,7 +369,7 @@ port = 8420
 refresh_seconds = 10    # how often an open page re-fetches itself
 ```
 
-Six views — active, queue, interrupted, one item, anomalies, and the log — carrying the
+Six views — active, queue, **needs me**, one item, anomalies, and the log — carrying the
 controls marked **Web** in the [command tables](#commands). Every one has a terminal
 equivalent, verified by a test rather than by intention. Add `.json` to any path, or send
 `Accept: application/json`, for the same facts as a payload:
@@ -381,6 +381,43 @@ curl -s localhost:8420/active.json | jq '.items[] | {id, repo_key, state, title}
 It is not a stable API; it is versioned by the commit that produced it. Nothing is fetched
 from a third-party host, so every view works with the machine offline, renders on a phone in
 one column, and works with scripting disabled.
+
+### The bar at the top of every page
+
+A strip of pills, on every view rather than on a status page, because each of these is asked
+from wherever you happen to be looking. **Read it as "everything here is something to know"** —
+a pill that would only ever state the value you get unless you went out of your way is not
+rendered at all.
+
+| Pill | Says | Links to |
+|---|---|---|
+| the daemon | running with its pid and heartbeat age, or `DAEMON NOT RUNNING`, or the health verdict's own word — `HUNG`, `STARTING` | — |
+| `n/N sessions` | against the cap the **daemon** is enforcing, broken down into yours and everything else | the queue |
+| `order:` | which end of the queue dispatch takes from | the queue |
+| `N need me` | how much work is parked on you | **needs me** |
+| `N anomalies` | conditions the system detected and has not had acknowledged | anomalies |
+| `DISPATCH PAUSED` | only while paused, with since-when and by-whom | the queue |
+| `effect level:` | only **below** `live`, or when the level could not be read at all | — |
+| `simulated rows included` | only while simulated rows are being shown | the same page, hidden |
+
+**`N need me` counts `awaiting_review`, `interrupted` and `failed` together.** One number,
+because the question is singular: is anything waiting on me? All three mean the same
+operational thing — the work is parked and nothing moves it without a decision — and `failed`
+is in there because `retry` and `reset` are routes only you can take. Quiet at zero, warning
+above it. It is scoped by whether simulated rows are being shown, so it always agrees with the
+page it links to.
+
+The last two are the ones whose *absence* carries the meaning:
+
+- **No `effect level:` pill means `live`.** Every level below it is a testing configuration
+  where nothing on the page means what it appears to mean, and that is worth a pill. `live` is
+  not. If the level genuinely could not be read — a daemon is running and its heartbeat does
+  not say — the pill appears reading `unknown`, because "we could not tell" is news.
+- **No `simulated rows included` pill means they are hidden**, which is the default at `live`.
+  Below `live` they are shown by default and the pill is normally there. When rows really are
+  being withheld, the table that withheld them says so underneath — `N simulated rows hidden —
+  show them` — which is where the way back lives, offered at the moment there is something to
+  reveal.
 
 ### Read this part
 
@@ -424,13 +461,19 @@ on the strength of never having looked is the one thing this must not do. None o
 request while a page renders: reconciliation establishes the answer and stores it, so these
 pages render with GitHub unreachable, showing the last answer and how old it is.
 
-### Two things the pages will tell you about themselves
+### Three things the pages will tell you about themselves
 
 **The session count is against the cap the daemon is enforcing**, not the config this process
 read at startup, because `serve` reads the file once. When the two disagree every view says so,
 names both numbers, and says which is in force. It is a warning, not a refusal — nothing is
 disabled — and the fix is to restart whichever process has been running since before the
 configuration changed. With no daemon running the page falls back to its own cap.
+
+**Work parked on you is never only on one page.** `awaiting_review`, `interrupted` and
+`failed` are listed together under **needs me**, and counted together in the bar from every
+view. An item leaving `active` used to vanish from the two pages worth watching with nothing
+anywhere to notice; the count is the fix, and `robot-army status` prints the same numbers by
+state in the terminal.
 
 **A refusal is shown, never hidden.** Resume, restart and reset obey the session cap, the pause
 and the holds exactly as the terminal does, and say so on the page rather than appearing to

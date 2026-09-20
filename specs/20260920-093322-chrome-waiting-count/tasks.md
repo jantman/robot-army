@@ -37,7 +37,7 @@ US3 and US4 are independent of both and of each other, except that US4 is gated 
 
 **Purpose**: nothing to set up. No dependency, no scaffold, no migration.
 
-- [ ] T001 Confirm the suite is green before any change: run `uv run pytest` and record the baseline, so a failure later is attributable to this work rather than inherited
+- [X] T001 Confirm the suite is green before any change: run `uv run pytest` and record the baseline, so a failure later is attributable to this work rather than inherited
 
 ---
 
@@ -48,7 +48,7 @@ US3 and US4 are independent of both and of each other, except that US4 is gated 
 **⚠️ CRITICAL**: T002 is a gate on Phase 6 (US4). If it fails, FR-012 cannot be implemented as
 written and the plan must be revised rather than the pill removed.
 
-- [ ] T002 Verify [research.md](research.md) R6 against the current code: for every route in `ROUTES` (`src/robot_army/web/server.py`), confirm that a view which filters rows by `include_simulated` renders either `_nothing` or `withheld_note` (or `/log`'s own scoped note) when it withholds. Record any view that can withhold without disclosing. R6's table is the expected answer; this task is the re-check against the tree as it actually stands
+- [X] T002 Verify [research.md](research.md) R6 against the current code: for every route in `ROUTES` (`src/robot_army/web/server.py`), confirm that a view which filters rows by `include_simulated` renders either `_nothing` or `withheld_note` (or `/log`'s own scoped note) when it withholds. Record any view that can withhold without disclosing. R6's table is the expected answer; this task is the re-check against the tree as it actually stands
 
 **Checkpoint**: the disclosure precondition is settled; story work can begin.
 
@@ -66,19 +66,19 @@ honest about what it withholds, and the page is named for what it holds.
 
 ### Implementation
 
-- [ ] T003 [US2] In `interrupted_view` (`src/robot_army/web/pages.py`), fetch failed items with a third `_items` call for `WorkItemState.FAILED`, pass it through `_visible` for its own withheld count, and map it through `_signal_row` — the same three steps the two existing sections take, in the same order, so the third section reads as obviously parallel to them
-- [ ] T004 [US2] Render the failed section in the same body: an `h(2, f"failed ({len(failed)})")`, a one-line `meta` saying what the state means and that `retry` and `reset` are the routes out, and either `_nothing("Nothing has failed.", withheld_failed, …)` or the cards, exactly as the awaiting-review section does (C22, C23, C25)
-- [ ] T005 [US2] Extend the page's withheld arithmetic: add `withheld_failed` to the `withheld` total and add `(withheld_failed if failed else 0)` to the `withheld_note` term, preserving the invariant that each withheld row is disclosed exactly once — the empty sections' counts and the note's count disjoint, together the whole ([research.md](research.md) R7, C26)
-- [ ] T006 [US2] Extend the `View.data` payload: a `failed` key holding the rows, a `failed` entry under `counts`, and `withheld_simulated` as the sum of all three sections, so the JSON body states what the page states (C28)
-- [ ] T007 [US2] Rename the page: the `h(1, …)` becomes `needs me`, with a `meta` line beneath it naming the three states it lists and why they share a page — the work is parked and the machine will not move it without a decision ([research.md](research.md) R4)
-- [ ] T008 [US2] Update `interrupted_view`'s docstring to carry the reasoning for the third section: `failed` was in exactly the position awaiting-review was in when this page took it on — navigable from nowhere — and `retry`/`reset` are controls that exist but could not be reached
-- [ ] T009 [P] [US2] Rename the `/interrupted` nav entry to `needs me` in `NAV` (`src/robot_army/web/html.py`), leaving the route unchanged, with a comment recording that the label is renamed and the path is not, and why ([research.md](research.md) R3)
+- [X] T003 [US2] In `interrupted_view` (`src/robot_army/web/pages.py`), fetch failed items with a third `_items` call for `WorkItemState.FAILED`, pass it through `_visible` for its own withheld count, and map it through `_signal_row` — the same three steps the two existing sections take, in the same order, so the third section reads as obviously parallel to them
+- [X] T004 [US2] Render the failed section in the same body: an `h(2, f"failed ({len(failed)})")`, a one-line `meta` saying what the state means and that `retry` and `reset` are the routes out, and either `_nothing("Nothing has failed.", withheld_failed, …)` or the cards, exactly as the awaiting-review section does (C22, C23, C25)
+- [X] T005 [US2] Extend the page's withheld arithmetic: add `withheld_failed` to the `withheld` total and add `(withheld_failed if failed else 0)` to the `withheld_note` term, preserving the invariant that each withheld row is disclosed exactly once — the empty sections' counts and the note's count disjoint, together the whole ([research.md](research.md) R7, C26)
+- [X] T006 [US2] Extend the `View.data` payload: a `failed` key holding the rows, a `failed` entry under `counts`, and `withheld_simulated` as the sum of all three sections, so the JSON body states what the page states (C28)
+- [X] T007 [US2] Rename the page: the `h(1, …)` becomes `needs me`, with a `meta` line beneath it naming the three states it lists and why they share a page — the work is parked and the machine will not move it without a decision ([research.md](research.md) R4)
+- [X] T008 [US2] Update `interrupted_view`'s docstring to carry the reasoning for the third section: `failed` was in exactly the position awaiting-review was in when this page took it on — navigable from nowhere — and `retry`/`reset` are controls that exist but could not be reached
+- [X] T009 [P] [US2] Rename the `/interrupted` nav entry to `needs me` in `NAV` (`src/robot_army/web/html.py`), leaving the route unchanged, with a comment recording that the label is renamed and the path is not, and why ([research.md](research.md) R3)
 
 ### Tests
 
-- [ ] T010 [US2] In `tests/unit/test_web_views.py`, assert a seeded `failed` item is listed on `/interrupted` with the controls `legal_actions` permits, that the JSON body carries it under `failed` and `counts.failed`, and that an empty failed section says so in its own words (C22–C24, C28)
-- [ ] T011 [US2] Add `("/interrupted", "failed", "Nothing has failed.")` to `WITHHELD_VIEWS` in `tests/unit/test_web_views.py`, so the new section is held to the four existing parametrised disclosure rules — withholding everything, withholding some, nothing withheld and nothing present, nothing withheld with rows present (C25, C26)
-- [ ] T012 [P] [US2] Assert the nav entry reads `needs me` and still points at `/interrupted` (C27)
+- [X] T010 [US2] In `tests/unit/test_web_views.py`, assert a seeded `failed` item is listed on `/interrupted` with the controls `legal_actions` permits, that the JSON body carries it under `failed` and `counts.failed`, and that an empty failed section says so in its own words (C22–C24, C28)
+- [X] T011 [US2] Add `("/interrupted", "failed", "Nothing has failed.")` to `WITHHELD_VIEWS` in `tests/unit/test_web_views.py`, so the new section is held to the four existing parametrised disclosure rules — withholding everything, withholding some, nothing withheld and nothing present, nothing withheld with rows present (C25, C26)
+- [X] T012 [P] [US2] Assert the nav entry reads `needs me` and still points at `/interrupted` (C27)
 
 **Checkpoint**: the destination can honour any count a pill states.
 
@@ -96,14 +96,14 @@ the bar, follow it, find the item.
 
 ### Implementation
 
-- [ ] T013 [US1] In `pages.chrome` (`src/robot_army/web/pages.py`), add `waiting_count`: `db.count_work_items_by_state(ctx.conn, include_simulated=include_simulated)` summed over `awaiting_review`, `interrupted` and `failed`, named as a module-level constant beside a comment giving the rule the three share and why one number beats three ([research.md](research.md) R1, [data-model.md](data-model.md); C7–C10). The comment must also record that the scoping is not optional, for the same reason recorded for the anomaly count: an unscoped count disagrees with the page it links to the moment the toggle is off
-- [ ] T014 [US1] In `_chrome_bar` (`src/robot_army/web/html.py`), render the pill immediately before the anomaly pill: a link to `/interrupted` carrying `_visibility_suffix`, reading `{n} need{'s' if n == 1 else ''} me`, class `pill warn` above zero and `pill quiet` at zero (C2–C6)
-- [ ] T015 [US1] Guard the pill on the key's *presence*, not its truthiness, so the chrome from `server._bare` — which counted nothing — renders no pill at all. Comment it against `_visibility_suffix`'s recorded reasoning for the same guard, and note explicitly that this does not follow `anomaly_count`, which `_bare` sets to zero (C1, [research.md](research.md) R2)
+- [X] T013 [US1] In `pages.chrome` (`src/robot_army/web/pages.py`), add `waiting_count`: `db.count_work_items_by_state(ctx.conn, include_simulated=include_simulated)` summed over `awaiting_review`, `interrupted` and `failed`, named as a module-level constant beside a comment giving the rule the three share and why one number beats three ([research.md](research.md) R1, [data-model.md](data-model.md); C7–C10). The comment must also record that the scoping is not optional, for the same reason recorded for the anomaly count: an unscoped count disagrees with the page it links to the moment the toggle is off
+- [X] T014 [US1] In `_chrome_bar` (`src/robot_army/web/html.py`), render the pill immediately before the anomaly pill: a link to `/interrupted` carrying `_visibility_suffix`, reading `{n} need{'s' if n == 1 else ''} me`, class `pill warn` above zero and `pill quiet` at zero (C2–C6)
+- [X] T015 [US1] Guard the pill on the key's *presence*, not its truthiness, so the chrome from `server._bare` — which counted nothing — renders no pill at all. Comment it against `_visibility_suffix`'s recorded reasoning for the same guard, and note explicitly that this does not follow `anomaly_count`, which `_bare` sets to zero (C1, [research.md](research.md) R2)
 
 ### Tests
 
-- [ ] T016 [US1] New file `tests/unit/test_web_chrome_waiting.py`: the count across all three states and none of the others (C7, C8); zero rendering quiet and present (C2); one and many rendering warn with correct inflection (C3, C4); the count in the JSON body of every view (C11); the pill absent on a 404 (C1); and the quiet bar at `live` reduced to exactly the daemon, capacity, order, waiting and anomaly pills (C21)
-- [ ] T017 [US1] In the same file, assert the agreement end to end (**C12**): with a simulated item parked, request a view at `include_simulated=0` and at `=1`, and assert in each case that the pill's number equals the number of items its destination lists under the same setting. This is the property the whole feature rests on and must be asserted as one fact, not as two halves (C9, C10, C12)
+- [X] T016 [US1] New file `tests/unit/test_web_chrome_waiting.py`: the count across all three states and none of the others (C7, C8); zero rendering quiet and present (C2); one and many rendering warn with correct inflection (C3, C4); the count in the JSON body of every view (C11); the pill absent on a 404 (C1); and the quiet bar at `live` reduced to exactly the daemon, capacity, order, waiting and anomaly pills (C21)
+- [X] T017 [US1] In the same file, assert the agreement end to end (**C12**): with a simulated item parked, request a view at `include_simulated=0` and at `=1`, and assert in each case that the pill's number equals the number of items its destination lists under the same setting. This is the property the whole feature rests on and must be asserted as one fact, not as two halves (C9, C10, C12)
 
 **Checkpoint**: the reported defect is fixed. This and Phase 3 together are the MVP.
 
@@ -119,13 +119,13 @@ the bar, follow it, find the item.
 
 ### Implementation
 
-- [ ] T018 [P] [US3] In `_chrome_bar` (`src/robot_army/web/html.py`), render the level pill only when the resolved level is not exactly `live`. The condition is inequality with `"live"`, not membership of the below-live set, because `unknown` must keep its pill (C13–C16)
-- [ ] T019 [US3] Replace the "deliberate and settled" comment with the reasoning that overrules it ([research.md](research.md) R10): the old argument was against *alarming* at `live` and remains right; it does not reach whether a calm pill belongs there, which the pause pill, the effect-mismatch banner, the cap-disagreement note and the simulated-consequences banner — all absent when silent — already answer the other way. An absent pill reads as `live` by the convention the bar teaches. And `unknown` keeps its pill, in both places it arises, because "we could not tell" is news, not the default. **Rewritten, not deleted**
+- [X] T018 [P] [US3] In `_chrome_bar` (`src/robot_army/web/html.py`), render the level pill only when the resolved level is not exactly `live`. The condition is inequality with `"live"`, not membership of the below-live set, because `unknown` must keep its pill (C13–C16)
+- [X] T019 [US3] Replace the "deliberate and settled" comment with the reasoning that overrules it ([research.md](research.md) R10): the old argument was against *alarming* at `live` and remains right; it does not reach whether a calm pill belongs there, which the pause pill, the effect-mismatch banner, the cap-disagreement note and the simulated-consequences banner — all absent when silent — already answer the other way. An absent pill reads as `live` by the convention the bar teaches. And `unknown` keeps its pill, in both places it arises, because "we could not tell" is news, not the default. **Rewritten, not deleted**
 
 ### Tests
 
-- [ ] T020 [US3] Rewrite `test_the_pill_is_calm_at_live` in `tests/unit/test_web_non_live_banner.py` to assert the pill's *absence* at `live`, keeping its existing assertion that the word "simulated" appears nowhere on a live bar, and renaming it for what it now asserts (C13)
-- [ ] T021 [P] [US3] Add coverage that the pill survives `unknown` in both places it arises: a running daemon whose effect level cannot be read, and the bare chrome of a 404 (C15, C16). `test_the_pill_alarms_below_live` is unchanged and stands (C14)
+- [X] T020 [US3] Rewrite `test_the_pill_is_calm_at_live` in `tests/unit/test_web_non_live_banner.py` to assert the pill's *absence* at `live`, keeping its existing assertion that the word "simulated" appears nowhere on a live bar, and renaming it for what it now asserts (C13)
+- [X] T021 [P] [US3] Add coverage that the pill survives `unknown` in both places it arises: a running daemon whose effect level cannot be read, and the bare chrome of a 404 (C15, C16). `test_the_pill_alarms_below_live` is unchanged and stands (C14)
 
 ---
 
@@ -143,23 +143,23 @@ the flipped setting).
 
 ### Implementation
 
-- [ ] T022 [US4] In `_chrome_bar` (`src/robot_army/web/html.py`), render the visibility pill only when `include_simulated` is true, keeping the existing absence when the key is missing entirely (C17–C19)
-- [ ] T023 [US4] Replace the 009 R9 comment with the reasoning that supersedes it ([research.md](research.md) R10): R9's complaint was that nothing on the page suggested the parameter existed; `withheld_note` did not exist then and now answers it exactly, beneath the table that withheld the rows, at the moment there is something to reveal. Record that R9 is satisfied elsewhere rather than abandoned, that T002 verified it holds on every withholding view, and the asymmetry with the level pill — below `live` the default is to *include*, so this pill is normally visible on a testing instance, which is the same polarity in both cases: the pill marks the surprising state. **Rewritten, not deleted**
+- [X] T022 [US4] In `_chrome_bar` (`src/robot_army/web/html.py`), render the visibility pill only when `include_simulated` is true, keeping the existing absence when the key is missing entirely (C17–C19)
+- [X] T023 [US4] Replace the 009 R9 comment with the reasoning that supersedes it ([research.md](research.md) R10): R9's complaint was that nothing on the page suggested the parameter existed; `withheld_note` did not exist then and now answers it exactly, beneath the table that withheld the rows, at the moment there is something to reveal. Record that R9 is satisfied elsewhere rather than abandoned, that T002 verified it holds on every withholding view, and the asymmetry with the level pill — below `live` the default is to *include*, so this pill is normally visible on a testing instance, which is the same polarity in both cases: the pill marks the surprising state. **Rewritten, not deleted**
 
 ### Tests
 
-- [ ] T024 [US4] Rewrite the first half of `test_the_toggle_pill_offers_the_other_direction` in `tests/unit/test_web_simulated_default.py`: at `plan` with rows included the pill is present and links to `include_simulated=0` (C17), and rename the test for what it now asserts
-- [ ] T025 [US4] Rewrite its second half — rows explicitly hidden on a `plan` instance — into an assertion that the *route back* is carried by `withheld_note` beneath the withholding table, and that no visibility pill is rendered. This is precisely the case R9 was protecting, and the assertion is what proves R9 is still honoured by something (C18, C20)
-- [ ] T026 [US4] Confirm `test_every_generated_link_restates_the_preference` still finds a link offering the other direction in both directions at `plan`. With the pill gone at `include_simulated=0`, the reveal link in the withheld disclosure is the one that supplies it — so this existing test now depends on the disclosure rather than on the pill, and that dependency should be stated in its docstring
+- [X] T024 [US4] Rewrite the first half of `test_the_toggle_pill_offers_the_other_direction` in `tests/unit/test_web_simulated_default.py`: at `plan` with rows included the pill is present and links to `include_simulated=0` (C17), and rename the test for what it now asserts
+- [X] T025 [US4] Rewrite its second half — rows explicitly hidden on a `plan` instance — into an assertion that the *route back* is carried by `withheld_note` beneath the withholding table, and that no visibility pill is rendered. This is precisely the case R9 was protecting, and the assertion is what proves R9 is still honoured by something (C18, C20)
+- [X] T026 [US4] Confirm `test_every_generated_link_restates_the_preference` still finds a link offering the other direction in both directions at `plan`. With the pill gone at `include_simulated=0`, the reveal link in the withheld disclosure is the one that supplies it — so this existing test now depends on the disclosure rather than on the pill, and that dependency should be stated in its docstring
 
 ---
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T027 [P] Update `docs/guide/operating.md`'s web interface section: the new pill and what it counts; the nav entry renamed and the page now listing three states; the two pills that are now silent by default and what their silence means. Correct "Six views — active, queue, interrupted, one item, anomalies, and the log" to match the renamed page
-- [ ] T028 Run `uv run pytest`. The full suite must pass — the constitution's completion criterion (SC-006)
-- [ ] T029 Walk [quickstart.md](quickstart.md) by hand against a scratch state directory: the quiet bar at `live`, the count changing with the visibility setting, and the page agreeing with it under both. The end-to-end check the unit tests approximate
-- [ ] T030 Re-read the three rewritten comments as a stranger would. Each must answer "why is this the way it is" and "what was the earlier position", because each reverses a decision the code previously argued for and the next reader's first instinct will be to change it back
+- [X] T027 [P] Update `docs/guide/operating.md`'s web interface section: the new pill and what it counts; the nav entry renamed and the page now listing three states; the two pills that are now silent by default and what their silence means. Correct "Six views — active, queue, interrupted, one item, anomalies, and the log" to match the renamed page
+- [X] T028 Run `uv run pytest`. The full suite must pass — the constitution's completion criterion (SC-006)
+- [X] T029 Walk [quickstart.md](quickstart.md) by hand against a scratch state directory: the quiet bar at `live`, the count changing with the visibility setting, and the page agreeing with it under both. The end-to-end check the unit tests approximate
+- [X] T030 Re-read the three rewritten comments as a stranger would. Each must answer "why is this the way it is" and "what was the earlier position", because each reverses a decision the code previously argued for and the next reader's first instinct will be to change it back
 
 ---
 

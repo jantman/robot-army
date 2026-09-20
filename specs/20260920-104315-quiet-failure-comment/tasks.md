@@ -85,16 +85,16 @@ reason on its card.
 
 ### Tests for User Story 2
 
-- [ ] T010 [P] [US2] Add `test_a_failed_card_says_why_it_failed` to `tests/unit/test_web_views.py` — seed a failed item with a `failure_reason`, assert the text appears in the `/interrupted` HTML (FR-006)
-- [ ] T011 [P] [US2] Add `test_a_failure_reason_is_rendered_as_text_not_markup` to `tests/unit/test_web_views.py` — seed a reason containing `<b>` and `&`, assert the escaped forms appear and the raw tag does not (FR-008, research R4)
-- [ ] T012 [P] [US2] Add `test_a_failed_card_with_no_recorded_reason_says_so` to `tests/unit/test_web_views.py` — assert the stated absence, and that it is distinguishable from a card that simply has no reason element (FR-007)
-- [ ] T013 [P] [US2] Add `test_interrupted_and_awaiting_cards_gain_no_empty_reason` to `tests/unit/test_web_views.py` — seed one item in each state and assert neither card carries a reason element (FR-013)
-- [ ] T014 [P] [US2] Add `test_the_needs_me_json_carries_the_reason_the_page_shows` to `tests/unit/test_web_views.py` — assert `failure_reason` on the JSON row equals the text rendered on the card (FR-012)
+- [X] T010 [P] [US2] Add `test_a_failed_card_says_why_it_failed` to `tests/unit/test_web_views.py` — seed a failed item with a `failure_reason`, assert the text appears in the `/interrupted` HTML (FR-006)
+- [X] T011 [P] [US2] Add `test_a_failure_reason_is_rendered_as_text_not_markup` to `tests/unit/test_web_views.py` — seed a reason containing `<b>` and `&`, assert the escaped forms appear and the raw tag does not (FR-008, research R4)
+- [X] T012 [P] [US2] Add `test_a_failed_card_with_no_recorded_reason_says_so` to `tests/unit/test_web_views.py` — assert the stated absence, and that it is distinguishable from a card that simply has no reason element (FR-007)
+- [X] T013 [P] [US2] Add `test_interrupted_and_awaiting_cards_gain_no_empty_reason` to `tests/unit/test_web_views.py` — seed one item in each state and assert neither card carries a reason element (FR-013)
+- [X] T014 [P] [US2] Add `test_the_needs_me_json_carries_the_reason_the_page_shows` to `tests/unit/test_web_views.py` — assert `failure_reason` on the JSON row equals the text rendered on the card (FR-012)
 
 ### Implementation for User Story 2
 
-- [ ] T015 [US2] In `_interrupted_card` in `src/robot_army/web/pages.py`, render `failure_reason or blocked_reason` for items in `failed`, falling back to a stated absence; use the same expression `/queue`'s blocked table uses (`pages.py:937`), and say in a comment why it is the same expression rather than a second rule
-- [ ] T016 [US2] Add a `.card .reason` rule to `APP_CSS` in `src/robot_army/web/html.py` — the existing `.reason` rule is scoped to `.banner`, so an unstyled reason inside a card would render at body weight with no separation from the signals above it
+- [X] T015 [US2] In `_interrupted_card` in `src/robot_army/web/pages.py`, render `failure_reason or blocked_reason` for items in `failed`, falling back to a stated absence; use the same expression `/queue`'s blocked table uses (`pages.py:937`), and say in a comment why it is the same expression rather than a second rule
+- [X] T016 [US2] Add a `.card .reason` rule to `APP_CSS` in `src/robot_army/web/html.py` — the existing `.reason` rule is scoped to `.banner`, so an unstyled reason inside a card would render at body weight with no separation from the signals above it
 
 **Checkpoint**: US1 and US2 together are the whole of the reported defect. The banner is
 still wrong for a gate-blocked item, which US3 fixes.

@@ -1322,6 +1322,23 @@ def _interrupted_card(
                 class_="banner error",
             )
         )
+    if row["state"] == str(WorkItemState.FAILED):
+        # ``failure_reason or blocked_reason`` is the expression ``/queue``'s blocked table
+        # already renders (:func:`_queue`), and it is reused rather than re-derived on
+        # purpose: two surfaces disagreeing about which column is *the* reason would be the
+        # next defect in this family, not a refinement of this one.
+        #
+        # This page is where the reason has to be legible, because the comment on the issue
+        # no longer carries it and the chrome pill counting failed items points here. The
+        # stated absence is not decoration either — a rebuilt database has failed rows with
+        # both columns empty, and a blank where a reason belongs reads as "no problem".
+        warnings.append(
+            div(
+                row.get("failure_reason") or row.get("blocked_reason") or
+                "no reason was recorded",
+                class_="reason",
+            )
+        )
     return div(
         h(3, join([item_link(row, include_simulated=include_simulated), " — ", row["title"]])),
         p(

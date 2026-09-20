@@ -9,6 +9,7 @@ that only checks the happy path would pass against a completely broken launcher.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -1222,6 +1223,76 @@ def test_a_blocked_dispatch_says_which_machine_refused(conn, audit, config, tmp_
     item = db.get_work_item(conn, item_id)
     assert item is not None and item.state is WorkItemState.FAILED
     assert "trust check failed" in (item.blocked_reason or "")
+
+
+def test_the_settings_drift_scenario_end_to_end(conn, audit, config, tmp_path, layout, web):
+    """SC-005 --- item 126, reproduced, with both halves asserted at once.
+
+    The scenario that produced this feature: a repository onboarded, a
+    ``.claude/settings.json`` committed to its base ref afterwards, and a dispatch that the
+    fingerprint gate refuses before anything is created. What went out was a public comment
+    carrying the diff and the local re-approval command; what the author was shown was a
+    claim that an isolated checkout had gone missing and advice to abandon.
+
+    Both halves are asserted together deliberately. Either one alone can be made to pass by
+    a change that breaks the other --- suppressing the reason everywhere would satisfy the
+    comment assertions, and restating it on the issue would satisfy the card's.
+    """
+    import subprocess
+
+    from tests.conftest import onboard_repo
+
+    clone = config.repos["demo"].path
+    # Onboarded while the repository had no committed settings: the empty mapping is what
+    # ``compute_fingerprint`` returns for that clone, and is what onboarding records.
+    onboard_repo(conn, "demo", clone, settings_fingerprint={})
+
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+    settings = clone / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"permissions": {"allow": ["Bash(ls:*)"]}}\n', encoding="utf-8")
+    for argv in (["add", ".claude/settings.json"], ["commit", "-qm", "add settings"]):
+        subprocess.run(["git", *argv], cwd=clone, env=env, check=True, capture_output=True)
+
+    writer = RecordingWriter()
+    item_id = ready_item(conn, config)
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=trust_file(tmp_path, clone),
+    )
+
+    item = db.get_work_item(conn, item_id)
+    assert item is not None and item.state is WorkItemState.FAILED
+    assert ".claude/settings.json" in (item.failure_reason or ""), "the gate we meant to hit"
+    assert item.worktree_path is None, "the gate runs before anything is created"
+
+    # Half one: what GitHub was told.
+    body = writer.comments[-1][2]
+    assert body == (
+        "🤖 robot-army could not start a session for this issue.\n\n"
+        f"- Host: `{dispatch.host_name()}`\n"
+        f"- Work item: `{item_id}`\n"
+    )
+
+    # Half two: what the author is shown. The reason is here, and the sentence that sent
+    # them to the wrong remedy is not.
+    page = web.get("/interrupted").text
+    assert ".claude/settings.json" in page
+    assert "--reapprove" in page, "the remedy the reason names"
+    assert "isolated checkout is missing" not in page
 
 
 def test_every_failure_path_posts_the_same_body(conn, audit, config, tmp_path, layout):

@@ -127,11 +127,11 @@ comments quietly.
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T022 [P] Update `docs/guide/5-outcome.md` — line 41 ("A failed attempt gets its own comment naming the host and the reason") is now false. State what the comment carries, why it carries so little, and the three places the reason went instead
-- [ ] T023 [P] Update `docs/guide/operating.md` — the needs-me section now describes a failed card that explains itself, and a missing-checkout warning that means something narrower
-- [ ] T024 Add the end-to-end test for SC-005 in `tests/integration/test_dispatch.py` — onboard a repository, add committed tool-permission settings at its base ref afterwards, dispatch, and assert both halves at once: a comment naming only a host and an item number, and a needs-me card naming the fingerprint reason with no missing-checkout banner
-- [ ] T025 Run the full suite: `uv run pytest`
-- [ ] T026 Walk [quickstart.md](./quickstart.md) — including the `--effect-level local` recipe that prints the body that would have been posted
+- [X] T022 [P] Update `docs/guide/5-outcome.md` — line 41 ("A failed attempt gets its own comment naming the host and the reason") is now false. State what the comment carries, why it carries so little, and the three places the reason went instead
+- [X] T023 [P] Update `docs/guide/operating.md` — the needs-me section now describes a failed card that explains itself, and a missing-checkout warning that means something narrower
+- [X] T024 Add the end-to-end test for SC-005 in `tests/integration/test_dispatch.py` — onboard a repository, add committed tool-permission settings at its base ref afterwards, dispatch, and assert both halves at once: a comment naming only a host and an item number, and a needs-me card naming the fingerprint reason with no missing-checkout banner
+- [X] T025 Run the full suite: `uv run pytest`
+- [X] T026 Walk [quickstart.md](./quickstart.md) — including the `--effect-level local` recipe that prints the body that would have been posted
 
 ---
 

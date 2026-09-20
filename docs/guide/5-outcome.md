@@ -38,9 +38,35 @@ session's context — which is the difference between reading the earlier transc
 context and reading it for facts that no longer apply. If no earlier session is on record
 (a rebuilt database), it says that rather than naming one.
 
-A failed attempt gets its own comment naming the host and the reason. Trust is granted per
-machine, so "it works on the other one" is a real case and the host line is what makes it
-visible.
+A failed attempt gets its own comment, and it is two lines:
+
+```markdown
+🤖 robot-army could not start a session for this issue.
+
+- Host: `phoenix`
+- Work item: `126`
+```
+
+**The reason is deliberately not on it**, and the comment reads the same whatever went
+wrong. It used to carry the reason in a fenced block, on the argument that machine text of
+unbounded shape needs a fence — which answered the wrong question. A reason interpolates git
+exception text, paths under my home directory, a repository's settings filenames and the
+exact local command that clears the condition, and the issue it lands on is often public and
+usually not mine. Item 126 published a tool-permission fingerprint diff onto somebody else's
+repository that way, where I cannot take it back.
+
+The host stays, because trust is granted per machine and "it works on the other one" is a
+real case. The item number is what replaces the reason: it means nothing to a stranger, and
+it is the number `robot-army show` takes. The reason is recorded in full in three places,
+none of them public — the `state.work_item` audit record, the item's own columns, and the
+notification, if a channel is configured:
+
+```bash
+robot-army show 126                    # prints `failure    : …`
+```
+
+It is also on the item's page and on its card under **needs me**, which is the surface that
+now has to be legible because the issue no longer is.
 
 Three rules hold throughout:
 

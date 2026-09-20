@@ -475,6 +475,18 @@ view. An item leaving `active` used to vanish from the two pages worth watching 
 anywhere to notice; the count is the fix, and `robot-army status` prints the same numbers by
 state in the terminal.
 
+**A failed card says why it failed.** The reason recorded at the moment of failure is on the
+card, not a click away — the count in the bar points here, and a listing that cannot explain
+what it counted is half a fix. It is the stored sentence, not a re-check; the item's own page
+is where stored and current sit side by side. A row with no reason recorded says so rather
+than rendering a blank, because a blank where a reason belongs reads as "no problem".
+
+**"The isolated checkout is missing" means one was there.** The warning, and its advice to
+abandon, appear only for an item whose checkout was recorded and whose directory has since
+gone. An item refused by the launch gate never got that far — nothing was created, so nothing
+is missing, and the answer is the one its reason names rather than `abandon`. The same
+condition holds in the JSON, so `worktree_missing` and the card agree.
+
 **A refusal is shown, never hidden.** Resume, restart and reset obey the session cap, the pause
 and the holds exactly as the terminal does, and say so on the page rather than appearing to
 work and quietly doing nothing. There is no `--force` button: the answer to a refusal is the

@@ -393,7 +393,7 @@ rendered at all.
 |---|---|---|
 | the daemon | running with its pid and heartbeat age, or `DAEMON NOT RUNNING`, or the health verdict's own word — `HUNG`, `STARTING` | — |
 | `n/N sessions` | against the cap the **daemon** is enforcing, broken down into yours and everything else | the queue |
-| `order:` | which end of the queue dispatch takes from | the queue |
+| `order:` | which end of the queue dispatch takes from | — |
 | `N need me` | how much work is parked on you | **needs me** |
 | `N anomalies` | conditions the system detected and has not had acknowledged | anomalies |
 | `DISPATCH PAUSED` | only while paused, with since-when and by-whom | the queue |

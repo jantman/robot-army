@@ -196,6 +196,28 @@ def _query(include_simulated: bool, **extra: Any) -> str:
 # -- chrome (FR-016 through FR-019) -----------------------------------------
 
 
+#: The states that mean "parked, and the machine will not move this without a decision"
+#: (issue #182). One count rather than one per state, because the question the author is
+#: asking from whatever page they are on is singular — *is anything waiting on me?* — and
+#: three numbers are three answers to it.
+#:
+#: ``failed`` belongs here for the same reason as the other two even though it never reached
+#: a session: ``retry`` and ``reset`` are routes out that only a person takes. ``done`` and
+#: ``abandoned`` are excluded not because they are uninteresting but because nothing is
+#: waiting — there is no decision left. ``ready``, ``dispatching`` and ``active`` are
+#: excluded because they are the machine's to move, and ``/queue`` already says why it has
+#: not moved them.
+#:
+#: This tuple and :func:`interrupted_view`'s three sections name the same set. They have to:
+#: the pill states a number and links to that page, and a count whose page lists something
+#: else is one surface printing two numbers.
+WAITING_STATES: tuple[WorkItemState, ...] = (
+    WorkItemState.AWAITING_REVIEW,
+    WorkItemState.INTERRUPTED,
+    WorkItemState.FAILED,
+)
+
+
 def chrome(
     ctx: operations.Context,
     *,
@@ -244,6 +266,13 @@ def chrome(
     # #21). An unscoped count here disagreed with the page it pointed at the moment the
     # visibility toggle was off, which is one surface telling the reader two numbers.
     anomalies = db.list_anomalies(ctx.conn, include_simulated=include_simulated)
+    # Scoped for the same reason the anomaly count above it is, and it is the same defect:
+    # the pill links to ``/interrupted``, and an unscoped count would disagree with that page
+    # the moment the visibility toggle was off. The terminal has printed these counts since
+    # ``status`` existed (``db.count_work_items_by_state`` is the function it uses); this is
+    # the web catching up rather than a second way of counting the same rows (issue #182).
+    by_state = db.count_work_items_by_state(ctx.conn, include_simulated=include_simulated)
+    waiting = sum(by_state.get(str(state), 0) for state in WAITING_STATES)
 
     return {
         "effect_level": str(ctx.effect_level),
@@ -281,6 +310,16 @@ def chrome(
         "dispatch_paused_at": pause.paused_at,
         "dispatch_paused_by": pause.paused_by,
         "anomaly_count": len(anomalies),
+        # How much work is parked on the author, across the three states that mean it
+        # (issue #182). An item leaving ``active`` for ``awaiting_review`` used to vanish
+        # from ``/active``, and ``/queue`` never had it, so nothing on any page noticed —
+        # the web losing a fact ``robot-army status`` has always printed.
+        #
+        # Present here and **absent** from ``server._bare``'s chrome, which has no database
+        # to count. That absence is the renderer's signal to omit the pill entirely, exactly
+        # as ``include_simulated``'s absence suppresses the visibility toggle there: a
+        # number nobody computed must not be rendered as a number, and zero is an answer.
+        "waiting_count": waiting,
         # On every view rather than only on the queue: "why is nothing running?" is asked
         # from wherever the author happens to be looking, and the answer is one line.
         #

@@ -131,11 +131,19 @@ def test_the_page_is_correct_with_scripting_disabled(web, conn):
 
 
 def test_every_page_carries_the_chrome(web, conn):
-    """FR-016 through FR-018 on every view, not on a status page."""
+    """FR-016 through FR-018 on every view, not on a status page.
+
+    The probe used to be the effect-level pill, which was on every page at every level.
+    Since issue #182 it is absent at ``live``, so what is asserted here is what really is on
+    every view whatever the configuration: the bar itself, the daemon's state, and the two
+    counts that answer "is anything waiting on me" and "is anything wrong".
+    """
     seed_item(conn, state="ready")
     for path in ("/active", "/queue", "/interrupted", "/anomalies", "/log"):
         body = web.get(path).text
-        assert "effect level:" in body, path
+        assert '<div class="chrome">' in body, path
+        assert "DAEMON NOT RUNNING" in body, path
+        assert "need me" in body, path
         assert "anomal" in body, path
         assert "rendered " in body, path
 

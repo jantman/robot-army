@@ -138,6 +138,11 @@ def test_every_generated_link_restates_the_preference(web_at, conn, stated: str)
     assert len(carrying) + len(toggling) == len(internal), sorted(
         set(internal) - set(carrying) - set(toggling)
     )
+    # Which link supplies this depends on the direction, since issue #182. With rows included
+    # it is the chrome toggle; with rows hidden the toggle is gone and the "show them" inside
+    # the withheld disclosure is the one — which is why this test seeds a simulated row. The
+    # dependency is worth stating because deleting that disclosure would break this test from
+    # a long way away.
     assert toggling, "no link offers the other direction"
 
 
@@ -158,17 +163,42 @@ def test_the_redirect_after_an_action_carries_it_too(web_at, conn) -> None:
     assert "include_simulated=0" in response.headers["Location"]
 
 
-def test_the_toggle_pill_offers_the_other_direction(web_at, conn) -> None:
-    """R9: the issue's complaint was that nothing on the page suggested the override existed.
+def test_the_toggle_pill_offers_the_way_out_of_the_surprising_state(web_at, conn) -> None:
+    """R9, in the half of it that is still the pill's job (issue #182).
 
-    Present in *both* states, because below ``live`` — where rows now show by default —
-    nothing else on the page would point at the hidden view at all.
+    Rows included is the default below ``live`` and the state where every row on the page
+    describes something that did not happen, so the pill is normally visible on a testing
+    instance and offers the way out of it.
     """
     shown = web_at("plan").get("/queue").text
     assert '<a href="/queue?include_simulated=0" class="pill quiet">simulated rows included' in shown
 
+
+def test_no_pill_when_rows_are_hidden_and_the_route_back_is_the_disclosure(
+    web_at, conn
+) -> None:
+    """The other half, and the case R9 was actually protecting (issue #182).
+
+    Rows explicitly hidden on a ``plan`` instance is where "nothing on the page suggests the
+    parameter exists" would bite — so the assertion is not that the pill is gone but that
+    something else carries the route. ``withheld_note`` does, beneath the table that withheld
+    the rows, which is R9's discoverability offered exactly when there is something to
+    discover. **If this half ever fails, the pill has to come back**: without it the reader
+    is stranded on a page that looks empty for a reason it does not state.
+    """
+    seed_item(conn, issue_number=26, dry_run=True, state="ready")
     hidden = web_at("plan").get("/queue?include_simulated=0").text
-    assert '<a href="/queue?include_simulated=1" class="pill quiet">simulated rows hidden' in hidden
+
+    assert "simulated rows hidden" not in hidden
+    assert "1 simulated row is hidden" in hidden
+    assert '<a href="/queue?include_simulated=1">show them</a>' in hidden
+
+
+def test_nothing_withheld_and_rows_hidden_says_nothing_at_all(web_at, conn) -> None:
+    """The pill's whole remaining cost, removed. A ``plan`` instance with the rows hidden and
+    nothing to hide now states neither — which is the rule the rest of the bar follows."""
+    hidden = web_at("plan").get("/queue?include_simulated=0").text
+    assert "simulated rows" not in hidden
 
 
 # -- the payload agrees with the page ----------------------------------------

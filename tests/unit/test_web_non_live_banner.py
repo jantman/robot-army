@@ -1,11 +1,22 @@
 """Milestone 009: every page below ``live`` says so, and says what it means.
 
-The polarity is settled and is the reason these tests read the way they do: the alarm goes on
-**non-live**, and ``live`` gets nothing at all. ``live`` is the state the system is meant to
-run in and the one the operator expects, so decorating it would train them to ignore the one
-place the level is shown. Every level below it is a testing configuration, which is the
+The polarity is the reason these tests read the way they do: the alarm goes on **non-live**,
+and ``live`` gets nothing at all. ``live`` is the state the system is meant to run in and the
+one the operator expects. Every level below it is a testing configuration, which is the
 surprising state — and the one where every value on the page means something other than what
 it appears to mean.
+
+Issue #182 took "nothing at all" one step further. 009 rendered a calm pill at ``live``, on
+the argument that decorating the expected state would train the operator to ignore the one
+place the level is shown. That is an argument against *alarming*, and it survives; it did not
+reach whether a calm pill belongs on screen. The rest of the bar had already answered — pause
+pill, effect-mismatch banner, cap-disagreement note and consequences banner are each absent
+when silent — so the pill is now absent at ``live`` too, and its absence reads as ``live`` by
+the convention the bar teaches.
+
+``unknown`` keeps its pill, in both places it arises. That is the one thing these tests exist
+to hold: "we could not tell" is not the default state, it is news, and the condition that
+hides the pill is inequality with ``live`` rather than membership of :data:`BELOW_LIVE`.
 """
 
 from __future__ import annotations
@@ -117,11 +128,33 @@ def test_the_pill_alarms_below_live(web_at, conn, level: str) -> None:
     assert f'class="pill level simulated">effect level: {level} — simulated' in body
 
 
-def test_the_pill_is_calm_at_live(web_at, conn) -> None:
-    """FR-017. The word "simulated" must not appear on the pill, in any form."""
+def test_there_is_no_pill_at_live(web_at, conn) -> None:
+    """Issue #182, reversing 009 FR-017's calm pill. Nothing at all, not a quiet something.
+
+    The "simulated" half of the original assertion stands unchanged and is the half that
+    always mattered: the word must not appear on a live bar in any form.
+    """
     body = web_at("live").get("/active").text
-    assert 'class="pill level live">effect level: live<' in body
+    assert "effect level" not in body
     assert "pill level simulated" not in body
+
+
+def test_an_unreadable_level_keeps_its_pill(web_at, conn, layout) -> None:
+    """A daemon holds the lock and its level cannot be read, so the level resolves to
+    ``unknown``. That is not ``live`` and must not be rendered as if it were — the reader
+    would take the absence for a live instance, which is the one misreading that costs."""
+    from robot_army.daemon import SingleInstanceLock
+
+    with SingleInstanceLock(layout.lock_path):
+        beat(layout, effect_level=None)
+        body = web_at("live").get("/active").text
+    assert "effect level: unknown" in body
+
+
+def test_a_dead_end_page_keeps_its_pill(web_at, conn) -> None:
+    """``server._bare`` renders 404s with no database and sets the level to ``unknown`` for
+    the same honest reason. Same rule, same pill."""
+    assert "effect level: unknown" in web_at("live").get("/no-such-page").text
 
 
 # -- one rule, so the two cannot disagree ------------------------------------

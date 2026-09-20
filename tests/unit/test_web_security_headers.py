@@ -221,7 +221,7 @@ def test_nothing_is_sniffed_and_no_referrer_reaches_another_origin(web, conn):
         assert responses[name].headers["Referrer-Policy"] == "same-origin", name
 
 
-def test_the_referrer_policy_leaves_the_referring_view_working(web, conn):
+def test_the_referrer_policy_leaves_the_referring_view_working(web_at, conn):
     """Why the policy is ``same-origin`` and not the stricter ``no-referrer``.
 
     ``_referring_view`` reads the ``Referer`` of our own POSTs, and ``no-referrer`` would
@@ -235,21 +235,28 @@ def test_the_referrer_policy_leaves_the_referring_view_working(web, conn):
     Asserting the behaviour and not only the header value is deliberate. A test that read
     the constant alone would keep passing under ``no-referrer`` while the thing the
     constant is chosen to protect stopped working.
+
+    Driven at ``plan`` rather than at ``live`` since issue #182. The toggle is the only
+    thing that renders ``chrome["path"]``, and it is now absent when simulated rows are
+    being hidden — which is the default at ``live``. Below ``live`` they are included by
+    default, the toggle renders, and the behaviour under test is observable again. The
+    behaviour itself is unchanged; only the configuration that makes it visible is.
     """
     assert server.SECURITY_HEADERS["Referrer-Policy"] == "same-origin"
 
+    harness = web_at("plan")
     item_id = seed_item(conn, issue_number=7, state="interrupted")
     # ``attach`` on an item that is not active: refused, so the page carries chrome.
-    refused = web.post(
+    refused = harness.post(
         f"/item/{item_id}/attach", headers={"Referer": "http://localhost:8420/queue"}
     )
-    blind = web.post(f"/item/{item_id}/attach")
+    blind = harness.post(f"/item/{item_id}/attach")
     assert refused.status == 409 and blind.status == 409
 
-    assert '"/queue?include_simulated=1"' in refused.text, (
+    assert '"/queue?include_simulated=0"' in refused.text, (
         "the toggle should return to the view the refused control was pressed on"
     )
-    assert '"/active?include_simulated=1"' in blind.text, (
+    assert '"/active?include_simulated=0"' in blind.text, (
         "and fall back to /active when no referrer was sent — the no-referrer behaviour"
     )
 

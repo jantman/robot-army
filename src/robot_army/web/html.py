@@ -159,10 +159,16 @@ def mark_simulated(simulated: Any) -> Markup:
 
 # -- page chrome ------------------------------------------------------------
 
+#: The label is what the reader sees; the path is what the reader never types. ``needs me``
+#: covers the three states that page lists — interrupted, awaiting review and failed — where
+#: ``interrupted`` named one of them and so gave no reason to click when the other two were
+#: what was waiting (issue #182). The route stays ``/interrupted`` deliberately: renaming it
+#: would rewrite every generated disclosure link, the route table and the terminal mapping to
+#: buy a tidier URL on an interface where navigation is these six words.
 NAV: tuple[tuple[str, str], ...] = (
     ("/active", "active"),
     ("/queue", "queue"),
-    ("/interrupted", "interrupted"),
+    ("/interrupted", "needs me"),
     ("/cards", "cards"),
     ("/anomalies", "anomalies"),
     ("/log", "log"),
@@ -241,124 +247,15 @@ def _visibility_suffix(chrome: dict[str, Any]) -> str:
     return f"?include_simulated={'1' if stated else '0'}"
 
 
-def _chrome_bar(chrome: dict[str, Any]) -> Markup:
-    """The facts FR-016 through FR-018 require on **every** view, not on a status page."""
-    daemon = chrome.get("daemon") or {}
-    running = bool(daemon.get("running"))
-    suffix = _visibility_suffix(chrome)
-    age = daemon.get("heartbeat_age_seconds")
-    if running:
-        state = f"daemon running (pid {daemon.get('pid') or '?'})"
-        if not daemon.get("healthy"):
-            # The verdict's own word, not "STALE" for every one of them (issue #52). A
-            # daemon that holds the lock and has stopped beating is HUNG; one that has just
-            # taken the lock and not beaten yet is STARTING, which is an ordinary restart
-            # rather than a fault to go hunting.
-            #
-            # The word comes from the enum rather than being derived here, because the whole
-            # point of the issue is that two surfaces may not describe one machine
-            # differently — and a renderer that upper-cased the value itself would be a
-            # second definition of the label waiting to drift from `robot-army health`'s.
-            # A payload with no verdict at all falls back to ``stale``, which is the word
-            # this line printed for every unhealthy daemon before the issue.
-            state += f" — {HealthState(daemon.get('state') or 'stale').label}"
-    else:
-        state = "DAEMON NOT RUNNING"
-    if age is not None:
-        state += f", heartbeat {int(age)}s old"
-    activity = daemon.get("activity")
-    if running and activity:
-        state += f", {activity}"
+def _chrome_notices(chrome: dict[str, Any], *, running: bool, level: str) -> list[Any]:
+    """The banners beneath the pills: conditions under which the page does not mean
+    what it appears to mean.
 
-    # The level pill carries the alarm below ``live`` and nothing at all at ``live`` (009
-    # FR-016, FR-017). The polarity is deliberate and settled: ``live`` is the state the
-    # operator expects and the one the system is meant to run in, so decorating it would
-    # train them to ignore the one place the level is shown. Every level below it is a
-    # testing configuration, and that is the surprising state.
-    #
-    # The word is in the text as well as in the colour, so a monochrome screenshot, a
-    # colour-blind reader, and `curl | grep` all still carry the signal.
-    level = str(chrome.get("effective_level") or chrome.get("effect_level") or "unknown")
-    simulated = level != "live"
-    pills: list[Any] = [
-        span(
-            f"effect level: {level}" + (" — simulated" if simulated else ""),
-            class_="pill level " + ("simulated" if simulated else "live"),
-        ),
-        span(state, class_="pill " + ("ok" if running and daemon.get("healthy") else "warn")),
-    ]
-    # The capacity pill (milestone 004). On every view rather than on the queue alone,
-    # because "why is nothing running?" is asked from wherever the author is looking, and
-    # the answer — including whether the sessions filling the machine are the author's own —
-    # is one line. It links to the queue, where the per-item reasons are.
-    capacity = chrome.get("capacity") or {}
-    if capacity:
-        if not capacity.get("observable", True):
-            pills.append(
-                a(
-                    "/queue" + suffix,
-                    f"capacity UNOBSERVABLE — {capacity.get('reason')}",
-                    class_="pill warn",
-                )
-            )
-        else:
-            total = int(capacity.get("total") or 0)
-            cap = int(capacity.get("global_cap") or 0)
-            # The snapshot's own phrase, which names the registry-blind terms when present
-            # so the pill sums to its total (issue #61). The fallback is the older shape, for
-            # a chrome dict built without it.
-            breakdown = capacity.get("breakdown") or (
-                f"{capacity.get('ours', 0)} ours, {capacity.get('others', 0)} other"
-            )
-            label = f"{total}/{cap} sessions ({breakdown})"
-            if capacity.get("degraded"):
-                label += " — degraded"
-            pills.append(
-                a(
-                    "/queue" + suffix,
-                    label,
-                    class_="pill " + ("warn" if cap and total >= cap else "quiet"),
-                )
-            )
-        pills.append(span(f"order: {capacity.get('order')}", class_="pill quiet"))
-
-    anomalies = int(chrome.get("anomaly_count") or 0)
-    pills.append(
-        a(
-            "/anomalies" + suffix,
-            f"{anomalies} anomal{'y' if anomalies == 1 else 'ies'}",
-            class_="pill " + ("warn" if anomalies else "quiet"),
-        )
-    )
-    if chrome.get("dispatch_paused"):
-        # Converted *here* rather than in the chrome dict, which ``server._render`` merges
-        # into the JSON body: that value is simultaneously a machine-readable field and
-        # something a person reads, and only the second may be local (010 R3).
-        since = timefmt.local(chrome.get("dispatch_paused_at")) or "unknown time"
-        by = chrome.get("dispatch_paused_by") or "?"
-        # A link, not a label: the pause is visible from every view, so the control that
-        # lifts it has to be reachable from every view too.
-        pills.append(
-            a("/queue" + suffix, f"DISPATCH PAUSED since {since} (by {by})", class_="pill warn")
-        )
-    # A link in both states, and present in both (009 R9). The issue this milestone answers
-    # did not report that the override was missing — it reported that "nothing on the page
-    # suggests the parameter exists". A label that appears only once the parameter has been
-    # found is no answer to that, and below `live`, where rows are now shown by default,
-    # nothing would otherwise point at the hidden view at all.
-    included = chrome.get("include_simulated")
-    if included is not None:
-        # Absent on the dead-end pages, which have no context to resolve a default from —
-        # and a toggle that reports a state it had to guess is worse than no toggle.
-        path = chrome.get("path") or "/active"
-        pills.append(
-            a(
-                f"{path}?include_simulated={'0' if included else '1'}",
-                "simulated rows included" if included else "simulated rows hidden",
-                class_="pill quiet",
-            )
-        )
-
+    Split out of :func:`_chrome_bar` rather than inlined with it because the two answer
+    different questions — the pills say what is true, these say what to distrust — and
+    because one function carrying both had grown past what a reader can hold at once.
+    Ordered by severity, and each one absent when it has nothing to say.
+    """
     notices: list[Any] = []
     if not running:
         notices.append(
@@ -426,7 +323,199 @@ def _chrome_bar(chrome: dict[str, Any]) -> Markup:
                 class_="banner error",
             )
         )
-    return Markup(str(div(*pills, class_="chrome")) + "".join(str(n) for n in notices))
+    return notices
+
+
+def _chrome_bar(chrome: dict[str, Any]) -> Markup:
+    """The facts FR-016 through FR-018 require on **every** view, not on a status page.
+
+    One rule decides whether a pill is here at all, and issue #182 is what settled it:
+    **the bar reads as "everything here is something to know"**. A pill that would only ever
+    state the value you get unless you went out of your way to change it is not rendered —
+    its absence says the same thing, more quietly, and the bar already teaches that
+    convention through the pause pill and the three banners below.
+
+    A *count* is the exception, and not an inconsistent one. ``0 need me`` and
+    ``0 anomalies`` stay on screen because they answer a question the reader is asking; an
+    ``effect level: live`` pill answers one nobody asked.
+    """
+    daemon = chrome.get("daemon") or {}
+    running = bool(daemon.get("running"))
+    suffix = _visibility_suffix(chrome)
+    age = daemon.get("heartbeat_age_seconds")
+    if running:
+        state = f"daemon running (pid {daemon.get('pid') or '?'})"
+        if not daemon.get("healthy"):
+            # The verdict's own word, not "STALE" for every one of them (issue #52). A
+            # daemon that holds the lock and has stopped beating is HUNG; one that has just
+            # taken the lock and not beaten yet is STARTING, which is an ordinary restart
+            # rather than a fault to go hunting.
+            #
+            # The word comes from the enum rather than being derived here, because the whole
+            # point of the issue is that two surfaces may not describe one machine
+            # differently — and a renderer that upper-cased the value itself would be a
+            # second definition of the label waiting to drift from `robot-army health`'s.
+            # A payload with no verdict at all falls back to ``stale``, which is the word
+            # this line printed for every unhealthy daemon before the issue.
+            state += f" — {HealthState(daemon.get('state') or 'stale').label}"
+    else:
+        state = "DAEMON NOT RUNNING"
+    if age is not None:
+        state += f", heartbeat {int(age)}s old"
+    activity = daemon.get("activity")
+    if running and activity:
+        state += f", {activity}"
+
+    # The level pill carries the alarm below ``live`` and **is not rendered at all** at
+    # ``live`` (009 FR-016, FR-017, revised by issue #182).
+    #
+    # 009 argued the pill should be present and calm at ``live``: decorating the expected
+    # state would train the operator to ignore the one place the level is shown. That
+    # argument is about not *alarming* at ``live`` and it still holds — it is why the pill
+    # below is plain when it appears. What it does not reach is whether a calm pill belongs
+    # on screen at all, and the rest of this bar already answers that the other way. The
+    # pause pill, the effect-mismatch banner, the cap-disagreement note and the
+    # simulated-consequences banner are every one of them absent when there is nothing to
+    # say, so an absent level pill reads as ``live`` by the convention the bar teaches.
+    # A pill that only ever states the value you get unless you went out of your way is not
+    # something to know; it is something to learn to skip.
+    #
+    # The condition is inequality with ``live`` rather than membership of the below-live
+    # set, and that is the whole care in this line. ``unknown`` — a running daemon whose
+    # level could not be read, and every page ``server._bare`` renders — keeps its pill.
+    # "We could not tell" is not the default state; it is news.
+    #
+    # The word is in the text as well as in the colour, so a monochrome screenshot, a
+    # colour-blind reader, and `curl | grep` all still carry the signal.
+    level = str(chrome.get("effective_level") or chrome.get("effect_level") or "unknown")
+    simulated = level != "live"
+    pills: list[Any] = []
+    if simulated:
+        pills.append(
+            span(f"effect level: {level} — simulated", class_="pill level simulated")
+        )
+    pills.append(
+        span(state, class_="pill " + ("ok" if running and daemon.get("healthy") else "warn"))
+    )
+    # The capacity pill (milestone 004). On every view rather than on the queue alone,
+    # because "why is nothing running?" is asked from wherever the author is looking, and
+    # the answer — including whether the sessions filling the machine are the author's own —
+    # is one line. It links to the queue, where the per-item reasons are.
+    capacity = chrome.get("capacity") or {}
+    if capacity:
+        if not capacity.get("observable", True):
+            pills.append(
+                a(
+                    "/queue" + suffix,
+                    f"capacity UNOBSERVABLE — {capacity.get('reason')}",
+                    class_="pill warn",
+                )
+            )
+        else:
+            total = int(capacity.get("total") or 0)
+            cap = int(capacity.get("global_cap") or 0)
+            # The snapshot's own phrase, which names the registry-blind terms when present
+            # so the pill sums to its total (issue #61). The fallback is the older shape, for
+            # a chrome dict built without it.
+            breakdown = capacity.get("breakdown") or (
+                f"{capacity.get('ours', 0)} ours, {capacity.get('others', 0)} other"
+            )
+            label = f"{total}/{cap} sessions ({breakdown})"
+            if capacity.get("degraded"):
+                label += " — degraded"
+            pills.append(
+                a(
+                    "/queue" + suffix,
+                    label,
+                    class_="pill " + ("warn" if cap and total >= cap else "quiet"),
+                )
+            )
+        pills.append(span(f"order: {capacity.get('order')}", class_="pill quiet"))
+
+    # How much work is parked on the author (issue #182). The bar named the effect level, the
+    # daemon, the capacity, the order and the anomalies, and said nothing whatever about work
+    # items — so exiting a session sent the item to ``awaiting_review``, off ``/active``, and
+    # no number anywhere noticed. The count is the anomaly pill's shape on purpose: a count on
+    # every view, linking to the page that explains it, is already the pattern for this.
+    #
+    # Guarded on the key's **presence**, not its value. ``server._bare`` — 404, 405, schema
+    # refusals — renders with no database and so counts nothing; omitting the key there and
+    # skipping the pill here keeps "we did not count" distinct from "we counted nothing",
+    # which is the same distinction ``_visibility_suffix`` above preserves for the toggle.
+    # (It is deliberately *not* what ``anomaly_count`` does: ``_bare`` sets that to zero, and
+    # an error page therefore prints "0 anomalies" having asked nobody.)
+    if "waiting_count" in chrome:
+        waiting = int(chrome.get("waiting_count") or 0)
+        pills.append(
+            a(
+                "/interrupted" + suffix,
+                f"{waiting} need{'s' if waiting == 1 else ''} me",
+                class_="pill " + ("warn" if waiting else "quiet"),
+            )
+        )
+
+    anomalies = int(chrome.get("anomaly_count") or 0)
+    pills.append(
+        a(
+            "/anomalies" + suffix,
+            f"{anomalies} anomal{'y' if anomalies == 1 else 'ies'}",
+            class_="pill " + ("warn" if anomalies else "quiet"),
+        )
+    )
+    if chrome.get("dispatch_paused"):
+        # Converted *here* rather than in the chrome dict, which ``server._render`` merges
+        # into the JSON body: that value is simultaneously a machine-readable field and
+        # something a person reads, and only the second may be local (010 R3).
+        since = timefmt.local(chrome.get("dispatch_paused_at")) or "unknown time"
+        by = chrome.get("dispatch_paused_by") or "?"
+        # A link, not a label: the pause is visible from every view, so the control that
+        # lifts it has to be reachable from every view too.
+        pills.append(
+            a("/queue" + suffix, f"DISPATCH PAUSED since {since} (by {by})", class_="pill warn")
+        )
+    # Rendered when simulated rows are being **included**, and not when they are being
+    # hidden (issue #182, revising 009 R9).
+    #
+    # R9's complaint was not that the override was missing but that "nothing on the page
+    # suggests the parameter exists", and a label found only after the parameter has been
+    # found is no answer to that. Sound then; `withheld_note` did not exist yet. It does
+    # now, and it renders "N simulated rows hidden — show them", with the reveal link,
+    # beneath any table that actually withheld rows, and nothing at all when the count is
+    # zero. That is R9's discoverability offered exactly when there is something to
+    # discover — so R9 is satisfied elsewhere rather than abandoned, and this pill
+    # duplicated it whenever it mattered and was noise the rest of the time.
+    #
+    # Deleting it was conditional on a check, because if some view could withhold rows
+    # without rendering a `withheld_note` then on that page this pill was the only route
+    # back. Every view that filters by `include_simulated` — /active, /queue, /interrupted,
+    # /cards, /anomalies and /log — discloses on the view itself; /item and the confirm
+    # pages look up by identity and withhold nothing. Verified, hence the deletion.
+    #
+    # The polarity looks inverted next to the level pill above and is not. Below `live` the
+    # default is to *include* simulated rows, so this pill is normally visible on a testing
+    # instance — which is the same rule in both cases: the pill marks the surprising state,
+    # and below `live` the page is full of rows describing things that did not happen.
+    included = chrome.get("include_simulated")
+    if included:
+        # The key is absent entirely on the dead-end pages, which have no context to resolve
+        # a default from — and a toggle that reports a state it had to guess is worse than no
+        # toggle. Absent and false both render nothing, for different reasons.
+        path = chrome.get("path") or "/active"
+        pills.append(
+            a(
+                f"{path}?include_simulated=0",
+                "simulated rows included",
+                class_="pill quiet",
+            )
+        )
+
+    return Markup(
+        str(div(*pills, class_="chrome"))
+        + "".join(
+            str(n) for n in _chrome_notices(chrome, running=running, level=level)
+        )
+    )
+
 
 
 def page(
@@ -594,7 +683,9 @@ h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
 .pill.level.simulated {
   border-color: var(--error); color: var(--error); font-weight: 700;
 }
-.pill.level.live { color: var(--muted); }
+/* There is no `.pill.level.live` rule because there is no such pill: since issue #182 the
+   level pill is rendered only when the level is not `live`, so the calm variant this rule
+   used to style has no elements left to style. */
 .pill.ok { border-color: var(--ok); color: var(--ok); }
 .pill.quiet { color: var(--muted); }
 .banner {

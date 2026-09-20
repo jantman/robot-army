@@ -196,6 +196,28 @@ def _query(include_simulated: bool, **extra: Any) -> str:
 # -- chrome (FR-016 through FR-019) -----------------------------------------
 
 
+#: The states that mean "parked, and the machine will not move this without a decision"
+#: (issue #182). One count rather than one per state, because the question the author is
+#: asking from whatever page they are on is singular — *is anything waiting on me?* — and
+#: three numbers are three answers to it.
+#:
+#: ``failed`` belongs here for the same reason as the other two even though it never reached
+#: a session: ``retry`` and ``reset`` are routes out that only a person takes. ``done`` and
+#: ``abandoned`` are excluded not because they are uninteresting but because nothing is
+#: waiting — there is no decision left. ``ready``, ``dispatching`` and ``active`` are
+#: excluded because they are the machine's to move, and ``/queue`` already says why it has
+#: not moved them.
+#:
+#: This tuple and :func:`interrupted_view`'s three sections name the same set. They have to:
+#: the pill states a number and links to that page, and a count whose page lists something
+#: else is one surface printing two numbers.
+WAITING_STATES: tuple[WorkItemState, ...] = (
+    WorkItemState.AWAITING_REVIEW,
+    WorkItemState.INTERRUPTED,
+    WorkItemState.FAILED,
+)
+
+
 def chrome(
     ctx: operations.Context,
     *,
@@ -244,6 +266,13 @@ def chrome(
     # #21). An unscoped count here disagreed with the page it pointed at the moment the
     # visibility toggle was off, which is one surface telling the reader two numbers.
     anomalies = db.list_anomalies(ctx.conn, include_simulated=include_simulated)
+    # Scoped for the same reason the anomaly count above it is, and it is the same defect:
+    # the pill links to ``/interrupted``, and an unscoped count would disagree with that page
+    # the moment the visibility toggle was off. The terminal has printed these counts since
+    # ``status`` existed (``db.count_work_items_by_state`` is the function it uses); this is
+    # the web catching up rather than a second way of counting the same rows (issue #182).
+    by_state = db.count_work_items_by_state(ctx.conn, include_simulated=include_simulated)
+    waiting = sum(by_state.get(str(state), 0) for state in WAITING_STATES)
 
     return {
         "effect_level": str(ctx.effect_level),
@@ -281,6 +310,16 @@ def chrome(
         "dispatch_paused_at": pause.paused_at,
         "dispatch_paused_by": pause.paused_by,
         "anomaly_count": len(anomalies),
+        # How much work is parked on the author, across the three states that mean it
+        # (issue #182). An item leaving ``active`` for ``awaiting_review`` used to vanish
+        # from ``/active``, and ``/queue`` never had it, so nothing on any page noticed —
+        # the web losing a fact ``robot-army status`` has always printed.
+        #
+        # Present here and **absent** from ``server._bare``'s chrome, which has no database
+        # to count. That absence is the renderer's signal to omit the pill entirely, exactly
+        # as ``include_simulated``'s absence suppresses the visibility toggle there: a
+        # number nobody computed must not be rendered as a number, and zero is an answer.
+        "waiting_count": waiting,
         # On every view rather than only on the queue: "why is nothing running?" is asked
         # from wherever the author happens to be looking, and the answer is one line.
         #
@@ -1315,12 +1354,23 @@ def interrupted_view(
     include_simulated: bool = False,
     capacity: capacity_mod.CapacitySnapshot | None = None,
 ) -> View:
-    """Interrupted items with the four FR-014 signals, plus what is awaiting review.
+    """The three states parked on the author, with the four FR-014 signals on each.
 
     ``awaiting_review`` is listed in its own section rather than left out: resume, restart
     and abandon are all legal there, and with no listing containing those items the only
     way to reach one would be to type its id into the address bar. A control that exists
     but cannot be navigated to is a gap, not a scope boundary.
+
+    ``failed`` was in exactly that position and stayed there until issue #182 — listed on no
+    page at all, while ``retry`` and ``reset`` sat behind it as routes only the author can
+    take. The argument that brought awaiting-review here is the same argument, so it is here
+    now, and the page is named for what the three share rather than for the one it started
+    as: the work is parked, and the machine will not move it without a decision.
+
+    That naming is load-bearing rather than cosmetic. The chrome counts these three states in
+    one pill (:func:`chrome`), and a count is only honest if following it lands on a listing
+    of everything it counted — so this view and ``waiting_count`` name the same set, and
+    changing one without the other is the defect, not the fix.
     """
     interrupted_items, _ = _items(
         ctx, include_simulated=True, state=str(WorkItemState.INTERRUPTED), capacity=capacity
@@ -1334,9 +1384,14 @@ def interrupted_view(
     )
     awaiting, withheld_awaiting = _visible(awaiting_items, include_simulated=include_simulated)
     awaiting = [_signal_row(ctx, item) for item in awaiting]
-    # Per section, because this view renders two states and each has its own empty text to
+    failed_items, _ = _items(
+        ctx, include_simulated=True, state=str(WorkItemState.FAILED), capacity=capacity
+    )
+    failed, withheld_failed = _visible(failed_items, include_simulated=include_simulated)
+    failed = [_signal_row(ctx, item) for item in failed]
+    # Per section, because this view renders three states and each has its own empty text to
     # be honest in (009 FR-007, FR-008).
-    withheld = withheld_interrupted + withheld_awaiting
+    withheld = withheld_interrupted + withheld_awaiting + withheld_failed
 
     def cards(rows: list[dict[str, Any]]) -> Markup:
         return join(
@@ -1350,7 +1405,18 @@ def interrupted_view(
 
     body = join(
         [
-            h(1, "interrupted"),
+            h(1, "needs me"),
+            p(
+                "Work the machine has stopped moving. Interrupted, awaiting review and "
+                "failed all mean the same thing operationally — nothing happens to any of "
+                "these until you decide what happens to it.",
+                class_="meta",
+            ),
+            h(2, f"interrupted ({len(interrupted)})"),
+            p(
+                "Sessions that ended without finishing.",
+                class_="meta",
+            ),
             _nothing(
                 "Nothing is interrupted.",
                 withheld_interrupted,
@@ -1372,20 +1438,41 @@ def interrupted_view(
             )
             if not awaiting
             else cards(awaiting),
+            h(2, f"failed ({len(failed)})"),
+            p(
+                "Something refused the item, or its session exited badly. retry re-reads "
+                "the issue and queues it again; reset does the same after discarding the "
+                "checkout and branch.",
+                class_="meta",
+            ),
+            _nothing(
+                "Nothing has failed.",
+                withheld_failed,
+                path="/interrupted",
+                include_simulated=include_simulated,
+            )
+            if not failed
+            else cards(failed),
             withheld_note(
                 (withheld_interrupted if interrupted else 0)
-                + (withheld_awaiting if awaiting else 0),
+                + (withheld_awaiting if awaiting else 0)
+                + (withheld_failed if failed else 0),
                 path="/interrupted",
                 include_simulated=include_simulated,
             ),
         ]
     )
     return View(
-        title="interrupted",
+        title="needs me",
         data={
             "items": interrupted,
             "awaiting_review": awaiting,
-            "counts": {"interrupted": len(interrupted), "awaiting_review": len(awaiting)},
+            "failed": failed,
+            "counts": {
+                "interrupted": len(interrupted),
+                "awaiting_review": len(awaiting),
+                "failed": len(failed),
+            },
             "withheld_simulated": withheld,
         },
         body=body,

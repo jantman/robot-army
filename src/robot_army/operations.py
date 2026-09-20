@@ -3749,10 +3749,20 @@ def abandon(
             entity_id=item_id,
             detail={"stage": "returning the card to its origin list"},
         )
+    # Two sentences, because an item that never got a checkout has nothing left in place
+    # and no use for the removal command. The old line was written for the case that has
+    # one and used ``or '(none)'`` to survive the case that does not, which produced "its
+    # worktree at (none) was left in place" followed by a command that would remove
+    # nothing — a claim about a directory that was never created, and a remedy for it.
+    # An item refused before ``worktree.prepare`` ran, or abandoned straight out of the
+    # queue, is exactly that case.
     lines = [
-        f"item {item_id} abandoned. Its worktree at "
-        f"{item.worktree_path or '(none)'} was left in place — "
-        f"`robot-army worktree remove {item_id}` removes it"
+        (
+            f"item {item_id} abandoned. Its worktree at {item.worktree_path} was left in "
+            f"place — `robot-army worktree remove {item_id}` removes it"
+        )
+        if item.worktree_path
+        else f"item {item_id} abandoned. It had no worktree, so nothing was left behind"
     ]
     if settled == "withheld":
         # `abandon` inherits issue #44's guard from the rule it calls, and must not inherit

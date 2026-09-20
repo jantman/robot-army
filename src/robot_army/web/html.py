@@ -180,7 +180,17 @@ NAV: tuple[tuple[str, str], ...] = (
 BANNERS: dict[str, tuple[str, str]] = {
     "resumed": ("ok", "Resume requested. The item moves to dispatching, then active."),
     "restarted": ("ok", "Restart requested. The item moves to dispatching, then active."),
-    "abandoned": ("ok", "Item abandoned. Its worktree was left in place."),
+    # "any checkout", not "its worktree": this table is a closed set of fixed strings
+    # chosen before the item is known, so a banner that names a worktree asserts one
+    # existed. An item abandoned straight out of the queue never had one, and telling its
+    # author a checkout was left in place sends them looking for a directory that was
+    # never created. What the sentence is actually for is that abandon is deliberately
+    # not destructive, and that is true either way.
+    "abandoned": (
+        "ok",
+        "Item abandoned. Nothing was deleted — any checkout and branch it had are "
+        "still there.",
+    ),
     "cancelled": ("ok", "Session stopped. The item is interrupted and its worktree untouched."),
     "retried": ("ok", "Item moved back to the queue."),
     "reset": (

@@ -107,3 +107,47 @@ def test_the_gates_own_message_carries_no_repr():
     command wins a race — so it has to be readable too."""
     exc = IllegalTransition("work_item", 20, WorkItemState.ACTIVE, WorkItemState.ABANDONED)
     assert str(exc) == "illegal work_item transition for 20: 'active' -> 'abandoned'"
+
+
+# -- what a successful abandon says about the checkout ----------------------
+#
+# The same family as the needs-me banner fixed in #184: a sentence written for the item
+# that has a checkout, applied to one that never had.
+
+
+def test_abandoning_an_item_with_a_checkout_names_it_and_the_removal_command(
+    conn, config, audit, boundaries
+):
+    item = seed_item(conn, dry_run=True, state="interrupted")
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn, item, worktree_path="/w/demo/issue-42", branch="robot-army/42"
+        )
+
+    text = "\n".join(operations.abandon(context(conn, config, audit, boundaries), item).lines)
+
+    assert "/w/demo/issue-42 was left in place" in text
+    assert f"robot-army worktree remove {item}" in text
+
+
+def test_abandoning_an_item_that_never_had_a_checkout_does_not_invent_one(
+    conn, config, audit, boundaries
+):
+    """A ``ready`` item abandoned out of the queue never reached ``worktree.prepare``.
+
+    The line used to render ``its worktree at (none) was left in place`` and then offer the
+    command that removes it — a claim about a directory that was never created, and a
+    remedy for it. Both halves are asserted absent, because dropping only the path would
+    leave the command still pointing at nothing.
+    """
+    item = seed_item(conn, dry_run=True, state=str(WorkItemState.READY))
+
+    result = operations.abandon(context(conn, config, audit, boundaries), item)
+    text = "\n".join(result.lines)
+
+    assert result.code == operations.EXIT_OK
+    assert f"item {item} abandoned" in text
+    assert "no worktree" in text
+    assert "(none)" not in text
+    assert "left in place" not in text
+    assert "worktree remove" not in text

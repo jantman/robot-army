@@ -163,7 +163,7 @@ def test_following_the_redirect_lands_on_a_page_with_the_banner(live_server, con
     item_id = seed_item(conn, state="interrupted")
     fetch(f"{live_server}/item/{item_id}/abandon", data={})
     _status, _headers, body = fetch(f"{live_server}/item/{item_id}?msg=abandoned")
-    assert "worktree was left in place" in body
+    assert "Item abandoned. Nothing was deleted" in body
 
 
 def test_a_reload_after_a_post_re_issues_a_get_and_does_not_re_post(live_server, conn):
@@ -322,7 +322,7 @@ def test_a_browser_shaped_confirm_then_post_lands_on_a_page_that_says_it_worked(
     assert "/confirm/" not in location
     status, _headers, landed = fetch(f"{live_server}{location}")
     assert status == 200
-    assert "worktree was left in place" in landed
+    assert "Item abandoned. Nothing was deleted" in landed
 
 
 def test_a_cross_site_post_over_the_wire_is_refused(live_server, conn):

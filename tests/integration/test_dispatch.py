@@ -1331,10 +1331,21 @@ def test_every_failure_path_posts_the_same_body(conn, audit, config, tmp_path, l
         trust_file=trust_file(tmp_path, config.repos["demo"].path),
     )
 
+    # Compared with the item line dropped rather than with the id substituted. The bodies
+    # carry the real hostname, item ids are small sequential integers, and a substitution
+    # over the whole body rewrites any hostname that happens to contain one of those digits
+    # --- so on a runner named `fv-az1136-2` the two sides diverge for a reason that has
+    # nothing to do with what this test checks. Dropping the line removes the collision
+    # rather than narrowing it, and lets each body be asserted to name its own item.
+    def without_item_line(body: str) -> str:
+        return "\n".join(
+            line for line in body.splitlines() if not line.startswith("- Work item:")
+        )
+
     blocked_body, unconfirmed_body = writer.comments[0][2], writer.comments[-1][2]
-    assert blocked_body.replace(str(blocked_id), "N") == unconfirmed_body.replace(
-        str(unconfirmed_id), "N"
-    )
+    assert without_item_line(blocked_body) == without_item_line(unconfirmed_body)
+    assert f"- Work item: `{blocked_id}`" in blocked_body
+    assert f"- Work item: `{unconfirmed_id}`" in unconfirmed_body
 
 
 def test_the_reason_leaves_the_comment_but_not_the_record(

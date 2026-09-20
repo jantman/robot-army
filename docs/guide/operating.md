@@ -32,6 +32,37 @@ Legal from `interrupted`, `awaiting_review` and `failed`. Also on the item's web
 `retry` re-reads the issue but keeps the checkout; `abandon` gives up without deleting
 anything.
 
+### The PR is done but I want to merge it later
+
+Nothing to do and nothing to configure: robot-army never merges a pull request and never
+closes an issue. A session that pushed and opened a PR has done the whole job, and the item
+waits for as long as I leave it.
+
+```bash
+uv run robot-army show <id>        # the PR, the branch, anything uncommitted
+uv run robot-army attach <id>      # then exit the session — the item becomes awaiting_review
+uv run robot-army capacity         # the slot is back
+```
+
+Exiting the worker is what frees its session slot; the worktree, the branch, the pull request
+and the issue are all left exactly as they are. `cancel <id>` does the same thing to the
+process and leaves the item `interrupted` instead. Both are equally safe for the work, which
+by then is on the branch and on GitHub. Nothing reclaims the checkout meanwhile — cleanup
+only considers `done` items, and even then it keeps a branch whose commits are not contained
+in the base.
+
+Merge whenever. Merging closes the issue, the next reconciliation pass moves the item to
+`done`, retires any worker still alive under it, and hands the checkout to cleanup if that is
+turned on.
+
+**The one thing that makes parking a PR expensive is `wait_for_merge`.** Where it is in force,
+any item that has been dispatched and has not reached `done` or `abandoned` holds that whole
+repository, `awaiting_review` included — `status` says so by name. There are two ways out and
+no third: leave `wait_for_merge` off for that repository, or `abandon <id>`, which is terminal,
+touches nothing on GitHub and releases the repository, at the price of never resuming or
+resetting that item. The distinction it draws, and why it is not `max_sessions`, is in
+[what runs next](3-selection.md#working-a-repository-serially).
+
 ### This item is stuck
 
 ```bash
@@ -120,6 +151,23 @@ what survives a reboot are on the [state page](state.md).
 **`resume` needs a previous session to restore**; without one only `restart` is offered.
 **Terminal is terminal**: neither `done` nor `abandoned` can be returned to the queue, and
 `reset` refuses both.
+
+**A worker never ends itself.** It does the work, opens the pull request, and then sits at its
+prompt waiting for someone to type. Nothing in robot-army types into it, so the item stays
+`active` for as long as that process lives — a finished PR does not move it. What the item
+becomes is decided by the process's exit status, written to the spool by the wrapper and
+applied when the daemon drains it:
+
+| The worker exits with… | Session | Item |
+|---|---|---|
+| `0` — in practice, because I attached and exited it | `exited_clean` | `awaiting_review` |
+| `1`, `126` or `127` — it never really ran | `exited_error` | `failed` |
+| a signal, which is what `cancel` sends | `exited_error` | `interrupted` |
+
+So `awaiting_review` means one specific thing: **that session exited cleanly, which is to say
+I ended it.** Not that the work is finished, not that a PR exists, and not that any amount of
+time has passed. If notifications are configured, this is the transition that emits
+`completion`.
 
 ## Commands
 

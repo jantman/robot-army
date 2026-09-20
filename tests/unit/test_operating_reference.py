@@ -49,10 +49,18 @@ def page() -> str:
 
 
 def rows_under(heading: str) -> list[list[str]]:
-    """Every markdown table row beneath ``heading``, up to the next heading of that level.
+    """The rows of the **first** markdown table beneath ``heading``.
 
     Cells are returned already stripped of backticks, because the page writes commands and
     states as code spans and the comparison is with the bare name.
+
+    First, rather than every table down to the next heading of that level. A section may
+    carry more than one — ``## States`` holds the state table and, below it, the exit
+    statuses a worker can end with — and the completeness checks below compare a whole
+    column against an enum, so a second table's rows read as states that do not exist. The
+    table a heading is *about* is the one directly under it; anything further down is
+    elaboration, and a checker that cannot tell them apart is asserting about the wrong
+    thing.
     """
     text = page()
     start = text.index(heading)
@@ -62,9 +70,15 @@ def rows_under(heading: str) -> list[list[str]]:
     section = rest[: following.start()] if following else rest
 
     rows = []
+    started = False
     for line in section.splitlines():
         line = line.strip()
-        if not line.startswith("|") or set(line) <= set("|- "):
+        if not line.startswith("|"):
+            if started:
+                break  # the first table has ended; anything below it is another table
+            continue
+        started = True
+        if set(line) <= set("|- "):
             continue
         cells = [cell.strip().strip("*") for cell in line.strip("|").split("|")]
         if cells and cells[0].lower() in ("state", "command", "path", "kind", "it says", "on the page", "for", "mitigation"):

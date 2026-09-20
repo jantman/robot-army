@@ -111,14 +111,14 @@ and find no banner; render with an item whose recorded checkout is gone and find
 
 ### Tests for User Story 3
 
-- [ ] T017 [P] [US3] Add `test_an_item_that_never_had_a_checkout_is_not_told_it_lost_one` to `tests/unit/test_web_views.py` — seed a failed item with no `worktree_path`, assert no banner text in the HTML **and** `worktree_missing is False` in the JSON (FR-010, FR-012)
-- [ ] T018 [P] [US3] Extend `test_a_missing_checkout_is_surfaced_distinctly` in `tests/unit/test_web_views.py` to assert the banner still appears for a recorded-but-absent path in the `failed` state as well as `interrupted` (FR-011); the existing assertion sets a `worktree_path` and needs no change
-- [ ] T019 [P] [US3] Add `test_a_failed_card_can_carry_both_a_reason_and_a_missing_checkout` to `tests/unit/test_web_views.py` — assert the reason is not displaced by the banner when both apply (spec US3 scenario 4)
+- [X] T017 [P] [US3] Add `test_an_item_that_never_had_a_checkout_is_not_told_it_lost_one` to `tests/unit/test_web_views.py` — seed a failed item with no `worktree_path`, assert no banner text in the HTML **and** `worktree_missing is False` in the JSON (FR-010, FR-012)
+- [X] T018 [P] [US3] Extend `test_a_missing_checkout_is_surfaced_distinctly` in `tests/unit/test_web_views.py` to assert the banner still appears for a recorded-but-absent path in the `failed` state as well as `interrupted` (FR-011); the existing assertion sets a `worktree_path` and needs no change
+- [X] T019 [P] [US3] Add `test_a_failed_card_can_carry_both_a_reason_and_a_missing_checkout` to `tests/unit/test_web_views.py` — assert the reason is not displaced by the banner when both apply (spec US3 scenario 4)
 
 ### Implementation for User Story 3
 
-- [ ] T020 [US3] In `_signal_row` in `src/robot_army/web/pages.py`, redefine `worktree_missing` as "a checkout path is recorded **and** it is not present"; document in a comment that the field is what makes the claim, so conditioning only the banner would leave the same false claim in the JSON (research R6, data-model.md)
-- [ ] T021 [US3] Update the banner's surrounding comment in `_interrupted_card` in `src/robot_army/web/pages.py` to record the narrowing and the case that motivated it — a gate refusal fails the item before `worktree.prepare` runs, so a blocked item has no path
+- [X] T020 [US3] In `_signal_row` in `src/robot_army/web/pages.py`, redefine `worktree_missing` as "a checkout path is recorded **and** it is not present"; document in a comment that the field is what makes the claim, so conditioning only the banner would leave the same false claim in the JSON (research R6, data-model.md)
+- [X] T021 [US3] Update the banner's surrounding comment in `_interrupted_card` in `src/robot_army/web/pages.py` to record the narrowing and the case that motivated it — a gate refusal fails the item before `worktree.prepare` runs, so a blocked item has no path
 
 **Checkpoint**: all three stories complete. The item 126 scenario now renders correctly and
 comments quietly.

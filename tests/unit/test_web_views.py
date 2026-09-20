@@ -221,6 +221,37 @@ def test_a_missing_checkout_is_surfaced_distinctly(web, conn):
     assert "isolated checkout is missing" in web.get("/interrupted").text
 
 
+def test_a_failed_item_that_lost_its_checkout_is_told_so_too(web, conn):
+    """FR-011. The warning narrowed for items that never had a checkout; it did not narrow
+    to one state. A failed item whose tree was removed underneath it has lost the same
+    thing an interrupted one has, and the same sentence is true of it."""
+    item_id = seed_item(conn, issue_number=44, state="failed")
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn, item_id, worktree_path="/definitely/not/here", branch="robot-army/44"
+        )
+    row = _row_for(web.get_json("/interrupted").json()["failed"], item_id)
+    assert row["worktree_missing"] is True
+    assert "isolated checkout is missing" in web.get("/interrupted").text
+
+
+def test_an_item_that_never_had_a_checkout_is_not_told_it_lost_one(web, conn):
+    """FR-010, and the sentence that sent the author to the wrong remedy.
+
+    A gate refusal fails the item before ``worktree.prepare`` runs, so there is no path and
+    nothing was created. The old rule --- "no checkout is present" --- described that as a
+    loss, told the author resuming would fail until it was restored, and recommended
+    abandoning. Every clause was false, and the right answer was to re-approve and retry.
+
+    Asserted in both representations deliberately: conditioning only the banner would have
+    left ``worktree_missing: true`` in the JSON, which is the same false claim in the form
+    a reader is more likely to trust.
+    """
+    item_id = seed_item(conn, issue_number=45, state="failed")
+    row = _row_for(web.get_json("/interrupted").json()["failed"], item_id)
+    assert row["worktree_path"] in (None, "")
+    assert row["worktree_missing"] is False
+    assert "isolated checkout is missing" not in web.get("/interrupted").text
 
 
 def test_a_failed_card_says_why_it_failed(web, conn):
@@ -290,6 +321,22 @@ def test_the_needs_me_json_carries_the_reason_the_page_shows(web, conn):
     assert row["failure_reason"] == "launch failed: no window"
     assert row["failure_reason"] in web.get("/interrupted").text
 
+
+def test_a_failed_card_can_carry_both_a_reason_and_a_missing_checkout(web, conn):
+    """Neither element is the other's alternative: the banner says what to do about the
+    tree, the reason says what happened to the item."""
+    item_id = seed_item(conn, issue_number=53, state="failed")
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn,
+            item_id,
+            worktree_path="/definitely/not/here",
+            branch="robot-army/53",
+            failure_reason="preparation step 2 (uv sync) failed",
+        )
+    body = web.get("/interrupted").text
+    assert "isolated checkout is missing" in body
+    assert "preparation step 2 (uv sync) failed" in body
 
 
 def test_anomalies_view_carries_enough_detail_to_act(web, conn):

@@ -1228,7 +1228,14 @@ def _signal_row(ctx: operations.Context, item: dict[str, Any]) -> dict[str, Any]
         "pull_requests_known": signals.get("pull_requests_known"),
         "signals_age_seconds": signals.get("signals_age_seconds"),
         "local_signals_age_seconds": signals.get("local_signals_age_seconds"),
-        "worktree_missing": not signals.get("worktree_present", False),
+        # "a checkout was recorded and it is not there", not "no checkout is present".
+        # The two differ for every item refused before ``worktree.prepare`` ran, and the
+        # old reading described those as having lost something they never had — on the
+        # card *and* in this payload. Conditioning only the banner would have fixed the
+        # sentence and left the same false claim in the JSON, which is the form a reader is
+        # likelier to trust.
+        "worktree_missing": bool(item.get("worktree_path"))
+        and not signals.get("worktree_present", False),
         "worktree_error": signals.get("worktree_error"),
         "github_error": signals.get("github_error"),
     }
@@ -1315,6 +1322,10 @@ def _interrupted_card(
 ) -> Markup:
     warnings: list[Any] = []
     if row["worktree_missing"]:
+        # Only reached when a checkout path was recorded and the directory is gone; see
+        # ``_signal_row`` for why the field carries that condition rather than this line.
+        # An item refused by ``check_gates`` never gets here, because the gate runs before
+        # ``worktree.prepare`` and there is nothing to have lost.
         warnings.append(
             div(
                 "The isolated checkout is missing. Resuming will fail until it is restored; "

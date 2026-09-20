@@ -1315,12 +1315,23 @@ def interrupted_view(
     include_simulated: bool = False,
     capacity: capacity_mod.CapacitySnapshot | None = None,
 ) -> View:
-    """Interrupted items with the four FR-014 signals, plus what is awaiting review.
+    """The three states parked on the author, with the four FR-014 signals on each.
 
     ``awaiting_review`` is listed in its own section rather than left out: resume, restart
     and abandon are all legal there, and with no listing containing those items the only
     way to reach one would be to type its id into the address bar. A control that exists
     but cannot be navigated to is a gap, not a scope boundary.
+
+    ``failed`` was in exactly that position and stayed there until issue #182 — listed on no
+    page at all, while ``retry`` and ``reset`` sat behind it as routes only the author can
+    take. The argument that brought awaiting-review here is the same argument, so it is here
+    now, and the page is named for what the three share rather than for the one it started
+    as: the work is parked, and the machine will not move it without a decision.
+
+    That naming is load-bearing rather than cosmetic. The chrome counts these three states in
+    one pill (:func:`chrome`), and a count is only honest if following it lands on a listing
+    of everything it counted — so this view and ``waiting_count`` name the same set, and
+    changing one without the other is the defect, not the fix.
     """
     interrupted_items, _ = _items(
         ctx, include_simulated=True, state=str(WorkItemState.INTERRUPTED), capacity=capacity
@@ -1334,9 +1345,14 @@ def interrupted_view(
     )
     awaiting, withheld_awaiting = _visible(awaiting_items, include_simulated=include_simulated)
     awaiting = [_signal_row(ctx, item) for item in awaiting]
-    # Per section, because this view renders two states and each has its own empty text to
+    failed_items, _ = _items(
+        ctx, include_simulated=True, state=str(WorkItemState.FAILED), capacity=capacity
+    )
+    failed, withheld_failed = _visible(failed_items, include_simulated=include_simulated)
+    failed = [_signal_row(ctx, item) for item in failed]
+    # Per section, because this view renders three states and each has its own empty text to
     # be honest in (009 FR-007, FR-008).
-    withheld = withheld_interrupted + withheld_awaiting
+    withheld = withheld_interrupted + withheld_awaiting + withheld_failed
 
     def cards(rows: list[dict[str, Any]]) -> Markup:
         return join(
@@ -1350,7 +1366,18 @@ def interrupted_view(
 
     body = join(
         [
-            h(1, "interrupted"),
+            h(1, "needs me"),
+            p(
+                "Work the machine has stopped moving. Interrupted, awaiting review and "
+                "failed all mean the same thing operationally — nothing happens to any of "
+                "these until you decide what happens to it.",
+                class_="meta",
+            ),
+            h(2, f"interrupted ({len(interrupted)})"),
+            p(
+                "Sessions that ended without finishing.",
+                class_="meta",
+            ),
             _nothing(
                 "Nothing is interrupted.",
                 withheld_interrupted,
@@ -1372,20 +1399,41 @@ def interrupted_view(
             )
             if not awaiting
             else cards(awaiting),
+            h(2, f"failed ({len(failed)})"),
+            p(
+                "Something refused the item, or its session exited badly. retry re-reads "
+                "the issue and queues it again; reset does the same after discarding the "
+                "checkout and branch.",
+                class_="meta",
+            ),
+            _nothing(
+                "Nothing has failed.",
+                withheld_failed,
+                path="/interrupted",
+                include_simulated=include_simulated,
+            )
+            if not failed
+            else cards(failed),
             withheld_note(
                 (withheld_interrupted if interrupted else 0)
-                + (withheld_awaiting if awaiting else 0),
+                + (withheld_awaiting if awaiting else 0)
+                + (withheld_failed if failed else 0),
                 path="/interrupted",
                 include_simulated=include_simulated,
             ),
         ]
     )
     return View(
-        title="interrupted",
+        title="needs me",
         data={
             "items": interrupted,
             "awaiting_review": awaiting,
-            "counts": {"interrupted": len(interrupted), "awaiting_review": len(awaiting)},
+            "failed": failed,
+            "counts": {
+                "interrupted": len(interrupted),
+                "awaiting_review": len(awaiting),
+                "failed": len(failed),
+            },
             "withheld_simulated": withheld,
         },
         body=body,

@@ -163,6 +163,43 @@ def test_interrupted_view_lists_awaiting_review_separately(web, conn):
     assert [row["id"] for row in payload["awaiting_review"]] == [awaiting]
 
 
+def test_interrupted_view_lists_failed_too(web, conn):
+    """Issue #182. ``failed`` was listed on no page at all, while ``retry`` and ``reset``
+    sat behind it as routes only the author can take — the same gap that put
+    ``awaiting_review`` on this page, left open one state longer."""
+    interrupted = seed_item(conn, issue_number=1, state="interrupted")
+    awaiting = seed_item(conn, issue_number=2, state="awaiting_review")
+    failed = seed_item(conn, issue_number=3, state="failed")
+    payload = web.get_json("/interrupted").json()
+    assert [row["id"] for row in payload["items"]] == [interrupted]
+    assert [row["id"] for row in payload["awaiting_review"]] == [awaiting]
+    assert [row["id"] for row in payload["failed"]] == [failed]
+    assert payload["counts"] == {"interrupted": 1, "awaiting_review": 1, "failed": 1}
+
+
+def test_the_failed_section_offers_the_routes_out(web, conn):
+    """The controls come from ``legal_actions``, which is FR-029's single source — so the
+    section cannot offer an action the state does not permit, or omit one it does."""
+    item_id = seed_item(conn, issue_number=3, state="failed")
+    text = web.get("/interrupted").text
+    assert "failed (1)" in text
+    for action in ("retry", "reset", "abandon"):
+        # Either shape is legitimate: a confirmed action is a link to a confirm page, an
+        # unconfirmed one is a form posting to the action. Both name this item's id.
+        assert (
+            f"/item/{item_id}/{action}" in text
+            or f"/item/{item_id}/confirm/{action}" in text
+        ), action
+
+
+def test_the_failed_section_says_so_when_it_is_empty(web, conn):
+    """Rendered at zero rather than omitted: a section that vanishes when empty cannot be
+    told from one that was never there, and this page's whole job is to be countable."""
+    body = web.get("/interrupted").text
+    assert "failed (0)" in body
+    assert "Nothing has failed." in body
+
+
 def test_a_missing_checkout_is_surfaced_distinctly(web, conn):
     """001 made ``worktree_missing`` a recoverable state rather than an error (FR-017)."""
     item_id = seed_item(conn, state="interrupted")
@@ -485,6 +522,16 @@ def test_every_view_carries_the_capacity_pill(web, conn):
         assert "order: oldest-first" in text, path
 
 
+def test_the_nav_entry_is_named_for_everything_that_page_lists(web, conn):
+    """Issue #182. ``interrupted`` named one of the three states that page holds, so an item
+    in either of the other two gave no reason to click it. The route is unchanged: the label
+    is what the reader sees."""
+    text = web.get("/active").text
+    assert '<a href="/interrupted' in text
+    assert ">needs me<" in text
+    assert ">interrupted<" not in text.split('<nav>')[1].split('</nav>')[0]
+
+
 def test_the_capacity_summary_is_in_every_payload_too(web, conn):
     payload = web.get_json("/queue").json()
     assert "capacity" in payload
@@ -511,6 +558,10 @@ WITHHELD_VIEWS = [
     ("/active", "active", "Nothing is running."),
     ("/queue", "ready", "Nothing is ready."),
     ("/interrupted", "interrupted", "Nothing is interrupted."),
+    # Issue #182's new section, held to the same four rules as its neighbours rather than
+    # to a test of its own: a section that discloses differently from the two beside it is
+    # the inconsistency 009 spent a milestone removing.
+    ("/interrupted", "failed", "Nothing has failed."),
 ]
 
 

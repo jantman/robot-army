@@ -159,10 +159,16 @@ def mark_simulated(simulated: Any) -> Markup:
 
 # -- page chrome ------------------------------------------------------------
 
+#: The label is what the reader sees; the path is what the reader never types. ``needs me``
+#: covers the three states that page lists — interrupted, awaiting review and failed — where
+#: ``interrupted`` named one of them and so gave no reason to click when the other two were
+#: what was waiting (issue #182). The route stays ``/interrupted`` deliberately: renaming it
+#: would rewrite every generated disclosure link, the route table and the terminal mapping to
+#: buy a tidier URL on an interface where navigation is these six words.
 NAV: tuple[tuple[str, str], ...] = (
     ("/active", "active"),
     ("/queue", "queue"),
-    ("/interrupted", "interrupted"),
+    ("/interrupted", "needs me"),
     ("/cards", "cards"),
     ("/anomalies", "anomalies"),
     ("/log", "log"),

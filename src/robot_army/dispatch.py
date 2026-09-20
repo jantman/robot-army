@@ -1074,7 +1074,7 @@ def _dispatch_item(
                 config=config,
                 item=item,
             )
-            _comment_failure(boundaries, audit, item, str(exc))
+            _comment_failure(boundaries, audit, item)
             return False
 
     # -- worktree ----------------------------------------------------------
@@ -1122,9 +1122,7 @@ def _dispatch_item(
                 config=config,
                 item=item,
             )
-            _comment_failure(
-                boundaries, audit, item, preparation.failure_reason or "preparation failed"
-            )
+            _comment_failure(boundaries, audit, item)
             return False
         worktree_path = preparation.worktree_path
         branch = preparation.branch
@@ -1169,7 +1167,7 @@ def _dispatch_item(
     if problems:
         reason = "pre-launch validation failed: " + "; ".join(problems)
         _fail(conn, audit, item_id, reason, boundaries=boundaries, config=config, item=item)
-        _comment_failure(boundaries, audit, item, reason)
+        _comment_failure(boundaries, audit, item)
         return False
 
     # The session row is written BEFORE the process exists (FR-020). A process that dies
@@ -1205,7 +1203,7 @@ def _dispatch_item(
                 reason=reason,
             )
         _fail(conn, audit, item_id, reason, boundaries=boundaries, config=config, item=item)
-        _comment_failure(boundaries, audit, item, reason)
+        _comment_failure(boundaries, audit, item)
         return False
 
     with db.transaction(conn):
@@ -1290,7 +1288,7 @@ def _dispatch_item(
             dry_run=dry_run,
         )
         _fail(conn, audit, item_id, reason, boundaries=boundaries, config=config, item=item)
-        _comment_failure(boundaries, audit, item, reason)
+        _comment_failure(boundaries, audit, item)
         return False
 
     # M0 F18: kitty places each launched window in its own scope, so this is the handle
@@ -1654,18 +1652,34 @@ def _predecessor_line(previous_session_id: str | None, *, resumed: bool) -> str:
     )
 
 
-def failure_comment_body(*, host: str, reason: str) -> str:
-    """The comment for an attempt that never reached a session.
+def failure_comment_body(*, host: str, item_id: int) -> str:
+    """The comment for an attempt that never reached a session. Two lines, whatever happened.
 
-    The host is here for the same reason it is on the dispatch comment, and one more: a
-    failure that happens on one machine and not another is the kind this line makes
-    attributable in a glance. The reason is fenced because it is machine text of unbounded
-    shape — a hook's stderr, an exception, a git error.
+    This used to fence the failure reason, on the argument that machine text of unbounded
+    shape needs a fence. That was the right conclusion from the wrong premise: the question
+    is not how to *render* the reason on an issue, it is whether it belongs there at all. A
+    reason interpolates git exception text, paths under the author's home directory, a
+    repository's settings filenames, and the exact local command that clears the condition —
+    and the issue it lands on may be public and is frequently not the author's. Principle V
+    forbids committing that much to a world-readable repository; posting it to a
+    world-readable issue is the same disclosure with less control, because a comment on
+    somebody else's repository cannot be taken back.
+
+    So the reason is not given to this function, rather than given and declined. A parameter
+    accepted and ignored would read as though the decision were still open, and the next
+    call site to be written would have no way to notice it had been made. The reason is
+    still recorded in full three times — the ``state.work_item`` record, the item's own
+    columns, and the notification — none of them public.
+
+    The host stays for the reason it was added: trust is granted per machine, so "it works
+    on the other one" is a real case and this is the line that makes it visible. The item
+    number is what replaces the reason — an address on the author's machine, the number
+    ``robot-army show`` takes, and meaningless to anyone else, which is the point.
     """
     return (
         "🤖 robot-army could not start a session for this issue.\n\n"
-        f"- Host: `{host}`\n\n"
-        f"```\n{reason}\n```\n"
+        f"- Host: `{host}`\n"
+        f"- Work item: `{item_id}`\n"
     )
 
 
@@ -1699,8 +1713,13 @@ def _comment_dispatch(
     )
 
 
-def _comment_failure(boundaries: Boundaries, audit: AuditLog, item: Any, reason: str) -> None:
-    _safe_comment(boundaries, audit, item, failure_comment_body(host=host_name(), reason=reason))
+def _comment_failure(boundaries: Boundaries, audit: AuditLog, item: Any) -> None:
+    """No ``reason`` parameter, deliberately. See :func:`failure_comment_body`.
+
+    Every call site still has its reason as a local and still hands it to :func:`_fail`,
+    which is what puts it on the record. What stops here is the reason's route to GitHub.
+    """
+    _safe_comment(boundaries, audit, item, failure_comment_body(host=host_name(), item_id=item.id))
 
 
 def _safe_comment(boundaries: Boundaries, audit: AuditLog, item: Any, body: str) -> None:

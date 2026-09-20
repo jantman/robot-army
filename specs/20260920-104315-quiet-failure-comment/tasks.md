@@ -27,7 +27,7 @@ below is preceded by the test that pins it.
 
 **Purpose**: establish the baseline this feature is measured against.
 
-- [ ] T001 Confirm the suite is green before any edit: `uv run pytest`
+- [X] T001 Confirm the suite is green before any edit: `uv run pytest`
 
 No project initialisation, no dependency, no tooling change. This feature edits four
 existing functions in two existing modules.
@@ -57,17 +57,17 @@ and a settings filename; the posted body contains neither, and contains two labe
 
 ### Tests for User Story 1
 
-- [ ] T002 [P] [US1] Rewrite `test_a_failure_comment_names_the_host_and_fences_the_reason` in `tests/unit/test_issue_comments.py` as `test_a_failure_comment_names_the_host_and_the_item_and_nothing_else` — assert `- Host:` and `- Work item:` lines, assert no fence, and assert the body is exactly one opening line plus two `- Label: value` lines
-- [ ] T003 [P] [US1] Add `test_a_failure_comment_cannot_be_given_a_reason` to `tests/unit/test_issue_comments.py` — assert via `inspect.signature` that `dispatch.failure_comment_body` takes no `reason` parameter, because the signature is what makes the omission structural rather than a rule review has to remember (research R2)
-- [ ] T004 [P] [US1] Add `test_every_failure_path_posts_the_same_body` to `tests/integration/test_dispatch.py` — drive two failures with different causes on the same item and host, assert the two bodies are byte-identical (FR-002)
-- [ ] T005 [P] [US1] Add `test_the_reason_leaves_the_comment_but_not_the_record` to `tests/integration/test_dispatch.py` — after a failure, assert the reason is absent from the posted body and present in all three of `work_items.failure_reason`, the `state.work_item` audit record's `detail.reason`, and the emitted notification's detail (FR-004, FR-005)
+- [X] T002 [P] [US1] Rewrite `test_a_failure_comment_names_the_host_and_fences_the_reason` in `tests/unit/test_issue_comments.py` as `test_a_failure_comment_names_the_host_and_the_item_and_nothing_else` — assert `- Host:` and `- Work item:` lines, assert no fence, and assert the body is exactly one opening line plus two `- Label: value` lines
+- [X] T003 [P] [US1] Add `test_a_failure_comment_cannot_be_given_a_reason` to `tests/unit/test_issue_comments.py` — assert via `inspect.signature` that `dispatch.failure_comment_body` takes no `reason` parameter, because the signature is what makes the omission structural rather than a rule review has to remember (research R2)
+- [X] T004 [P] [US1] Add `test_every_failure_path_posts_the_same_body` to `tests/integration/test_dispatch.py` — drive two failures with different causes on the same item and host, assert the two bodies are byte-identical (FR-002)
+- [X] T005 [P] [US1] Add `test_the_reason_leaves_the_comment_but_not_the_record` to `tests/integration/test_dispatch.py` — after a failure, assert the reason is absent from the posted body and present in all three of `work_items.failure_reason`, the `state.work_item` audit record's `detail.reason`, and the emitted notification's detail (FR-004, FR-005)
 
 ### Implementation for User Story 1
 
-- [ ] T006 [US1] Change `failure_comment_body` in `src/robot_army/dispatch.py` to `(*, host: str, item_id: int)`, returning the two-line body from the contract; rewrite its docstring — the existing one argues *for* fencing the reason, and that argument is what this change overturns, so it is replaced by the reason it was overturned rather than deleted
-- [ ] T007 [US1] Change `_comment_failure` in `src/robot_army/dispatch.py` to take no `reason`, passing `item.id` instead
-- [ ] T008 [US1] Update the five `_comment_failure` call sites in `src/robot_army/dispatch.py` (lines 1077, 1125, 1172, 1208, 1293) to stop passing the reason; each keeps its `reason` local, which `_fail` still requires
-- [ ] T009 [US1] Update `tests/integration/test_dispatch.py:1216` — `"trust check failed" in body` becomes an assertion that it is **not** in the body; the assertion two lines below that it *is* on `item.blocked_reason` already exists and stays
+- [X] T006 [US1] Change `failure_comment_body` in `src/robot_army/dispatch.py` to `(*, host: str, item_id: int)`, returning the two-line body from the contract; rewrite its docstring — the existing one argues *for* fencing the reason, and that argument is what this change overturns, so it is replaced by the reason it was overturned rather than deleted
+- [X] T007 [US1] Change `_comment_failure` in `src/robot_army/dispatch.py` to take no `reason`, passing `item.id` instead
+- [X] T008 [US1] Update the five `_comment_failure` call sites in `src/robot_army/dispatch.py` (lines 1077, 1125, 1172, 1208, 1293) to stop passing the reason; each keeps its `reason` local, which `_fail` still requires
+- [X] T009 [US1] Update `tests/integration/test_dispatch.py:1216` — `"trust check failed" in body` becomes an assertion that it is **not** in the body; the assertion two lines below that it *is* on `item.blocked_reason` already exists and stays
 
 **Checkpoint**: the leak is closed. Independently shippable — the reason is still reachable
 from `robot-army show`, the item page and `/queue`'s blocked table without US2.

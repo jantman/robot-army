@@ -1213,11 +1213,101 @@ def test_a_blocked_dispatch_says_which_machine_refused(conn, audit, config, tmp_
     body = writer.comments[-1][2]
     assert "could not start a session" in body
     assert f"- Host: `{dispatch.host_name()}`" in body
-    assert "trust check failed" in body
+    assert f"- Work item: `{item_id}`" in body
+    # The reason is what sent this feature's author looking: it named a settings file, a
+    # repository key and a local command, on somebody else's public issue. The host line
+    # stays --- trust is granted per machine --- and the reason does not.
+    assert "trust check failed" not in body
 
     item = db.get_work_item(conn, item_id)
     assert item is not None and item.state is WorkItemState.FAILED
     assert "trust check failed" in (item.blocked_reason or "")
+
+
+def test_every_failure_path_posts_the_same_body(conn, audit, config, tmp_path, layout):
+    """FR-002. Two failures as far apart as this system has: a gate that refuses before
+    anything is created, and a launch that got a window and could not confirm a session.
+
+    If the bodies differ in anything but the item number, something about the cause is
+    reaching the issue --- which is the disclosure this feature exists to stop, arriving by
+    a route no test looking for a *reason* would catch.
+    """
+    writer = RecordingWriter()
+    blocked_id = ready_item(conn, config, issue_number=101)
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit)),
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=blocked_id,
+        trust_file=tmp_path / "absent.json",
+    )
+
+    unconfirmed_id = ready_item(conn, config, issue_number=102)
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=make_boundaries(
+            audit,
+            writer=writer,
+            host=StubSessionHost(confirm=False),
+            hooks=SubprocessHookRunner(audit),
+        ),
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=unconfirmed_id,
+        trust_file=trust_file(tmp_path, config.repos["demo"].path),
+    )
+
+    blocked_body, unconfirmed_body = writer.comments[0][2], writer.comments[-1][2]
+    assert blocked_body.replace(str(blocked_id), "N") == unconfirmed_body.replace(
+        str(unconfirmed_id), "N"
+    )
+
+
+def test_the_reason_leaves_the_comment_but_not_the_record(
+    conn, audit, config, tmp_path, layout, monkeypatch
+):
+    """FR-004, FR-005. The reason is not suppressed; it is moved off the public surface.
+
+    All three of the places it goes are asserted together, because the argument for the
+    quiet comment is that nothing is lost --- and an argument of that shape is only as good
+    as the test that fails when one of the three stops holding.
+    """
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        dispatch.notifications, "emit", lambda **kwargs: sent.append(kwargs) or None
+    )
+    writer = RecordingWriter()
+    boundaries = make_boundaries(audit, writer=writer, hooks=SubprocessHookRunner(audit))
+    item_id = ready_item(conn, config)
+
+    assert not dispatch.dispatch_item(
+        conn,
+        boundaries=boundaries,
+        audit=audit,
+        config=config,
+        layout=layout,
+        item_id=item_id,
+        trust_file=tmp_path / "absent.json",
+    )
+
+    body = writer.comments[-1][2]
+    assert "trust check failed" not in body
+
+    item = db.get_work_item(conn, item_id)
+    assert item is not None
+    assert "trust check failed" in (item.failure_reason or "")
+
+    transitions = [
+        record
+        for record in records_of(layout, audit, "state.work_item")
+        if record["entity_id"] == item_id
+    ]
+    assert "trust check failed" in transitions[-1]["detail"]["reason"]
+
+    assert sent and "trust check failed" in sent[-1]["detail"]
 
 
 def test_a_restart_names_the_session_it_supersedes_and_says_it_kept_nothing(

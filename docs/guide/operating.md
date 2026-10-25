@@ -139,13 +139,13 @@ what survives a reboot are on the [state page](state.md).
 | State | Means | You can | Becomes |
 |---|---|---|---|
 | `discovered` | found by the poller, not yet evaluated | wait; `poll` to force a pass | `ready`, `failed` |
-| `ready` | eligible and queued, waiting for a slot | `hold`, `unhold`, `abandon` | `dispatching`, `abandoned` |
+| `ready` | eligible and queued, waiting for a slot | `hold`, `unhold`, `keep`, `abandon` | `dispatching`, `abandoned` |
 | `dispatching` | claimed; worktree and session being prepared | wait — it settles or ages out | `active`, `failed` |
-| `active` | a session is running | `cancel`, `attach` | `awaiting_review`, `interrupted`, `failed`, `done` |
-| `awaiting_review` | the session ended cleanly; work is waiting on me | `resume`, `restart`, `reset`, `abandon` | `done`, `dispatching`, `ready`, `abandoned` |
-| `interrupted` | the session ended without finishing | `resume`, `restart`, `reset`, `abandon` | `dispatching`, `ready`, `done`, `abandoned` |
-| `failed` | something refused it, or the session exited badly | `retry`, `reset`, `abandon` | `ready`, `abandoned` |
-| `done` | finished — terminal | `cleanup`, `worktree remove` | — |
+| `active` | a session is running | `cancel`, `attach`, `keep` | `awaiting_review`, `interrupted`, `failed`, `done` |
+| `awaiting_review` | the session ended cleanly; work is waiting on me | `resume`, `restart`, `reset`, `keep`, `abandon` | `done`, `dispatching`, `ready`, `abandoned` |
+| `interrupted` | the session ended without finishing | `resume`, `restart`, `reset`, `keep`, `abandon` | `dispatching`, `ready`, `done`, `abandoned` |
+| `failed` | something refused it, or the session exited badly | `retry`, `reset`, `keep`, `abandon` | `ready`, `abandoned` |
+| `done` | finished — terminal | `cleanup`, `worktree remove`; `keep`/`unkeep` while its session still runs | — |
 | `abandoned` | given up on — terminal | `worktree remove` | — |
 
 **`resume` needs a previous session to restore**; without one only `restart` is offered.
@@ -189,6 +189,8 @@ on a page; **Terminal** means a shell on this machine is required.
 | `attach <id>` | open a terminal window on a running session | you want to watch or type | no running session | Both |
 | `hold` / `unhold` | take one item or a whole repository out of dispatch | not now, but not never | — | Both |
 | `holds` | every hold in force, including ones holding nothing | "why is nothing dispatching?" | — | Terminal |
+| `keep <id>` / `unkeep <id>` | keep a session open after its issue closes — no retirement, no tab close, no automatic cleanup — until released | before merging, to verify the result in the same session | `keep`: an unknown item; an `abandoned` item (it can never reach `done`; `cancel` ends its session); a `done` item with no running session (prints the `claude --resume` line instead) | Both |
+| `keeps` | every keep in force, including ones whose session has ended | "why is this session still here?", or the machine is full | — | Both |
 | `prompt <id>` | print the prompt a dispatch would compose | before trusting a dispatch | — | Terminal |
 
 ### The machine
@@ -286,7 +288,7 @@ uv run robot-army anomalies --acknowledge <id>   # I looked
 
 | Kind | Means | Settle it with |
 |---|---|---|
-| `orphan_session` | a live worker under the worktree root that no item claims | `attach`, then `cancel`; clears itself once the process is gone |
+| `orphan_session` | a live worker under the worktree root that no item claims | `attach`, then `cancel`; clears itself once the process is gone, or once its `done` item is [kept](5-outcome.md#keeping-a-session-after-the-merge) with the session still open and it is the item's current attempt. Never raised for a kept `done` item's current session |
 | `prunable_worktree` | an item's recorded checkout directory is gone | `worktree remove <id>`, or `cleanup <id>` for a finished item. **Acknowledging does not settle it** — the row never changes on its own |
 | `orphan_worktree` | a checkout shaped like ours that no item claims | `worktree remove <path>`; clears itself once the directory is gone or a row claims it |
 | `no_transcript` | the session left nothing resumable | `restart` it, never `resume` it. `doctor` shows whether `CLAUDE_CODE_*` reached the session host |
@@ -377,6 +379,14 @@ equivalent, verified by a test rather than by intention. Add `.json` to any path
 ```bash
 curl -s localhost:8420/active.json | jq '.items[] | {id, repo_key, state, title}'
 ```
+
+**`/active` also lists every keep**, in a "kept" section under the running table that is
+there even when empty (`Nothing is kept.`). It is the only page that shows a session still
+running under a `done` item — the running table lists `active` items only — and it lists
+keeps waiting for a session and keeps whose session has ended too, each with a `release`.
+Each running row, and the item page, carries the `keep` control; the item page offers it only
+where `keep` would not be refused. The JSON carries the same rows as `keeps --json` under
+`keeps`.
 
 It is not a stable API; it is versioned by the commit that produced it. Nothing is fetched
 from a third-party host, so every view works with the machine offline, renders on a phone in

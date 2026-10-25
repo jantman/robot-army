@@ -71,6 +71,18 @@ count is rehearsal rows left behind, not work in progress. `status`, the web chr
 `in flight` when they are zero. Until issue #61 they were counted and never shown, so `6 of 7`
 could be explained as `0 ours, 2 other`.
 
+**A kept session is named inside `ours`.** A session I have [kept past its issue
+closing](5-outcome.md#keeping-a-session-after-the-merge) is still one of mine and still holds
+its slot, so it is counted where it always was and annotated rather than broken out — the
+terms still sum: `2 of 2 sessions running (2 ours (1 kept), 0 other)`. The per-repository
+reason says it too, because that is the cap a keep actually fills:
+`repository o/n: 1 of 1 sessions (configured), 1 kept`. The fix it names is
+`robot-army unkeep <id>`. With nothing kept both read exactly as before. The `(N kept)` in
+the global breakdown counts only kept sessions that are also in `ours`, so it can never exceed
+it: a kept row the registry cannot see (simulated, or a worker that died unseen) is left out of
+it, and on the degraded `/proc` path, where `ours` is empty, the annotation disappears. The
+per-repository `N kept` counts rows, like the per-repository count it sits beside.
+
 Four things worth knowing:
 
 - **One session per repository by default.** Two sessions in one clone share its ports, its
@@ -289,6 +301,9 @@ Three things it does **not** do, each on purpose:
 - **It never expires.** A hold that lapsed on its own would silently start work I stopped.
 - **It never stops a running session.** A hold governs entry into dispatch; `cancel` is what
   stops a session, and the two must not be confusable.
+  Nor does a hold, or a pause, keep one alive after its issue closes: a `done` item's idle
+  worker is retired whatever is held or paused. Keeping a session is a separate statement,
+  [`keep`](5-outcome.md#keeping-a-session-after-the-merge), with its own release.
 - **It never reorders anything.** Releasing puts an item back exactly where it was.
 
 Holds are durable — they survive a restart and a reboot, and a hold placed while the daemon is

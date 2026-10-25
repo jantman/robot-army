@@ -551,6 +551,36 @@ did not change. `reconcile.pass` carries `pull_request_changes`, so a cycle in w
 moved is still accounted for, and `work_items.pull_requests_at` on the row carries the last
 confirmation.
 
+## The keep actions
+
+A **keep** holds a `done` item's session open past its issue closing (see
+[keeping a session after the merge](5-outcome.md#keeping-a-session-after-the-merge)). Both
+verbs are intent/outcome pairs, like `hold.item`; from the web, `_perform`'s `web.keep.item`
+or `web.unkeep.item` pair comes first.
+
+| Record | When | Notable detail |
+|---|---|---|
+| `keep.item` | `robot-army keep <id>`, or the web's `keep` | Intent: `by` (`cli` or `web`), `was_kept`, the item's `state`, and `live_session` — whether a session row was open. Outcome: `kept_at`, `kept_by` and `placed`; a redundant keep is recorded with `placed: false` and the **original** time and surface. A refusal — the item is `done` or `abandoned` with no session open — is outcome `error` with a `reason`, and writes no row. An unknown item is an `error` with `cause: no such work item` |
+| `unkeep.item` | `robot-army unkeep <id>`, or the web's `release` | Intent: `by`. Outcome: `released`, `was_kept_at`, and `open_sessions` — the ids of the item's session rows that were open at the moment of release |
+| `anomaly.resolved` | **Changed** — a second reason for `orphan_session` | `the work item is done and kept by the operator, so this session is accounted for`, with `work_item_id`. Written when an orphan raised before the keep (the worker was busy when its item finished) is retracted. The `pid` re-check runs first, so a kept worker that has since died is resolved with the ordinary "no longer running" reason instead. Only the item's current attempt is covered: an orphan from a superseded attempt is never retracted by a keep |
+
+**A retirement that followed a release is told apart by joining on the session id.**
+`session.retire` is unchanged; the `unkeep.item` before it names the sessions it released.
+Every retirement that came after a release — `released == true`, because releasing an item
+that was never kept is a no-op that still records `open_sessions`:
+
+```bash
+jq -sc '
+  (map(select(.action == "unkeep.item" and .kind == "outcome" and .detail.released == true)
+     | .detail.open_sessions[]?)) as $released
+  | .[] | select(.action == "session.retire" and (.detail.session_id | IN($released[])))
+' ~/.local/state/robot-army/logs/audit-*.jsonl
+```
+
+Two things a keep makes the system **not** write, both listed in the table below: the
+retirement a keep withholds, and the cleanup consideration of a kept item whose session is
+still open.
+
 ## What is deliberately not logged
 
 Principle III permits gaps only when they are named and justified in the feature plan. The
@@ -575,6 +605,8 @@ the log knows what its silence means:
 | The project board's **item sequence** on every read — the counts and the outcome are recorded instead | The order itself is recoverable from `work_items.board_position` at any instant, and it is not a question about an action the system *took*. Writing the same list every 60 seconds per repository would be ~1,440 copies a day drowning the records that matter. What is genuinely lost is history: from the log alone you cannot say what order the board was in three days ago. Every read, every failure, every fallback and every dispatch **is** recorded, so nothing the system did is unreconstructable |
 | A **window that simply does not qualify for closing** — its item is `failed`, or still has a live session | The pass runs every 60 seconds and a working machine has several such windows permanently, so a record each would be thousands a day carrying no news. The condition is re-derivable from the item's state at any instant, and everything the sweep *does* — every close, every failure to close, every failure to list — is recorded. Same reasoning as the row below, and as the transcript check |
 | A **retirement deferred because the worker was not idle yet, or idle without a merge and not for long enough** | The reconciliation loop runs every 60 seconds and a finished session may sit idle for hours, so recording "still busy" would write ~1,440 records a day carrying one bit. The condition is re-derivable at any instant from the worker's own registry entry and the item's stored pull requests, and the *decision that acts* — `session.retire` and everything after it — is logged in full. Both of retirement's deferrals are covered by this one line and neither writes anything, unchanged by issue #149. Precedent: the transcript check writes nothing for a session still inside its grace period, for the same reason. See the issue #138 section above |
+| A **retirement withheld because the item is kept** | The same "not yet" as the row above, for an operator-chosen length of time — days, possibly — so a record per pass would be thousands carrying one bit. `keep.item` and `unkeep.item` already say when the keep was placed and released, and which sessions it was holding at release, so whether a session was kept at any moment is reconstructable from the log alone |
+| A **cleanup pass that leaves out a kept item whose session is open** | It used to write `cleanup.considered` with `skipped` every pass, which was tolerable for the minute between `done` and retirement and is not for a keep that stands for days. The decision is re-derivable from the keep and session tables at any instant, and `cleanup <id>` still considers the item and records `skipped` on demand. A keep whose session has ended does not exclude the item, so its cleanup is recorded as before |
 | **Read-only web requests** — every `GET` the interface serves | They change no state outside the process, so Principle III's own scope does not reach them. The exception is written down because the *volume* makes the omission visible: a page auto-refreshing every 10 seconds issues a `GET` every 10 seconds, and logging those would bury the record this project exists to keep readable. Nothing a `GET` does is unreconstructable — the data it read is in the database and in this log. **Every `POST` is logged**, without exception |
 
 ## Silent failure is forbidden

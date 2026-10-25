@@ -305,6 +305,37 @@ and expiry would silently restart work I stopped. A hold left on a finished item
 could not see it. What does remove one is the cascade: purging simulated rows takes their
 holds with them, so `purge-simulated` needs no knowledge of holds at all.
 
+### `item_keeps` — sessions I have kept past their issue
+
+Added by migration 016. One row per work item whose session should outlive its issue closing
+(see [keeping a session after the merge](5-outcome.md#keeping-a-session-after-the-merge)).
+Its own table, not a scope column on `item_holds`, and with its own column names: a hold
+stops work starting and a keep stops a session ending, and a row here reading `held_at` would
+be exactly the confusion between the two the design refuses. Otherwise it is shaped like
+`item_holds`, for that table's reasons.
+
+| Column | Meaning |
+|---|---|
+| `work_item_id` | The kept item, and the **primary key**: keeping it twice is a reported no-op. `REFERENCES work_items(id) ON DELETE CASCADE`, so purging simulated rows takes their keeps with them |
+| `kept_at` | When it was placed. Never rewritten by a repeated keep |
+| `kept_by` | `web` or `cli` |
+
+```bash
+sqlite3 -header -column ~/.local/state/robot-army/state.db 'SELECT * FROM item_keeps'
+robot-army keeps                      # every keep, with each item's state and session
+robot-army keep 42                    # and `unkeep 42`
+```
+
+**Nothing sweeps a keep**, for the reason nothing sweeps a hold: no expiry, and no clearing
+when the item finishes or its session ends. A keep whose session is gone is inert — it holds
+no slot and blocks no cleanup — and `keeps` shows it as `no live session`. No `dry_run`
+column: a keep applies to a simulated item as to a real one.
+
+**Across a reboot the keep survives and the session does not.** The worker is gone, so the
+next pass's stale-session sweep finds its row's process dead and closes the row as it would
+any other, keep or no keep — a kept row whose worker is dead is never left holding a slot.
+The keep is left in place, inert, until I release it.
+
 ### `cards` — the intake board, and the mapping to what each card became
 
 Added by migration 003. A table of its own rather than columns on `work_items`, and the

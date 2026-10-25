@@ -230,6 +230,59 @@ Until issue #23 a closed stdin tracebacked here, and a Ctrl-C — which `main` h
 — left nothing behind at all. `cancel --force` skips the question, and is a different
 `--force` from the ones on this page.
 
+### Keeping a session after the merge
+
+**Sometimes the merge is not the end of the work.** In a configuration-management
+repository the merge *is* the deploy, and the useful next step is to check the result from
+inside the session that made the change — it already knows what it changed and why. The
+merged path above retires that worker on the first idle pass, which is a minute after I
+merge. A **keep** is how I say "not this one":
+
+```bash
+uv run robot-army keep <id>      # this item's session outlives its issue closing
+uv run robot-army unkeep <id>    # back to the ordinary rules
+uv run robot-army keeps          # every keep in force, including ones with no session left
+```
+
+The web has the same two: a `keep` button on each `/active` row and on the item page, and a
+"kept" section on `/active` listing every keep with its `release`.
+
+While a `done` item is kept and its session is open, reconciliation does not retire the
+worker, does not close its tab, and does not offer its checkout to automatic cleanup. That is
+all a keep does. It starts, stops and signals nothing, so it works with the daemon stopped
+and takes effect on the next pass.
+
+- **Place it before merging.** Retirement on the merged path runs on the next pass, so a keep
+  placed afterwards is usually too late. A keep can go on an item in any state — `ready`,
+  `active`, `failed` — and simply waits for `done`. Placed after the fact it is accepted
+  while the worker still runs; once the item is finished and no session is open, `keep`
+  refuses and prints `claude --resume <session-id>` for the transcript instead.
+- **Not on an `abandoned` item.** It has no way back to `done`, so a keep there could never
+  take effect. `keep` refuses and says so; its worker is already left running, and
+  `robot-army cancel <id>` is what ends it.
+- **It never expires.** No timer, and no clearing when the session ends. A keep whose
+  session is gone is inert — it holds no slot and blocks no cleanup — and `keeps` shows it as
+  `no live session` so I can release it.
+- **Exiting the session ends it.** When I am done verifying I exit the worker as usual; the
+  row closes, the tab goes on the next pass, and the keep is left inert. `unkeep` instead
+  hands the still-running worker back to the rules above: with a merged pull request it is
+  retired on the next pass that finds it idle, with no further wait.
+- **A kept session holds a slot.** It counts against both caps for as long as it runs, and
+  the capacity reasons say so: `2 ours (1 kept), 0 other`, and
+  `repository o/n: 1 of 1 sessions (configured), 1 kept`. The fix that names is `unkeep`.
+- **A hold and a pause do not keep a session.** They govern what *starts*; a keep governs
+  what *ends*. A merged, idle `done` item under a paused queue and both holds is retired as
+  normal.
+
+A kept `done` session is not an orphan, so it raises no `orphan_session`, and one raised
+before the keep was placed (the worker was busy when the item finished) is retracted on the
+next pass — unless its worker has died by then, in which case it resolves as gone.
+
+**A keep covers the item's current session only.** If the item was resumed while an earlier
+attempt's worker was still alive, that earlier worker is not the one I kept: it is retired
+when idle, reported as `orphan_session` when busy, and its anomaly is not retracted, exactly
+as if there were no keep.
+
 ### The tab
 
 **The tab does not close by itself, and I assumed for one whole feature that it did.** The
@@ -267,6 +320,9 @@ Three consequences worth knowing:
 - **It is a sweep, not a step of retirement.** Which means a tab left behind by a crash
   between the kill and the close is still cleaned up on the next pass, and so is one left by
   a version of this that predates the rule.
+- **A kept session keeps its tab** — not because the tab reads the keep, but because the
+  kept session's row stays open, which is the rule above. When I exit the session its row
+  closes and the tab goes on the next pass, keep or no keep.
 - **It goes on the pass the item finishes.** The rule above was right from the start and the
   tab still sat there for half an hour, because it waits on the session row and the row was
   waiting on a 30-minute clock the ordinary path never reached. Nothing in this rule changed
@@ -369,6 +425,11 @@ With `on_issue_close = true`, an item whose issue has closed has its worktree an
 reclaimed on the next reconciliation pass — provided nothing in either exists only there.
 `robot-army cleanup` runs the identical function under the identical guards whether or not
 the automatic path is enabled, so the manual route cannot drift from the automatic one.
+
+A **kept** item whose session is still open is not offered to either — automatic cleanup or
+bare `robot-army cleanup` — so a keep that stands for days does not write a `skipped`
+record every pass. `cleanup <id>` still considers it and still reports it as live. A keep
+whose session has ended does not block cleanup at all.
 
 **The guards are different guards, and that is the whole design.**
 

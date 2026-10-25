@@ -949,3 +949,174 @@ def test_a_reset_from_the_browser_requeues_the_item(web, conn, config, layout, m
     assert state_of(conn, item_id) == "ready"
     assert db.get_work_item(conn, item_id).title == "the title as edited"
     assert web_records(layout, action="web.reset")
+
+
+# -- keep-session-after-close (US1): the web half of `keep` / `unkeep` --------
+
+
+def test_keeping_and_releasing_an_item_from_the_web(web, conn):
+    item_id = seed_item(conn, state="active")
+    seed_session(conn, item_id, state="running", session_id="s-live")
+
+    response = web.post(f"/item/{item_id}/keep")
+    assert response.status == 303
+    assert "msg=kept" in response.headers["Location"]
+    assert response.headers["Location"].startswith(f"/item/{item_id}")
+    assert db.list_item_keeps(conn)[item_id].kept_by == "web"
+
+    response = web.post(f"/item/{item_id}/unkeep")
+    assert response.status == 303
+    assert "msg=unkept" in response.headers["Location"]
+    assert db.list_item_keeps(conn) == {}
+
+
+def test_a_cross_site_keep_is_refused_and_writes_nothing(web, conn, layout):
+    item_id = seed_item(conn, state="active")
+    response = web.post_json(f"/item/{item_id}/keep", headers=CROSS_SITE)
+    assert response.status == 403
+    assert db.list_item_keeps(conn) == {}
+    assert web_records(layout, action="web.keep.item"), "the refused attempt is recorded"
+
+
+def test_keeping_an_unknown_item_from_the_web_is_a_404(web, conn):
+    seed_item(conn)
+    assert web.post("/item/999999/keep").status == 404
+    assert db.list_item_keeps(conn) == {}
+
+
+def test_the_item_page_offers_keep_then_release(web, conn):
+    item_id = seed_item(conn, state="active")
+    seed_session(conn, item_id, state="running", session_id="s-live")
+
+    page = web.get(f"/item/{item_id}").text
+    assert f'action="/item/{item_id}/keep"' in page
+    assert f'action="/item/{item_id}/unkeep"' not in page
+
+    web.post(f"/item/{item_id}/keep")
+    page = web.get(f"/item/{item_id}").text
+    assert f'action="/item/{item_id}/unkeep"' in page
+    assert f'action="/item/{item_id}/keep"' not in page
+
+
+def test_every_active_row_carries_a_keep_control(web, conn):
+    first = seed_item(conn, state="active", issue_number=1)
+    second = seed_item(conn, state="active", issue_number=2)
+    seed_session(conn, first, state="running", session_id="s-1")
+    seed_session(conn, second, state="running", session_id="s-2")
+    with db.transaction(conn):
+        db.set_item_keep(conn, second, by="cli")
+
+    page = web.get("/active").text
+    assert f'action="/item/{first}/keep"' in page
+    assert f'action="/item/{second}/unkeep"' in page
+
+
+# -- keep-session-after-close (US2): the "kept" section on /active ------------
+
+
+def test_the_kept_section_is_always_there_and_says_when_it_is_empty(web, conn):
+    page = web.get("/active").text
+    assert "kept" in page
+    assert "Nothing is kept." in page
+    assert web.get_json("/active").json()["keeps"] == []
+
+
+def test_the_kept_section_lists_every_keep_with_a_release_control(web, conn):
+    """The only web surface that lists a session running under a ``done`` item — the
+    running table filters on ``active`` — so it must never filter kept rows the same way."""
+    live = seed_item(conn, state="done", issue_number=1)
+    pending = seed_item(conn, state="ready", issue_number=2)
+    inert = seed_item(conn, state="done", issue_number=3)
+    seed_session(conn, live, state="running", session_id="s-live")
+    with db.transaction(conn):
+        for item_id in (live, pending, inert):
+            db.set_item_keep(conn, item_id, by="cli")
+
+    page = web.get("/active").text
+    assert "Nothing is kept." not in page
+    assert "live s-live" in page
+    assert "none yet" in page
+    assert "no live session" in page
+    for item_id in (live, pending, inert):
+        assert f'action="/item/{item_id}/unkeep"' in page
+
+    keeps = web.get_json("/active").json()["keeps"]
+    assert [row["item_id"] for row in keeps] == [live, pending, inert]
+    assert keeps[0]["open_session_id"] == "s-live"
+    assert set(keeps[0]) == {
+        "item_id",
+        "repo_key",
+        "issue_number",
+        "state",
+        "kept_at",
+        "kept_by",
+        "age_seconds",
+        "open_session_id",
+    }
+
+
+def test_the_capacity_pill_names_kept_sessions(web, conn, config, tmp_path, monkeypatch):
+    """The pill renders ``breakdown``, so it inherits ``(N kept)`` with no change of its own.
+    A real registry entry is needed for the session to count as ours."""
+    import functools
+    from pathlib import Path
+
+    from tests.conftest import write_proc, write_registry
+
+    from robot_army import capacity as capacity_mod
+
+    registry = tmp_path / "kept-registry"
+    registry.mkdir()
+    proc = tmp_path / "kept-proc"
+    write_proc(proc, 1, starttime="1", exe="/usr/lib/systemd/systemd")
+    item_id = seed_item(conn, state="done")
+    seed_session(conn, item_id, state="running", session_id="s-kept", pid=600)
+    cwd = Path(config.worktree_root) / "issue-600"
+    cwd.mkdir(parents=True, exist_ok=True)
+    write_registry(registry, pid=600, session_id="s-kept", proc_start="600", cwd=str(cwd))
+    write_proc(proc, 600, starttime="600", cwd=str(cwd))
+    with db.transaction(conn):
+        db.set_item_keep(conn, item_id, by="cli")
+    monkeypatch.setattr(
+        capacity_mod,
+        "snapshot",
+        functools.partial(capacity_mod.snapshot, registry_dir=registry, proc_root=proc),
+    )
+
+    assert "(1 ours (1 kept), 0 other)" in web.get("/active").text
+
+
+# -- keep-session-after-close (US3): the refusal on the web ------------------
+
+
+def test_keeping_a_finished_item_with_no_session_is_refused_and_recorded(web, conn, layout):
+    item_id = seed_item(conn, state="done")
+    seed_session(conn, item_id, state="exited_clean", session_id="s-ended")
+
+    response = web.post_json(f"/item/{item_id}/keep")
+
+    assert response.status == 409
+    payload = response.json()
+    assert payload["code"] == operations.EXIT_PRECONDITION
+    assert "nothing to keep" in payload["reason"]
+    assert "claude --resume s-ended" in payload["reason"]
+    assert db.list_item_keeps(conn) == {}
+
+    kinds = [(r["kind"], r["outcome"]) for r in web_records(layout, action="web.keep.item")]
+    assert kinds == [("intent", "pending"), ("outcome", "error")]
+
+
+def test_the_item_page_offers_no_keep_where_keep_would_be_refused(web, conn):
+    item_id = seed_item(conn, state="done")
+    seed_session(conn, item_id, state="exited_clean", session_id="s-ended")
+    page = web.get(f"/item/{item_id}").text
+    assert f'action="/item/{item_id}/keep"' not in page
+
+
+def test_the_item_page_still_offers_release_on_an_inert_keep(web, conn):
+    """An inert keep must stay releasable from the page that shows the item."""
+    item_id = seed_item(conn, state="done")
+    with db.transaction(conn):
+        db.set_item_keep(conn, item_id, by="cli")
+    page = web.get(f"/item/{item_id}").text
+    assert f'action="/item/{item_id}/unkeep"' in page

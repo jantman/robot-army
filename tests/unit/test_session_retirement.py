@@ -1136,3 +1136,351 @@ def test_a_retirement_settles_its_row_even_when_another_registry_file_is_refused
     after = capacity.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
     assert after.total == 0, "the slot comes back; a killed worker must not hold one"
     assert records(layout, "session.retired")[0]["detail"]["settled"] == "reclaimed"
+
+
+# -- keeping a session past its issue (keep-session-after-close, US1) --------
+#
+# A keep is the one thing that stops this sweep ending a finished item's worker, and it is
+# separate from a hold and from pause (FR-012): neither of those is read here, and the last
+# test below pins that a session under a paused, doubly-held item is retired as normal.
+
+
+def place_keep(layout, item: int) -> None:
+    """Write a keep through a connection of its own and close it, as ``robot-army keep``
+    run against a stopped daemon would. Nothing caches keeps, so the next pass reads it."""
+    writer, _ = db.open_database(layout.db_path)
+    with db.transaction(writer):
+        db.set_item_keep(writer, item, by="cli")
+    writer.close()
+
+
+def test_a_kept_merged_idle_worker_is_not_retired_and_nothing_is_written(
+    conn, config, audit, layout, registry, proc
+):
+    """US1, and the (F) case of a keep placed while no daemon runs being honoured by the
+    first pass that follows. The withheld retirement writes nothing (C6): the keep and its
+    release are the record, and a pass a minute would otherwise say "still kept" all day."""
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    merge_pull_request(conn, item)
+    place_keep(layout, item)
+    host = KillingHost(proc)
+    before = records(layout)
+
+    for _ in range(3):
+        assert sweep(conn, audit, registry, proc, host) == 0
+
+    assert host.calls == []
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+    after = records(layout)
+    assert after == before, "a withheld retirement must write nothing"
+    assert not [r for r in after if SESSION in json.dumps(r)]
+
+
+def test_releasing_a_keep_retires_on_the_next_pass_with_the_merged_signal(
+    conn, config, audit, layout, registry, proc
+):
+    """SC-002: release returns the item to exactly the decision it would have met — a
+    merged pull request retires on the first idle pass, with no extra wait."""
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    merge_pull_request(conn, item)
+    place_keep(layout, item)
+    host = KillingHost(proc)
+    assert sweep(conn, audit, registry, proc, host) == 0
+
+    with db.transaction(conn):
+        db.clear_item_keep(conn, item)
+
+    assert sweep(conn, audit, registry, proc, host) == 1
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+    retire = records(layout, "session.retire")
+    assert len(retire) == 1
+    assert retire[0]["detail"]["signal"] == "merged_pull_request"
+
+
+def test_a_kept_unmerged_worker_is_not_retired_after_the_quiet_period(
+    conn, config, audit, layout, registry, proc
+):
+    item = finished_item(conn, config, registry, proc, idle_ms=LONG_IDLE_MS)
+    place_keep(layout, item)
+    host = KillingHost(proc)
+
+    assert sweep(conn, audit, registry, proc, host) == 0
+    assert host.calls == []
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+
+
+def test_a_keep_on_an_active_item_changes_nothing_before_done(
+    conn, config, audit, layout, registry, proc
+):
+    """The keep waits for ``done``; before that the item was never a candidate."""
+    item = finished_item(conn, config, registry, proc, item_state="active")
+    merge_pull_request(conn, item)
+    place_keep(layout, item)
+    host = KillingHost(proc)
+
+    assert sweep(conn, audit, registry, proc, host) == 0
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+    assert db.get_work_item(conn, item).state is WorkItemState.ACTIVE
+
+
+def test_pause_and_holds_do_not_keep_a_session(conn, config, audit, layout, registry, proc):
+    """Clarification 3a, FR-012. A pause and a hold govern dispatch, not the end of a
+    session; with both in force and no keep, a merged idle ``done`` item is retired."""
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    merge_pull_request(conn, item)
+    with db.transaction(conn):
+        db.set_dispatch_paused(conn, paused=True, by="cli")
+        db.set_item_hold(conn, item, by="cli")
+        db.set_repo_hold(conn, REPO, by="cli")
+    host = KillingHost(proc)
+
+    assert sweep(conn, audit, registry, proc, host) == 1
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+
+
+# -- keep-session-after-close (US2): a kept session is not an orphan ---------
+#
+# The sweep that would otherwise report it is `reclaim_stale_session`'s alive branch. The
+# keep is tested *inside* that branch, so a kept session whose worker has died is still
+# reclaimed (issue #28) — otherwise a reboot would leak the slot for as long as the keep
+# stands.
+
+
+def reclaim(conn, audit, item: int, registry: Path, proc: Path) -> str:
+    session = db.latest_session_for_item(conn, item)
+    with db.transaction(conn):
+        return reconcile.reclaim_stale_session(
+            conn,
+            audit,
+            session=session,
+            scan=sessions.scan(registry_dir=registry, proc_root=proc),
+            proc_root=proc,
+            reason="test",
+        )
+
+
+def test_a_kept_done_items_live_worker_is_left_with_no_anomaly(
+    conn, config, audit, layout, registry, proc
+):
+    item = finished_item(conn, config, registry, proc)
+    place_keep(layout, item)
+
+    assert reclaim(conn, audit, item, registry, proc) == "left"
+    assert db.list_anomalies(conn) == []
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+
+
+def test_a_kept_done_items_dead_worker_is_still_reclaimed(
+    conn, config, audit, layout, registry, proc
+):
+    """(F) The reboot case. The keep survives, the worker does not, and the row must be
+    closed or it holds a slot for as long as the keep stands."""
+    item = finished_item(conn, config, registry, proc)
+    place_keep(layout, item)
+    shutil.rmtree(proc / str(PID))
+
+    assert reclaim(conn, audit, item, registry, proc) == "reclaimed"
+    assert db.latest_session_for_item(conn, item).state is SessionState.LOST
+    assert db.is_kept(conn, item), "the keep is left in place, inert (research R7)"
+
+
+def test_a_kept_abandoned_items_live_worker_is_still_reported(
+    conn, config, audit, layout, registry, proc
+):
+    """``done`` only. ``operations.abandon`` calls this too, and a live worker under an
+    abandoned item is a real orphan whatever was said about it earlier."""
+    item = finished_item(conn, config, registry, proc, item_state="abandoned")
+    place_keep(layout, item)
+
+    assert reclaim(conn, audit, item, registry, proc) == "reported"
+    assert [a.kind for a in db.list_anomalies(conn)] == ["orphan_session"]
+
+
+def test_an_unkept_done_items_live_worker_is_still_reported(
+    conn, config, audit, registry, proc
+):
+    item = finished_item(conn, config, registry, proc)
+    assert reclaim(conn, audit, item, registry, proc) == "reported"
+    assert [a.kind for a in db.list_anomalies(conn)] == ["orphan_session"]
+
+
+def test_a_full_pass_over_a_kept_merged_item_keeps_session_tab_and_worktree(
+    conn, config, audit, layout, registry, proc
+):
+    """FR-002 end to end, with the US2 guard: the worker is not retired, no
+    ``orphan_session`` is raised, the tab stays, and the worktree is not a cleanup
+    candidate — for as long as the keep stands. Without the US2 guard every kept session
+    would raise an anomaly on the first pass and keep it open for as long as it was kept.
+
+    Cleanup is switched on and the repository is ``demo`` (the one the config fixture
+    gives a clone path), so the only thing between this worktree and removal is the keep."""
+    from dataclasses import replace
+
+    from tests.unit.test_cleanup import FakeVcs
+    from tests.unit.test_window_closing import open_window
+
+    from robot_army.boundaries.kitty import SimulatedDisplay
+
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS, repo_key="demo")
+    merge_pull_request(conn, item)
+    with db.transaction(conn):
+        db.update_work_item_columns(
+            conn,
+            item,
+            worktree_path=str(Path(config.worktree_root) / "issue-116"),
+            branch="robot-army/issue-116-x",
+        )
+    place_keep(layout, item)
+    display = SimulatedDisplay(audit)
+    open_window(display, item)
+    vcs = FakeVcs(ahead={"origin/main": 0})
+    cleaning = replace(config, cleanup=replace(config.cleanup, on_issue_close=True))
+
+    for _ in range(3):
+        result = reconcile.reconcile(
+            conn,
+            boundaries=make_boundaries(
+                audit, host=KillingHost(proc), display=display, vcs=vcs
+            ),
+            audit=audit,
+            config=cleaning,
+            layout=layout,
+            registry_dir=registry,
+            proc_root=proc,
+        )
+        assert result.retired == 0
+        assert result.orphans == 0
+        assert result.windows_closed == 0
+
+    assert db.latest_session_for_item(conn, item).state is SessionState.RUNNING
+    assert db.list_anomalies(conn, unacknowledged_only=False) == []
+    assert len(display.list_by_var(reconcile.WINDOW_ITEM_VAR)) == 1, "the tab stays"
+    assert item not in [
+        row.id for row in db.list_cleanup_candidates(conn, include_simulated=True)
+    ]
+    assert db.get_work_item(conn, item).cleanup_state is None
+    assert vcs.removals == [], "a kept item's worktree must not be removed"
+
+
+# -- a keep covers the current attempt only ------------------------------------
+#
+# Resuming while attempt 1's worker is still alive leaves two open rows. The keep is the
+# author's statement about the session they are using — the latest — and must not swallow
+# the superseded worker, which `orphan_session` reported while the item was active.
+
+SUPERSEDING_PID = 767309
+SUPERSEDING_SESSION = "5b1d6f0e-2c4a-4d8e-9a77-0c3f1e2d4b61"
+
+
+def resumed_item(
+    conn, config, registry: Path, proc: Path, *, superseded_status: str = "idle"
+) -> int:
+    """A ``done`` item with two open rows: attempt 1 (``SESSION``) superseded, attempt 2
+    current, both workers alive and long idle unless ``superseded_status`` says otherwise."""
+    item = finished_item(conn, config, registry, proc, status=superseded_status)
+    seed_session(
+        conn,
+        item,
+        state="running",
+        session_id=SUPERSEDING_SESSION,
+        pid=SUPERSEDING_PID,
+        proc_start=str(SUPERSEDING_PID),
+    )
+    cwd = Path(config.worktree_root) / "issue-116"
+    write_registry(
+        registry,
+        pid=SUPERSEDING_PID,
+        session_id=SUPERSEDING_SESSION,
+        proc_start=str(SUPERSEDING_PID),
+        cwd=str(cwd),
+        status="idle",
+        status_updated_at=now_ms() - LONG_IDLE_MS,
+    )
+    write_proc(proc, SUPERSEDING_PID, starttime=str(SUPERSEDING_PID), cwd=str(cwd))
+    return item
+
+
+def test_a_keep_does_not_stop_a_superseded_idle_attempt_being_retired(
+    conn, config, audit, layout, registry, proc
+):
+    item = resumed_item(conn, config, registry, proc)
+    place_keep(layout, item)
+    host = KillingHost(proc)
+
+    assert sweep(conn, audit, registry, proc, host) == 1
+
+    assert [pid for pid, _, _ in host.calls] == [PID], "only the superseded worker"
+    assert db.get_session(conn, SESSION).state is SessionState.LOST
+    assert db.get_session(conn, SUPERSEDING_SESSION).state is SessionState.RUNNING
+
+
+def test_a_keep_does_not_stop_a_superseded_busy_attempt_being_reported(
+    conn, config, audit, layout, registry, proc
+):
+    """Busy, so retirement leaves it; the stale sweep then reports it as an orphan, as it
+    would without the keep. The current attempt is left with no anomaly."""
+    item = resumed_item(conn, config, registry, proc, superseded_status="busy")
+    place_keep(layout, item)
+
+    result = reconcile.reconcile(
+        conn,
+        boundaries=make_boundaries(audit, host=KillingHost(proc)),
+        audit=audit,
+        config=config,
+        layout=layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+
+    assert result.retired == 0
+    assert db.get_session(conn, SESSION).state is SessionState.RUNNING
+    assert db.get_session(conn, SUPERSEDING_SESSION).state is SessionState.RUNNING
+    assert [(a.kind, a.entity_id) for a in db.list_anomalies(conn)] == [
+        ("orphan_session", SESSION)
+    ]
+    assert db.list_kept_sessions(conn) == [(REPO, SUPERSEDING_SESSION)]
+
+
+# -- FR-008: a retirement that followed a release is joinable to it ----------
+
+
+def test_a_retirement_after_a_release_names_a_session_the_release_recorded(
+    conn, config, audit, layout, registry, proc, monkeypatch
+):
+    """The join ``docs/guide/audit-log.md`` gives for "every retirement that came after a
+    release", exercised through the real command rather than the table: ``unkeep.item``
+    records the open session ids, and the ``session.retire`` the next pass writes names one
+    of them."""
+    from robot_army import operations
+
+    monkeypatch.setattr(
+        operations, "wire", lambda level, cfg, log, conn: make_boundaries(log, level=level)
+    )
+    item = finished_item(conn, config, registry, proc, idle_ms=FRESH_IDLE_MS)
+    merge_pull_request(conn, item)
+    place_keep(layout, item)
+
+    ctx = operations.build_context(config)
+    try:
+        operations.unkeep_item(ctx, item)
+    finally:
+        ctx.close()
+
+    result = reconcile.reconcile(
+        conn,
+        boundaries=make_boundaries(audit, host=KillingHost(proc)),
+        audit=audit,
+        config=config,
+        layout=layout,
+        registry_dir=registry,
+        proc_root=proc,
+    )
+    assert result.retired == 1
+
+    released = [r for r in records(layout, "unkeep.item") if r["kind"] == "outcome"]
+    assert len(released) == 1
+    assert released[0]["detail"]["released"] is True
+    retire = records(layout, "session.retire")
+    assert retire, "the release must lead to a retirement on the next pass"
+    assert {r["detail"]["session_id"] for r in retire} == {SESSION}
+    assert SESSION in released[0]["detail"]["open_sessions"]

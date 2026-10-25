@@ -318,6 +318,22 @@ def reclaim_stale_session(
 
     entry = scan.find(session.session_id)
     if entry is not None and entry.alive(proc_root=proc_root):
+        # A live worker under a `done` item the author has kept is accounted for: the keep
+        # *is* the statement that this session outlives its issue. Inside the alive branch
+        # on purpose — a kept session whose worker has died (exited, or the machine
+        # rebooted) must still fall through to `reclaimed` below, or its row holds a slot
+        # for as long as the keep stands (issue #28 again). `done` only, because
+        # `operations.abandon` reaches this too, and a live worker under an abandoned item
+        # is a real orphan whatever was said about it earlier. The current attempt only: a
+        # keep holds the item's session, not every worker it ever had, so a superseded
+        # attempt's live worker is reported here like any other.
+        if (
+            item is not None
+            and item.state is WorkItemState.DONE
+            and db.is_kept(conn, item.id)
+            and _is_current_attempt(conn, session)
+        ):
+            return "left"
         db.raise_anomaly(
             conn,
             kind="orphan_session",
@@ -1186,11 +1202,21 @@ def _retire_finished_sessions(
     documented Principle III gap: a 60-second loop reporting "still busy" about a session
     someone is using would write ~1,440 records a day carrying one bit, and the condition
     is re-derivable from the registry at any instant. ``_sweep_transcripts`` sets the same
-    precedent for the same shape of decision.
+    precedent for the same shape of decision. A **kept** item is the same "not yet", for an
+    operator-chosen length of time rather than a quiet period, and is skipped just as
+    silently: the ``keep.item``/``unkeep.item`` pair already reconstructs when it was kept
+    and released, so a record per pass would add nothing but volume.
+
+    The keep is the only thing read here besides the item and the registry. A pause and a
+    hold govern dispatch, not the end of a session, and are deliberately not consulted
+    (FR-012, clarification 3a).
 
     Bounded by the number of open session rows, which the global cap bounds in turn.
     """
     retired = 0
+    # Once per pass, not per row. Read fresh every pass, so a keep placed against a stopped
+    # daemon is honoured by the first pass after it starts and nothing can go stale.
+    keeps = db.list_item_keeps(conn)
     for session in db.list_sessions(
         conn,
         include_simulated=True,
@@ -1198,6 +1224,14 @@ def _retire_finished_sessions(
     ):
         item = db.get_work_item(conn, session.work_item_id)
         if item is None or item.state is not WorkItemState.DONE:
+            continue
+
+        # Kept by the operator: leave it, before any liveness or idleness read, so a kept
+        # session costs no registry lookup. `_retire_signal` is untouched on purpose —
+        # releasing the keep returns the item to exactly the decision it would have met.
+        # The current attempt only: a superseded attempt's open row is not the session the
+        # author kept, and is retired when idle exactly as if there were no keep.
+        if item.id in keeps and _is_current_attempt(conn, session):
             continue
 
         # No process was ever recorded, so there is nothing to end. A simulated row is
@@ -1708,10 +1742,20 @@ def _resolve_orphan_anomalies(
     list which is mostly stale teaches the habit of clearing it without reading it, which is
     how the anomaly that mattered gets acknowledged along with the noise.
 
-    **Only this kind, and only this condition.** ``orphan_session`` is the one anomaly whose
-    truth can be positively re-established as false, because both places that raise it write
-    the pid and the process start time into ``detail``. Every other kind has its own
+    **Only this kind, and only these two conditions.** ``orphan_session`` is the one anomaly
+    whose truth can be positively re-established as false, because both places that raise it
+    write the pid and the process start time into ``detail``. Every other kind has its own
     settling story and none of them is guessed at here.
+
+    The second condition is a **keep**. If the worker was busy when its item reached
+    ``done``, the same pass raised this before the author could say they wanted the session
+    kept. The anomaly's claim was "nothing accounts for this worker"; a keep on a ``done``
+    item whose row is still open now does, so the claim is false and is retracted. The pid
+    re-check still runs first, so a worker that has since died is resolved as dead, which is
+    the truer of the two reasons. Only ``done``, only an open row, and only the item's
+    current attempt, matching ``reclaim_stale_session``'s rule, so the two cannot disagree:
+    a closed row, an abandoned item, or a superseded attempt's worker is one the keep does
+    not account for.
 
     Identity, not the number: ``procinfo.is_alive`` compares ``/proc/<pid>/stat`` field 22
     against the recorded start time, so a *recycled* pid — the number reused by an unrelated
@@ -1732,12 +1776,32 @@ def _resolve_orphan_anomalies(
         except (ValueError, TypeError):
             detail = {}
         pid = detail.get("pid") if isinstance(detail, dict) else None
-        if not isinstance(pid, int) or isinstance(pid, bool):
-            # No evidence to re-check against. Left alone permanently and deliberately:
-            # "we could not check" must never be recorded as "it is fine".
-            continue
-        proc_start = detail.get("proc_start")
-        if procinfo.is_alive(pid, proc_start, root=proc_root):
+        has_pid = isinstance(pid, int) and not isinstance(pid, bool)
+        proc_start = detail.get("proc_start") if has_pid else None
+        # The pid re-check first, so a kept session whose worker has died is resolved for
+        # the reason that is true of it — the process is gone — rather than for the keep,
+        # which would tell the log reader the worker is still there and accounted for.
+        if has_pid and not procinfo.is_alive(pid, proc_start, root=proc_root):
+            reason_detail: dict[str, Any] = {
+                "pid": pid,
+                "proc_start": proc_start,
+                "reason": (
+                    "the process this anomaly named is no longer running, so the "
+                    "condition it reported no longer holds"
+                ),
+            }
+        elif _kept_and_open(conn, anomaly, detail):
+            reason_detail = {
+                "work_item_id": detail.get("work_item_id"),
+                "reason": (
+                    "the work item is done and kept by the operator, so this "
+                    "session is accounted for"
+                ),
+            }
+        else:
+            # Alive and not kept, or no pid to re-check against. The latter is left alone
+            # permanently and deliberately: "we could not check" must never be recorded as
+            # "it is fine".
             continue
 
         with db.transaction(conn):
@@ -1751,12 +1815,7 @@ def _resolve_orphan_anomalies(
                 detail={
                     "kind": anomaly.kind,
                     "anomaly_entity_id": anomaly.entity_id,
-                    "pid": pid,
-                    "proc_start": proc_start,
-                    "reason": (
-                        "the process this anomaly named is no longer running, so the "
-                        "condition it reported no longer holds"
-                    ),
+                    **reason_detail,
                 },
                 # The retraction of a rehearsed anomaly is itself rehearsed work (issue #21).
                 # Without this the record shows in `robot-army log`'s default view while the
@@ -1766,6 +1825,42 @@ def _resolve_orphan_anomalies(
             )
         resolved += 1
     return resolved
+
+
+def _kept_and_open(conn: sqlite3.Connection, anomaly: Any, detail: Any) -> bool:
+    """Whether an ``orphan_session`` now names a session the author has kept.
+
+    The item comes from ``detail.work_item_id``, which both raising sites record; the
+    session from the anomaly's entity. Anything missing or malformed is "no": an anomaly
+    this cannot read is left to the pid re-check, never retracted on a guess.
+    """
+    if not isinstance(detail, dict):
+        return False
+    item_id = detail.get("work_item_id")
+    if not isinstance(item_id, int) or isinstance(item_id, bool):
+        return False
+    item = db.get_work_item(conn, item_id)
+    if item is None or item.state is not WorkItemState.DONE or not db.is_kept(conn, item_id):
+        return False
+    session = db.get_session(conn, str(anomaly.entity_id)) if anomaly.entity_id else None
+    return (
+        session is not None
+        and session.state in (SessionState.STARTING, SessionState.RUNNING)
+        and _is_current_attempt(conn, session)
+    )
+
+
+def _is_current_attempt(conn: sqlite3.Connection, session: Session) -> bool:
+    """Whether ``session`` is its item's latest attempt — the only session a keep covers.
+
+    A keep is keyed on the item (research R8) but means "this session outlives its issue".
+    Resuming while an earlier worker is still alive leaves two open rows, and the earlier
+    one is ``_sweep_superseded_sessions``'s ``orphan_session`` whatever the author later
+    says about the item. Every place that honours a keep asks this, so none of them can
+    swallow that worker.
+    """
+    latest = db.latest_session_for_item(conn, session.work_item_id)
+    return latest is not None and latest.id == session.id
 
 
 def _resolve_card_create_anomalies(conn: sqlite3.Connection, *, audit: AuditLog) -> int:

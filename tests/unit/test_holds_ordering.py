@@ -428,3 +428,56 @@ def test_plan_still_reports_every_reason_after_the_launch_holds_extraction(conn,
     with db.transaction(conn):
         db.set_dispatch_paused(conn, paused=True, by="cli")
     assert plan(conn, config)[0].hold is reason.PAUSED, "and it outranks the hold above"
+
+
+# -- keep-session-after-close (US2): a cap reason names kept sessions ---------
+#
+# A kept session holds a slot, which is its cost. The reason that bites is the repository
+# cap, and naming the kept session there names the fix: release one with `unkeep`.
+
+
+def test_the_repository_cap_reason_names_kept_sessions(conn, config):
+    ready(conn, 1)
+    entry = plan(
+        conn,
+        config,
+        total=1,
+        ours=("s-kept",),
+        per_repo={"demo": 1},
+        kept_per_repo={"demo": 1},
+    )[0]
+
+    assert entry.hold is ordering.HoldReason.REPO_CAP
+    assert entry.detail.startswith("repository demo: 1 of 1 sessions (")
+    assert entry.detail.endswith("), 1 kept")
+
+
+def test_the_repository_cap_reason_is_unchanged_with_nothing_kept(conn, config):
+    ready(conn, 1)
+    entry = plan(conn, config, total=1, ours=("s-1",), per_repo={"demo": 1})[0]
+
+    assert entry.hold is ordering.HoldReason.REPO_CAP
+    assert "kept" not in entry.detail
+    assert entry.detail.endswith(")")
+
+
+def test_the_global_cap_reason_carries_the_kept_breakdown(conn, config):
+    ready(conn, 1)
+    entry = plan(
+        conn,
+        config,
+        total=2,
+        global_cap=2,
+        ours=("s-1", "s-2"),
+        kept_per_repo={"other/repo": 1},
+        kept_session_ids=("s-1",),
+    )[0]
+
+    assert entry.hold is ordering.HoldReason.GLOBAL_CAP
+    assert entry.detail == "2 of 2 sessions running (2 ours (1 kept), 0 other)"
+
+
+def test_the_global_cap_reason_is_unchanged_with_nothing_kept(conn, config):
+    ready(conn, 1)
+    entry = plan(conn, config, total=2, global_cap=2, ours=("s-1", "s-2"))[0]
+    assert entry.detail == "2 of 2 sessions running (2 ours, 0 other)"

@@ -758,3 +758,32 @@ def test_a_transient_close_failure_is_never_settled(conn, audit, layout):
     assert sweep(conn, audit, display) == 1, (
         "a window whose close kept failing must still be closable once it stops"
     )
+
+
+# -- keep-session-after-close (US1 scenario 3, research R4) ------------------
+#
+# No code change was needed for the tab: the open-row guard above already keeps a kept
+# session's window. These pin that claim, because "no change needed" holds only while that
+# guard does.
+
+
+def test_a_kept_done_items_tab_stays_while_its_session_runs_and_goes_when_it_exits(
+    conn, audit
+):
+    display = SimulatedDisplay(audit)
+    item = finished_item(conn, session_states=("running",))
+    with db.transaction(conn):
+        db.set_item_keep(conn, item, by="cli")
+    open_window(display, item)
+
+    for _ in range(3):
+        assert sweep(conn, audit, display) == 0
+    assert len(display.list_by_var(reconcile.WINDOW_ITEM_VAR)) == 1
+
+    # The author exits the session; its exit record closes the row. The keep is still in
+    # place and does not matter any more: nothing is running in that window.
+    conn.execute("UPDATE sessions SET state = 'exited_clean' WHERE work_item_id = ?", (item,))
+    assert db.is_kept(conn, item)
+
+    assert sweep(conn, audit, display) == 1
+    assert display.list_by_var(reconcile.WINDOW_ITEM_VAR) == []

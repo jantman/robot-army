@@ -45,6 +45,7 @@ READ_COMMANDS = frozenset(
         "doctor",
         "cards",
         "holds",
+        "keeps",
     }
 )
 
@@ -361,6 +362,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("holds", help="every hold in force, including ones holding nothing")
 
+    # Keeping a session past its issue closing. Siblings of `hold`/`unhold` in shape and
+    # deliberately separate verbs (FR-012). Item-only, so a plain positional id: there is no
+    # repository-scoped keep (clarification 1a) and so no target to state.
+    for verb, blurb in (
+        ("keep", "keep one item's session open after its issue closes, until released"),
+        ("unkeep", "release a keep placed by `keep`"),
+    ):
+        parser_for = sub.add_parser(verb, help=blurb)
+        parser_for.add_argument("item_id", type=int, help="the work item to act on")
+
+    sub.add_parser("keeps", help="every keep in force, including ones whose session has ended")
+
     attach = sub.add_parser("attach", help="open a terminal window on a running session")
     attach.add_argument("item_id", type=int)
 
@@ -400,6 +413,8 @@ def build_parser() -> argparse.ArgumentParser:
             "unpause",
             "hold",
             "unhold",
+            "keep",
+            "unkeep",
             "attach",
             # `onboard` is here because 011 gave it a machine-readable mode to be correct
             # about: its prompt writes to stderr and its approval screen is suppressed so
@@ -660,6 +675,9 @@ def _dispatch(args: argparse.Namespace, ctx: Context) -> Result | None:
         "hold": lambda: _hold(args, ctx, holding=True),
         "unhold": lambda: _hold(args, ctx, holding=False),
         "holds": lambda: operations.list_holds(ctx),
+        "keep": lambda: operations.keep_item(ctx, args.item_id, by="cli"),
+        "unkeep": lambda: operations.unkeep_item(ctx, args.item_id, by="cli"),
+        "keeps": lambda: operations.list_keeps(ctx),
         "attach": lambda: operations.attach(ctx, args.item_id),
         "cards": lambda: operations.cards(
             ctx, state=args.state, include_simulated=include_simulated

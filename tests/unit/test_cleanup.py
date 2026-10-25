@@ -641,3 +641,90 @@ def test_a_real_removal_keeps_its_wording(conn, config, audit):
 
     assert decision.simulated is False
     assert decision.reason.startswith("worktree removed; branch removed — ")
+
+
+# -- keep-session-after-close (US1, research R5) -----------------------------
+#
+# The guard already refuses a kept item while its session runs, so the disk is safe with no
+# change. What changes is the volume: a keep can stand for days, and re-offering the item
+# every pass would write a ``cleanup.considered``/``skipped`` record a minute (the C6 shape).
+
+
+def _considered(layout) -> list[dict]:
+    import json
+
+    return [
+        record
+        for path in sorted(layout.log_dir.glob("audit-*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (record := json.loads(line))["action"] == "cleanup.considered"
+    ]
+
+
+def test_a_kept_item_with_a_live_session_is_not_offered_to_automatic_cleanup(
+    conn, config, audit, layout
+):
+    from robot_army import reconcile
+
+    item = finished(conn)
+    seed_session(conn, item.id, state=str(SessionState.RUNNING), session_id="s-live")
+    with db.transaction(conn):
+        db.set_item_keep(conn, item.id, by="cli")
+    vcs = FakeVcs()
+
+    assert item.id not in [c.id for c in db.list_cleanup_candidates(conn)]
+    for _ in range(3):
+        decisions = reconcile._cleanup_worktrees(
+            conn, boundaries=boundaries_with(audit, vcs), audit=audit, config=config
+        )
+        assert decisions == []
+    audit.close()
+
+    assert vcs.removals == []
+    assert _considered(layout) == [], "an excluded candidate writes nothing"
+
+
+def test_an_inert_keep_does_not_block_reclaiming_the_disk(conn, config, audit):
+    """A keep left standing after its session ended protects nothing (research R7), and a
+    forgotten one must not retain a worktree for ever."""
+    item = finished(conn)
+    seed_session(conn, item.id, state=str(SessionState.EXITED_CLEAN), session_id="s-done")
+    with db.transaction(conn):
+        db.set_item_keep(conn, item.id, by="cli")
+
+    assert item.id in [c.id for c in db.list_cleanup_candidates(conn)]
+    decisions = cleanup.sweep(
+        conn, boundaries=boundaries_with(audit, FakeVcs()), audit=audit, config=config
+    )
+    assert [d.item_id for d in decisions] == [item.id]
+    assert decisions[0].state != cleanup.SKIPPED
+
+
+def test_an_unkept_item_with_a_live_session_is_still_offered_and_skipped(
+    conn, config, audit
+):
+    """Unchanged for an unkept item (SC-003): the exclusion needs both conditions."""
+    item = finished(conn)
+    seed_session(conn, item.id, state=str(SessionState.RUNNING), session_id="s-live")
+    assert item.id in [c.id for c in db.list_cleanup_candidates(conn)]
+
+
+def test_cleanup_naming_a_kept_live_item_still_reports_it_as_live(conn, config, audit):
+    """FR-011. ``cleanup <id>`` does not use the candidate list, so it still says why."""
+    item = finished(conn)
+    seed_session(conn, item.id, state=str(SessionState.RUNNING), session_id="s-live")
+    with db.transaction(conn):
+        db.set_item_keep(conn, item.id, by="cli")
+    vcs = FakeVcs()
+
+    decisions = cleanup.sweep(
+        conn,
+        boundaries=boundaries_with(audit, vcs),
+        audit=audit,
+        config=config,
+        item_id=item.id,
+    )
+
+    assert [d.state for d in decisions] == [cleanup.SKIPPED]
+    assert "still live" in decisions[0].reason
+    assert vcs.removals == []

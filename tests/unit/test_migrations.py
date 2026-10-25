@@ -22,6 +22,7 @@ EXPECTED_TABLES = {
     "repo_projects",
     "item_holds",
     "repo_holds",
+    "item_keeps",
 }
 
 
@@ -511,7 +512,7 @@ def test_a_killed_migration_004_leaves_user_version_at_three_and_re_runs(
 def test_the_schema_version_derives_from_the_ladder_length(tmp_path):
     """Appending a migration is the whole act of adding one. A hand-maintained constant
     beside the tuple is a second thing to remember and a second thing to get wrong."""
-    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 15
+    assert SCHEMA_VERSION == len(migrations.MIGRATIONS) == 16
 
 
 # -- migration 005 (milestone 005, T019) ------------------------------------
@@ -1814,4 +1815,116 @@ def test_a_killed_migration_015_leaves_user_version_at_fourteen_and_re_runs(
     assert (start, end) == (14, SCHEMA_VERSION)
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(poll_state)")}
     assert "etag_request" in columns
+    conn.close()
+
+
+# -- migration 016: the keep table (keep a session after its issue closes) ---
+
+
+def test_migration_016_creates_the_keep_table_with_its_own_column_names(tmp_path):
+    """Its own table and its own column names, never a scope on ``item_holds``: a row in
+    ``item_keeps`` reading ``held_at`` is exactly the confusion between the two statements
+    that FR-012 forbids."""
+    conn, (start, end) = db.open_database(tmp_path / "state.db")
+    assert (start, end) == (0, SCHEMA_VERSION)
+    assert SCHEMA_VERSION == 16
+
+    columns = {
+        row["name"]: row for row in conn.execute("PRAGMA table_info(item_keeps)")
+    }
+    assert set(columns) == {"work_item_id", "kept_at", "kept_by"}
+    assert columns["work_item_id"]["pk"] == 1
+    assert columns["work_item_id"]["type"] == "INTEGER"
+    assert columns["kept_at"]["notnull"] == 1
+    assert columns["kept_by"]["notnull"] == 1
+
+    keys = list(conn.execute("PRAGMA foreign_key_list(item_keeps)"))
+    assert len(keys) == 1
+    assert keys[0]["table"] == "work_items"
+    assert keys[0]["from"] == "work_item_id"
+    assert keys[0]["on_delete"] == "CASCADE"
+    conn.close()
+
+
+def test_migration_016_cascades_a_keep_away_with_its_item(tmp_path):
+    """A keep cannot outlive the item it keeps, nor reattach itself to a recycled id."""
+    conn, _ = db.open_database(tmp_path / "state.db")
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    with db.transaction(conn):
+        db.upsert_repo(conn, repo_key="demo", settings_fingerprint=None, trust_verified=True)
+        item_id = db.insert_work_item(
+            conn,
+            source="github",
+            source_id="demo#1",
+            source_url="https://github.com/x/demo/issues/1",
+            repo_key="demo",
+            issue_number=1,
+            title="t",
+            body="b",
+            labels="[]",
+            author="jantman",
+            dry_run=False,
+        )
+        conn.execute("INSERT INTO item_keeps VALUES (?, 't', 'cli')", (item_id,))
+    with db.transaction(conn):
+        conn.execute("DELETE FROM work_items WHERE id = ?", (item_id,))
+    assert conn.execute("SELECT COUNT(*) FROM item_keeps").fetchone()[0] == 0
+    conn.close()
+
+
+def test_migration_016_upgrades_a_015_era_database_without_a_backfill(tmp_path):
+    """No keep existed before this migration, so an upgraded database is correct the
+    instant the table exists, and nothing already stored is touched."""
+    conn = db.connect(tmp_path / "state.db")
+    _ladder_to(conn, 15)
+    with db.transaction(conn):
+        db.upsert_repo(conn, repo_key="demo", settings_fingerprint=None, trust_verified=True)
+        item_id = db.insert_work_item(
+            conn,
+            source="github",
+            source_id="demo#1",
+            source_url="https://github.com/x/demo/issues/1",
+            repo_key="demo",
+            issue_number=1,
+            title="t",
+            body="b",
+            labels="[]",
+            author="jantman",
+            dry_run=False,
+        )
+        conn.execute("INSERT INTO item_holds VALUES (?, 't', 'cli')", (item_id,))
+
+    start, end = migrate(conn)
+
+    assert (start, end) == (15, SCHEMA_VERSION)
+    assert db.get_work_item(conn, item_id) is not None
+    assert set(db.list_item_holds(conn)) == {item_id}
+    assert conn.execute("SELECT COUNT(*) FROM item_keeps").fetchone()[0] == 0
+    conn.close()
+
+
+def test_a_killed_migration_016_leaves_user_version_at_fifteen_and_re_runs(
+    tmp_path, monkeypatch
+):
+    conn = db.connect(tmp_path / "state.db")
+    _ladder_to(conn, 15)
+
+    def _explode(connection: sqlite3.Connection) -> None:
+        migrations._migration_016(connection)
+        raise RuntimeError("killed mid-migration")
+
+    monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:15], _explode))
+    with pytest.raises(RuntimeError):
+        migrate(conn)
+
+    assert current_version(conn) == 15
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master")}
+    assert "item_keeps" not in tables, "no half-applied table may be observable"
+
+    monkeypatch.undo()
+    start, end = migrate(conn)
+
+    assert (start, end) == (15, SCHEMA_VERSION)
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master")}
+    assert "item_keeps" in tables
     conn.close()

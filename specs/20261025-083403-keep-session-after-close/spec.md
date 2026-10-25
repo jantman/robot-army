@@ -131,8 +131,9 @@ survive; place one on a `done` item whose session has already ended and observe 
 
 - **Keep placed before dispatch.** A keep placed on an item that has not yet started a session
   applies to the session it later starts. [Assumption; see Assumptions.]
-- **Item ends `failed` or `abandoned`.** Those already keep their workers and tabs; a keep is
-  harmless there and changes nothing.
+- **Item ends `failed` or `abandoned`.** Those already keep their workers and tabs. A keep on
+  `failed` is accepted (a retry can still reach `done`); a keep on `abandoned` is refused,
+  because it can never reach `done` and the keep could never take effect (decided 2026-10-25).
 - **Item retried or resumed after a keep.** The keep belongs to the item, so it covers the item's
   current session, not just the one open when it was placed.
 - **Daemon restart or reboot.** A keep is durable runtime state, like a hold: it survives both.

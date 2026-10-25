@@ -13,7 +13,8 @@ They are shaped like `_item_hold_action` (`web/server.py:1165`):
 - `require_item` and the operation run **inside** the body, so a refusal is recorded.
 - They are not effect-guarded and do not require the daemon.
 - On success they redirect to the referring view, falling back to `/item/<id>`, with the
-  message `kept` or `released`.
+  message `kept` or `unkept`. Not `released`: that key is already the hold's banner, and
+  sharing it would make a released keep read as a released hold.
 - An FR-010 refusal renders the operation's message, including the resume line, with the
   terminal exit code, which is the existing `Refusal` path.
 

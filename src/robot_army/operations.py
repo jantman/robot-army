@@ -4558,6 +4558,293 @@ def unhold_repo(ctx: Context, repo_key: str, *, by: str = "cli") -> Result:
     return result
 
 
+# -- keeping a session past its issue closing ----------------------------------
+#
+# Parallel to the holds above and deliberately not merged with them (FR-012): a hold stops
+# work *starting*, a keep stops a finished item's session *ending*. Same idiom — one
+# transaction, one audit pair, a redundant request reported rather than refused — under
+# its own names, so neither verb can be read as the other.
+
+
+def _open_session_ids(ctx: Context, item_id: int) -> list[str]:
+    """Session ids of the item's open (``starting``/``running``) rows, in attempt order.
+
+    ``cleanup.live_sessions`` is the one definition of "open", shared with cleanup's guard
+    and the tab's, so a keep's notion of a live session cannot drift from theirs.
+    """
+    return [row.session_id for row in cleanup_mod.live_sessions(ctx.conn, item_id)]
+
+
+class _KeepRefused(Exception):
+    """Raised inside ``keep.item``'s audit pair so a refusal is recorded as its ``error``
+    outcome rather than returned before the intent was written."""
+
+
+def keep_refusal_reason(conn: sqlite3.Connection, item: WorkItem) -> str | None:
+    """Why ``keep`` would refuse this item, or ``None`` if it would place a keep (FR-010).
+
+    **``abandoned`` is refused whatever its sessions.** It has no transition out, so it can
+    never reach ``done`` and a keep on it could never take effect — accepting one would
+    print a promise nothing honours. Its worker is already left alone (retirement only
+    touches ``done``), and ``cancel`` is the route that ends it, so the refusal says that.
+
+    **Otherwise refused only when the item is finished and no session is open under it**:
+    there is nothing to keep and nothing that can start one. Every other state is accepted,
+    because a session can still exist later — ``ready`` and ``dispatching`` get one at dispatch,
+    ``interrupted``, ``awaiting_review`` and ``failed`` get one on resume or retry, and the
+    keep is keyed on the item rather than a session (research R8). Refusing those would make
+    the author wait for a session before saying they want it kept, by which time a merge may
+    already have retired it.
+
+    One predicate for the command and the web's item page, so the page cannot offer a
+    control the command would refuse.
+    """
+    if item.state is WorkItemState.ABANDONED:
+        return (
+            f"work item {item.id} is abandoned and can never reach done, so a keep would "
+            "never take effect. An abandoned item's session is already left running; "
+            f"`robot-army cancel {item.id}` ends it."
+        )
+    if item.state not in TERMINAL_WORK_ITEM_STATES:
+        return None
+    if cleanup_mod.live_sessions(conn, item.id):
+        return None
+    return (
+        f"work item {item.id} is {item.state} and has no running session; there is nothing "
+        "to keep."
+    )
+
+
+def keep_item(ctx: Context, item_id: int, *, by: str = "cli") -> Result:
+    """Keep one item's session open past its issue closing, until released.
+
+    The case is post-merge verification: in a configuration-management repository the
+    merge is the deploy, and the author wants to check the result from inside the session
+    that made it. Reconciliation would retire that worker on the first idle pass after the
+    merge; a keep withholds that, the tab close that follows it, and automatic cleanup of the
+    checkout, and does nothing else.
+
+    **A keep starts, stops and signals nothing**, so it needs no running daemon and no
+    effect-level guard: it is one row that reconciliation reads on its next pass, whenever
+    that is. It never expires (clarification 2a) and is not cleared when the session ends
+    (research R7); exiting the session is what ends a kept session.
+    """
+    item = db.get_work_item(ctx.conn, item_id)
+    if item is None:
+        return _no_such_item(ctx, item_id, action="keep.item")
+
+    before = db.list_item_keeps(ctx.conn).get(item_id)
+    live = bool(_open_session_ids(ctx, item_id))
+    refusal = keep_refusal_reason(ctx.conn, item)
+    try:
+        with ctx.audit.action(
+            "keep.item",
+            entity_type="work_item",
+            entity_id=item_id,
+            detail={
+                "by": by,
+                "was_kept": before is not None,
+                "state": str(item.state),
+                "live_session": live,
+            },
+        ) as outcome:
+            if refusal is not None:
+                outcome["reason"] = refusal
+                raise _KeepRefused(refusal)
+            with db.transaction(ctx.conn):
+                keep, placed = db.set_item_keep(ctx.conn, item_id, by=by)
+            outcome.update(
+                {"kept_at": keep.kept_at, "kept_by": keep.kept_by, "placed": placed}
+            )
+    except _KeepRefused:
+        lines = [refusal or ""]
+        latest = db.latest_session_for_item(ctx.conn, item_id)
+        if latest is not None and not live:
+            # A finished session's transcript outlives it, so the honest answer to "keep
+            # it" is the route back to it rather than a promise nothing can honour.
+            lines.append(f"Its transcript survives: claude --resume {latest.session_id}")
+        return Result(
+            code=EXIT_PRECONDITION,
+            lines=lines,
+            data={"item_id": item_id, "kept": False, "state": str(item.state)},
+        )
+
+    result = Result(
+        data={
+            "item_id": item_id,
+            "kept": True,
+            "kept_at": keep.kept_at,
+            "kept_by": keep.kept_by,
+            "redundant": not placed,
+            "state": str(item.state),
+            "live_session": live,
+        }
+    )
+    if not placed:
+        # The keep already in force, with its original time, is the useful answer — the
+        # judgement `hold_item` makes for the same reason.
+        result.say(
+            f"work item {item_id} was already kept, since "
+            f"{timefmt.local(keep.kept_at)} by {keep.kept_by}"
+        )
+        return result
+    result.say(
+        f"work item {item_id} (#{item.issue_number} {item.repo_key}) kept at "
+        f"{timefmt.local(keep.kept_at)} by {by}"
+    )
+    if item.state is WorkItemState.DONE and live:
+        result.say(
+            "Its session will not be retired, its tab not closed and its checkout not "
+            "reclaimed until released. It holds a session slot meanwhile."
+        )
+    else:
+        result.say(
+            "The keep takes effect when the issue closes: the session stays open instead "
+            "of being retired."
+        )
+    result.say(f"Release it with `robot-army unkeep {item_id}`.")
+    return result
+
+
+def unkeep_item(ctx: Context, item_id: int, *, by: str = "cli") -> Result:
+    """Release one item's keep. Releasing what is not kept is a no-op that exits 0.
+
+    The ids of the sessions open at the moment of release are collected **before** the row
+    is cleared and recorded on ``unkeep.item`` (FR-008). That is what makes a retirement
+    that follows a release distinguishable from the log alone: the next ``session.retire``
+    for one of those ids is the one the release allowed. ``session.retire`` itself is
+    unchanged, because it would otherwise need to know that a keep *used to* exist.
+    """
+    item = db.get_work_item(ctx.conn, item_id)
+    if item is None:
+        return _no_such_item(ctx, item_id, action="unkeep.item")
+
+    open_sessions = _open_session_ids(ctx, item_id)
+    with (
+        ctx.audit.action(
+            "unkeep.item",
+            entity_type="work_item",
+            entity_id=item_id,
+            detail={"by": by},
+        ) as outcome,
+        db.transaction(ctx.conn),
+    ):
+        removed = db.clear_item_keep(ctx.conn, item_id)
+        outcome.update(
+            {
+                "released": removed is not None,
+                "was_kept_at": removed.kept_at if removed else None,
+                "open_sessions": open_sessions,
+            }
+        )
+
+    result = Result(
+        data={
+            "item_id": item_id,
+            "kept": False,
+            "released": removed is not None,
+            "open_sessions": open_sessions,
+        }
+    )
+    if removed is None:
+        result.say(f"work item {item_id} was not kept; nothing to release")
+        return result
+    result.say(
+        f"work item {item_id} released; it was kept since {timefmt.local(removed.kept_at)} "
+        f"by {removed.kept_by}"
+    )
+    if item.state is WorkItemState.DONE and open_sessions:
+        result.say("Its session is retired on the next reconciliation pass that finds it idle.")
+    return result
+
+
+def _keep_rows(ctx: Context) -> list[dict[str, Any]]:
+    """Every keep in force as the ``keeps --json`` row shape, oldest item id first.
+
+    One builder for both surfaces, so ``keeps`` and the ``/active`` "kept" section cannot
+    describe the same keep differently.
+    """
+    rows: list[dict[str, Any]] = []
+    for item_id, keep in sorted(db.list_item_keeps(ctx.conn).items()):
+        item = db.get_work_item(ctx.conn, item_id)
+        open_ids = _open_session_ids(ctx, item_id)
+        latest = db.latest_session_for_item(ctx.conn, item_id)
+        rows.append(
+            {
+                "item_id": item_id,
+                "repo_key": item.repo_key if item else None,
+                "issue_number": item.issue_number if item else None,
+                "state": str(item.state) if item else None,
+                "kept_at": keep.kept_at,
+                "kept_by": keep.kept_by,
+                "age_seconds": health._age(keep.kept_at),
+                # The latest attempt, when its row is open: the only session a keep holds.
+                # Any other open row is the superseded-attempt case, which `orphan_session`
+                # reports and reconciliation retires whatever the keep says.
+                "open_session_id": (
+                    latest.session_id
+                    if latest is not None and latest.session_id in open_ids
+                    else None
+                ),
+            }
+        )
+    return rows
+
+
+def keep_session_label(row: dict[str, Any]) -> str:
+    """The ``session`` column, in the three words both surfaces use.
+
+    ``none yet`` and ``no live session`` are different facts: the first is a keep waiting
+    for a session that can still start, the second an inert keep whose item is finished and
+    whose session is gone — the one a reader should consider releasing.
+    """
+    if row["open_session_id"]:
+        return f"live {row['open_session_id']}"
+    state = row["state"]
+    if state is not None and WorkItemState(state) in TERMINAL_WORK_ITEM_STATES:
+        return "no live session"
+    return "none yet"
+
+
+def list_keeps(ctx: Context) -> Result:
+    """Every keep in force, **including inert ones** (FR-007).
+
+    Inert keeps — the item finished and its session is gone — are listed and never cleared,
+    for the reason ``list_holds`` gives: nothing sweeps a hold, because clearing on a state
+    transition is expiry under another name, and a keep has no expiry by design
+    (clarification 2a). Showing the item's state and that no session is left is what makes
+    such a keep visible rather than mysterious. It costs nothing else: it holds no slot and
+    blocks no cleanup.
+
+    With nothing kept it says so in words, because an empty table is the same output a
+    broken query would produce.
+    """
+    rows = _keep_rows(ctx)
+    result = Result(data={"keeps": rows, "count": len(rows)})
+    if not rows:
+        result.say("nothing is kept")
+        return result
+
+    result.say(f"kept items ({len(rows)}):")
+    table_rows = [
+        [
+            str(row["item_id"]),
+            row["repo_key"] or "-",
+            f"#{row['issue_number']}" if row["issue_number"] else "-",
+            row["state"] or "-",
+            keep_session_label(row),
+            timefmt.local(row["kept_at"]) or "-",
+            row["kept_by"],
+        ]
+        for row in rows
+    ]
+    for line in _table(table_rows, ["item", "repo", "issue", "state", "session", "kept", "by"]):
+        result.say("  " + line)
+    result.say()
+    result.say("Release with `robot-army unkeep <item>`.")
+    return result
+
+
 def _no_such_item(ctx: Context, item_id: int, *, action: str) -> Result:
     """Refuse, and record the refusal.
 

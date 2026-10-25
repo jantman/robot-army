@@ -782,3 +782,106 @@ def test_an_interrupted_restatement_leaves_the_previous_text(conn):
     stored = stored_row(conn, anomaly_id)
     assert stored.detail_obj == PUBLIC
     assert stored.detected_at == OLD_STAMP
+
+
+# -- keep-session-after-close (US2): a keep accounts for an orphan -----------
+#
+# If the worker was busy when its item reached `done`, the same pass raised `orphan_session`
+# before the author could place a keep. The anomaly said "nobody accounts for this"; the keep
+# now does, so it is retracted. The pid re-check still runs first, so a worker that has since
+# died is resolved as dead rather than as kept.
+
+
+KEPT_REASON = "the work item is done and kept by the operator, so this session is accounted for"
+
+
+def kept_orphan(conn, proc, *, item_state: str = "done", keep: bool = True,
+                session_state: str = "running", alive: bool = True) -> tuple[int, int]:
+    from tests.conftest import seed_item, seed_session
+
+    item = seed_item(conn, state=item_state)
+    seed_session(conn, item, state=session_state, session_id="sess-1", pid=PID)
+    if alive:
+        write_proc(proc, PID, starttime=START)
+    with db.transaction(conn):
+        db.raise_anomaly(
+            conn,
+            kind="orphan_session",
+            entity_type="session",
+            entity_id="sess-1",
+            detail={"pid": PID, "proc_start": START, "work_item_id": item},
+        )
+        if keep:
+            db.set_item_keep(conn, item, by="cli")
+    return item, next(a.id for a in db.list_anomalies(conn) if a.entity_id == "sess-1")
+
+
+def test_an_orphan_under_a_kept_done_item_is_retracted_with_the_keep_reason(
+    conn, audit, layout, proc
+):
+    item, anomaly_id = kept_orphan(conn, proc)
+
+    assert resolve(conn, audit, proc) == 1
+
+    assert db.list_anomalies(conn) == []
+    resolved = records(layout, "anomaly.resolved")
+    assert len(resolved) == 1
+    assert resolved[0]["entity_id"] == str(anomaly_id)
+    assert resolved[0]["detail"]["reason"] == KEPT_REASON
+    assert resolved[0]["detail"]["work_item_id"] == item
+    assert resolved[0]["detail"]["kind"] == "orphan_session"
+
+
+def test_an_orphan_under_an_unkept_done_item_stays_listed(conn, audit, proc):
+    kept_orphan(conn, proc, keep=False)
+    assert resolve(conn, audit, proc) == 0
+    assert [a.kind for a in db.list_anomalies(conn)] == ["orphan_session"]
+
+
+@pytest.mark.parametrize("item_state", ["abandoned", "interrupted"])
+def test_an_orphan_under_a_kept_item_that_is_not_done_stays_listed(
+    conn, audit, proc, item_state
+):
+    kept_orphan(conn, proc, item_state=item_state)
+    assert resolve(conn, audit, proc) == 0
+    assert [a.kind for a in db.list_anomalies(conn)] == ["orphan_session"]
+
+
+def test_an_orphan_whose_row_is_closed_is_not_retracted_by_the_keep(conn, audit, proc):
+    """The keep accounts for a session only while its row is open. A closed row with a live
+    process is a worker nothing accounts for, keep or no keep."""
+    kept_orphan(conn, proc, session_state="lost")
+    assert resolve(conn, audit, proc) == 0
+    assert [a.kind for a in db.list_anomalies(conn)] == ["orphan_session"]
+
+
+def test_a_kept_orphan_whose_worker_died_is_resolved_as_dead_not_as_kept(
+    conn, audit, layout, proc
+):
+    """The pid re-check runs before the keep. "Kept by the operator, so accounted for"
+    would tell the log reader the worker is still there; the truer reason is that it is
+    gone."""
+    kept_orphan(conn, proc, alive=False)
+
+    assert resolve(conn, audit, proc) == 1
+
+    resolved = records(layout, "anomaly.resolved")
+    assert len(resolved) == 1
+    assert resolved[0]["detail"]["reason"] != KEPT_REASON
+    assert "no longer running" in resolved[0]["detail"]["reason"]
+    assert resolved[0]["detail"]["pid"] == PID
+
+
+def test_an_orphan_from_a_superseded_attempt_is_not_retracted_by_the_keep(conn, audit, proc):
+    """A keep covers the item's current session only. Attempt 1's live worker, reported by
+    ``_sweep_superseded_sessions`` when the item was resumed, is still nothing the keep
+    accounts for once the item is kept and ``done``."""
+    from tests.conftest import seed_session
+
+    item, _ = kept_orphan(conn, proc)
+    seed_session(conn, item, state="running", session_id="sess-2", pid=PID + 1)
+
+    assert resolve(conn, audit, proc) == 0
+    assert [(a.kind, a.entity_id) for a in db.list_anomalies(conn)] == [
+        ("orphan_session", "sess-1")
+    ]

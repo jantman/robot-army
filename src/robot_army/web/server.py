@@ -1208,6 +1208,42 @@ def _item_hold_action(holding: bool) -> Callable[..., Redirect]:
     return handler
 
 
+def _item_keep_action(keeping: bool) -> Callable[..., Redirect]:
+    """``POST /item/<id>/keep`` and its release: keep a session past its issue closing.
+
+    Shaped like ``_item_hold_action`` and for its reasons. Not effect-guarded: a keep starts,
+    stops and signals nothing — it withholds an automatic ending, and releasing it hands the
+    item back to rules that apply the effect level themselves when they act. Not
+    ``require_daemon``: it is one row the next reconciliation pass reads, whenever that is.
+
+    Checks run inside ``_perform``'s body, so a refusal — an unknown item, or a finished
+    item with no session left to keep — is recorded rather than silently returned.
+    """
+
+    def handler(app: WebApp, ctx: Context, request: Request, params: dict[str, Any]) -> Redirect:
+        item_id = params["id"]
+
+        def body(outcome: dict[str, Any]) -> dict[str, Any]:
+            require_item(ctx, item_id)
+            operation = operations.keep_item if keeping else operations.unkeep_item
+            return _report(operation(ctx, item_id, by="web"))
+
+        return _perform(
+            ctx,
+            request,
+            action="keep.item" if keeping else "unkeep.item",
+            entity_type="work_item",
+            entity_id=item_id,
+            # The item page, not the queue: a kept item is usually running or finished, and
+            # the item page is where its keep control sits when there is no referrer.
+            location=_referring_view(request, f"/item/{item_id}"),
+            message="kept" if keeping else "unkept",
+            body=body,
+        )
+
+    return handler
+
+
 def _repo_hold_action(holding: bool) -> Callable[..., Redirect]:
     """``POST /repos/hold`` and its release, taking the key from the **form body**.
 
@@ -1411,6 +1447,12 @@ ROUTES: tuple[Route, ...] = (
     ),
     Route(
         POST, ("item", "<id>", "unhold"), _item_hold_action(False), terminal="unhold"
+    ),
+    Route(
+        POST, ("item", "<id>", "keep"), _item_keep_action(True), terminal="keep"
+    ),
+    Route(
+        POST, ("item", "<id>", "unkeep"), _item_keep_action(False), terminal="unkeep"
     ),
     Route(POST, _seg("/repos/hold"), _repo_hold_action(True), terminal="hold"),
     Route(POST, _seg("/repos/unhold"), _repo_hold_action(False), terminal="unhold"),

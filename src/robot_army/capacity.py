@@ -33,6 +33,7 @@ Two properties are load-bearing and neither is a matter of care:
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -102,6 +103,28 @@ class CapacitySnapshot:
     per_repo: dict[str, int] = field(default_factory=dict)
     #: Why observation failed, when it did. ``None`` whenever ``observable`` is true.
     reason: str | None = None
+    #: ``repo_key`` → kept sessions (``db.list_kept_sessions``): the open row of a ``done``,
+    #: kept item's latest attempt. **Row-based, like ``per_repo``**, because the one reader
+    #: is the repository cap reason, which is phrased in ``per_repo``'s terms; a simulated
+    #: row or one whose worker has died is counted here exactly as it is counted there.
+    kept_per_repo: dict[str, int] = field(default_factory=dict)
+    #: Session ids of the same kept sessions. Carried so ``kept`` can count only those that
+    #: are also in ``ours`` — rows and registry entries are different populations, and the
+    #: global breakdown annotates ``ours``.
+    kept_session_ids: tuple[str, ...] = ()
+
+    @property
+    def kept(self) -> int:
+        """How many of ``ours`` are kept sessions: a **subset** of ``ours`` by construction.
+
+        An intersection rather than a count of rows, because a kept row with no registry
+        entry — simulated, or a worker that died — is counted in ``simulated`` or
+        ``in flight`` and not in ``ours``, and a ``1 ours (2 kept)`` would contradict itself.
+        It exists so that "the machine is full" can name the sessions the author chose to
+        keep, whose fix is ``unkeep`` rather than waiting.
+        """
+        ours = set(self.ours)
+        return sum(1 for session_id in self.kept_session_ids if session_id in ours)
 
     @property
     def at_capacity(self) -> bool:
@@ -133,7 +156,15 @@ class CapacitySnapshot:
         pill and a hold's detail each composing it would soon disagree about which terms to
         show.
         """
-        return ", ".join(f"{count} {label}" for label, count in self.components)
+        parts = [f"{count} {label}" for label, count in self.components]
+        # Kept sessions are an annotation on ``ours`` rather than a component, because they
+        # are already counted there and ``components`` must sum to ``total``. ``kept`` is
+        # an intersection with ``ours``, so on the degraded path, where ``ours`` is empty and
+        # kept sessions sit in ``other``, it is zero and nothing is shown. With nothing kept
+        # the phrase is exactly what it always was (SC-003).
+        if self.kept:
+            parts[0] = f"{parts[0]} ({self.kept} kept)"
+        return ", ".join(parts)
 
     @property
     def cap_disagreement(self) -> str | None:
@@ -296,6 +327,7 @@ def snapshot(
     total = len(scan.entries) + len(unmatched)
     others = max(len(scan.entries) - len(ours), 0)
 
+    kept = db.list_kept_sessions(conn)
     return CapacitySnapshot(
         observable=True,
         degraded=degraded,
@@ -308,6 +340,8 @@ def snapshot(
         configured_cap=configured_cap,
         per_repo=_per_repo(conn, live_rows),
         reason=None,
+        kept_per_repo=dict(Counter(repo_key for repo_key, _ in kept)),
+        kept_session_ids=tuple(session_id for _, session_id in kept),
     )
 
 

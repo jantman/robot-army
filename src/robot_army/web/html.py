@@ -210,6 +210,20 @@ BANNERS: dict[str, tuple[str, str]] = {
         "Hold released. The work dispatches on the next tick, exactly as if it had never "
         "been held.",
     ),
+    "kept": (
+        "ok",
+        "Kept. When its issue closes the session stays open: it is not retired, its tab is "
+        "not closed and its checkout is not reclaimed until the keep is released. It holds a "
+        "session slot meanwhile.",
+    ),
+    # Its own key rather than reusing "released", whose sentence is about a *hold* and would
+    # tell the author their work dispatches on the next tick — the confusion between the two
+    # statements that FR-012 forbids.
+    "unkept": (
+        "ok",
+        "Keep released. A finished item's session is retired on the next reconciliation pass "
+        "that finds it idle.",
+    ),
     "paused": ("ok", "Dispatch paused. Eligible items accumulate in ready."),
     "unpaused": ("ok", "Dispatch resumed."),
     "polled": ("ok", "Poll requested. The result appears in the audit log."),

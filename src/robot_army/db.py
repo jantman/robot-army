@@ -30,6 +30,7 @@ from robot_army.models import (
     Card,
     DispatchControl,
     Hold,
+    Keep,
     PollState,
     Repo,
     RepoProject,
@@ -408,14 +409,34 @@ def list_cleanup_candidates(
 
     Scoped by ``dry_run`` like every other listing (FR-056). A simulated item's cleanup is
     simulated too, but *which* rows the caller sees stays the caller's explicit choice.
+
+    **An item that is kept and has an open session row is left out.** Cleanup's own guard
+    would refuse it anyway, but by writing a ``cleanup.considered``/``skipped`` record — and
+    a keep can stand for days, which is a record a minute carrying one bit (the C6 shape).
+    Both conditions, never the keep alone: a keep whose session has ended protects nothing,
+    and a forgotten one must not retain a 499 MB worktree for ever. ``cleanup <id>`` does not
+    read this list, so it still reports the item as live on demand (FR-011).
     """
     sql = (
         "SELECT * FROM work_items WHERE state = ? AND worktree_path IS NOT NULL "  # noqa: S608
-        "AND (cleanup_state IS NULL OR cleanup_state = 'skipped')"
+        "AND (cleanup_state IS NULL OR cleanup_state = 'skipped') "
+        "AND NOT EXISTS (SELECT 1 FROM item_keeps k JOIN sessions s "
+        "ON s.work_item_id = k.work_item_id "
+        "WHERE k.work_item_id = work_items.id AND s.state IN (?, ?))"
         + _scope(include_simulated)
         + " ORDER BY id"
     )
-    return _rows(conn.execute(sql, (str(WorkItemState.DONE),)), WorkItem)
+    return _rows(
+        conn.execute(
+            sql,
+            (
+                str(WorkItemState.DONE),
+                str(SessionState.STARTING),
+                str(SessionState.RUNNING),
+            ),
+        ),
+        WorkItem,
+    )
 
 
 def record_cleanup(
@@ -1393,6 +1414,100 @@ def set_repo_hold(conn: sqlite3.Connection, repo_key: str, *, by: str) -> tuple[
 
 def clear_repo_hold(conn: sqlite3.Connection, repo_key: str) -> Hold | None:
     return _clear_hold(conn, table="repo_holds", column="repo_key", target=repo_key)
+
+
+# -- keeps: a session kept past its issue closing ----------------------------
+#
+# Beside the holds because they are shaped alike, and deliberately not built on
+# ``_set_hold``/``_clear_hold``: those are generic over table and key column but not over the
+# provenance columns, and reusing them would mean naming these ``held_at``/``held_by`` — a
+# keep row that reads as a hold is the confusion FR-012 forbids (research R1).
+#
+# No ``include_simulated`` here either, for the hold listings' reason: the table has no
+# ``dry_run`` column and a keep applies to a simulated item by design.
+
+
+def list_item_keeps(conn: sqlite3.Connection) -> dict[int, Keep]:
+    """Every keep in force, keyed by work item id. One scan; empty is the common case.
+
+    Reconciliation reads this once per pass rather than once per open row.
+    """
+    return {
+        int(row["work_item_id"]): Keep(kept_at=row["kept_at"], kept_by=row["kept_by"])
+        for row in conn.execute("SELECT work_item_id, kept_at, kept_by FROM item_keeps")
+    }
+
+
+def is_kept(conn: sqlite3.Connection, item_id: int) -> bool:
+    """One primary-key lookup, for ``reconcile.reclaim_stale_session``, which handles one
+    row at a time and is also reached from ``operations.abandon``."""
+    row = conn.execute(
+        "SELECT 1 FROM item_keeps WHERE work_item_id = ?", (item_id,)
+    ).fetchone()
+    return row is not None
+
+
+def set_item_keep(conn: sqlite3.Connection, item_id: int, *, by: str) -> tuple[Keep, bool]:
+    """Keep one item's session past its issue closing. Returns ``(keep, newly_placed)``.
+
+    ``ON CONFLICT DO NOTHING`` then read back, so keeping what is already kept returns the
+    **original** ``kept_at`` and ``kept_by`` — the judgement ``_set_hold`` makes, for its
+    reason. Called inside ``db.transaction`` by its callers.
+    """
+    placed = conn.execute(
+        "INSERT INTO item_keeps (work_item_id, kept_at, kept_by) VALUES (?, ?, ?) "
+        "ON CONFLICT(work_item_id) DO NOTHING",
+        (item_id, utcnow(), by),
+    ).rowcount
+    row = conn.execute(
+        "SELECT kept_at, kept_by FROM item_keeps WHERE work_item_id = ?", (item_id,)
+    ).fetchone()
+    return Keep(kept_at=row["kept_at"], kept_by=row["kept_by"]), bool(placed)
+
+
+def clear_item_keep(conn: sqlite3.Connection, item_id: int) -> Keep | None:
+    """Release a keep, returning the one removed, or ``None`` if there was none, so the
+    caller reports "nothing to release" as a no-op without a second query."""
+    row = conn.execute(
+        "SELECT kept_at, kept_by FROM item_keeps WHERE work_item_id = ?", (item_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("DELETE FROM item_keeps WHERE work_item_id = ?", (item_id,))
+    return Keep(kept_at=row["kept_at"], kept_by=row["kept_by"])
+
+
+def list_kept_sessions(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """``(repo_key, session_id)`` of every kept session (research R6).
+
+    That is what a *kept session* is: the open row of a ``done``, kept item's **latest
+    attempt**. A keep on an item that is not yet ``done`` changes nothing, and a keep whose
+    session has ended holds no slot, so neither is listed — naming either as the reason the
+    machine is full would send the author to release something that frees nothing. An open
+    row from a superseded attempt is not covered either: the keep holds the item's current
+    session, and an earlier attempt's live worker is ``orphan_session``'s to report, kept
+    item or not.
+
+    Simulated rows are included, exactly as ``capacity.snapshot`` counts them: a rehearsal
+    spends the same quota, so it must be named the same way.
+    """
+    return [
+        (str(row["repo_key"]), str(row["session_id"]))
+        for row in conn.execute(
+            "SELECT w.repo_key AS repo_key, s.session_id AS session_id FROM sessions s "
+            "JOIN work_items w ON w.id = s.work_item_id "
+            "JOIN item_keeps k ON k.work_item_id = w.id "
+            "WHERE s.state IN (?, ?) AND w.state = ? "
+            "AND s.attempt = (SELECT MAX(attempt) FROM sessions l "
+            "WHERE l.work_item_id = s.work_item_id) "
+            "ORDER BY s.id",
+            (
+                str(SessionState.STARTING),
+                str(SessionState.RUNNING),
+                str(WorkItemState.DONE),
+            ),
+        )
+    ]
 
 
 # -- simulated-row purge (FR-058) -------------------------------------------

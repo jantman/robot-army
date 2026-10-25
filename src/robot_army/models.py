@@ -482,6 +482,23 @@ class Hold:
     held_by: str
 
 
+@dataclass(frozen=True, slots=True)
+class Keep:
+    """One deliberate statement that a work item's session outlives its issue closing.
+
+    Shaped like :class:`Hold` and for its reasons, but a separate type because it is a
+    separate statement (FR-012): a hold stops work *starting*, a keep stops a finished
+    item's session *ending*. Presence is the whole fact. There is no expiry by design
+    (clarification 2a): a keep that lapsed on a timer would end the very session the author
+    went back to, at a moment they did not choose. It stands until released.
+
+    Not in ``ROW_TYPES``, for the reason ``Hold`` is not.
+    """
+
+    kept_at: str
+    kept_by: str
+
+
 #: Every anomaly kind the system can raise. Named here so ``status`` and ``anomalies``
 #: can surface all of them (FR-065, T135) rather than only the ones seen so far.
 ANOMALY_KINDS: tuple[str, ...] = (

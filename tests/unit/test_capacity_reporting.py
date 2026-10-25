@@ -308,3 +308,132 @@ def test_a_repositorys_limit_is_clamped_by_the_cap_in_force(
         assert row["cap"] == 4, "clamped by the enforced 7, not by this process's 2"
     finally:
         built.close()
+
+
+# -- keep-session-after-close (US2): naming kept sessions ---------------------
+
+
+def _snapshot(**overrides):
+    from robot_army import capacity as capacity_mod
+
+    fields = {
+        "observable": True,
+        "degraded": False,
+        "total": 2,
+        "ours": ("s-1", "s-2"),
+        "others": 0,
+        "global_cap": 2,
+    }
+    fields.update(overrides)
+    return capacity_mod.CapacitySnapshot(**fields)
+
+
+def test_the_breakdown_names_kept_sessions_inside_ours():
+    """A kept session is already one of ours, so it is an annotation on that term, never a
+    term of its own — the components must still sum to the total."""
+    snap = _snapshot(kept_per_repo={"demo": 1}, kept_session_ids=("s-1",))
+
+    assert snap.kept == 1
+    assert snap.breakdown == "2 ours (1 kept), 0 other"
+    assert snap.components == (("ours", 2), ("other", 0))
+    assert sum(count for _, count in snap.components) == snap.total
+
+
+def test_with_nothing_kept_every_string_is_unchanged():
+    """SC-003: an unkept machine reads exactly as it did."""
+    snap = _snapshot()
+    assert snap.kept == 0
+    assert snap.kept_per_repo == {}
+    assert snap.breakdown == "2 ours, 0 other"
+    assert snap.describe() == "2/2 sessions, 2 ours, 0 other"
+
+
+def test_the_degraded_path_omits_the_annotation_rather_than_showing_it_against_zero():
+    """On the /proc path ``ours`` is empty and kept sessions are counted in ``other``; a
+    ``0 ours (1 kept)`` would contradict itself."""
+    snap = _snapshot(
+        degraded=True, ours=(), others=2, kept_per_repo={"demo": 1}, kept_session_ids=("s-1",)
+    )
+    assert snap.kept == 0
+    assert snap.breakdown == "0 ours, 2 other"
+
+
+def test_kept_counts_only_kept_sessions_that_are_also_ours():
+    """``kept`` annotates ``ours``, so it is an intersection with it. A kept row with no
+    registry entry — simulated, or a worker that died — is counted in ``simulated`` or
+    ``in flight`` and must not inflate the annotation past ``ours``; the per-repository
+    count stays row-based, like ``per_repo``, because the repository cap reason reads it."""
+    snap = _snapshot(
+        total=3,
+        ours=("s-1",),
+        simulated=2,
+        kept_per_repo={"demo": 3},
+        kept_session_ids=("s-1", "s-sim-1", "s-sim-2"),
+    )
+
+    assert snap.kept == 1
+    assert snap.kept <= len(snap.ours)
+    assert snap.breakdown == "1 ours (1 kept), 0 other, 2 simulated"
+    assert snap.kept_per_repo == {"demo": 3}
+
+
+def test_snapshot_counts_kept_sessions_by_repository(config, conn, tmp_path):
+    """End to end through ``capacity.snapshot``: two of ours running, one under a ``done``
+    kept item."""
+    from pathlib import Path
+
+    from tests.conftest import write_proc, write_registry
+
+    from robot_army import capacity as capacity_mod
+    from robot_army import db
+
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    proc = tmp_path / "proc"
+    write_proc(proc, 1, starttime="1", exe="/usr/lib/systemd/systemd")
+    running = seed_item(conn, repo_key="demo", issue_number=1, state=str(WorkItemState.ACTIVE))
+    kept = seed_item(conn, repo_key="demo", issue_number=2, state=str(WorkItemState.DONE))
+    for pid, (item, session_id) in enumerate(((running, "s-run"), (kept, "s-kept")), start=500):
+        seed_session(conn, item, state=str(SessionState.RUNNING), session_id=session_id, pid=pid)
+        cwd = Path(config.worktree_root) / f"issue-{pid}"
+        cwd.mkdir(parents=True, exist_ok=True)
+        write_registry(registry, pid=pid, session_id=session_id, proc_start=str(pid), cwd=str(cwd))
+        write_proc(proc, pid, starttime=str(pid), cwd=str(cwd))
+    with db.transaction(conn):
+        db.set_item_keep(conn, kept, by="cli")
+
+    snap = capacity_mod.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
+
+    assert snap.kept_per_repo == {"demo": 1}
+    assert snap.kept_session_ids == ("s-kept",)
+    assert snap.kept == 1
+    assert snap.breakdown == "2 ours (1 kept), 0 other"
+    assert sum(count for _, count in snap.components) == snap.total == 2
+
+
+def test_snapshot_does_not_count_a_kept_row_the_registry_cannot_see_as_ours(
+    config, conn, tmp_path
+):
+    """End to end: a kept item whose open row has no registry entry (its worker died
+    unseen) is in ``kept_per_repo`` — the repository cap is row-based — but not in the
+    ``ours`` annotation, which would otherwise read ``0 ours (1 kept)``."""
+    from tests.conftest import write_proc
+
+    from robot_army import capacity as capacity_mod
+    from robot_army import db
+
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    proc = tmp_path / "proc"
+    write_proc(proc, 1, starttime="1", exe="/usr/lib/systemd/systemd")
+    kept = seed_item(conn, repo_key="demo", issue_number=2, state=str(WorkItemState.DONE))
+    seed_session(conn, kept, state=str(SessionState.RUNNING), session_id="s-gone", pid=700)
+    with db.transaction(conn):
+        db.set_item_keep(conn, kept, by="cli")
+
+    snap = capacity_mod.snapshot(conn, config=config, registry_dir=registry, proc_root=proc)
+
+    assert snap.kept_per_repo == {"demo": 1}
+    assert snap.ours == ()
+    assert snap.kept == 0
+    assert "kept" not in snap.breakdown

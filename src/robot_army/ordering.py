@@ -395,12 +395,13 @@ def launch_holds(
     running, cap, explicit = repo_capacity(item.repo_key, config=config, capacity=capacity)
     if running >= cap:
         source = "configured" if explicit else "the default"
-        holds.append(
-            (
-                HoldReason.REPO_CAP,
-                f"repository {item.repo_key}: {running} of {cap} sessions ({source})",
-            )
-        )
+        detail = f"repository {item.repo_key}: {running} of {cap} sessions ({source})"
+        # The case a keep actually bites on: one repository at its cap because the author
+        # kept a finished session. Naming it names the fix — release one with `unkeep`.
+        kept = capacity.kept_per_repo.get(item.repo_key, 0)
+        if kept:
+            detail += f", {kept} kept"
+        holds.append((HoldReason.REPO_CAP, detail))
 
     return holds
 

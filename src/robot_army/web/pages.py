@@ -626,6 +626,41 @@ def _item_hold_control(
     )
 
 
+def _item_keep_control(
+    item_id: int, *, kept: bool, include_simulated: bool = False
+) -> Markup:
+    """Keep one item's session past its issue closing, or release the keep.
+
+    One control, whichever applies, for ``_item_hold_control``'s reason. Labelled ``keep``
+    and ``release`` rather than reusing ``hold``: a keep is a different statement (FR-012),
+    and a control that read the same as the hold beside it would invite exactly the
+    confusion the separate verbs exist to prevent.
+    """
+    return form(
+        f"/item/{item_id}/{'unkeep' if kept else 'keep'}",
+        html.hidden("include_simulated", "1" if include_simulated else "0"),
+        button("release" if kept else "keep", class_="primary" if kept else None),
+    )
+
+
+def _item_keep_cell(
+    ctx: operations.Context, item_id: int, *, include_simulated: bool = False
+) -> Markup:
+    """The item page's keep control, offered only where ``keep`` would not be refused.
+
+    A kept item always gets its release, inert or not — an inert keep must stay releasable
+    from the page that shows it. An unkept one gets ``keep`` only when
+    ``operations.keep_refusal_reason`` has nothing to say, which is the same predicate the
+    command applies, so the page never offers what the command would refuse.
+    """
+    if db.is_kept(ctx.conn, item_id):
+        return _item_keep_control(item_id, kept=True, include_simulated=include_simulated)
+    row = db.get_work_item(ctx.conn, item_id)
+    if row is None or operations.keep_refusal_reason(ctx.conn, row) is not None:
+        return Markup("")
+    return _item_keep_control(item_id, kept=False, include_simulated=include_simulated)
+
+
 def _repo_hold_control(
     repo_key: str, *, holding: bool, include_simulated: bool = False
 ) -> Markup:
@@ -803,6 +838,10 @@ def active_view(
 ) -> View:
     """What is running, and for how long."""
     rows: list[dict[str, Any]] = []
+    # Once per render, not per row; the running table's controls and the kept section both
+    # read this one listing.
+    kept_rows = operations.list_keeps(ctx).data["keeps"]
+    keeps = {row["item_id"] for row in kept_rows}
     items, withheld = _items(
         ctx,
         include_simulated=include_simulated,
@@ -820,6 +859,7 @@ def active_view(
                 "session_state": (session or {}).get("state"),
                 "started_at": started,
                 "elapsed_seconds": age_seconds(started),
+                "kept": item["id"] in keeps,
             }
         )
 
@@ -848,6 +888,9 @@ def active_view(
                     "started",
                     "elapsed",
                     "checkout",
+                    # Here because this is where the author is standing before a merge, which
+                    # is when a keep has to be placed to be any use.
+                    "keep",
                 ],
                 [
                     [
@@ -867,6 +910,9 @@ def active_view(
                                 span(row["branch"] or "—", class_="mono"),
                             ]
                         ),
+                        _item_keep_control(
+                            row["item_id"], kept=row["kept"], include_simulated=include_simulated
+                        ),
                     ]
                     for row in rows
                 ],
@@ -874,12 +920,57 @@ def active_view(
             withheld_note(
                 withheld if rows else 0, path="/active", include_simulated=include_simulated
             ),
+            _kept_section(kept_rows, include_simulated=include_simulated),
         ]
     )
     return View(
         title="active",
-        data={"items": rows, "count": len(rows), "withheld_simulated": withheld},
+        data={
+            "items": rows,
+            "count": len(rows),
+            "withheld_simulated": withheld,
+            "keeps": kept_rows,
+        },
         body=body,
+    )
+
+
+def _kept_section(rows: list[dict[str, Any]], *, include_simulated: bool) -> Markup:
+    """Every keep in force, below the running table, always present (FR-007).
+
+    **This is the only web surface that lists a session running under a ``done`` item.** The
+    running table above filters on ``active``, so without this section a kept session — the
+    one the author deliberately left open — would be invisible on the web while holding a
+    slot. It therefore never filters on state: pending keeps (item not yet ``done``) and
+    inert ones (session gone) are listed too, each with its release.
+
+    Built from ``operations.list_keeps``' rows rather than re-queried, so it and ``keeps``
+    cannot describe the same keep differently.
+    """
+    return join(
+        [
+            h(2, "kept"),
+            _empty("Nothing is kept.")
+            if not rows
+            else table(
+                ["item", "repo", "issue", "state", "session", "kept since", "by", ""],
+                [
+                    [
+                        item_link({"id": row["item_id"]}, include_simulated=include_simulated),
+                        row["repo_key"] or "—",
+                        span(f"#{row['issue_number']}") if row["issue_number"] else "—",
+                        row["state"] or "—",
+                        span(operations.keep_session_label(row), class_="mono"),
+                        when(row["kept_at"]),
+                        row["kept_by"],
+                        _item_keep_control(
+                            row["item_id"], kept=True, include_simulated=include_simulated
+                        ),
+                    ]
+                    for row in rows
+                ],
+            ),
+        ]
     )
 
 
@@ -1997,6 +2088,9 @@ def item_view(
                 class_="kv",
             ),
             action_bar(item["id"], actions, include_simulated=include_simulated),
+            # Beside the action bar rather than in it: the bar is the state machine's legal
+            # transitions, and a keep is not a transition — it changes no state.
+            _item_keep_cell(ctx, item["id"], include_simulated=include_simulated),
             *signals_block,
             h(2, "state history"),
             table(

@@ -750,6 +750,36 @@ SCHEMA_015_SQL = """
 ALTER TABLE poll_state ADD COLUMN etag_request TEXT;
 """
 
+SCHEMA_016_SQL = """
+-- One work item whose session the author has chosen to keep past its issue closing.
+--
+-- The case is post-merge verification: in a configuration-management repository the merge
+-- is the deploy, and the author wants to check the result from inside the same session that
+-- produced it. Reconciliation retires a `done` item's worker on the first idle pass after a
+-- merged pull request, so without this row the session the author meant to go back to is
+-- gone a minute after they merged.
+--
+-- **Its own table, not a scope column on `item_holds`** (FR-012). A hold governs *entry* into
+-- dispatch and a keep governs the *end* of a session. They are different statements with
+-- different releases, and sharing a table makes `unhold` ambiguous about which one it lifts.
+-- The column names are its own for the same reason: a row here reading `held_at` is exactly
+-- the confusion between the two that FR-012 forbids, which is also why `db.py` does not reuse
+-- the hold accessors.
+--
+-- Otherwise it is shaped like `item_holds` and for that table's reasons (migration 010): the
+-- PRIMARY KEY makes "at most one keep per item" a constraint, presence is the whole fact (no
+-- expiry, no level, no note — a keep stands until released), and ON DELETE CASCADE stops a
+-- keep outliving its item or reattaching to a recycled id, so `db.purge_simulated` needs no
+-- change. No `dry_run` column: a rehearsal must rehearse the real behaviour.
+--
+-- No backfill: no keep existed before this migration.
+CREATE TABLE item_keeps (
+    work_item_id INTEGER PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE,
+    kept_at      TEXT NOT NULL,
+    kept_by      TEXT NOT NULL
+);
+"""
+
 
 def _migration_005(conn: sqlite3.Connection) -> None:
     for statement in _statements(SCHEMA_005_SQL):
@@ -806,6 +836,11 @@ def _migration_015(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migration_016(conn: sqlite3.Connection) -> None:
+    for statement in _statements(SCHEMA_016_SQL):
+        conn.execute(statement)
+
+
 #: Ordered ladder. Index + 1 is the ``user_version`` the migration produces.
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_001,
@@ -823,6 +858,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_013,
     _migration_014,
     _migration_015,
+    _migration_016,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)
